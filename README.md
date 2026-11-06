@@ -27,6 +27,14 @@ The RMSNorm regression compares four rows against an FP64 CPU reference at
 hidden sizes 32, 96, 256, 896, and 1024, using block widths 32, 63, and 128.
 It checks two epsilon values, guards, and determinism. A separate GPU test
 checks the rounding of individual FP32 instructions.
+
+Milestone 13 runs a specialization of GGML's CUDA residual-add kernel through
+the project DLL on Iris Xe and Arc B390. Run the DLL check with
+`cargo test --release --locked --test gpu ggml_cuda_add_f32 -- --ignored --nocapture`
+after building the release DLL. The report includes separate Ollama CPU and
+Vulkan baselines and the blockers found when loading the stock CUDA backend.
+[Milestone 13 results and reproduction](docs/milestone-13.md)
+
 The Forge-style test queues RMSNorm, residual addition, and row reduction on
 one stream and on three event-linked streams. It compares both modes with an
 FP64 CPU reference and checks guard regions after completion.
@@ -112,8 +120,9 @@ while an explicit stream or event host wait is active.
 The translator accepts one PTX 4.1 entry with 64-bit addressing and scalar
 32- or 64-bit parameters. Pointer parameters must use `.ptr` and point into a
 device allocation in the current context. The instruction subset covers parameter
-loads, `cvta.to.global.u64`, reads of `%ctaid`, `%ntid`, and `%tid`, selected integer
-arithmetic and comparisons, and 32-bit global loads and stores. FP32 support
+loads, `cvta.to.global.u64`, reads of `%ctaid`, `%ntid`, `%tid`, and `%nctaid`,
+selected integer arithmetic and comparisons, predicate AND and OR, immediate
+64-bit left shifts below 64, and 32-bit global loads and stores. FP32 support
 includes scalar parameters, round-to-nearest add, multiply, fused multiply-add,
 unsigned-to-float conversion, divide, and square root. Divide and square root
 use integer significand arithmetic on the GPU. Explicit FMA remains fused and
