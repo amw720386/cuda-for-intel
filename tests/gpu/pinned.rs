@@ -159,7 +159,19 @@ fn pinned_async_transfers() {
     ok!(cuMemFreeHost(src));
     assert_eq!(unsafe { cuMemFreeHost(src) }, 1);
     assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(device, src, SIZE, down) }, 1);
-    assert_eq!(unsafe { dst.cast::<[u8; SIZE]>().read() }, input);
+    let retired_output = unsafe { dst.cast::<[u8; SIZE]>().read() };
+    if retired_output != input {
+        // Read after capturing the failing host snapshot so the diagnostic copy
+        // cannot hide a premature completion or host visibility failure.
+        let mut device_snapshot = [0; SIZE];
+        let result = unsafe { cuMemcpyDtoH_v2(device_snapshot.as_mut_ptr().cast(), device, SIZE) };
+        eprintln!(
+            "retired stream diagnostic: blocking DtoH result={result}, device_matches_input={}, device_matches_stale_output={}",
+            device_snapshot == input,
+            device_snapshot == retired_output
+        );
+    }
+    assert_eq!(retired_output, input);
     for _ in 0..64 {
         let mut temporary = null_mut();
         ok!(cuMemHostAlloc(&mut temporary, SIZE, 0));

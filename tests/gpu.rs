@@ -11,6 +11,8 @@ type Handle = *mut c_void;
 mod gpu_device;
 use gpu_device::ordinal as test_device;
 
+#[path = "gpu/discovery.rs"]
+mod discovery;
 #[path = "gpu/forge.rs"]
 mod forge;
 #[path = "gpu/isolation.rs"]

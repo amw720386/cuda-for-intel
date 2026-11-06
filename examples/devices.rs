@@ -190,6 +190,12 @@ fn validation_plan(ordinal: usize, device: &DeviceInfo) {
     }
     for (test, flags, limits, reason) in [
         (
+            "resolved_primary_context_runs_multiple_module_entries",
+            spirv && copy,
+            supported_kernel(1, 1, 12, 0, 4),
+            "SPIR-V or copy capability",
+        ),
+        (
             "compiled_ptx_vector_add",
             fp32 && copy,
             supported_kernel(64, 32, 28, 0, 4096),

@@ -1,0 +1,19 @@
+.version 4.1
+.target sm_52
+.address_size 64
+
+.visible .entry marker() .maxntid 1 {
+    ret;
+}
+
+.visible .entry write_value(
+    .param .u64 .ptr .global output,
+    .param .u32 value
+) {
+    .reg .b64 %address;
+    .reg .b32 %data;
+    ld.param.u64 %address, [output];
+    ld.param.u32 %data, [value];
+    st.global.b32 [%address], %data;
+    ret;
+}

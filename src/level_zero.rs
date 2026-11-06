@@ -270,11 +270,23 @@ struct EventDesc {
     wait: u32,
 }
 
+#[repr(C)]
+struct PciProperties {
+    header: Header,
+    address: [u32; 4],
+    generation: i32,
+    width: i32,
+    bandwidth: i64,
+}
+
+type GetPci = unsafe extern "system" fn(Raw, *mut PciProperties) -> Status;
+
 macro_rules! loader_api {
     ($( $name:ident($($arg:ty),*) ),+ $(,)?) => {
         #[allow(non_snake_case)]
         pub(crate) struct Api {
             $( $name: unsafe extern "system" fn($($arg),*) -> Status, )+
+            get_pci: Option<GetPci>,
             #[cfg(not(test))]
             _library: Library,
             #[cfg(test)]
@@ -296,6 +308,8 @@ macro_rules! loader_api {
                 Ok(Self {
                     $( $name: unsafe { library.get(concat!(stringify!($name), "\0").as_bytes()) }
                         .map(|symbol| *symbol).map_err(Error::Loader)?, )+
+                    get_pci: unsafe { library.get::<GetPci>(b"zeDevicePciGetPropertiesExt\0") }
+                        .ok().map(|symbol| *symbol),
                     #[cfg(not(test))]
                     _library: library,
                     #[cfg(test)]
@@ -312,6 +326,7 @@ macro_rules! loader_api {
                         }
                         unsupported
                     }, )+
+                    get_pci: None,
                     _library: None,
                 }
             }
@@ -385,6 +400,8 @@ pub struct DeviceInfo {
     pub vendor_id: u32,
     pub device_id: u32,
     pub device_flags: u32,
+    /// PCI domain, bus, device and function, when the driver exposes them.
+    pub pci_address: Option<[u32; 4]>,
     pub driver_version: u32,
     pub api_version: u32,
     pub uuid: [u8; 16],
@@ -503,32 +520,31 @@ pub(crate) struct Context {
 
 pub(crate) struct Module {
     handle: Handle,
-    kernel: Option<Handle>,
+    kernels: Vec<Handle>,
 }
 
 impl Module {
-    pub(crate) fn create_kernel(&mut self, api: &Api, name: &CStr) -> Result<(), Error> {
-        if self.kernel.is_none() {
-            let desc = KernelDesc {
-                header: Header::new(0x1d),
-                flags: 0,
-                name: name.as_ptr(),
-            };
-            let mut kernel = std::ptr::null_mut();
-            call("zeKernelCreate", || unsafe {
-                (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
-            })?;
-            self.kernel = Some(Handle(kernel));
-        }
-        Ok(())
+    pub(crate) fn create_kernel(&mut self, api: &Api, name: &CStr) -> Result<Handle, Error> {
+        let desc = KernelDesc {
+            header: Header::new(0x1d),
+            flags: 0,
+            name: name.as_ptr(),
+        };
+        let mut kernel = std::ptr::null_mut();
+        call("zeKernelCreate", || unsafe {
+            (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
+        })?;
+        let kernel = Handle(kernel);
+        self.kernels.push(kernel);
+        Ok(kernel)
     }
 
     pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
-        if let Some(kernel) = self.kernel {
+        while let Some(kernel) = self.kernels.last() {
             call("zeKernelDestroy", || unsafe {
                 (api.zeKernelDestroy)(kernel.0)
             })?;
-            self.kernel = None;
+            self.kernels.pop();
         }
         call("zeModuleDestroy", || unsafe {
             (api.zeModuleDestroy)(self.handle.0)
@@ -716,7 +732,7 @@ impl Context {
         }
         Ok(Module {
             handle: Handle(module),
-            kernel: None,
+            kernels: Vec::new(),
         })
     }
 }
@@ -876,6 +892,16 @@ impl Runtime {
                     (unsafe { (api.zeDeviceGetProperties)(handle, &mut timer) } == 0
                         && timer.timer_resolution != 0)
                         .then_some(timer.timer_resolution);
+                let pci_address = api.get_pci.and_then(|get_pci| {
+                    let mut pci = PciProperties {
+                        header: Header::new(0x10008),
+                        address: [0; 4],
+                        generation: 0,
+                        width: 0,
+                        bandwidth: 0,
+                    };
+                    (unsafe { get_pci(handle, &mut pci) } == 0).then_some(pci.address)
+                });
                 devices.push(Device {
                     driver: Handle(driver),
                     handle: Handle(handle),
@@ -885,6 +911,7 @@ impl Runtime {
                         vendor_id: properties.vendor,
                         device_id: properties.device,
                         device_flags: properties.flags,
+                        pci_address,
                         driver_version: *driver_version,
                         api_version: *api_version,
                         uuid: properties.uuid,
@@ -962,6 +989,8 @@ mod tests {
         assert_eq!(offset_of!(Properties, name), 112);
         assert_eq!(size_of::<DriverProperties>(), 40);
         assert_eq!(size_of::<FloatAtomics>(), 32);
+        assert_eq!(size_of::<PciProperties>(), 48);
+        assert_eq!(offset_of!(PciProperties, bandwidth), 40);
         assert_eq!(size_of::<ComputeProperties>(), 88);
         assert_eq!(size_of::<MemoryProperties>(), 296);
         assert_eq!(size_of::<ModuleProperties>(), 64);

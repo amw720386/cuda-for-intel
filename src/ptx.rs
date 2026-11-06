@@ -185,15 +185,20 @@ struct Entry<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Translation {
+pub(crate) struct KernelMetadata {
     pub(crate) name: String,
     pub(crate) params: Vec<Param>,
-    pub(crate) words: Vec<u32>,
     pub(crate) shared_bytes: u32,
     pub(crate) max_threads: Option<u32>,
     pub(crate) device_atomics: bool,
     pub(crate) fp32: bool,
     pub(crate) fp32_fma: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct Translation {
+    pub(crate) words: Vec<u32>,
+    pub(crate) kernels: Vec<KernelMetadata>,
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
@@ -218,7 +223,7 @@ mod tests {
 
         let translated = translate(GGML_ADD).unwrap();
         assert_eq!(
-            translated.params,
+            translated.kernels[0].params,
             [vec![Param::GlobalPtr; 3], vec![Param::U32; 5]].concat()
         );
         let module = rspirv::dr::load_words(&translated.words).unwrap();
@@ -264,7 +269,7 @@ mod tests {
         use rspirv::spirv::{MemorySemantics, Scope, StorageClass};
 
         let translated = translate(SHARED).unwrap();
-        assert_eq!(translated.shared_bytes, 16);
+        assert_eq!(translated.kernels[0].shared_bytes, 16);
         let module = rspirv::dr::load_words(&translated.words).unwrap();
         assert!(module.types_global_values.iter().any(|inst| {
             inst.class.opcode == Op::Variable
@@ -327,8 +332,8 @@ mod tests {
     #[test]
     fn lowers_reduction_control_flow_and_static_limits() {
         let translated = translate(BLOCK_REDUCE).unwrap();
-        assert_eq!(translated.max_threads, Some(128));
-        assert_eq!(translated.shared_bytes, 512);
+        assert_eq!(translated.kernels[0].max_threads, Some(128));
+        assert_eq!(translated.kernels[0].shared_bytes, 512);
         let module = rspirv::dr::load_words(&translated.words).unwrap();
         let instructions = module.functions[0]
             .blocks
@@ -352,8 +357,8 @@ mod tests {
     #[test]
     fn accepts_only_device_scope_relaxed_unsigned_atomic_add() {
         let translated = translate(ATOMIC_TICKETS).unwrap();
-        assert!(translated.device_atomics);
-        assert!(!translated.fp32);
+        assert!(translated.kernels[0].device_atomics);
+        assert!(!translated.kernels[0].fp32);
         let module = rspirv::dr::load_words(&translated.words).unwrap();
         assert!(
             module.functions[0]
@@ -406,6 +411,7 @@ mod tests {
             ATOMIC_TICKETS,
             RMSNORM,
             GGML_ADD,
+            include_str!("../tests/gpu/multi_entry.ptx"),
             include_str!("../examples/forge_residual.ptx"),
             include_str!("../examples/forge_reduce.ptx"),
         ] {
@@ -424,7 +430,7 @@ mod tests {
             assert!(
                 process.wait().unwrap().success(),
                 "invalid SPIR-V for {}",
-                translated.name
+                translated.kernels[0].name
             );
             written.unwrap();
         }
@@ -436,8 +442,8 @@ mod tests {
         use rspirv::spirv::{ExecutionMode, OpenclStd100Op};
 
         let translated = translate(RMSNORM).unwrap();
-        assert_eq!(translated.params.last(), Some(&Param::F32));
-        assert!(translated.fp32 && translated.fp32_fma);
+        assert_eq!(translated.kernels[0].params.last(), Some(&Param::F32));
+        assert!(translated.kernels[0].fp32 && translated.kernels[0].fp32_fma);
         let module = rspirv::dr::load_words(&translated.words).unwrap();
         assert!(module.execution_modes.iter().any(|inst| {
             inst.operands
@@ -488,7 +494,8 @@ mod tests {
 
     #[test]
     fn parses_compiler_generated_ptx() {
-        let entry = parse::parse(VECTOR_ADD).unwrap();
+        let entries = parse::parse(VECTOR_ADD).unwrap();
+        let entry = &entries[0];
         assert_eq!(entry.name, "vector_add");
         assert_eq!(
             entry.params.iter().map(|&(_, ty)| ty).collect::<Vec<_>>(),
@@ -512,9 +519,9 @@ mod tests {
     #[test]
     fn lowers_bounds_check_and_float_add_to_spirv() {
         let translated = translate(VECTOR_ADD).unwrap();
-        assert_eq!(translated.name, "vector_add");
+        assert_eq!(translated.kernels[0].name, "vector_add");
         assert_eq!(
-            translated
+            translated.kernels[0]
                 .params
                 .iter()
                 .map(|param| param.size())
@@ -559,7 +566,12 @@ mod tests {
                 "accepted {new}"
             );
         }
-        assert!(translate(&format!("{VECTOR_ADD}\n.visible .entry other() {{ ret; }}")).is_err());
+        assert!(
+            translate(&format!(
+                "{VECTOR_ADD}\n.visible .entry vector_add() {{ ret; }}"
+            ))
+            .is_err()
+        );
         assert!(translate("not PTX").is_err());
     }
 }

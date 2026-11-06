@@ -303,6 +303,7 @@ pub(crate) fn start() -> Runtime {
                 vendor_id: 0x8086,
                 device_id: index as u32,
                 device_flags: 0,
+                pci_address: Some([0, 2, 3, 1]),
                 driver_version: 0,
                 api_version: 0x10000,
                 uuid: [0; 16],

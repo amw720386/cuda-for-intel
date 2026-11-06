@@ -1,6 +1,6 @@
 use super::{
-    Api, Context, Error, EventDesc, EventPoolDesc, GroupCount, Handle, Header, Module, QueueDesc,
-    Raw, call, check, invoke,
+    Api, Context, Error, EventDesc, EventPoolDesc, GroupCount, Handle, Header, QueueDesc, Raw,
+    call, check, invoke,
 };
 use std::ptr::null_mut;
 use std::sync::Arc;
@@ -129,16 +129,13 @@ impl CommandList {
     pub(crate) fn launch(
         &self,
         api: &Api,
-        module: &Module,
+        kernel: Handle,
         geometry: ([u32; 3], [u32; 3]),
         args: &[&[u8]],
         signal: Option<&Fence>,
         waits: &[Arc<Fence>],
     ) -> Result<(), Error> {
-        let kernel = module
-            .kernel
-            .ok_or(Error::Driver("launch without a kernel", 0x7800001c))?
-            .0;
+        let kernel = kernel.0;
         let ([x, y, z], [bx, by, bz]) = geometry;
         call("zeKernelSetGroupSize", || unsafe {
             (api.zeKernelSetGroupSize)(kernel, bx, by, bz)

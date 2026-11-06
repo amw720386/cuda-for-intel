@@ -373,7 +373,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
+pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
     let mut parser = Parser {
         tokens: tokens(source)?.into_iter(),
     };
@@ -389,6 +389,21 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
     }
     parser.expect(".address_size")?;
     parser.expect("64")?;
+    let mut names = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    loop {
+        let entry = parse_entry(&mut parser)?;
+        if !names.insert(entry.name) {
+            return Err(Error::new("duplicate PTX entry name"));
+        }
+        entries.push(entry);
+        if parser.peek().is_none() {
+            return Ok(entries);
+        }
+    }
+}
+
+fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     parser.eat(".visible");
     parser.expect(".entry")?;
     let name = parser.identifier()?;
@@ -438,9 +453,6 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
         None
     };
     let blocks = parser.blocks()?;
-    if parser.peek().is_some() {
-        return Err(Error::new("only a single PTX entry is supported"));
-    }
     Ok(Entry {
         name,
         params,

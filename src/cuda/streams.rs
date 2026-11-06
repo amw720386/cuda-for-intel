@@ -3,7 +3,8 @@ use super::{
     Api, Context, CuResult, Opaque, State, backend_error, current, reserve_handle, state, status,
     with_context_handles,
 };
-use crate::level_zero::{CommandList, Fence, Fences, Module};
+use crate::cuda::trace;
+use crate::level_zero::{CommandList, Fence, Fences, Handle};
 use crate::level_zero::{DeviceHealth, QueueFence};
 use batch::{Batch, Policy};
 use batch_wake::Wake;
@@ -16,7 +17,7 @@ mod batch;
 #[cfg(all(test, windows))]
 mod batch_tests;
 mod batch_wake;
-mod events;
+pub(super) mod events;
 #[cfg(test)]
 mod fake_tests;
 #[cfg(all(test, windows))]
@@ -430,7 +431,7 @@ impl Streams {
         &mut self,
         api: &Api,
         context: &Context,
-        module: &Module,
+        kernel: Handle,
         key: usize,
         geometry: ([u32; 3], [u32; 3]),
         args: &[&[u8]],
@@ -445,7 +446,7 @@ impl Streams {
         let waits = self.legacy_waits(api, key, blocking)?;
         self.get_mut(key)?
             .record(api, context, signal, waits, |list, signal, waits| {
-                list.launch(api, module, geometry, args, signal, waits)
+                list.launch(api, kernel, geometry, args, signal, waits)
             })
     }
 
@@ -588,29 +589,31 @@ impl Streams {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> CuResult {
-    status(with_context_handles(|runtime, context, next| {
-        if out.is_null() || flags > 1 {
-            return Err(InvalidValue);
-        }
-        context.streams.collect_retired(&runtime.api)?;
-        let key = reserve_handle(next)?;
-        if flags == 0 {
-            context
-                .streams
-                .track_legacy(&runtime.api, &context.backend)?;
-        }
-        let streams = &mut context.streams;
-        let stream = Stream::new(
-            &runtime.api,
-            &context.backend,
-            flags == 0,
-            streams.policy,
-            &streams.wake,
-        )?;
-        streams.live.insert(key, stream);
-        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
-        Ok(())
-    }))
+    trace::call("cuStreamCreate", || {
+        status(with_context_handles(|runtime, context, next| {
+            if out.is_null() || flags > 1 {
+                return Err(InvalidValue);
+            }
+            context.streams.collect_retired(&runtime.api)?;
+            let key = reserve_handle(next)?;
+            if flags == 0 {
+                context
+                    .streams
+                    .track_legacy(&runtime.api, &context.backend)?;
+            }
+            let streams = &mut context.streams;
+            let stream = Stream::new(
+                &runtime.api,
+                &context.backend,
+                flags == 0,
+                streams.policy,
+                &streams.wake,
+            )?;
+            streams.live.insert(key, stream);
+            unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+            Ok(())
+        }))
+    })
 }
 
 // Explicit stream handles identify their owning context independently of the calling
@@ -644,33 +647,35 @@ fn with_stream(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
-    status(with_stream(handle, |api, streams, key| {
-        if key == 0 {
-            return Err(InvalidHandle);
-        }
-        streams.collect_retired(api)?;
-        let stream = streams.get_mut(key)?;
-        stream.flush(api)?;
-        let ready = if stream.has_waiters() {
-            Err(NotReady)
-        } else {
-            stream.wait(api, 0)
-        };
-        let cleanup = match ready {
-            Ok(()) => stream.destroy(api),
-            Err(NotReady) => Err(NotReady),
-            Err(error) => return Err(error),
-        };
-        let stream = streams.live.remove(&key).ok_or(InvalidHandle)?;
-        if cleanup.is_err() {
-            streams.retired.push(stream);
-        }
-        if ready == Err(NotReady) {
-            Ok(())
-        } else {
-            cleanup
-        }
-    }))
+    trace::call("cuStreamDestroy_v2", || {
+        status(with_stream(handle, |api, streams, key| {
+            if key == 0 {
+                return Err(InvalidHandle);
+            }
+            streams.collect_retired(api)?;
+            let stream = streams.get_mut(key)?;
+            stream.flush(api)?;
+            let ready = if stream.has_waiters() {
+                Err(NotReady)
+            } else {
+                stream.wait(api, 0)
+            };
+            let cleanup = match ready {
+                Ok(()) => stream.destroy(api),
+                Err(NotReady) => Err(NotReady),
+                Err(error) => return Err(error),
+            };
+            let stream = streams.live.remove(&key).ok_or(InvalidHandle)?;
+            if cleanup.is_err() {
+                streams.retired.push(stream);
+            }
+            if ready == Err(NotReady) {
+                Ok(())
+            } else {
+                cleanup
+            }
+        }))
+    })
 }
 
 fn synchronize(
@@ -730,21 +735,25 @@ pub(super) fn synchronize_context() -> CuResult {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamSynchronize(handle: Opaque) -> CuResult {
-    status(synchronize(|state| {
-        let (owner, key) = stream_owner(state, handle)?;
-        Ok((owner, Some(key)))
-    }))
+    trace::call("cuStreamSynchronize", || {
+        status(synchronize(|state| {
+            let (owner, key) = stream_owner(state, handle)?;
+            Ok((owner, Some(key)))
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamQuery(handle: Opaque) -> CuResult {
-    status(with_stream(handle, |api, streams, key| {
-        if key == 0 {
-            streams.wait_legacy(api, 0)
-        } else {
-            streams.get_mut(key)?.wait(api, 0)
-        }
-    }))
+    trace::call("cuStreamQuery", || {
+        status(with_stream(handle, |api, streams, key| {
+            if key == 0 {
+                streams.wait_legacy(api, 0)
+            } else {
+                streams.get_mut(key)?.wait(api, 0)
+            }
+        }))
+    })
 }
 
 #[cfg(all(test, windows))]

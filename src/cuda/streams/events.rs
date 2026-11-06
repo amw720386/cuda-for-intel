@@ -1,4 +1,5 @@
 use super::{Fence, Recording, Streams};
+use crate::cuda::trace;
 use crate::cuda::{
     Api, Context, CuResult, Opaque, backend_error, reserve_handle, status, with_context,
     with_context_handles,
@@ -40,122 +41,134 @@ impl Streams {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuEventCreate(out: *mut Opaque, flags: u32) -> CuResult {
-    status(with_context_handles(|_, context, next| {
-        if out.is_null() {
-            return Err(InvalidValue);
-        }
-        match flags {
-            0 | 2 => {}                                // DEFAULT or DISABLE_TIMING
-            1 | 3 | 6 | 7 => return Err(NotSupported), // BLOCKING_SYNC or INTERPROCESS
-            _ => return Err(InvalidValue),
-        }
-        let key = reserve_handle(next)?;
-        context.streams.events.insert(key, None);
-        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
-        Ok(())
-    }))
+    trace::call("cuEventCreate", || {
+        status(with_context_handles(|_, context, next| {
+            if out.is_null() {
+                return Err(InvalidValue);
+            }
+            match flags {
+                0 | 2 => {}                                // DEFAULT or DISABLE_TIMING
+                1 | 3 | 6 | 7 => return Err(NotSupported), // BLOCKING_SYNC or INTERPROCESS
+                _ => return Err(InvalidValue),
+            }
+            let key = reserve_handle(next)?;
+            context.streams.events.insert(key, None);
+            unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuEventRecord(event: Opaque, stream: Opaque) -> CuResult {
-    status(with_context(|runtime, context| {
-        let streams = &mut context.streams;
-        streams.event(event)?;
-        let key = streams.launch_key(stream)?;
-        // Publish only after append succeeds. Older consumers keep their own
-        // reference to the previous recording, even after this handle changes.
-        let completion = streams.event_marker(&runtime.api, &context.backend, key, None)?;
-        streams.events.insert(
-            event.addr(),
-            Some(Recording {
-                producer: key,
-                fence: completion,
-            }),
-        );
-        Ok(())
-    }))
+    trace::call("cuEventRecord", || {
+        status(with_context(|runtime, context| {
+            let streams = &mut context.streams;
+            streams.event(event)?;
+            let key = streams.launch_key(stream)?;
+            // Publish only after append succeeds. Older consumers keep their own
+            // reference to the previous recording, even after this handle changes.
+            let completion = streams.event_marker(&runtime.api, &context.backend, key, None)?;
+            streams.events.insert(
+                event.addr(),
+                Some(Recording {
+                    producer: key,
+                    fence: completion,
+                }),
+            );
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuEventQuery(event: Opaque) -> CuResult {
-    status(with_context(|runtime, context| {
-        let streams = &context.streams;
-        if let Some(recording) = streams.event(event)? {
-            if let Ok(producer) = streams.get(recording.producer) {
-                producer.check()?;
+    trace::call("cuEventQuery", || {
+        status(with_context(|runtime, context| {
+            let streams = &context.streams;
+            if let Some(recording) = streams.event(event)? {
+                if let Ok(producer) = streams.get(recording.producer) {
+                    producer.check()?;
+                }
+                if !recording
+                    .fence
+                    .ready(&runtime.api)
+                    .inspect_err(|error| context.backend.health.observe(error))
+                    .map_err(backend_error)?
+                {
+                    return Err(NotReady);
+                }
             }
-            if !recording
-                .fence
-                .ready(&runtime.api)
-                .inspect_err(|error| context.backend.health.observe(error))
-                .map_err(backend_error)?
-            {
-                return Err(NotReady);
-            }
-        }
-        Ok(())
-    }))
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuEventSynchronize(event: Opaque) -> CuResult {
-    let snapshot = with_context(|runtime, context| {
-        let streams = &mut context.streams;
-        let Some(recording) = streams.event(event)? else {
-            return Ok(None);
-        };
-        let producer = recording.producer;
-        let fence = Arc::clone(&recording.fence);
-        streams.flush_producer(&runtime.api, producer, &fence)?;
-        Ok(Some((
-            Arc::clone(&streams.event_waiters),
-            fence,
-            runtime.api.event_wait_fn(),
-            Arc::clone(&context.backend.health),
-        )))
-    });
-    status(snapshot.and_then(|snapshot| {
-        // Keep the fence and its context alive with the state mutex released.
-        if let Some((_context_guard, fence, wait, health)) = snapshot {
-            fence
-                .synchronize(wait)
-                .inspect_err(|error| health.observe(error))
-                .map_err(backend_error)?;
-        }
-        Ok(())
-    }))
+    trace::call("cuEventSynchronize", || {
+        let snapshot = with_context(|runtime, context| {
+            let streams = &mut context.streams;
+            let Some(recording) = streams.event(event)? else {
+                return Ok(None);
+            };
+            let producer = recording.producer;
+            let fence = Arc::clone(&recording.fence);
+            streams.flush_producer(&runtime.api, producer, &fence)?;
+            Ok(Some((
+                Arc::clone(&streams.event_waiters),
+                fence,
+                runtime.api.event_wait_fn(),
+                Arc::clone(&context.backend.health),
+            )))
+        });
+        status(snapshot.and_then(|snapshot| {
+            // Keep the fence and its context alive with the state mutex released.
+            if let Some((_context_guard, fence, wait, health)) = snapshot {
+                fence
+                    .synchronize(wait)
+                    .inspect_err(|error| health.observe(error))
+                    .map_err(backend_error)?;
+            }
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuEventDestroy_v2(event: Opaque) -> CuResult {
-    status(with_context(|_, context| {
-        context
-            .streams
-            .events
-            .remove(&event.addr())
-            .ok_or(InvalidHandle)?;
-        Ok(())
-    }))
+    trace::call("cuEventDestroy_v2", || {
+        status(with_context(|_, context| {
+            context
+                .streams
+                .events
+                .remove(&event.addr())
+                .ok_or(InvalidHandle)?;
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamWaitEvent(stream: Opaque, event: Opaque, flags: u32) -> CuResult {
-    status(with_context(|runtime, context| {
-        if flags != 0 {
-            return Err(InvalidValue);
-        }
-        let streams = &mut context.streams;
-        let key = streams.launch_key(stream)?;
-        if let Some(recording) = streams.event(event)? {
-            let producer = recording.producer;
-            let fence = Arc::clone(&recording.fence);
-            if key != producer {
-                streams.flush_producer(&runtime.api, producer, &fence)?;
+    trace::call("cuStreamWaitEvent", || {
+        status(with_context(|runtime, context| {
+            if flags != 0 {
+                return Err(InvalidValue);
             }
-            streams.event_marker(&runtime.api, &context.backend, key, Some(fence))?;
-        }
-        Ok(())
-    }))
+            let streams = &mut context.streams;
+            let key = streams.launch_key(stream)?;
+            if let Some(recording) = streams.event(event)? {
+                let producer = recording.producer;
+                let fence = Arc::clone(&recording.fence);
+                if key != producer {
+                    streams.flush_producer(&runtime.api, producer, &fence)?;
+                }
+                streams.event_marker(&runtime.api, &context.backend, key, Some(fence))?;
+            }
+            Ok(())
+        }))
+    })
 }
 
 #[cfg(all(test, windows))]

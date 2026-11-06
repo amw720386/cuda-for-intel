@@ -1,12 +1,15 @@
 //! CUDA Driver ABI. Public pointers follow CUDA's caller validity requirements.
-use crate::level_zero::{Api, Context, DeviceInfo, Error, Module, Runtime};
+use crate::level_zero::{Api, Context, DeviceInfo, Error, Handle, Module, Runtime};
 use crate::ptx::{self, Param};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
+mod discovery;
+mod primary;
 mod streams;
+mod trace;
 use streams::Streams;
 
 #[cfg(all(test, windows))]
@@ -36,6 +39,7 @@ pub(crate) enum CuResult {
     InvalidHandle = 400,
     NotFound = 500,
     NotReady = 600,
+    PrimaryContextActive = 708,
     ContextIsDestroyed = 709,
     LaunchFailed = 719,
     NotSupported = 801,
@@ -54,16 +58,19 @@ struct CudaContext {
     allocations: BTreeMap<usize, usize>,
     host_allocations: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
-    functions: HashMap<usize, usize>,
+    functions: HashMap<usize, (usize, CString)>,
 }
 
 struct CudaModule {
     backend: Module,
-    name: CString,
+    entries: HashMap<CString, CudaEntry>,
+    unloading: bool,
+}
+
+struct CudaEntry {
     params: Vec<Param>,
     max_threads: Option<u32>,
-    function: Option<usize>,
-    unloading: bool,
+    function: Option<(usize, Handle)>,
 }
 
 struct State {
@@ -71,6 +78,7 @@ struct State {
     next_handle: usize,
     contexts: HashMap<usize, CudaContext>,
     incomplete_contexts: Vec<Context>,
+    primary: HashMap<c_int, primary::Primary>,
 }
 
 static RUNTIME: Mutex<Option<State>> = Mutex::new(None);
@@ -81,6 +89,21 @@ thread_local! {
 }
 
 fn backend_error(error: Error) -> CuResult {
+    if trace::enabled() {
+        match &error {
+            Error::Driver(_, 1) => {}
+            Error::Driver(call, status) => {
+                trace::record(format_args!("Level Zero {call} -> {status:#010x}"))
+            }
+            Error::Build(status, _) => {
+                trace::record(format_args!("Level Zero zeModuleCreate -> {status:#010x}"))
+            }
+            Error::Loader(_) => trace::record(format_args!("Level Zero loader unavailable")),
+            Error::InvalidProperties => {
+                trace::record(format_args!("Level Zero invalid device properties"))
+            }
+        }
+    }
     if !matches!(error, Error::Driver(_, 1)) {
         diagnostic(&error);
     }
@@ -163,28 +186,37 @@ fn device(ordinal: c_int, action: impl FnOnce(&DeviceInfo) -> CuResult) -> CuRes
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
-    if flags != 0 {
-        return InvalidValue;
-    }
-    let Ok(mut guard) = RUNTIME.lock() else {
-        return Unknown;
-    };
-    if guard.is_some() {
-        return Success;
-    }
-    match Runtime::load() {
-        Ok(rt) if rt.devices.is_empty() => NoDevice,
-        Ok(rt) => {
-            *guard = Some(State {
-                runtime: rt,
-                next_handle: 3, // CUDA reserves stream values 0, 1 and 2.
-                contexts: HashMap::new(),
-                incomplete_contexts: Vec::new(),
-            });
-            Success
+    trace::call("cuInit", || {
+        if flags != 0 {
+            return InvalidValue;
         }
-        Err(error) => backend_error(error),
-    }
+        let Ok(mut guard) = RUNTIME.lock() else {
+            return Unknown;
+        };
+        if guard.is_some() {
+            return Success;
+        }
+        match Runtime::load() {
+            Ok(rt) if rt.devices.is_empty() => NoDevice,
+            Ok(rt) => {
+                if trace::enabled() {
+                    trace::record(format_args!(
+                        "initialized {} Level Zero device(s)",
+                        rt.devices.len()
+                    ));
+                }
+                *guard = Some(State {
+                    runtime: rt,
+                    next_handle: 3, // CUDA reserves stream values 0, 1 and 2.
+                    contexts: HashMap::new(),
+                    incomplete_contexts: Vec::new(),
+                    primary: HashMap::new(),
+                });
+                Success
+            }
+            Err(error) => backend_error(error),
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -193,23 +225,73 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
     flags: c_uint,
     ordinal: c_int,
 ) -> CuResult {
-    status(state(|state| {
-        if out.is_null() {
-            return Err(InvalidValue);
-        }
-        // Only the default scheduling policy and no additional flags are supported.
-        if flags != 0 {
-            return Err(NotSupported);
-        }
-        let device = state
+    trace::call("cuCtxCreate_v2", || {
+        status(state(|state| {
+            if out.is_null() {
+                return Err(InvalidValue);
+            }
+            // Only the default scheduling policy and no additional flags are supported.
+            if flags != 0 {
+                return Err(NotSupported);
+            }
+            let key = state.create_context(ordinal)?;
+            CURRENT.with(|stack| stack.borrow_mut().push(key));
+            unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+            Ok(())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
+    trace::call("cuCtxDestroy_v2", || {
+        let destroyed = state(|state| {
+            let key = handle.addr();
+            if state
+                .primary
+                .values()
+                .any(|primary| primary.key == Some(key))
+            {
+                return Err(InvalidContext);
+            }
+            let (result, worker) = state.destroy_context(key)?;
+            if !state.contexts.contains_key(&key) {
+                CURRENT.with_borrow_mut(|stack| {
+                    if stack.last() == Some(&key) {
+                        stack.pop();
+                    }
+                });
+            }
+            Ok((result, worker))
+        });
+        finish_destroy(destroyed)
+    })
+}
+
+type ContextTeardown = (
+    Result<(), CuResult>,
+    Option<std::thread::JoinHandle<Result<(), CuResult>>>,
+);
+
+fn finish_destroy(destroyed: Result<ContextTeardown, CuResult>) -> CuResult {
+    status(destroyed.and_then(|(result, worker)| {
+        let stopped = worker.map_or(Ok(()), |worker| {
+            worker.join().map_err(|_| Unknown).and_then(|result| result)
+        });
+        result.and(stopped)
+    }))
+}
+
+impl State {
+    fn create_context(&mut self, ordinal: c_int) -> Result<usize, CuResult> {
+        let device = self
             .runtime
             .devices
             .get(ordinal as usize)
             .ok_or(InvalidDevice)?;
-        let key = reserve_handle(&mut state.next_handle)?;
-        let api = &state.runtime.api;
-        state
-            .incomplete_contexts
+        let key = reserve_handle(&mut self.next_handle)?;
+        let api = &self.runtime.api;
+        self.incomplete_contexts
             .retain_mut(|context| context.destroy(api).inspect_err(diagnostic).is_err());
         let mut backend = Context::create(api, device).map_err(backend_error)?;
         let streams = match backend
@@ -221,12 +303,12 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
             Err(error) => {
                 if let Err(cleanup) = backend.destroy(api) {
                     diagnostic(&cleanup);
-                    state.incomplete_contexts.push(backend);
+                    self.incomplete_contexts.push(backend);
                 }
                 return Err(error);
             }
         };
-        state.contexts.insert(
+        self.contexts.insert(
             key,
             CudaContext {
                 backend,
@@ -239,95 +321,85 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
                 functions: HashMap::new(),
             },
         );
-        CURRENT.with(|stack| stack.borrow_mut().push(key));
-        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
-        Ok(())
-    }))
-}
+        if trace::enabled() {
+            trace::record(format_args!("context created ordinal={ordinal}"));
+        }
+        Ok(key)
+    }
 
-#[unsafe(no_mangle)]
-pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
-    let destroyed = state(|state| {
-        let key = handle.addr();
-        let context = state.contexts.get_mut(&key).ok_or(InvalidContext)?;
-        // Context teardown cannot invalidate a list another host call is using.
+    fn destroy_context(&mut self, key: usize) -> Result<ContextTeardown, CuResult> {
+        let context = self.contexts.get_mut(&key).ok_or(InvalidContext)?;
+        // An explicit host wait can still be using a native list.
         if context.streams.has_waiters() {
             return Err(NotReady);
         }
-        let result = context.destroy(&state.runtime.api);
+        let result = context.destroy(&self.runtime.api);
         let worker = context.streams.stop();
         if let Err(error) = result {
-            // Some native resources may already have been released. Only a
-            // destroy retry can use this context after teardown has started.
+            // Some native resources may already have been released.
             context.teardown_error.get_or_insert(error);
             return Ok((result, worker));
         }
         let result = context.streams.execution_error().map_or(Ok(()), Err);
-        state.contexts.remove(&key);
-        CURRENT.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            if stack.last() == Some(&key) {
-                stack.pop();
-            }
-        });
+        self.contexts.remove(&key);
         Ok((result, worker))
-    });
-    status(destroyed.and_then(|(result, worker)| {
-        let stopped = worker.map_or(Ok(()), |worker| {
-            worker.join().map_err(|_| Unknown).and_then(|result| result)
-        });
-        result.and(stopped)
-    }))
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuCtxGetCurrent(out: *mut Opaque) -> CuResult {
-    status(state(|_| {
-        if out.is_null() {
-            return Err(InvalidValue);
-        }
-        let key = current().unwrap_or(0);
-        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
-        Ok(())
-    }))
+    trace::call("cuCtxGetCurrent", || {
+        status(state(|_| {
+            if out.is_null() {
+                return Err(InvalidValue);
+            }
+            let key = current().unwrap_or(0);
+            unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSetCurrent(handle: Opaque) -> CuResult {
-    status(state(|state| {
-        let key = handle.addr();
-        if key != 0 {
-            state
-                .contexts
-                .get(&key)
-                .ok_or(InvalidContext)?
-                .check_live()?;
-        }
-        CURRENT.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            stack.pop();
+    trace::call("cuCtxSetCurrent", || {
+        status(state(|state| {
+            let key = handle.addr();
             if key != 0 {
-                stack.push(key);
+                state
+                    .contexts
+                    .get(&key)
+                    .ok_or(InvalidContext)?
+                    .check_live()?;
             }
-        });
-        Ok(())
-    }))
+            CURRENT.with(|stack| {
+                let mut stack = stack.borrow_mut();
+                stack.pop();
+                if key != 0 {
+                    stack.push(key);
+                }
+            });
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuCtxGetDevice(out: *mut c_int) -> CuResult {
-    status(with_context(|_, context| {
-        if out.is_null() {
-            return Err(InvalidValue);
-        }
-        unsafe { out.write(context.device) };
-        Ok(())
-    }))
+    trace::call("cuCtxGetDevice", || {
+        status(with_context(|_, context| {
+            if out.is_null() {
+                return Err(InvalidValue);
+            }
+            unsafe { out.write(context.device) };
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize() -> CuResult {
-    streams::synchronize_context()
+    trace::call("cuCtxSynchronize", streams::synchronize_context)
 }
 
 impl CudaContext {
@@ -380,8 +452,10 @@ impl CudaContext {
         // A failed module destroy can follow a successful kernel destroy.
         // Keep the module for a retry, while retiring its function handles.
         module.unloading = true;
-        if let Some(function) = module.function.take() {
-            self.functions.remove(&function);
+        for entry in module.entries.values_mut() {
+            if let Some((function, _)) = entry.function.take() {
+                self.functions.remove(&function);
+            }
         }
         module
             .backend
@@ -405,36 +479,40 @@ fn contains_range(allocations: &BTreeMap<usize, usize>, address: usize, size: us
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuResult {
-    status(with_context(|runtime, context| {
-        if out.is_null() || size == 0 {
-            return Err(InvalidValue);
-        }
-        if size as u64 > runtime.devices[context.device as usize].info.max_allocation {
-            return Err(OutOfMemory);
-        }
-        let address = context
-            .backend
-            .alloc(&runtime.api, size)
-            .inspect_err(|error| context.backend.health.observe(error))
-            .map_err(backend_error)?;
-        context.allocations.insert(address, size);
-        unsafe { out.write(address as u64) };
-        Ok(())
-    }))
+    trace::call("cuMemAlloc_v2", || {
+        status(with_context(|runtime, context| {
+            if out.is_null() || size == 0 {
+                return Err(InvalidValue);
+            }
+            if size as u64 > runtime.devices[context.device as usize].info.max_allocation {
+                return Err(OutOfMemory);
+            }
+            let address = context
+                .backend
+                .alloc(&runtime.api, size)
+                .inspect_err(|error| context.backend.health.observe(error))
+                .map_err(backend_error)?;
+            context.allocations.insert(address, size);
+            unsafe { out.write(address as u64) };
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
-    status(with_context(|runtime, context| {
-        if address == 0 {
-            return Ok(());
-        }
-        if !context.allocations.contains_key(&(address as usize)) {
-            return Err(InvalidValue);
-        }
-        context.streams.wait_all(&runtime.api)?;
-        context.free(&runtime.api, address as usize)
-    }))
+    trace::call("cuMemFree_v2", || {
+        status(with_context(|runtime, context| {
+            if address == 0 {
+                return Ok(());
+            }
+            if !context.allocations.contains_key(&(address as usize)) {
+                return Err(InvalidValue);
+            }
+            context.streams.wait_all(&runtime.api)?;
+            context.free(&runtime.api, address as usize)
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -443,36 +521,40 @@ pub unsafe extern "system" fn cuMemHostAlloc(
     size: usize,
     flags: c_uint,
 ) -> CuResult {
-    status(with_context(|runtime, context| {
-        if out.is_null() || size == 0 || flags & !7 != 0 {
-            return Err(InvalidValue);
-        }
-        if flags != 0 {
-            return Err(NotSupported);
-        }
-        if size as u64 > runtime.devices[context.device as usize].info.max_allocation {
-            return Err(OutOfMemory);
-        }
-        let base = context
-            .backend
-            .alloc_host(&runtime.api, size)
-            .inspect_err(|error| context.backend.health.observe(error))
-            .map_err(backend_error)?;
-        context.host_allocations.insert(base, size);
-        unsafe { out.write(std::ptr::with_exposed_provenance_mut(base)) };
-        Ok(())
-    }))
+    trace::call("cuMemHostAlloc", || {
+        status(with_context(|runtime, context| {
+            if out.is_null() || size == 0 || flags & !7 != 0 {
+                return Err(InvalidValue);
+            }
+            if flags != 0 {
+                return Err(NotSupported);
+            }
+            if size as u64 > runtime.devices[context.device as usize].info.max_allocation {
+                return Err(OutOfMemory);
+            }
+            let base = context
+                .backend
+                .alloc_host(&runtime.api, size)
+                .inspect_err(|error| context.backend.health.observe(error))
+                .map_err(backend_error)?;
+            context.host_allocations.insert(base, size);
+            unsafe { out.write(std::ptr::with_exposed_provenance_mut(base)) };
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFreeHost(host: Opaque) -> CuResult {
-    status(with_context(|runtime, context| {
-        if !context.host_allocations.contains_key(&host.addr()) {
-            return Err(InvalidValue);
-        }
-        context.streams.wait_all(&runtime.api)?;
-        context.free_host(&runtime.api, host.addr())
-    }))
+    trace::call("cuMemFreeHost", || {
+        status(with_context(|runtime, context| {
+            if !context.host_allocations.contains_key(&host.addr()) {
+                return Err(InvalidValue);
+            }
+            context.streams.wait_all(&runtime.api)?;
+            context.free_host(&runtime.api, host.addr())
+        }))
+    })
 }
 
 unsafe fn copy_async(
@@ -513,7 +595,9 @@ pub unsafe extern "system" fn cuMemcpyHtoDAsync_v2(
     size: usize,
     stream: Opaque,
 ) -> CuResult {
-    unsafe { copy_async(src.cast_mut(), dst, size, stream, true) }
+    trace::call("cuMemcpyHtoDAsync_v2", || unsafe {
+        copy_async(src.cast_mut(), dst, size, stream, true)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -523,7 +607,9 @@ pub unsafe extern "system" fn cuMemcpyDtoHAsync_v2(
     size: usize,
     stream: Opaque,
 ) -> CuResult {
-    unsafe { copy_async(dst, src, size, stream, false) }
+    trace::call("cuMemcpyDtoHAsync_v2", || unsafe {
+        copy_async(dst, src, size, stream, false)
+    })
 }
 
 unsafe fn copy(host: Opaque, device: u64, size: usize, to_device: bool) -> CuResult {
@@ -554,12 +640,14 @@ pub unsafe extern "system" fn cuMemcpyHtoD_v2(
     src: *const c_void,
     size: usize,
 ) -> CuResult {
-    unsafe { copy(src.cast_mut(), dst, size, true) }
+    trace::call("cuMemcpyHtoD_v2", || unsafe {
+        copy(src.cast_mut(), dst, size, true)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemcpyDtoH_v2(dst: Opaque, src: u64, size: usize) -> CuResult {
-    unsafe { copy(dst, src, size, false) }
+    trace::call("cuMemcpyDtoH_v2", || unsafe { copy(dst, src, size, false) })
 }
 
 fn load_ptx(
@@ -570,29 +658,40 @@ fn load_ptx(
 ) -> Result<usize, CuResult> {
     let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
     let translated = ptx::translate(ptx).map_err(|error| {
+        if trace::enabled() {
+            trace::record(format_args!("PTX translation rejected"));
+        }
         diagnostic(&error);
         InvalidPtx
     })?;
     let device = &runtime.devices[context.device as usize];
     let info = &device.info;
-    if info.spirv_version < 0x10000
-        || (translated.fp32 && !info.supports_fp32())
-        || (translated.fp32_fma && !info.fp32_fma)
-    {
+    if info.spirv_version < 0x10000 {
         return Err(NotSupported);
     }
-    if translated.device_atomics && !info.device_memory_atomics {
-        return Err(NotSupported);
+    let mut entries = HashMap::with_capacity(translated.kernels.len());
+    for kernel in translated.kernels {
+        let argument_bytes = kernel.params.iter().fold(0usize, |offset, &param| {
+            offset.next_multiple_of(param.size()) + param.size()
+        });
+        if (kernel.fp32 && !info.supports_fp32())
+            || (kernel.fp32_fma && !info.fp32_fma)
+            || (kernel.device_atomics && !info.device_memory_atomics)
+            || argument_bytes > info.max_kernel_arguments_size as usize
+            || kernel.shared_bytes > info.max_shared_local_memory
+        {
+            return Err(NotSupported);
+        }
+        let name = CString::new(kernel.name).map_err(|_| InvalidPtx)?;
+        entries.insert(
+            name,
+            CudaEntry {
+                params: kernel.params,
+                max_threads: kernel.max_threads,
+                function: None,
+            },
+        );
     }
-    let argument_bytes = translated.params.iter().fold(0usize, |offset, &param| {
-        offset.next_multiple_of(param.size()) + param.size()
-    });
-    if argument_bytes > info.max_kernel_arguments_size as usize
-        || translated.shared_bytes > info.max_shared_local_memory
-    {
-        return Err(NotSupported);
-    }
-    let name = CString::new(translated.name).map_err(|_| InvalidPtx)?;
     let key = reserve_handle(next)?;
     let backend = context
         .backend
@@ -603,10 +702,7 @@ fn load_ptx(
         key,
         CudaModule {
             backend,
-            name,
-            params: translated.params,
-            max_threads: translated.max_threads,
-            function: None,
+            entries,
             unloading: false,
         },
     );
@@ -615,49 +711,55 @@ fn load_ptx(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuModuleLoad(out: *mut Opaque, path: *const c_char) -> CuResult {
-    status(with_context_handles(|runtime, context, next| {
-        if out.is_null() || path.is_null() {
-            return Err(InvalidValue);
-        }
-        let path = unsafe { CStr::from_ptr(path) }
-            .to_str()
-            .map_err(|_| InvalidValue)?;
-        let image = std::fs::read(path).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => FileNotFound,
-            _ => OperatingSystem,
-        })?;
-        let key = load_ptx(runtime, context, next, &image)?;
-        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
-        Ok(())
-    }))
+    trace::call("cuModuleLoad", || {
+        status(with_context_handles(|runtime, context, next| {
+            if out.is_null() || path.is_null() {
+                return Err(InvalidValue);
+            }
+            let path = unsafe { CStr::from_ptr(path) }
+                .to_str()
+                .map_err(|_| InvalidValue)?;
+            let image = std::fs::read(path).map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => FileNotFound,
+                _ => OperatingSystem,
+            })?;
+            let key = load_ptx(runtime, context, next, &image)?;
+            unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c_void) -> CuResult {
-    status(with_context_handles(|runtime, context, next| {
-        if out.is_null() || image.is_null() {
-            return Err(InvalidValue);
-        }
-        // Recognize ELF and CUDA fatbin headers before treating the input as C text.
-        if matches!(unsafe { image.cast::<u8>().read() }, 0x7f | 0x50 | 0xb1) {
-            return Err(InvalidImage);
-        }
-        let image = unsafe { CStr::from_ptr(image.cast()) }.to_bytes();
-        let key = load_ptx(runtime, context, next, image)?;
-        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
-        Ok(())
-    }))
+    trace::call("cuModuleLoadData", || {
+        status(with_context_handles(|runtime, context, next| {
+            if out.is_null() || image.is_null() {
+                return Err(InvalidValue);
+            }
+            // Recognize ELF and CUDA fatbin headers before treating the input as C text.
+            if matches!(unsafe { image.cast::<u8>().read() }, 0x7f | 0x50 | 0xb1) {
+                return Err(InvalidImage);
+            }
+            let image = unsafe { CStr::from_ptr(image.cast()) }.to_bytes();
+            let key = load_ptx(runtime, context, next, image)?;
+            unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+            Ok(())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
-    status(with_context(|runtime, context| {
-        if !context.modules.contains_key(&module.addr()) {
-            return Err(InvalidHandle);
-        }
-        context.streams.wait_all(&runtime.api)?;
-        context.unload(&runtime.api, module.addr())
-    }))
+    trace::call("cuModuleUnload", || {
+        status(with_context(|runtime, context| {
+            if !context.modules.contains_key(&module.addr()) {
+                return Err(InvalidHandle);
+            }
+            context.streams.wait_all(&runtime.api)?;
+            context.unload(&runtime.api, module.addr())
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -666,32 +768,37 @@ pub unsafe extern "system" fn cuModuleGetFunction(
     module: Opaque,
     name: *const c_char,
 ) -> CuResult {
-    status(with_context_handles(|runtime, context, next| {
-        if out.is_null() || name.is_null() {
-            return Err(InvalidValue);
-        }
-        let module_key = module.addr();
-        let module = context.modules.get_mut(&module_key).ok_or(InvalidHandle)?;
-        if module.unloading {
-            return Err(InvalidHandle);
-        }
-        if unsafe { CStr::from_ptr(name) } != module.name.as_c_str() {
-            return Err(NotFound);
-        }
-        let function = match module.function {
-            Some(key) => key,
-            None => reserve_handle(next)?,
-        };
-        module
-            .backend
-            .create_kernel(&runtime.api, &module.name)
-            .inspect_err(|error| context.backend.health.observe(error))
-            .map_err(backend_error)?;
-        module.function = Some(function);
-        context.functions.insert(function, module_key);
-        unsafe { out.write(std::ptr::without_provenance_mut(function)) };
-        Ok(())
-    }))
+    trace::call("cuModuleGetFunction", || {
+        status(with_context_handles(|runtime, context, next| {
+            if out.is_null() || name.is_null() {
+                return Err(InvalidValue);
+            }
+            let module_key = module.addr();
+            let module = context.modules.get_mut(&module_key).ok_or(InvalidHandle)?;
+            if module.unloading {
+                return Err(InvalidHandle);
+            }
+            let name = unsafe { CStr::from_ptr(name) };
+            let entry = module.entries.get_mut(name).ok_or(NotFound)?;
+            let function = if let Some((function, _)) = entry.function {
+                function
+            } else {
+                let function = reserve_handle(next)?;
+                let kernel = module
+                    .backend
+                    .create_kernel(&runtime.api, name)
+                    .inspect_err(|error| context.backend.health.observe(error))
+                    .map_err(backend_error)?;
+                entry.function = Some((function, kernel));
+                context
+                    .functions
+                    .insert(function, (module_key, name.to_owned()));
+                function
+            };
+            unsafe { out.write(std::ptr::without_provenance_mut(function)) };
+            Ok(())
+        }))
+    })
 }
 
 fn validate_launch(
@@ -732,73 +839,81 @@ pub unsafe extern "system" fn cuLaunchKernel(
     kernel_params: *mut Opaque,
     extra: *mut Opaque,
 ) -> CuResult {
-    status(with_context(|runtime, context| {
-        if shared_bytes != 0 || !extra.is_null() {
-            return Err(NotSupported);
-        }
-        let stream = context.streams.launch_key(stream)?;
-        let module_key = context
-            .functions
-            .get(&function.addr())
-            .ok_or(InvalidHandle)?;
-        let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
-        let grid = [grid_x, grid_y, grid_z];
-        let block = [block_x, block_y, block_z];
-        validate_launch(
-            &runtime.devices[context.device as usize].info,
-            grid,
-            block,
-            module.max_threads,
-        )?;
-        if kernel_params.is_null() && !module.params.is_empty() {
-            return Err(InvalidValue);
-        }
-        let mut args = Vec::with_capacity(module.params.len());
-        for (index, &param) in module.params.iter().enumerate() {
-            let value = unsafe { kernel_params.add(index).read() };
-            if value.is_null() {
+    trace::call("cuLaunchKernel", || {
+        status(with_context(|runtime, context| {
+            if shared_bytes != 0 || !extra.is_null() {
+                return Err(NotSupported);
+            }
+            let stream = context.streams.launch_key(stream)?;
+            let (module_key, name) = context
+                .functions
+                .get(&function.addr())
+                .ok_or(InvalidHandle)?;
+            let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
+            let entry = module.entries.get(name).ok_or(InvalidHandle)?;
+            let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
+            let grid = [grid_x, grid_y, grid_z];
+            let block = [block_x, block_y, block_z];
+            validate_launch(
+                &runtime.devices[context.device as usize].info,
+                grid,
+                block,
+                entry.max_threads,
+            )?;
+            if kernel_params.is_null() && !entry.params.is_empty() {
                 return Err(InvalidValue);
             }
-            if param == Param::GlobalPtr {
-                let address = unsafe { value.cast::<u64>().read_unaligned() };
-                if !contains_range(&context.allocations, address as usize, 1) {
+            let mut args = Vec::with_capacity(entry.params.len());
+            for (index, &param) in entry.params.iter().enumerate() {
+                let value = unsafe { kernel_params.add(index).read() };
+                if value.is_null() {
                     return Err(InvalidValue);
                 }
+                if param == Param::GlobalPtr {
+                    let address = unsafe { value.cast::<u64>().read_unaligned() };
+                    if !contains_range(&context.allocations, address as usize, 1) {
+                        return Err(InvalidValue);
+                    }
+                }
+                args.push(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), param.size()) });
             }
-            args.push(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), param.size()) });
-        }
-        context.streams.launch(
-            &runtime.api,
-            &context.backend,
-            &module.backend,
-            stream,
-            (grid, block),
-            &args,
-        )
-    }))
+            context.streams.launch(
+                &runtime.api,
+                &context.backend,
+                kernel,
+                stream,
+                (grid, block),
+                &args,
+            )
+        }))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuDeviceGetCount(count: *mut c_int) -> CuResult {
-    runtime(|rt| {
-        if count.is_null() {
-            return Err(InvalidValue);
-        }
-        let value = c_int::try_from(rt.devices.len()).map_err(|_| Unknown)?;
-        unsafe { count.write(value) };
-        Ok(Success)
+    trace::call("cuDeviceGetCount", || {
+        runtime(|rt| {
+            if count.is_null() {
+                return Err(InvalidValue);
+            }
+            let value = c_int::try_from(rt.devices.len()).map_err(|_| Unknown)?;
+            unsafe { count.write(value) };
+            Ok(Success)
+        })
+        .unwrap_or_else(|error| error)
     })
-    .unwrap_or_else(|error| error)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuDeviceGet(out: *mut c_int, ordinal: c_int) -> CuResult {
-    device(ordinal, |_| {
-        if out.is_null() {
-            return InvalidValue;
-        }
-        unsafe { out.write(ordinal) };
-        Success
+    trace::call("cuDeviceGet", || {
+        device(ordinal, |_| {
+            if out.is_null() {
+                return InvalidValue;
+            }
+            unsafe { out.write(ordinal) };
+            Success
+        })
     })
 }
 
@@ -808,28 +923,32 @@ pub unsafe extern "system" fn cuDeviceGetName(
     len: c_int,
     ordinal: c_int,
 ) -> CuResult {
-    device(ordinal, |info| {
-        if out.is_null() || len <= 0 {
-            return InvalidValue;
-        }
-        let bytes = info.name.as_bytes();
-        let copied = bytes.len().min(len as usize - 1);
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), copied);
-            out.add(copied).write(0);
-        }
-        Success
+    trace::call("cuDeviceGetName", || {
+        device(ordinal, |info| {
+            if out.is_null() || len <= 0 {
+                return InvalidValue;
+            }
+            let bytes = info.name.as_bytes();
+            let copied = bytes.len().min(len as usize - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), copied);
+                out.add(copied).write(0);
+            }
+            Success
+        })
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuDeviceTotalMem_v2(out: *mut usize, ordinal: c_int) -> CuResult {
-    device(ordinal, |info| {
-        if out.is_null() {
-            return InvalidValue;
-        }
-        unsafe { out.write(info.total_memory as usize) };
-        Success
+    trace::call("cuDeviceTotalMem_v2", || {
+        device(ordinal, |info| {
+            if out.is_null() {
+                return InvalidValue;
+            }
+            unsafe { out.write(info.total_memory as usize) };
+            Success
+        })
     })
 }
 
@@ -839,6 +958,15 @@ fn attribute(info: &DeviceInfo, attr: c_int) -> Result<c_int, CuResult> {
         2..=4 => info.max_workgroup_dimensions[(attr - 2) as usize],
         5..=7 => info.max_grid_dimensions[(attr - 5) as usize],
         8 => info.max_shared_local_memory,
+        18 => info.device_flags & 1, // ZE_DEVICE_PROPERTY_FLAG_INTEGRATED
+        33 | 34 | 50 => {
+            let [domain, bus, device, _] = info.pci_address.ok_or(NotSupported)?;
+            match attr {
+                33 => bus,
+                34 => device,
+                _ => domain,
+            }
+        }
         _ => return Err(NotSupported),
     };
     // CUDA uses a signed int even where the backend can represent larger limits.
@@ -851,17 +979,24 @@ pub unsafe extern "system" fn cuDeviceGetAttribute(
     attr: c_int,
     ordinal: c_int,
 ) -> CuResult {
-    device(ordinal, |info| {
-        if out.is_null() {
-            return InvalidValue;
+    trace::call("cuDeviceGetAttribute", || {
+        if trace::enabled() {
+            trace::record(format_args!(
+                "device attribute ordinal={ordinal} attribute={attr}"
+            ));
         }
-        match attribute(info, attr) {
-            Ok(value) => {
-                unsafe { out.write(value) };
-                Success
+        device(ordinal, |info| {
+            if out.is_null() {
+                return InvalidValue;
             }
-            Err(error) => error,
-        }
+            match attribute(info, attr) {
+                Ok(value) => {
+                    unsafe { out.write(value) };
+                    Success
+                }
+                Err(error) => error,
+            }
+        })
     })
 }
 

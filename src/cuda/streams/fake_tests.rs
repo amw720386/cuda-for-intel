@@ -43,6 +43,7 @@ impl Fixture {
                     next_handle: 3,
                     contexts: HashMap::new(),
                     incomplete_contexts: Vec::new(),
+                    primary: HashMap::new(),
                 })
                 .is_none()
         );
@@ -620,4 +621,145 @@ fn fake_fault_worker_progress_failure_and_shutdown() {
     assert_eq!(cuCtxDestroy_v2(ctx), OperatingSystem);
     assert_eq!(cuCtxDestroy_v2(ctx), InvalidContext);
     assert_baseline();
+}
+
+#[test]
+fn fake_primary_context_references_reset_and_native_failures() {
+    use crate::cuda::primary::*;
+    let _fixture = Fixture::new();
+    for policy in [None, BATCH] {
+        TEST_POLICY.set(Some(policy));
+        let primary_state = || {
+            let (mut flags, mut active) = (u32::MAX, -1);
+            assert_eq!(
+                unsafe { cuDevicePrimaryCtxGetState(0, &mut flags, &mut active) },
+                Success
+            );
+            (flags, active)
+        };
+        assert_eq!(primary_state(), (0, 0));
+        assert_eq!(cuDevicePrimaryCtxSetFlags_v2(0, 3), InvalidValue);
+        assert_eq!(cuDevicePrimaryCtxSetFlags_v2(0, 1), NotSupported);
+        assert_eq!(cuDevicePrimaryCtxSetFlags_v2(0, 0), Success);
+        assert_eq!(cuDevicePrimaryCtxRelease_v2(0), InvalidContext);
+        let mut primary = null_mut();
+        arm("zeContextCreate", OOM);
+        assert_eq!(
+            unsafe { cuDevicePrimaryCtxRetain(&mut primary, 0) },
+            OutOfMemory
+        );
+        assert!(primary.is_null());
+        assert_eq!(primary_state(), (0, 0));
+        assert_eq!(
+            unsafe { cuDevicePrimaryCtxRetain(&mut primary, 0) },
+            Success
+        );
+        assert_eq!(current(), None);
+        assert_eq!(cuCtxSetCurrent(primary), Success);
+        assert_eq!(cuCtxDestroy_v2(primary), InvalidContext);
+        assert_eq!(cuDevicePrimaryCtxSetFlags(0, 0), PrimaryContextActive);
+        let primary_key = primary.addr();
+        thread::spawn(move || {
+            let mut same = null_mut();
+            assert_eq!(unsafe { cuDevicePrimaryCtxRetain(&mut same, 0) }, Success);
+            assert_eq!(same.addr(), primary_key);
+            assert_eq!(current(), None);
+            assert_eq!(cuDevicePrimaryCtxRelease_v2(0), Success);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(primary_state(), (0, 1));
+        let mut pinned = null_mut();
+        assert_eq!(unsafe { cuMemHostAlloc(&mut pinned, 64, 0) }, Success);
+        arm("zeContextDestroy", FAIL);
+        assert_eq!(cuDevicePrimaryCtxReset_v2(0), Unknown);
+        assert_eq!(primary_state(), (0, 1));
+        let mut unavailable = null_mut();
+        assert_eq!(
+            unsafe { cuDevicePrimaryCtxRetain(&mut unavailable, 0) },
+            Unknown
+        );
+        assert_eq!(cuDevicePrimaryCtxReset_v2(0), Success);
+        assert_eq!(current(), Some(primary_key));
+        assert_eq!(cuCtxSynchronize(), ContextIsDestroyed);
+        assert_eq!(primary_state(), (0, 0));
+        let mut replacement = null_mut();
+        assert_eq!(
+            unsafe { cuDevicePrimaryCtxRetain(&mut replacement, 0) },
+            Success
+        );
+        assert_ne!(replacement, primary);
+        assert_eq!(cuDevicePrimaryCtxRelease_v2(0), Success);
+        assert_eq!(primary_state(), (0, 1));
+        assert_eq!(cuDevicePrimaryCtxRelease_v2(0), Success);
+        assert_eq!(cuDevicePrimaryCtxRelease_v2(0), InvalidContext);
+        assert_eq!(cuCtxSetCurrent(null_mut()), Success);
+        TEST_POLICY.set(None);
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_multi_entry_kernel_create_and_unload_retry() {
+    let _fixture = Fixture::new();
+    for policy in [None, BATCH] {
+        let ctx = context(policy);
+        let image = c".version 4.1 .target sm_52 .address_size 64 .entry first() { ret; } .entry second() { ret; }";
+        let (mut module, mut first, mut second) = (null_mut(), null_mut(), null_mut());
+        assert_eq!(
+            unsafe { cuModuleLoadData(&mut module, image.as_ptr().cast()) },
+            Success
+        );
+        let lookup = |out: &mut Opaque, name: &CStr| unsafe {
+            cuModuleGetFunction(out, module, name.as_ptr())
+        };
+        assert_eq!(lookup(&mut first, c"first"), Success);
+        arm("zeKernelCreate", OOM);
+        assert_eq!(lookup(&mut second, c"second"), OutOfMemory);
+        assert!(second.is_null());
+        assert_eq!(lookup(&mut second, c"second"), Success);
+        assert_ne!(first, second);
+        assert_eq!(
+            unsafe {
+                cuLaunchKernel(
+                    first,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            },
+            Success
+        );
+        nth("zeKernelDestroy", 2, FAIL);
+        assert_eq!(cuModuleUnload(module), Unknown);
+        assert_eq!(lookup(&mut first, c"first"), InvalidHandle);
+        assert_eq!(
+            unsafe {
+                cuLaunchKernel(
+                    second,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            },
+            InvalidHandle
+        );
+        assert_eq!(cuModuleUnload(module), Success);
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
 }

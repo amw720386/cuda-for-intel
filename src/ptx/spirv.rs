@@ -1,8 +1,8 @@
 use super::flow::Flow;
 use super::rounded;
 use super::{
-    Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
-    Translation, Width,
+    Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
+    Terminator, Translation, Width,
 };
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Instruction as SpirvInstruction, Operand};
@@ -81,7 +81,7 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    fn new(declarations: HashMap<String, Width>, shared: Option<(&'a str, u32)>) -> Self {
+    fn new() -> Self {
         let mut builder = Builder::new();
         builder.set_version(1, 0);
         for capability in [
@@ -104,14 +104,6 @@ impl<'a> Emitter<'a> {
         let global_word_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u32_type);
         let shared_byte_ptr = builder.type_pointer(None, StorageClass::Workgroup, u8_type);
         let shared_word_ptr = builder.type_pointer(None, StorageClass::Workgroup, u32_type);
-        let shared = shared.map(|(name, bytes)| {
-            // Use a u32 array to retain the PTX declaration's four-byte alignment.
-            let length = builder.constant_bit32(u32_type, bytes / 4);
-            let array = builder.type_array(u32_type, length);
-            let pointer = builder.type_pointer(None, StorageClass::Workgroup, array);
-            let variable = builder.variable(pointer, None, StorageClass::Workgroup, None);
-            (name, variable)
-        });
         // OpenCL's Physical64 environment uses size_t vectors for these built-ins.
         let builtin_type = builder.type_vector(u64_type, 3);
         let builtin_ptr = builder.type_pointer(None, StorageClass::Input, builtin_type);
@@ -130,10 +122,10 @@ impl<'a> Emitter<'a> {
             global_word_ptr,
             shared_byte_ptr,
             shared_word_ptr,
-            shared,
+            shared: None,
             builtin_type,
             builtins,
-            declarations,
+            declarations: HashMap::new(),
             registers: HashMap::new(),
             initialized: HashSet::new(),
             locals: Vec::new(),
@@ -557,86 +549,113 @@ impl<'a> Emitter<'a> {
     }
 }
 
-pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
-    let flow = Flow::analyze(&entry.blocks)?;
-    let mut emitter = Emitter::new(entry.registers, entry.shared);
-    let types: Vec<_> = entry
-        .params
-        .iter()
-        .map(|&(_, param)| emitter.param_type(param))
-        .collect();
-    let void = emitter.builder.type_void();
-    let signature = emitter.builder.type_function(void, types.iter().copied());
-    let function = emitter
-        .builder
-        .begin_function(void, None, FunctionControl::NONE, signature)?;
-    emitter.builder.entry_point(
-        ExecutionModel::Kernel,
-        function,
-        entry.name,
-        emitter.builtins,
-    );
-    let values = types
+pub(super) fn emit(entries: Vec<Entry<'_>>) -> Result<Translation, Error> {
+    let mut emitter = Emitter::new();
+    let kernels = entries
         .into_iter()
-        .map(|ty| emitter.builder.function_parameter(ty))
-        .collect::<Result<Vec<_>, _>>()?;
-    emitter.builder.begin_block(None)?;
-    for ((name, param), mut id) in entry.params.iter().zip(values) {
-        let kind = match param {
-            Param::U32 => Kind::B32,
-            Param::F32 => {
-                id = emitter.builder.bitcast(emitter.u32_type, None, id)?;
-                Kind::B32
-            }
-            Param::U64 => Kind::B64,
-            Param::GlobalPtr => Kind::Address(Space::Global),
-        };
-        emitter.params.insert(name, Value { id, kind });
-    }
-    let labels: Vec<_> = entry.blocks.iter().map(|_| emitter.builder.id()).collect();
-    emitter.builder.branch(labels[0])?;
-    for index in flow.order {
-        emitter.initialized.clone_from(&flow.inputs[index]);
-        emitter.builder.begin_block(Some(labels[index]))?;
-        let block = &entry.blocks[index];
-        for &inst in &block.instructions {
-            emitter.instruction(inst)?;
-        }
-        match block.end {
-            Terminator::Return => emitter.builder.ret()?,
-            Terminator::Jump(target) => emitter.builder.branch(labels[target])?,
-            Terminator::Branch {
-                predicate,
-                taken,
-                other,
-            } => {
-                let condition = emitter
-                    .read(predicate)?
-                    .require(Kind::Predicate, predicate)?;
-                emitter
-                    .builder
-                    .branch_conditional(condition, labels[taken], labels[other], [])?;
-            }
-        }
-    }
-    emitter.builder.end_function()?;
-    if emitter.fp32 {
-        emitter
-            .builder
-            .execution_mode(function, ExecutionMode::ContractionOff, []);
-    }
-    let mut module = emitter.builder.module();
-    module.functions[0].blocks[0]
-        .instructions
-        .splice(0..0, emitter.locals);
+        .map(|entry| emitter.emit_entry(entry))
+        .collect::<Result<_, _>>()?;
     Ok(Translation {
-        name: entry.name.to_owned(),
-        params: entry.params.into_iter().map(|(_, param)| param).collect(),
-        words: module.assemble(),
-        shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
-        max_threads: entry.max_threads,
-        device_atomics: emitter.device_atomics,
-        fp32: emitter.fp32,
-        fp32_fma: emitter.fp32_fma,
+        words: emitter.builder.module().assemble(),
+        kernels,
     })
+}
+
+impl<'a> Emitter<'a> {
+    fn emit_entry(&mut self, entry: Entry<'a>) -> Result<KernelMetadata, Error> {
+        let flow = Flow::analyze(&entry.blocks)?;
+        self.declarations = entry.registers;
+        self.registers.clear();
+        self.initialized.clear();
+        self.params.clear();
+        self.device_atomics = false;
+        self.fp32 = false;
+        self.fp32_fma = false;
+        self.shared = entry.shared.map(|(name, bytes)| {
+            // Use a u32 array to retain the PTX declaration's four-byte alignment.
+            let length = self.builder.constant_bit32(self.u32_type, bytes / 4);
+            let array = self.builder.type_array(self.u32_type, length);
+            let pointer = self
+                .builder
+                .type_pointer(None, StorageClass::Workgroup, array);
+            let variable = self
+                .builder
+                .variable(pointer, None, StorageClass::Workgroup, None);
+            (name, variable)
+        });
+        let types: Vec<_> = entry
+            .params
+            .iter()
+            .map(|&(_, param)| self.param_type(param))
+            .collect();
+        let void = self.builder.type_void();
+        let signature = self.builder.type_function(void, types.iter().copied());
+        let function = self
+            .builder
+            .begin_function(void, None, FunctionControl::NONE, signature)?;
+        self.builder
+            .entry_point(ExecutionModel::Kernel, function, entry.name, self.builtins);
+        let values = types
+            .into_iter()
+            .map(|ty| self.builder.function_parameter(ty))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.builder.begin_block(None)?;
+        for ((name, param), mut id) in entry.params.iter().zip(values) {
+            let kind = match param {
+                Param::U32 => Kind::B32,
+                Param::F32 => {
+                    id = self.builder.bitcast(self.u32_type, None, id)?;
+                    Kind::B32
+                }
+                Param::U64 => Kind::B64,
+                Param::GlobalPtr => Kind::Address(Space::Global),
+            };
+            self.params.insert(name, Value { id, kind });
+        }
+        let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
+        self.builder.branch(labels[0])?;
+        for index in flow.order {
+            self.initialized.clone_from(&flow.inputs[index]);
+            self.builder.begin_block(Some(labels[index]))?;
+            let block = &entry.blocks[index];
+            for &inst in &block.instructions {
+                self.instruction(inst)?;
+            }
+            match block.end {
+                Terminator::Return => self.builder.ret()?,
+                Terminator::Jump(target) => self.builder.branch(labels[target])?,
+                Terminator::Branch {
+                    predicate,
+                    taken,
+                    other,
+                } => {
+                    let condition = self.read(predicate)?.require(Kind::Predicate, predicate)?;
+                    self.builder
+                        .branch_conditional(condition, labels[taken], labels[other], [])?;
+                }
+            }
+        }
+        self.builder.end_function()?;
+        if self.fp32 {
+            self.builder
+                .execution_mode(function, ExecutionMode::ContractionOff, []);
+        }
+        self.builder
+            .module_mut()
+            .functions
+            .last_mut()
+            .unwrap()
+            .blocks[0]
+            .instructions
+            .splice(0..0, self.locals.drain(..));
+        Ok(KernelMetadata {
+            name: entry.name.to_owned(),
+            params: entry.params.into_iter().map(|(_, param)| param).collect(),
+            shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
+            max_threads: entry.max_threads,
+            device_atomics: self.device_atomics,
+            fp32: self.fp32,
+            fp32_fma: self.fp32_fma,
+        })
+    }
 }
