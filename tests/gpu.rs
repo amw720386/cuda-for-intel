@@ -15,6 +15,8 @@ use gpu_device::ordinal as test_device;
 mod discovery;
 #[path = "gpu/forge.rs"]
 mod forge;
+#[path = "gpu/ggml.rs"]
+mod ggml;
 #[path = "gpu/isolation.rs"]
 mod isolation;
 #[path = "gpu/isolation_capability.rs"]

@@ -73,7 +73,7 @@ struct Emitter<'a> {
     registers: HashMap<&'a str, Value>,
     initialized: HashSet<&'a str>,
     locals: Vec<SpirvInstruction>,
-    params: HashMap<&'a str, Value>,
+    params: HashMap<(&'a str, usize), Value>,
     device_atomics: bool,
     fp32: bool,
     fp32_fma: bool,
@@ -139,7 +139,7 @@ impl<'a> Emitter<'a> {
 
     fn param_type(&self, param: Param) -> Word {
         match param {
-            Param::U32 => self.u32_type,
+            Param::U32 | Param::Words(_) => self.u32_type,
             Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
             Param::GlobalPtr => self.global_byte_ptr,
@@ -349,6 +349,42 @@ impl<'a> Emitter<'a> {
                     _ => self.builder.f_mul(ty, None, a, b)?,
                 }
             }
+            FloatOp::MinMax { min, src: [a, b] } => {
+                let a = self.float_bits(a)?;
+                let b = self.float_bits(b)?;
+                let magnitude_mask = self.builder.constant_bit32(self.u32_type, 0x7fff_ffff);
+                let combined = self.builder.bitwise_or(self.u32_type, None, a, b)?;
+                let magnitude =
+                    self.builder
+                        .bitwise_and(self.u32_type, None, combined, magnitude_mask)?;
+                let zero = self.builder.constant_bit32(self.u32_type, 0);
+                let both_zero = self
+                    .builder
+                    .i_equal(self.bool_type, None, magnitude, zero)?;
+                // PTX orders -0 below +0. OpenCL fmin/fmax do not guarantee the zero sign.
+                let signed_zero = if min {
+                    combined
+                } else {
+                    self.builder.bitwise_and(self.u32_type, None, a, b)?
+                };
+                let a = self.builder.bitcast(ty, None, a)?;
+                let b = self.builder.bitcast(ty, None, b)?;
+                let op = if min {
+                    OpenclStd100Op::fmin
+                } else {
+                    OpenclStd100Op::fmax
+                };
+                let numeric = self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    op as u32,
+                    [a, b].map(Operand::IdRef),
+                )?;
+                let signed_zero = self.builder.bitcast(ty, None, signed_zero)?;
+                self.builder
+                    .select(ty, None, both_zero, signed_zero, numeric)?
+            }
             FloatOp::Fma([a, b, c]) => {
                 let a = self.float_value(a)?;
                 let b = self.float_value(b)?;
@@ -379,12 +415,10 @@ impl<'a> Emitter<'a> {
 
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
         let (dst, id, kind) = match inst {
-            Instruction::Param(width, dst, src) => {
-                let value = self
-                    .params
-                    .get(src)
-                    .copied()
-                    .ok_or_else(|| Error::new(format!("unknown PTX parameter {src}")))?;
+            Instruction::Param(width, dst, src, offset) => {
+                let value = self.params.get(&(src, offset)).copied().ok_or_else(|| {
+                    Error::new(format!("unknown PTX parameter word {src}+{offset}"))
+                })?;
                 if width != value.kind.width() {
                     return Err(Error::new(format!(
                         "mismatched PTX parameter load for {src}"
@@ -444,11 +478,6 @@ impl<'a> Emitter<'a> {
                 (dst, id, Kind::Predicate)
             }
             Instruction::Integer32(op, dst, [a, b]) => {
-                if matches!(op, IntegerOp::ShiftRight) && !b.parse::<u32>().is_ok_and(|n| n < 32) {
-                    return Err(Error::new(
-                        "only immediate PTX right shifts below 32 are supported",
-                    ));
-                }
                 let a = self.integer(a, Kind::B32)?;
                 let b = self.integer(b, Kind::B32)?;
                 let ty = self.u32_type;
@@ -456,7 +485,22 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Add => self.builder.i_add(ty, None, a, b),
                     IntegerOp::Sub => self.builder.i_sub(ty, None, a, b),
                     IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
-                    IntegerOp::ShiftRight => self.builder.shift_right_logical(ty, None, a, b),
+                    IntegerOp::ShiftRight => {
+                        // PTX clamps at 32, but SPIR-V shifts at or above 32 are undefined.
+                        let bits = self.builder.constant_bit32(ty, 32);
+                        let zero = self.builder.constant_bit32(ty, 0);
+                        let in_range = self.builder.u_less_than(self.bool_type, None, b, bits)?;
+                        let safe = self.builder.select(ty, None, in_range, b, zero)?;
+                        let shifted = self.builder.shift_right_logical(ty, None, a, safe)?;
+                        self.builder.select(ty, None, in_range, shifted, zero)
+                    }
+                    IntegerOp::MulHighUnsigned => self.builder.ext_inst(
+                        ty,
+                        None,
+                        self.opencl,
+                        OpenclStd100Op::u_mul_hi as u32,
+                        [a, b].map(Operand::IdRef),
+                    ),
                 }?;
                 (dst, id, Kind::B32)
             }
@@ -478,6 +522,14 @@ impl<'a> Emitter<'a> {
                 (
                     dst,
                     self.builder.i_mul(self.u64_type, None, a, b)?,
+                    Kind::B64,
+                )
+            }
+            Instruction::WidenUnsigned(dst, src) => {
+                let src = self.integer(src, Kind::B32)?;
+                (
+                    dst,
+                    self.builder.u_convert(self.u64_type, None, src)?,
                     Kind::B64,
                 )
             }
@@ -586,7 +638,13 @@ impl<'a> Emitter<'a> {
         let types: Vec<_> = entry
             .params
             .iter()
-            .map(|&(_, param)| self.param_type(param))
+            .flat_map(|&(_, param)| {
+                let count = match param {
+                    Param::Words(words) => usize::from(words),
+                    _ => 1,
+                };
+                std::iter::repeat_n(self.param_type(param), count)
+            })
             .collect();
         let void = self.builder.type_void();
         let signature = self.builder.type_function(void, types.iter().copied());
@@ -600,7 +658,24 @@ impl<'a> Emitter<'a> {
             .map(|ty| self.builder.function_parameter(ty))
             .collect::<Result<Vec<_>, _>>()?;
         self.builder.begin_block(None)?;
-        for ((name, param), mut id) in entry.params.iter().zip(values) {
+        let mut values = values.into_iter();
+        for &(name, param) in &entry.params {
+            // Keep one CUDA argument, but pass each aligned word to Level Zero
+            // as a scalar so the device ABI needs no by-value struct pointer.
+            if let Param::Words(words) = param {
+                for offset in 0..usize::from(words) {
+                    let id = values.next().unwrap();
+                    self.params.insert(
+                        (name, offset * 4),
+                        Value {
+                            id,
+                            kind: Kind::B32,
+                        },
+                    );
+                }
+                continue;
+            }
+            let mut id = values.next().unwrap();
             let kind = match param {
                 Param::U32 => Kind::B32,
                 Param::F32 => {
@@ -609,8 +684,9 @@ impl<'a> Emitter<'a> {
                 }
                 Param::U64 => Kind::B64,
                 Param::GlobalPtr => Kind::Address(Space::Global),
+                Param::Words(_) => unreachable!(),
             };
-            self.params.insert(name, Value { id, kind });
+            self.params.insert((name, 0), Value { id, kind });
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
         self.builder.branch(labels[0])?;

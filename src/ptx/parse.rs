@@ -82,31 +82,56 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
+    fn param(&mut self) -> Result<(&'a str, Param), Error> {
+        self.expect(".param")?;
+        let ty = match self.take()? {
+            ".align" => {
+                self.expect("4")?;
+                self.expect(".b8")?;
+                let name = self.identifier()?;
+                self.expect("[")?;
+                let bytes = self
+                    .take()?
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|n| (4..=4096).contains(n) && n.is_multiple_of(4))
+                    .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
+                self.expect("]")?;
+                return Ok((name, Param::Words(bytes / 4)));
+            }
+            ".u32" | ".b32" => Param::U32,
+            ".f32" => Param::F32,
+            ".u64" | ".b64" if self.eat(".ptr") => {
+                // Generic pointer parameters are restricted to device memory at launch.
+                self.eat(".global");
+                if self.eat(".align") && !matches!(self.take()?, "1" | "2" | "4") {
+                    return Err(Error::new("unsupported PTX pointer alignment"));
+                }
+                Param::GlobalPtr
+            }
+            ".u64" | ".b64" => Param::U64,
+            ty => return Err(Error::new(format!("unsupported PTX parameter type {ty}"))),
+        };
+        Ok((self.identifier()?, ty))
+    }
+
     fn params(&mut self) -> Result<Vec<(&'a str, Param)>, Error> {
         let mut params = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        let mut bytes = 0usize;
         self.expect("(")?;
         if self.eat(")") {
             return Ok(params);
         }
         loop {
-            self.expect(".param")?;
-            let ty = match self.take()? {
-                ".u32" | ".b32" => Param::U32,
-                ".f32" => Param::F32,
-                ".u64" | ".b64" if self.eat(".ptr") => {
-                    // Generic pointer parameters are restricted to device memory at launch.
-                    self.eat(".global");
-                    if self.eat(".align") && !matches!(self.take()?, "1" | "2" | "4") {
-                        return Err(Error::new("unsupported PTX pointer alignment"));
-                    }
-                    Param::GlobalPtr
-                }
-                ".u64" | ".b64" => Param::U64,
-                ty => return Err(Error::new(format!("unsupported PTX parameter type {ty}"))),
-            };
-            let name = self.identifier()?;
-            if params.iter().any(|&(param, _)| param == name) {
+            let (name, ty) = self.param()?;
+            if !names.insert(name) {
                 return Err(Error::new(format!("duplicate PTX parameter {name}")));
+            }
+            bytes = bytes.next_multiple_of(ty.alignment()) + ty.size();
+            // Bound aggregate expansion before constructing the SPIR-V signature.
+            if bytes > 32_764 {
+                return Err(Error::new("PTX parameter list is too large"));
             }
             params.push((name, ty));
             if self.eat(")") {
@@ -121,7 +146,7 @@ impl<'a> Parser<'a> {
         while self.eat(".reg") {
             let width = match self.take()? {
                 ".pred" => Width::Predicate,
-                ".b32" | ".u32" | ".s32" => Width::B32,
+                ".b32" | ".u32" | ".s32" | ".f32" => Width::B32,
                 ".b64" | ".u64" | ".s64" => Width::B64,
                 ty => return Err(Error::new(format!("unsupported PTX register type {ty}"))),
             };
@@ -162,11 +187,28 @@ impl<'a> Parser<'a> {
             .position(|&token| token == ";")
             .ok_or_else(|| Error::new("unterminated PTX instruction"))?;
         let result = match &slice[..end] {
-            ["ld.param.b32" | "ld.param.u32", dst, ",", "[", src, "]"] => {
-                Instruction::Param(Width::B32, dst, src)
+            [
+                "ld.param.b32" | "ld.param.u32" | "ld.param.f32",
+                dst,
+                ",",
+                "[",
+                src,
+                "]",
+            ] => {
+                let (name, offset) = if let Some((name, offset)) = src.split_once('+') {
+                    (
+                        name,
+                        offset
+                            .parse()
+                            .map_err(|_| Error::new("invalid PTX parameter offset"))?,
+                    )
+                } else {
+                    (*src, 0)
+                };
+                Instruction::Param(Width::B32, dst, name, offset)
             }
             ["ld.param.b64" | "ld.param.u64", dst, ",", "[", src, "]"] => {
-                Instruction::Param(Width::B64, dst, src)
+                Instruction::Param(Width::B64, dst, src, 0)
             }
             ["cvta.to.global.u64", dst, ",", src] => Instruction::ToGlobal(dst, src),
             ["mov.b64", dst, ",", src] => Instruction::SharedAddress(dst, src),
@@ -209,7 +251,7 @@ impl<'a> Parser<'a> {
                 src: [a, b],
             },
             [
-                op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "shr.u32"),
+                op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shr.u32"),
                 dst,
                 ",",
                 a,
@@ -220,23 +262,25 @@ impl<'a> Parser<'a> {
                     "add.s32" => IntegerOp::Add,
                     "sub.s32" => IntegerOp::Sub,
                     "mul.lo.s32" => IntegerOp::Mul,
+                    "mul.hi.u32" => IntegerOp::MulHighUnsigned,
                     _ => IntegerOp::ShiftRight,
                 };
                 Instruction::Integer32(op, dst, [a, b])
             }
             ["mov.b32", dst, ",", src] => Instruction::Move32(dst, src),
+            ["cvt.u64.u32", dst, ",", src] => Instruction::WidenUnsigned(dst, src),
             ["mul.wide.u32", dst, ",", a, ",", b] => Instruction::MulWide32(dst, [a, b]),
             ["shl.b64", dst, ",", a, ",", b] => Instruction::ShiftLeft64(dst, [a, b]),
             ["add.s64" | "add.u64", dst, ",", a, ",", b] => Instruction::Add64(dst, [a, b]),
             [
-                op @ ("ld.global.b32" | "ld.shared.b32"),
+                op @ ("ld.global.b32" | "ld.global.f32" | "ld.shared.b32"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
             ] => {
-                let space = if *op == "ld.global.b32" {
+                let space = if *op != "ld.shared.b32" {
                     Space::Global
                 } else {
                     Space::Shared
@@ -246,6 +290,13 @@ impl<'a> Parser<'a> {
             ["add.f32" | "add.rn.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Add([a, b]))
             }
+            [op @ ("min.f32" | "max.f32"), dst, ",", a, ",", b] => Instruction::Float32(
+                dst,
+                FloatOp::MinMax {
+                    min: *op == "min.f32",
+                    src: [a, b],
+                },
+            ),
             ["mul.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Mul([a, b])),
             ["fma.rn.f32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Float32(dst, FloatOp::Fma([a, b, c]))
@@ -256,14 +307,14 @@ impl<'a> Parser<'a> {
             ["div.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Div([a, b])),
             ["sqrt.rn.f32", dst, ",", src] => Instruction::Float32(dst, FloatOp::Sqrt([src])),
             [
-                op @ ("st.global.b32" | "st.shared.b32"),
+                op @ ("st.global.b32" | "st.global.f32" | "st.shared.b32"),
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
             ] => {
-                let space = if *op == "st.global.b32" {
+                let space = if *op != "st.shared.b32" {
                     Space::Global
                 } else {
                     Space::Shared
@@ -378,7 +429,9 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
         tokens: tokens(source)?.into_iter(),
     };
     parser.expect(".version")?;
-    parser.expect("4.1")?;
+    if !matches!(parser.take()?, "4.1" | "8.8") {
+        return Err(Error::new("unsupported PTX version"));
+    }
     parser.expect(".target")?;
     let target = parser.take()?;
     if !target
@@ -407,7 +460,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     parser.eat(".visible");
     parser.expect(".entry")?;
     let name = parser.identifier()?;
-    let params = parser.params()?;
+    let mut params = parser.params()?;
     let max_threads = if parser.eat(".maxntid") {
         let mut total = 1u32;
         for axis in 0..3 {
@@ -453,6 +506,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
         None
     };
     let blocks = parser.blocks()?;
+    infer_direct_global_params(&mut params, &blocks);
     Ok(Entry {
         name,
         params,
@@ -461,4 +515,27 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
         max_threads,
         blocks,
     })
+}
+
+/// nvcc may omit .ptr. Only promote direct, uniquely defined parameter loads.
+/// The emitter still checks dominance and requires compatible uses of the pointer.
+fn infer_direct_global_params(params: &mut [(&str, Param)], blocks: &[Block<'_>]) {
+    let mut definitions = HashMap::new();
+    for inst in blocks.iter().flat_map(|block| &block.instructions) {
+        if let Some((dst, _)) = inst.assignment() {
+            definitions
+                .entry(dst)
+                .and_modify(|def| *def = None)
+                .or_insert(Some(inst));
+        }
+    }
+    for inst in blocks.iter().flat_map(|block| &block.instructions) {
+        if let Instruction::ToGlobal(_, src) = inst
+            && let Some(Some(Instruction::Param(Width::B64, _, name, 0))) = definitions.get(src)
+            && let Some((_, ty)) = params.iter_mut().find(|(param, _)| param == name)
+            && *ty == Param::U64
+        {
+            *ty = Param::GlobalPtr;
+        }
+    }
 }

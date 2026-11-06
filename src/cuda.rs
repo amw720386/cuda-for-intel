@@ -672,7 +672,7 @@ fn load_ptx(
     let mut entries = HashMap::with_capacity(translated.kernels.len());
     for kernel in translated.kernels {
         let argument_bytes = kernel.params.iter().fold(0usize, |offset, &param| {
-            offset.next_multiple_of(param.size()) + param.size()
+            offset.next_multiple_of(param.alignment()) + param.size()
         });
         if (kernel.fp32 && !info.supports_fp32())
             || (kernel.fp32_fma && !info.fp32_fma)
@@ -875,7 +875,13 @@ pub unsafe extern "system" fn cuLaunchKernel(
                         return Err(InvalidValue);
                     }
                 }
-                args.push(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), param.size()) });
+                let bytes = unsafe { std::slice::from_raw_parts(value.cast::<u8>(), param.size()) };
+                match param {
+                    Param::Words(_) => {
+                        args.extend(bytes.as_chunks::<4>().0.iter().map(|word| word.as_slice()))
+                    }
+                    _ => args.push(bytes),
+                }
             }
             context.streams.launch(
                 &runtime.api,

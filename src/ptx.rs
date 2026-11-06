@@ -13,13 +13,22 @@ pub(crate) enum Param {
     F32,
     U64,
     GlobalPtr,
+    Words(u16),
 }
 
 impl Param {
+    pub(crate) fn alignment(self) -> usize {
+        match self {
+            Self::U64 | Self::GlobalPtr => 8,
+            Self::U32 | Self::F32 | Self::Words(_) => 4,
+        }
+    }
+
     pub(crate) fn size(self) -> usize {
         match self {
             Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
+            Self::Words(words) => usize::from(words) * 4,
         }
     }
 }
@@ -75,12 +84,14 @@ enum IntegerOp {
     Sub,
     Mul,
     ShiftRight,
+    MulHighUnsigned,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum FloatOp<'a> {
     Add([&'a str; 2]),
     Mul([&'a str; 2]),
+    MinMax { min: bool, src: [&'a str; 2] },
     Fma([&'a str; 3]),
     FromUnsigned([&'a str; 1]),
     Div([&'a str; 2]),
@@ -92,6 +103,7 @@ impl<'a> FloatOp<'a> {
         match self {
             Self::Add(inputs) | Self::Mul(inputs) | Self::Div(inputs) => inputs,
             Self::Fma(inputs) => inputs,
+            Self::MinMax { src, .. } => src,
             Self::FromUnsigned(inputs) | Self::Sqrt(inputs) => inputs,
         }
     }
@@ -99,7 +111,7 @@ impl<'a> FloatOp<'a> {
 
 #[derive(Clone, Copy, Debug)]
 enum Instruction<'a> {
-    Param(Width, &'a str, &'a str),
+    Param(Width, &'a str, &'a str, usize),
     ToGlobal(&'a str, &'a str),
     SharedAddress(&'a str, &'a str),
     Builtin(&'a str, &'a str),
@@ -113,6 +125,7 @@ enum Instruction<'a> {
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
     Move32(&'a str, &'a str),
     MulWide32(&'a str, [&'a str; 2]),
+    WidenUnsigned(&'a str, &'a str),
     ShiftLeft64(&'a str, [&'a str; 2]),
     Add64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
@@ -126,10 +139,11 @@ impl<'a> Instruction<'a> {
     fn assignment(&self) -> Option<(&'a str, &[&'a str])> {
         use Instruction::*;
         Some(match self {
-            Param(_, dst, _) | SharedAddress(dst, _) | Load32(_, dst, _) | AtomicAdd32(dst, ..) => {
-                (*dst, &[])
-            }
-            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) => {
+            Param(_, dst, ..)
+            | SharedAddress(dst, _)
+            | Load32(_, dst, _)
+            | AtomicAdd32(dst, ..) => (*dst, &[]),
+            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) | WidenUnsigned(dst, src) => {
                 (*dst, std::slice::from_ref(src))
             }
             Mad32(dst, src) => (*dst, src),
@@ -214,6 +228,7 @@ mod tests {
     const BLOCK_REDUCE: &str = include_str!("../examples/block_reduce.ptx");
     const ATOMIC_TICKETS: &str = include_str!("../examples/atomic_tickets.ptx");
     const RMSNORM: &str = include_str!("../examples/rmsnorm.ptx");
+    const GGML_MODERN: &str = include_str!("../examples/ggml_scale_clamp.ptx");
     const GGML_ADD: &str = include_str!("../examples/ggml_add_f32.ptx");
 
     #[test]
@@ -245,6 +260,45 @@ mod tests {
         }
         assert!(translate(&GGML_ADD.replace("%rd10, 2;", "%rd10, 64;")).is_err());
         assert!(translate(&GGML_ADD.replace("%p3, %p1, %p2;", "%p3, %r4, %p2;")).is_err());
+    }
+
+    #[test]
+    fn lowers_nvcc_aggregate_and_scalar_abi() {
+        let translated = translate(GGML_MODERN).unwrap();
+        assert_eq!(translated.kernels.len(), 2);
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        for (kernel, function) in translated.kernels.iter().zip(&module.functions) {
+            assert_eq!(kernel.params.len(), 14);
+            assert_eq!(kernel.params[..2], [Param::GlobalPtr; 2]);
+            assert_eq!(kernel.params[5..8], [Param::Words(3); 3]);
+            assert_eq!(function.parameters.len(), 20);
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_nvcc_operand_forms() {
+        for (from, to) in [
+            (".version 8.8", ".version 9.0"),
+            (".align 4 .b8", ".align 8 .b8"),
+            ("param_5[12]", "param_5[10]"),
+            ("param_5+8]", "param_5+12]"),
+            ("param_5+8]", "param_5+1]"),
+            ("param_4]", "param_4+4]"),
+            ("cvta.to.global.u64", "cvta.to.shared.u64"),
+            ("mul.hi.u32", "mul.hi.s32"),
+            ("cvt.u64.u32", "cvt.s64.s32"),
+            ("min.f32", "min.ftz.f32"),
+            ("max.f32", "max.NaN.f32"),
+            ("ld.global.f32", "ld.global.v2.f32"),
+            ("st.global.f32", "st.global.f16"),
+            ("shr.u32", "shfl.sync.bfly.b32"),
+        ] {
+            assert!(GGML_MODERN.contains(from));
+            assert!(
+                translate(&GGML_MODERN.replacen(from, to, 1)).is_err(),
+                "accepted {to}"
+            );
+        }
     }
 
     const SHARED: &str = "
@@ -411,6 +465,7 @@ mod tests {
             ATOMIC_TICKETS,
             RMSNORM,
             GGML_ADD,
+            GGML_MODERN,
             include_str!("../tests/gpu/multi_entry.ptx"),
             include_str!("../examples/forge_residual.ptx"),
             include_str!("../examples/forge_reduce.ptx"),
@@ -558,7 +613,7 @@ mod tests {
             ("$L__BB0_2:", "other_label:"),
             ("[%rd3]", "[%rd3+4]"),
             (".reg .b64", ".reg .b32"),
-            (".ptr .align 1", ""),
+            (".ptr .align 1", ".ptr .shared"),
         ] {
             assert!(VECTOR_ADD.contains(old), "fixture lacks {old}");
             assert!(
