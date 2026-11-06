@@ -1,6 +1,6 @@
 # CUDA for Intel
 
-An independent Rust implementation of a small CUDA Driver API subset for Intel GPUs. Precompiled CUDA vector addition, shared-memory block reduction, and FP32 RMSNorm run on Intel Iris Xe (Alder Lake) under Windows x64.
+An independent Rust implementation of a small CUDA Driver API subset for Intel GPUs. Precompiled CUDA vector addition, shared-memory block reduction, and FP32 RMSNorm run on Intel Iris Xe (Alder Lake) and Intel Arc B390 (Panther Lake) under Windows x64.
 
 ```text
 CUDA Driver API → PTX parser and SPIR-V emitter → Level Zero → Intel GPU
@@ -21,7 +21,7 @@ cargo test --locked --lib gated_stream_stays_pending -- --ignored
 cargo test --locked --lib gated_event_generations -- --ignored
 ```
 
-The opt-in GPU tests load the built DLL by absolute path. They verify a memory round trip, vector addition, a 1,003-element block reduction at six block widths, and atomic contention across 23 workgroups. The reduction includes odd widths and partial final blocks. It checks bit-exact dyadic inputs, an FP32 tree-depth error bound for rounded inputs, and guard regions. GPU validation covers the Intel Core i5-1235U's Iris Xe (PCI device `8086:46a8`, Windows graphics driver `32.0.101.7085`). The Linux loader path is included for portability.
+The opt-in GPU tests load the built DLL by absolute path. They verify a memory round trip, vector addition, a 1,003-element block reduction at six block widths, and atomic contention across 23 workgroups. The reduction includes odd widths and partial final blocks. It checks bit-exact dyadic inputs, an FP32 tree-depth error bound for rounded inputs, and guard regions. Windows GPU validation covers the Core i5-1235U's Iris Xe (PCI `8086:46a8`, driver `32.0.101.7085`) and the Core Ultra X7 358H's Arc B390 (PCI `8086:b080`, driver `32.0.101.9033`). The Linux loader path is included for portability. [Milestone 12 results](docs/milestone-12.md)
 
 The RMSNorm regression compares four rows against an FP64 CPU reference at
 hidden sizes 32, 96, 256, 896, and 1024, using block widths 32, 63, and 128.
@@ -35,10 +35,14 @@ and event-linked upload/compute/download with one or two reusable buffer sets.
 The `devices` example reports Level Zero driver and device capabilities. On
 Windows, run `pwsh -File scripts/validate-gpu.ps1` to check all detected Intel GPUs
 with immediate lists and experimental batching. Use `-Device` to select ordinals
-or `-PerformancePasses 0` for correctness only. The runner logs capability skips
-and results in `docs/gpu-validation.log`.
-On the tested Iris Xe driver, one queue group serves both compute and copies.
-The runtime submits CUDA streams to that group.
+or `-PerformancePasses 0` for correctness only. The runner logs capability skips,
+toolchain and artifact hashes, and results in `docs/gpu-validation.log`. Use
+`-LogPath` to retain separate runs. The DLL suite checks two independent CUDA
+contexts on each eligible GPU and adds a physical-device case when a second
+eligible root GPU is present. Both tested hosts exposed one root GPU each.
+Production uses the selected compute queue group for both kernels and copies.
+Arc B390 additionally exposes a copy-only group that the opt-in timestamp
+experiment exercises.
 
 With Khronos `spirv-val` on PATH or selected by `SPIRV_VAL`, validate the emitted OpenCL SPIR-V independently.
 
