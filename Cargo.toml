@@ -1,0 +1,13 @@
+[package]
+name = "cuda-for-intel"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Experimental CUDA Driver API compatibility runtime for Intel GPUs"
+
+[lib]
+name = "nvcuda"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libloading = "0.8"

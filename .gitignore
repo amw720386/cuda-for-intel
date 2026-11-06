@@ -1,0 +1,12 @@
+/docs/
+/target/
+*.dll
+*.so
+*.so.*
+*.exe
+*.pdb
+*.lib
+*.log
+*.tmp
+*.spv
+.cache/
