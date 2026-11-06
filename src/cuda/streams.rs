@@ -7,6 +7,8 @@ use crate::level_zero::{CommandList, Fence, Fences, Module};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+mod events;
+
 const LEGACY: usize = 1;
 const PER_THREAD: usize = 2;
 
@@ -86,6 +88,8 @@ pub(super) struct Streams {
     live: HashMap<usize, Stream>,
     retired: Vec<Stream>,
     fences: Fences,
+    events: HashMap<usize, Option<Arc<Fence>>>,
+    event_waiters: Arc<()>,
     track_legacy: bool,
 }
 
@@ -97,6 +101,8 @@ impl Streams {
             live: HashMap::new(),
             retired: Vec::new(),
             fences: Fences::default(),
+            events: HashMap::new(),
+            event_waiters: Arc::new(()),
             track_legacy: false,
         })
     }
@@ -129,10 +135,12 @@ impl Streams {
     }
 
     pub(super) fn has_waiters(&self) -> bool {
-        self.legacy
-            .iter()
-            .chain(self.explicit())
-            .any(Stream::has_waiters)
+        Arc::strong_count(&self.event_waiters) > 1
+            || self
+                .legacy
+                .iter()
+                .chain(self.explicit())
+                .any(Stream::has_waiters)
     }
 
     fn snapshot(&self, key: Option<usize>) -> Result<Vec<(Arc<CommandList>, u64)>, CuResult> {
@@ -220,16 +228,7 @@ impl Streams {
         } else {
             None
         };
-        let waits = if key == 0 {
-            self.explicit()
-                .filter(|stream| stream.blocking)
-                .filter_map(Stream::tail)
-                .collect()
-        } else if blocking {
-            self.get(0)?.tail().into_iter().collect()
-        } else {
-            Vec::new()
-        };
+        let waits = self.legacy_waits(key, blocking);
         let stream = self.get_mut(key)?;
         stream
             .list
@@ -243,6 +242,23 @@ impl Streams {
             });
         }
         Ok(())
+    }
+
+    fn legacy_waits(&self, key: usize, blocking: bool) -> Vec<Arc<Fence>> {
+        if key == 0 {
+            self.explicit()
+                .filter(|stream| stream.blocking)
+                .filter_map(Stream::tail)
+                .collect()
+        } else if blocking {
+            self.legacy
+                .as_ref()
+                .and_then(Stream::tail)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 
     pub(super) fn launch_key(&self, handle: Opaque) -> Result<usize, CuResult> {
@@ -274,6 +290,7 @@ impl Streams {
             stream.list.destroy(api).map_err(backend_error)?;
             self.live.remove(&key);
         }
+        self.events.clear();
         self.fences.destroy(api).map_err(backend_error)
     }
 }

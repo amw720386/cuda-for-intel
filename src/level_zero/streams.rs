@@ -17,6 +17,10 @@ impl Api {
     pub(crate) fn stream_wait_fn(&self) -> WaitFn {
         self.zeCommandListHostSynchronize
     }
+
+    pub(crate) fn event_wait_fn(&self) -> WaitFn {
+        self.zeEventHostSynchronize
+    }
 }
 
 impl Context {
@@ -41,6 +45,18 @@ impl CommandList {
     pub(crate) fn signal(&self, api: &Api, fence: &Fence) -> Result<(), Error> {
         check("zeCommandListAppendSignalEvent", unsafe {
             (api.zeCommandListAppendSignalEvent)(self.0.0, fence.handle.0)
+        })
+    }
+
+    pub(crate) fn barrier(
+        &self,
+        api: &Api,
+        signal: &Fence,
+        waits: &[Arc<Fence>],
+    ) -> Result<(), Error> {
+        let mut events = WaitEvents::new(waits)?;
+        check("zeCommandListAppendBarrier", unsafe {
+            (api.zeCommandListAppendBarrier)(self.0.0, signal.handle.0, events.count, events.ptr())
         })
     }
 
@@ -87,14 +103,7 @@ impl CommandList {
                 )
             })?;
         }
-        let mut events: Vec<Raw> = waits.iter().map(|fence| fence.handle.0).collect();
-        let count = u32::try_from(events.len())
-            .map_err(|_| Error::Driver("wait event count", 0x78000008))?;
-        let wait = if events.is_empty() {
-            null_mut()
-        } else {
-            events.as_mut_ptr()
-        };
+        let mut events = WaitEvents::new(waits)?;
         let groups = GroupCount { x, y, z };
         check("zeCommandListAppendLaunchKernel", unsafe {
             (api.zeCommandListAppendLaunchKernel)(
@@ -102,10 +111,34 @@ impl CommandList {
                 kernel,
                 &groups,
                 signal.map_or(null_mut(), |fence| fence.handle.0),
-                count,
-                wait,
+                events.count,
+                events.ptr(),
             )
         })
+    }
+}
+
+struct WaitEvents {
+    handles: Vec<Raw>,
+    count: u32,
+}
+
+impl WaitEvents {
+    fn new(waits: &[Arc<Fence>]) -> Result<Self, Error> {
+        let count = u32::try_from(waits.len())
+            .map_err(|_| Error::Driver("wait event count", 0x78000008))?;
+        Ok(Self {
+            handles: waits.iter().map(|fence| fence.handle.0).collect(),
+            count,
+        })
+    }
+
+    fn ptr(&mut self) -> *mut Raw {
+        if self.count == 0 {
+            null_mut()
+        } else {
+            self.handles.as_mut_ptr()
+        }
     }
 }
 
@@ -113,11 +146,17 @@ pub(crate) struct Fence {
     handle: Handle,
 }
 
-// A fence is an opaque handle. The frontend serializes operations, while
-// shared references keep the slot from being recycled during a device wait.
+// Level Zero allows simultaneous host waits and queries. The frontend
+// serializes appends and retains references to prevent reset or destruction.
 unsafe impl Sync for Fence {}
 
 impl Fence {
+    pub(crate) fn synchronize(&self, wait: WaitFn) -> Result<(), Error> {
+        check("zeEventHostSynchronize", unsafe {
+            wait(self.handle.0, u64::MAX)
+        })
+    }
+
     pub(crate) fn ready(&self, api: &Api) -> Result<bool, Error> {
         match unsafe { (api.zeEventQueryStatus)(self.handle.0) } {
             1 => Ok(false), // ZE_RESULT_NOT_READY
