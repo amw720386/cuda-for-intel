@@ -8,6 +8,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 mod events;
+#[cfg(all(test, windows))]
+mod profiling;
 
 const LEGACY: usize = 1;
 const PER_THREAD: usize = 2;

@@ -42,6 +42,15 @@ impl Context {
 }
 
 impl CommandList {
+    #[cfg(all(test, windows))]
+    pub(crate) unsafe fn append_timestamp(
+        &self,
+        clock: &super::profiling::Clock,
+        dst: *mut u64,
+    ) -> Result<(), Error> {
+        unsafe { clock.append(self.0.0, dst) }
+    }
+
     pub(crate) unsafe fn copy(
         &self,
         api: &Api,
@@ -51,13 +60,16 @@ impl CommandList {
         waits: &[Arc<Fence>],
     ) -> Result<(), Error> {
         let mut events = WaitEvents::new(waits)?;
+        let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+        #[cfg(all(test, windows))]
+        let signal = super::profiling::operation_signal(signal);
         check("zeCommandListAppendMemoryCopy", unsafe {
             (api.zeCommandListAppendMemoryCopy)(
                 self.0.0,
                 dst,
                 src,
                 size,
-                signal.map_or(null_mut(), |fence| fence.handle.0),
+                signal,
                 events.count,
                 events.ptr(),
             )
@@ -127,12 +139,15 @@ impl CommandList {
         }
         let mut events = WaitEvents::new(waits)?;
         let groups = GroupCount { x, y, z };
+        let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+        #[cfg(all(test, windows))]
+        let signal = super::profiling::operation_signal(signal);
         check("zeCommandListAppendLaunchKernel", unsafe {
             (api.zeCommandListAppendLaunchKernel)(
                 self.0.0,
                 kernel,
                 &groups,
-                signal.map_or(null_mut(), |fence| fence.handle.0),
+                signal,
                 events.count,
                 events.ptr(),
             )

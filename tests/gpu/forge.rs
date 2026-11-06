@@ -1,40 +1,21 @@
 use super::{Handle, library, ok, symbols};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr::null_mut;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[path = "pipeline.rs"]
 mod pipeline;
 
-const GUARD: usize = 8;
-const SENTINEL: f32 = -99_999.0;
-const EPSILON: f32 = 1e-5;
-const BATCH: usize = 32;
-const KERNELS: [(&std::ffi::CStr, &str); 3] = [
-    (c"rmsnorm", include_str!("../../examples/rmsnorm.ptx")),
-    (
-        c"forge_residual",
-        include_str!("../../examples/forge_residual.ptx"),
-    ),
-    (
-        c"forge_reduce",
-        include_str!("../../examples/forge_reduce.ptx"),
-    ),
-];
+#[path = "forge_workload.rs"]
+mod forge_workload;
+use forge_workload::*;
 
-fn arg<T>(value: &T) -> Handle {
-    std::ptr::from_ref(value).cast_mut().cast()
-}
-
-fn report(label: &str, samples: &mut [Duration]) {
-    samples.sort_unstable();
-    let micros = |duration: Duration| duration.as_secs_f64() * 1e6;
-    let p95 = (95 * samples.len()).div_ceil(100) - 1;
-    println!(
-        "{label}: n={} median={:.3} us p95={:.3} us",
-        samples.len(),
-        micros(samples[samples.len() / 2]),
-        micros(samples[p95]),
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+fn forge_transfer_pipeline() {
+    pipeline::run_pipeline(
+        None,
+        std::env::var_os("CUDA_FOR_INTEL_BENCH_TRANSFERS").is_some(),
     );
 }
 

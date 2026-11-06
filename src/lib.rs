@@ -6,4 +6,4 @@ mod cuda;
 mod level_zero;
 mod ptx;
 
-pub use level_zero::{DeviceInfo, Error, intel_devices};
+pub use level_zero::{DeviceInfo, Error, QueueGroup, intel_devices};

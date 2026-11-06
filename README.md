@@ -32,6 +32,9 @@ one stream and on three event-linked streams. It compares both modes with an
 FP64 CPU reference and checks guard regions after completion.
 The pinned-memory pipeline also compares blocking, single-stream asynchronous,
 and event-linked upload/compute/download with one or two reusable buffer sets.
+The `devices` example reports Level Zero queue groups and timestamp capabilities.
+On the tested Iris Xe driver, one queue group serves both compute and copies.
+The runtime submits CUDA streams to that group.
 
 With Khronos `spirv-val` on PATH or selected by `SPIRV_VAL`, validate the emitted OpenCL SPIR-V independently.
 

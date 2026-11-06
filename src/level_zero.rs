@@ -5,6 +5,8 @@ use std::fmt;
 
 mod streams;
 pub(crate) use streams::{CommandList, Fence, Fences};
+#[cfg(test)]
+pub(crate) mod profiling;
 
 type Raw = *mut c_void;
 type Status = u32;
@@ -311,6 +313,40 @@ pub struct DeviceInfo {
     pub fp32_round_to_nearest: bool,
     pub max_kernel_arguments_size: u32,
     pub driver_extensions: Vec<(String, u32)>,
+    pub queue_groups: Vec<QueueGroup>,
+    /// Timestamp counter frequency, when the driver supports the 1.2 properties.
+    pub timestamp_frequency_hz: Option<u64>,
+    pub timestamp_valid_bits: u32,
+    pub kernel_timestamp_valid_bits: u32,
+}
+
+/// An ordinal and its capabilities as reported by Level Zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueGroup {
+    pub ordinal: u32,
+    pub flags: u32,
+    pub queues: u32,
+}
+
+impl QueueGroup {
+    pub fn compute(self) -> bool {
+        self.flags & 1 != 0
+    }
+
+    pub fn copy(self) -> bool {
+        self.flags & 2 != 0
+    }
+
+    pub fn copy_only(self) -> bool {
+        self.copy() && !self.compute()
+    }
+}
+
+fn select_compute_queue(groups: &[QueueGroup]) -> Option<u32> {
+    groups
+        .iter()
+        .find(|group| group.queues != 0 && group.compute())
+        .map(|group| group.ordinal)
 }
 
 pub(crate) struct Device {
@@ -485,13 +521,16 @@ impl Context {
         size: usize,
     ) -> Result<(), Error> {
         let commands = self.commands()?;
+        let signal = std::ptr::null_mut();
+        #[cfg(all(test, windows))]
+        let signal = profiling::operation_signal(signal);
         check("zeCommandListAppendMemoryCopy", unsafe {
             (api.zeCommandListAppendMemoryCopy)(
                 commands,
                 dst,
                 src,
                 size,
-                std::ptr::null_mut(),
+                signal,
                 0,
                 std::ptr::null_mut(),
             )
@@ -639,10 +678,22 @@ impl Runtime {
                         (api.zeDeviceGetCommandQueueGroupProperties)(handle, count, out)
                     },
                 )?;
-                let compute_queue = groups
-                    .iter()
-                    .position(|group| group.flags & 1 != 0 && group.queues != 0)
-                    .map(|index| index as u32);
+                let queue_groups: Vec<_> = groups
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ordinal, group)| QueueGroup {
+                        ordinal: ordinal as u32,
+                        flags: group.flags,
+                        queues: group.queues,
+                    })
+                    .collect();
+                let compute_queue = select_compute_queue(&queue_groups);
+                let mut timer: Properties = unsafe { std::mem::zeroed() };
+                timer.header = Header::new(0x0002_0006); // ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES_1_2
+                let timestamp_frequency_hz =
+                    (unsafe { (api.zeDeviceGetProperties)(handle, &mut timer) } == 0
+                        && timer.timer_resolution != 0)
+                        .then_some(timer.timer_resolution);
                 devices.push(Device {
                     driver: Handle(driver),
                     handle: Handle(handle),
@@ -666,6 +717,10 @@ impl Runtime {
                         fp32_round_to_nearest: module.fp32_flags & 4 != 0,
                         max_kernel_arguments_size: module.max_arguments_size,
                         driver_extensions: extensions.as_ref().cloned().unwrap_or_default(),
+                        queue_groups,
+                        timestamp_frequency_hz,
+                        timestamp_valid_bits: properties.timestamp_valid_bits,
+                        kernel_timestamp_valid_bits: properties.kernel_timestamp_valid_bits,
                     },
                 });
             }
@@ -698,6 +753,34 @@ mod tests {
         assert_eq!(size_of::<ModuleProperties>(), 64);
         assert_eq!(size_of::<MemoryAccessProperties>(), 40);
         assert_eq!(size_of::<ExtensionProperties>(), 260);
+        assert_eq!(size_of::<QueueGroupProperties>(), 40);
+        assert_eq!(offset_of!(QueueGroupProperties, queues), 32);
+    }
+
+    #[test]
+    fn queue_selection_uses_capabilities_and_real_ordinals() {
+        let groups = [
+            QueueGroup {
+                ordinal: 2,
+                flags: 1,
+                queues: 0,
+            },
+            QueueGroup {
+                ordinal: 4,
+                flags: 2,
+                queues: 1,
+            },
+            QueueGroup {
+                ordinal: 7,
+                flags: 15,
+                queues: 1,
+            },
+        ];
+        assert_eq!(select_compute_queue(&groups), Some(7));
+        assert_eq!(select_compute_queue(&groups[..2]), None);
+        assert_eq!(select_compute_queue(&groups[2..]), Some(7));
+        assert!(groups[1].copy_only());
+        assert!(groups[2].copy() && !groups[2].copy_only());
     }
 
     #[test]

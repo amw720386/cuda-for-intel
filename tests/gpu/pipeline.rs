@@ -1,5 +1,5 @@
 use super::{BATCH, EPSILON, GUARD, KERNELS, SENTINEL, arg, report};
-use crate::{Handle, library, ok, symbols};
+use super::{Handle, library, ok, symbols};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr::null_mut;
 use std::time::Instant;
@@ -9,16 +9,22 @@ fn bytes(elements: usize) -> usize {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Mode {
+pub(super) enum Mode {
     Blocking,
     SingleStream,
     EventLinked,
 }
 
-#[test]
-#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+pub(super) trait Trace {
+    fn begin(&mut self);
+    // None selects the blocking copy list. Some(null) selects the legacy stream.
+    fn mark(&mut self, stream: Option<Handle>);
+    fn end(&mut self, mode: Mode, slots: usize, sample: bool);
+    fn report(&mut self, label: &str);
+}
+
 #[allow(non_snake_case)]
-fn forge_transfer_pipeline() {
+pub(super) fn run_pipeline(trace_factory: Option<fn() -> Box<dyn Trace>>, bench: bool) {
     let dll = library();
     symbols!(dll;
         cuInit(u32),
@@ -81,7 +87,6 @@ fn forge_transfer_pipeline() {
         unsafe { host.copy_from_nonoverlapping(values.as_ptr(), values.len()) };
         host
     };
-    let bench = std::env::var_os("CUDA_FOR_INTEL_BENCH_TRANSFERS").is_some();
     let mut seed = 0xf817_a029u32;
     let mut random = || {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -132,11 +137,21 @@ fn forge_transfer_pipeline() {
             })
         });
 
-        let run = |mode, slot_count| {
+        let mut trace = trace_factory.map(|create| create());
+        let run = |mode, slot_count, trace: &mut Option<Box<dyn Trace>>, sample| {
             let [upload, compute, download] = match mode {
                 Mode::Blocking => [null_mut(); 3],
                 Mode::SingleStream => [streams[0]; 3],
                 Mode::EventLinked => streams,
+            };
+            let copy_stream = |stream| (!matches!(mode, Mode::Blocking)).then_some(stream);
+            if let Some(trace) = trace.as_mut() {
+                trace.begin();
+            }
+            let mut mark = |stream| {
+                if let Some(trace) = trace.as_mut() {
+                    trace.mark(stream);
+                }
             };
             let start = Instant::now();
             for batch in 0..BATCH {
@@ -151,6 +166,7 @@ fn forge_transfer_pipeline() {
                     (skip, unsafe { host_skip.add(batch * tensor) }, tensor),
                     (w, host_weight, cols),
                 ] {
+                    mark(copy_stream(upload));
                     if matches!(mode, Mode::Blocking) {
                         ok!(cuMemcpyHtoD_v2(device, host.cast(), bytes(len)));
                     } else {
@@ -161,6 +177,7 @@ fn forge_transfer_pipeline() {
                             upload
                         ));
                     }
+                    mark(copy_stream(upload));
                 }
                 if matches!(mode, Mode::EventLinked) {
                     ok!(cuEventRecord(uploaded, upload));
@@ -169,6 +186,7 @@ fn forge_transfer_pipeline() {
                 let normalized = norm + bytes(GUARD) as u64;
                 let sum = added + bytes(GUARD) as u64;
                 let result = out + bytes(GUARD) as u64;
+                mark(Some(compute));
                 launch(
                     kernels[0],
                     rows,
@@ -182,6 +200,8 @@ fn forge_transfer_pipeline() {
                         arg(&EPSILON),
                     ],
                 );
+                mark(Some(compute));
+                mark(Some(compute));
                 launch(
                     kernels[1],
                     elements.div_ceil(threads),
@@ -189,6 +209,8 @@ fn forge_transfer_pipeline() {
                     compute,
                     &mut [arg(&normalized), arg(&skip), arg(&sum), arg(&elements)],
                 );
+                mark(Some(compute));
+                mark(Some(compute));
                 launch(
                     kernels[2],
                     rows,
@@ -196,11 +218,13 @@ fn forge_transfer_pipeline() {
                     compute,
                     &mut [arg(&sum), arg(&result), arg(&columns)],
                 );
+                mark(Some(compute));
                 if matches!(mode, Mode::EventLinked) {
                     ok!(cuEventRecord(computed, compute));
                     ok!(cuStreamWaitEvent(download, computed, 0));
                 }
                 let dst = unsafe { host_out.add(batch * result_stride + GUARD) };
+                mark(copy_stream(download));
                 if matches!(mode, Mode::Blocking) {
                     ok!(cuMemcpyDtoH_v2(dst.cast(), result, bytes(rows_len)));
                 } else {
@@ -211,6 +235,7 @@ fn forge_transfer_pipeline() {
                         download
                     ));
                 }
+                mark(copy_stream(download));
                 if matches!(mode, Mode::EventLinked) {
                     ok!(cuEventRecord(downloaded, download));
                 }
@@ -220,7 +245,11 @@ fn forge_transfer_pipeline() {
             if !matches!(mode, Mode::Blocking) {
                 ok!(cuStreamSynchronize(download));
             }
-            (submitted, sync_start.elapsed(), start.elapsed())
+            let timing = (submitted, sync_start.elapsed(), start.elapsed());
+            if let Some(trace) = trace.as_mut() {
+                trace.end(mode, slot_count, sample);
+            }
+            timing
         };
         let mut baseline = Vec::new();
         let mut max_error = 0.0f64;
@@ -234,7 +263,7 @@ fn forge_transfer_pipeline() {
                 unsafe {
                     host_out.copy_from_nonoverlapping(result_init.as_ptr(), result_init.len())
                 };
-                run(mode, slots);
+                run(mode, slots, &mut trace, !bench);
                 let actual = unsafe { std::slice::from_raw_parts(host_out, result_init.len()) };
                 let mut bits = Vec::new();
                 for (batch, result) in actual.chunks_exact(result_stride).enumerate() {
@@ -271,24 +300,40 @@ fn forge_transfer_pipeline() {
                     }
                 }
             }
+            let label = format!("Forge {rows}x{columns} {mode:?} slots={slots} batches={BATCH}");
             if bench {
-                for _ in 0..5 {
-                    run(mode, slots);
+                let has_trace = trace.is_some();
+                let mut off = None;
+                for (pass, variants) in [[false, true], [true, false]].into_iter().enumerate() {
+                    for instrumented in variants {
+                        if !has_trace && (instrumented || pass > 0) {
+                            continue;
+                        }
+                        let active = if instrumented { &mut trace } else { &mut off };
+                        for _ in 0..5 {
+                            run(mode, slots, active, false);
+                        }
+                        let (mut submit, mut sync, mut complete) =
+                            (Vec::new(), Vec::new(), Vec::new());
+                        for _ in 0..31 {
+                            let (s, w, c) = run(mode, slots, active, true);
+                            submit.push(s);
+                            sync.push(w);
+                            complete.push(c);
+                        }
+                        let label = format!("{label} pass={} timestamps={instrumented}", pass + 1);
+                        if !matches!(mode, Mode::Blocking) {
+                            report(&format!("{label} submit"), &mut submit);
+                            report(&format!("{label} synchronize"), &mut sync);
+                        }
+                        report(&format!("{label} complete"), &mut complete);
+                        if let Some(trace) = active {
+                            trace.report(&label);
+                        }
+                    }
                 }
-                let (mut submit, mut sync, mut complete) = (Vec::new(), Vec::new(), Vec::new());
-                for _ in 0..31 {
-                    let (s, w, c) = run(mode, slots);
-                    submit.push(s);
-                    sync.push(w);
-                    complete.push(c);
-                }
-                let label =
-                    format!("Forge {rows}x{columns} {mode:?} slots={slots} batches={BATCH}");
-                if !matches!(mode, Mode::Blocking) {
-                    report(&format!("{label} submit"), &mut submit);
-                    report(&format!("{label} synchronize"), &mut sync);
-                }
-                report(&format!("{label} complete"), &mut complete);
+            } else if let Some(trace) = &mut trace {
+                trace.report(&label);
             }
         }
         println!(
