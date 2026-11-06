@@ -32,6 +32,7 @@ fn pinned_transfer_benchmark() {
     let runtime = Runtime::load().unwrap();
     let api = &runtime.api;
     let mut direct = Context::create(api, &runtime.devices[0]).unwrap();
+    direct.initialize(api).unwrap();
     let list = direct.create_stream(api).unwrap();
 
     for size in [4096, 65536, 1 << 20, 16 << 20] {

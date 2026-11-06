@@ -3,19 +3,24 @@ use super::{
     Api, Context, CuResult, Opaque, State, backend_error, current, reserve_handle, state, status,
     with_context_handles,
 };
-use crate::level_zero::QueueFence;
 use crate::level_zero::{CommandList, Fence, Fences, Module};
+use crate::level_zero::{DeviceHealth, QueueFence};
 use batch::{Batch, Policy};
+use batch_wake::Wake;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar};
+use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 mod batch;
 #[cfg(all(test, windows))]
 mod batch_tests;
+mod batch_wake;
 mod events;
 #[cfg(all(test, windows))]
 mod profiling;
+#[cfg(all(test, windows))]
+mod recovery_tests;
 
 const LEGACY: usize = 1;
 const PER_THREAD: usize = 2;
@@ -51,6 +56,8 @@ struct Stream {
     dirty: bool,
     generation: u64,
     pending: VecDeque<Submission>,
+    append_error: Option<CuResult>,
+    health: Arc<DeviceHealth>,
 }
 
 impl Stream {
@@ -59,7 +66,7 @@ impl Stream {
         context: &Context,
         blocking: bool,
         policy: Option<Policy>,
-        wake: &Arc<Condvar>,
+        wake: &Arc<Wake>,
     ) -> Result<Self, CuResult> {
         let (immediate, batch) = match policy {
             Some(policy) => (
@@ -72,7 +79,12 @@ impl Stream {
                 )?)),
             ),
             None => (
-                Some(Arc::new(context.create_stream(api).map_err(backend_error)?)),
+                Some(Arc::new(
+                    context
+                        .create_stream(api)
+                        .inspect_err(|error| context.health.observe(error))
+                        .map_err(backend_error)?,
+                )),
                 None,
             ),
         };
@@ -83,6 +95,8 @@ impl Stream {
             dirty: false,
             generation: 0,
             pending: VecDeque::new(),
+            append_error: None,
+            health: Arc::clone(&context.health),
         })
     }
 
@@ -94,7 +108,12 @@ impl Stream {
 
     fn reap(&mut self, api: &Api) -> Result<(), CuResult> {
         while let Some(pending) = self.pending.front() {
-            if !pending.completion.ready(api).map_err(backend_error)? {
+            if !pending
+                .completion
+                .ready(api)
+                .inspect_err(|error| self.health.observe(error))
+                .map_err(backend_error)?
+            {
                 break;
             }
             self.pending.pop_front();
@@ -102,7 +121,19 @@ impl Stream {
         Ok(())
     }
 
+    fn check(&self) -> Result<(), CuResult> {
+        if self.health.lost() {
+            return Err(LaunchFailed);
+        }
+        self.append_error.map_or(Ok(()), Err)?;
+        if let Some(batch) = &self.batch {
+            batch.check()?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self, api: &Api) -> Result<(), CuResult> {
+        self.check()?;
         if let Some(batch) = &mut self.batch {
             batch.flush(api)?;
         }
@@ -125,16 +156,12 @@ impl Stream {
     }
 
     fn wait(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
+        self.check()?;
         if let Some(batch) = &mut self.batch {
-            batch.check()?;
             if batch.buffered() {
                 return Err(NotReady);
             }
-            if let Some(fence) = batch.tail() {
-                fence
-                    .wait(api.fence_wait_fn(), timeout)
-                    .map_err(backend_error)?;
-            }
+            batch.wait_tail(api, timeout)?;
             batch.reap(api)?;
             self.complete();
         } else if self.dirty {
@@ -142,9 +169,25 @@ impl Stream {
                 .as_ref()
                 .unwrap()
                 .wait(api, timeout)
+                .inspect_err(|error| self.health.observe(error))
                 .map_err(backend_error)?;
             self.complete();
         }
+        Ok(())
+    }
+
+    fn drain(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
+        if let Some(batch) = &mut self.batch {
+            batch.drain(api, timeout)?;
+        } else if self.dirty {
+            self.immediate
+                .as_ref()
+                .unwrap()
+                .wait(api, timeout)
+                .inspect_err(|error| self.health.observe(error))
+                .map_err(backend_error)?;
+        }
+        self.complete();
         Ok(())
     }
 
@@ -172,18 +215,29 @@ impl Stream {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
+        self.check()?;
         let list = match &mut self.batch {
             Some(batch) => batch.recording(api, context)?,
             None => self.immediate.as_ref().unwrap(),
         };
-        let result = append(list, signal.as_deref(), &waits).map_err(backend_error);
+        let result = append(list, signal.as_deref(), &waits);
         let submission = signal.map(|completion| Submission {
             completion,
             _waits: waits,
         });
         if let Err(error) = result {
+            let attempted_append = matches!(&error, crate::level_zero::Error::Driver(call, _)
+                if call.starts_with("zeCommandListAppend"));
+            let fatal = error.device_lost();
+            self.health.observe(&error);
+            let error = backend_error(error);
             if let Some(batch) = &mut self.batch {
                 batch.record_failed(error, submission);
+            } else if attempted_append || fatal {
+                // An immediate append may already have reached the driver.
+                self.submitted();
+                self.pending.extend(submission);
+                self.append_error = Some(error);
             }
             return Err(error);
         }
@@ -221,28 +275,26 @@ pub(super) struct Streams {
     fences: Fences,
     events: HashMap<usize, Option<Recording>>,
     policy: Option<Policy>,
-    wake: Arc<Condvar>,
-    worker: Option<JoinHandle<()>>,
+    wake: Arc<Wake>,
+    worker: Option<JoinHandle<Result<(), CuResult>>>,
     event_waiters: Arc<()>,
     track_legacy: bool,
+    execution_error: Option<CuResult>,
 }
 
 impl Streams {
     pub(super) fn new(api: &Api, context: &Context, owner: usize) -> Result<Self, CuResult> {
         let policy = Policy::configured()?;
-        let wake = Arc::new(Condvar::new());
-        let mut legacy = Stream::new(api, context, true, policy, &wake)?;
-        let worker = match policy
+        let wake = Arc::new(Wake::new(
+            policy.is_some_and(|policy| policy.high_resolution),
+        )?);
+        // The worker cannot access driver handles until the complete context
+        // is published under the runtime lock. It exits if initialization fails.
+        let worker = policy
             .and_then(|policy| policy.delay)
             .map(|_| batch::spawn(owner, Arc::clone(&wake)))
-            .transpose()
-        {
-            Ok(worker) => worker,
-            Err(error) => {
-                legacy.destroy(api)?;
-                return Err(error);
-            }
-        };
+            .transpose()?;
+        let legacy = Stream::new(api, context, true, policy, &wake)?;
         Ok(Self {
             legacy: Some(legacy),
             policy,
@@ -254,6 +306,7 @@ impl Streams {
             events: HashMap::new(),
             event_waiters: Arc::new(()),
             track_legacy: false,
+            execution_error: None,
         })
     }
 
@@ -313,13 +366,10 @@ impl Streams {
             .collect()
     }
 
-    pub(super) fn experimental(&self) -> bool {
-        self.policy.is_some()
-    }
-
-    pub(super) fn stop(&mut self) -> Option<JoinHandle<()>> {
-        self.wake.notify_one();
-        self.worker.take()
+    pub(super) fn stop(&mut self) -> Option<JoinHandle<Result<(), CuResult>>> {
+        let worker = self.worker.take()?;
+        self.wake.notify();
+        Some(worker)
     }
 
     fn collect_retired(&mut self, api: &Api) -> Result<(), CuResult> {
@@ -348,7 +398,10 @@ impl Streams {
                 stream.reap(api)?;
             }
         }
-        self.fences.acquire(api, context).map_err(backend_error)
+        self.fences
+            .acquire(api, context)
+            .inspect_err(|error| context.health.observe(error))
+            .map_err(backend_error)
     }
 
     fn track_legacy(&mut self, api: &Api, context: &Context) -> Result<(), CuResult> {
@@ -450,11 +503,11 @@ impl Streams {
         fence: &Arc<Fence>,
     ) -> Result<(), CuResult> {
         // A removed producer submitted its last list before retirement.
-        if let Ok(stream) = self.get_mut(producer)
-            && let Some(batch) = &mut stream.batch
-        {
-            batch.check()?;
-            if batch.contains_recording(fence) {
+        if let Ok(stream) = self.get_mut(producer) {
+            stream.check()?;
+            if let Some(batch) = &mut stream.batch
+                && batch.contains_recording(fence)
+            {
                 batch.flush(api)?;
             }
         }
@@ -491,6 +544,28 @@ impl Streams {
         self.collect_retired(api)
     }
 
+    pub(super) fn drain_for_teardown(&mut self, api: &Api) -> Result<(), CuResult> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut execution_error = self.execution_error;
+        for stream in self.all_mut() {
+            if let Err(error) = stream.flush(api) {
+                execution_error.get_or_insert(error);
+            }
+        }
+        self.execution_error = execution_error;
+        // Flush every producer before waiting on any queue. Failed open lists
+        // stay owned and inaccessible to consumers until teardown destroys them.
+        for stream in self.all_mut() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            stream.drain(api, left.as_nanos() as u64)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn execution_error(&self) -> Option<CuResult> {
+        self.execution_error
+    }
+
     pub(super) fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
         if let Some(legacy) = &mut self.legacy {
             legacy.destroy(api)?;
@@ -499,6 +574,10 @@ impl Streams {
         while let Some((&key, stream)) = self.live.iter_mut().next() {
             stream.destroy(api)?;
             self.live.remove(&key);
+        }
+        while let Some(stream) = self.retired.last_mut() {
+            stream.destroy(api)?;
+            self.retired.pop();
         }
         self.events.clear();
         self.fences.destroy(api).map_err(backend_error)
@@ -575,25 +654,27 @@ pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
         } else {
             stream.wait(api, 0)
         };
-        match ready {
-            Ok(()) => {
-                stream.destroy(api)?;
-                streams.live.remove(&key);
-            }
-            Err(NotReady) => {
-                let stream = streams.live.remove(&key).ok_or(InvalidHandle)?;
-                streams.retired.push(stream);
-            }
+        let cleanup = match ready {
+            Ok(()) => stream.destroy(api),
+            Err(NotReady) => Err(NotReady),
             Err(error) => return Err(error),
+        };
+        let stream = streams.live.remove(&key).ok_or(InvalidHandle)?;
+        if cleanup.is_err() {
+            streams.retired.push(stream);
         }
-        Ok(())
+        if ready == Err(NotReady) {
+            Ok(())
+        } else {
+            cleanup
+        }
     }))
 }
 
 fn synchronize(
     target: impl FnOnce(&State) -> Result<(usize, Option<usize>), CuResult>,
 ) -> Result<(), CuResult> {
-    let (owner, lists, immediate_wait, fence_wait) = state(|state| {
+    let (owner, lists, immediate_wait, fence_wait, health) = state(|state| {
         let (owner, key) = target(state)?;
         let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
         context.check_live()?;
@@ -603,6 +684,7 @@ fn synchronize(
             context.streams.snapshot(&state.runtime.api, key)?,
             state.runtime.api.stream_wait_fn(),
             state.runtime.api.fence_wait_fn(),
+            Arc::clone(&context.backend.health),
         ))
     })?;
     if lists.is_empty() {
@@ -615,6 +697,7 @@ fn synchronize(
             Completion::Immediate(list, _) => list.wait_with(immediate_wait, u64::MAX),
             Completion::Regular(fence) => fence.wait(fence_wait, u64::MAX),
         }
+        .inspect_err(|error| health.observe(error))
         .map_err(backend_error)?;
     }
     state(move |state| {

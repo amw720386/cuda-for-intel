@@ -1,5 +1,5 @@
 use super::streams::WaitFn;
-use super::{Api, CommandList, Context, Error, Handle, Header, QueueDesc, check};
+use super::{Api, CommandList, Context, Error, Handle, Header, QueueDesc, call, check};
 use std::ptr::null_mut;
 
 #[repr(C)]
@@ -40,7 +40,7 @@ impl Context {
             priority: 0,
         };
         let mut queue = null_mut();
-        check("zeCommandQueueCreate", unsafe {
+        call("zeCommandQueueCreate", || unsafe {
             (api.zeCommandQueueCreate)(self.handle.0, self.device.0, &desc, &mut queue)
         })?;
         Ok(Queue(Handle(queue)))
@@ -53,7 +53,7 @@ impl Context {
             flags: 1 << 3, // ZE_COMMAND_LIST_FLAG_IN_ORDER
         };
         let mut list = null_mut();
-        check("zeCommandListCreate", unsafe {
+        call("zeCommandListCreate", || unsafe {
             (api.zeCommandListCreate)(self.handle.0, self.device.0, &desc, &mut list)
         })?;
         Ok(CommandList(Handle(list)))
@@ -67,7 +67,7 @@ impl Queue {
             flags: 0,
         };
         let mut fence = null_mut();
-        check("zeFenceCreate", unsafe {
+        call("zeFenceCreate", || unsafe {
             (api.zeFenceCreate)(self.0.0, &desc, &mut fence)
         })?;
         Ok(QueueFence(Handle(fence)))
@@ -80,24 +80,33 @@ impl Queue {
         fence: &QueueFence,
     ) -> Result<(), Error> {
         let mut handle = list.0.0;
-        check("zeCommandListClose", unsafe {
-            (api.zeCommandListClose)(handle)
-        })?;
-        check("zeCommandQueueExecuteCommandLists", unsafe {
+        call("zeCommandQueueExecuteCommandLists", || unsafe {
             (api.zeCommandQueueExecuteCommandLists)(self.0.0, 1, &mut handle, fence.0.0)
         })
     }
 
+    pub(crate) fn wait(&self, api: &Api, timeout: u64) -> Result<(), Error> {
+        call("zeCommandQueueSynchronize", || unsafe {
+            (api.zeCommandQueueSynchronize)(self.0.0, timeout)
+        })
+    }
+
     pub(crate) fn destroy(&self, api: &Api) -> Result<(), Error> {
-        check("zeCommandQueueDestroy", unsafe {
+        call("zeCommandQueueDestroy", || unsafe {
             (api.zeCommandQueueDestroy)(self.0.0)
         })
     }
 }
 
 impl CommandList {
+    pub(crate) fn close(&self, api: &Api) -> Result<(), Error> {
+        call("zeCommandListClose", || unsafe {
+            (api.zeCommandListClose)(self.0.0)
+        })
+    }
+
     pub(crate) fn reset(&self, api: &Api) -> Result<(), Error> {
-        check("zeCommandListReset", unsafe {
+        call("zeCommandListReset", || unsafe {
             (api.zeCommandListReset)(self.0.0)
         })
     }
@@ -112,14 +121,34 @@ impl QueueFence {
     }
 
     pub(crate) fn wait(&self, wait: WaitFn, timeout: u64) -> Result<(), Error> {
-        check("zeFenceHostSynchronize", unsafe { wait(self.0.0, timeout) })
+        #[cfg(all(test, windows))]
+        let start = std::time::Instant::now();
+        let result = call("zeFenceHostSynchronize", || unsafe {
+            wait(self.0.0, timeout)
+        });
+        #[cfg(all(test, windows))]
+        LAST_FENCE_WAIT.set(start.elapsed());
+        result
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn last_wait() -> std::time::Duration {
+        LAST_FENCE_WAIT.get()
     }
 
     pub(crate) fn reset(&self, api: &Api) -> Result<(), Error> {
-        check("zeFenceReset", unsafe { (api.zeFenceReset)(self.0.0) })
+        call("zeFenceReset", || unsafe { (api.zeFenceReset)(self.0.0) })
     }
 
     pub(crate) fn destroy(&self, api: &Api) -> Result<(), Error> {
-        check("zeFenceDestroy", unsafe { (api.zeFenceDestroy)(self.0.0) })
+        call("zeFenceDestroy", || unsafe {
+            (api.zeFenceDestroy)(self.0.0)
+        })
     }
+}
+
+#[cfg(all(test, windows))]
+thread_local! {
+    static LAST_FENCE_WAIT: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
 }

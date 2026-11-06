@@ -170,6 +170,17 @@ impl OperationEvents {
         NEXT_EVENT.with(|next| !next.replace(null_mut()).is_null())
     }
 
+    pub(crate) fn wait(
+        &self,
+        index: usize,
+        wait: super::streams::WaitFn,
+        timeout: u64,
+    ) -> Result<(), Error> {
+        check("zeEventHostSynchronize (timestamps)", unsafe {
+            wait(self.events[index], timeout)
+        })
+    }
+
     pub(crate) fn query(&self, index: usize) -> Result<[u64; 2], Error> {
         let mut result = TimestampResult::default();
         check("zeEventQueryKernelTimestamp", unsafe {

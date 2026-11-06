@@ -81,12 +81,15 @@ pub extern "system" fn cuEventQuery(event: Opaque) -> CuResult {
     status(with_context(|runtime, context| {
         let streams = &context.streams;
         if let Some(recording) = streams.event(event)? {
-            if let Ok(producer) = streams.get(recording.producer)
-                && let Some(batch) = &producer.batch
-            {
-                batch.check()?;
+            if let Ok(producer) = streams.get(recording.producer) {
+                producer.check()?;
             }
-            if !recording.fence.ready(&runtime.api).map_err(backend_error)? {
+            if !recording
+                .fence
+                .ready(&runtime.api)
+                .inspect_err(|error| context.backend.health.observe(error))
+                .map_err(backend_error)?
+            {
                 return Err(NotReady);
             }
         }
@@ -108,12 +111,16 @@ pub extern "system" fn cuEventSynchronize(event: Opaque) -> CuResult {
             Arc::clone(&streams.event_waiters),
             fence,
             runtime.api.event_wait_fn(),
+            Arc::clone(&context.backend.health),
         )))
     });
     status(snapshot.and_then(|snapshot| {
         // Keep the fence and its context alive with the state mutex released.
-        if let Some((_context_guard, fence, wait)) = snapshot {
-            fence.synchronize(wait).map_err(backend_error)?;
+        if let Some((_context_guard, fence, wait, health)) = snapshot {
+            fence
+                .synchronize(wait)
+                .inspect_err(|error| health.observe(error))
+                .map_err(backend_error)?;
         }
         Ok(())
     }))

@@ -2,7 +2,13 @@
 use libloading::Library;
 use std::ffi::{CStr, c_char, c_void};
 use std::fmt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
+#[cfg(all(test, windows))]
+pub(crate) mod fault;
 mod regular;
 pub(crate) use regular::{Queue, QueueFence};
 mod streams;
@@ -51,11 +57,29 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    pub(crate) fn device_lost(&self) -> bool {
+        matches!(
+            self,
+            Self::Driver(_, 0x70000001) | Self::Build(0x70000001, _)
+        )
+    }
+}
+
 fn check(call: &'static str, status: Status) -> Result<(), Error> {
     match status {
         0 => Ok(()),
         _ => Err(Error::Driver(call, status)),
     }
+}
+
+// Fail before entering the driver so tests never corrupt driver state.
+fn call(name: &'static str, invoke: impl FnOnce() -> Status) -> Result<(), Error> {
+    #[cfg(all(test, windows))]
+    if let Some(status) = fault::status(name) {
+        return check(name, status);
+    }
+    check(name, invoke())
 }
 
 #[repr(C)]
@@ -276,6 +300,7 @@ loader_api! {
     zeCommandListReset(Raw),
     zeCommandQueueCreate(Raw, Raw, *const QueueDesc, *mut Raw),
     zeCommandQueueDestroy(Raw),
+    zeCommandQueueSynchronize(Raw, u64),
     zeCommandQueueExecuteCommandLists(Raw, u32, *mut Raw, Raw),
     zeFenceCreate(Raw, *const regular::FenceDesc, *mut Raw),
     zeFenceDestroy(Raw),
@@ -377,7 +402,23 @@ pub(crate) struct Runtime {
     pub(crate) devices: Vec<Device>,
 }
 
+#[derive(Default)]
+pub(crate) struct DeviceHealth(AtomicBool);
+
+impl DeviceHealth {
+    pub(crate) fn observe(&self, error: &Error) {
+        if error.device_lost() {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn lost(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 pub(crate) struct Context {
+    pub(crate) health: Arc<DeviceHealth>,
     handle: Handle,
     device: Handle,
     commands: Option<Handle>,
@@ -449,27 +490,30 @@ impl Context {
         check("zeContextCreate", unsafe {
             (api.zeContextCreate)(device.driver.0, &desc, &mut handle)
         })?;
+        Ok(Self {
+            health: Arc::default(),
+            handle: Handle(handle),
+            device: device.handle,
+            commands: None,
+            ordinal,
+        })
+    }
+
+    pub(crate) fn initialize(&mut self, api: &Api) -> Result<(), Error> {
         let queue = QueueDesc {
             header: Header::new(0xe),
-            ordinal,
+            ordinal: self.ordinal,
             index: 0,
             flags: 0,
             mode: 1, // ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS
             priority: 0,
         };
         let mut commands = std::ptr::null_mut();
-        if let Err(error) = check("zeCommandListCreateImmediate", unsafe {
-            (api.zeCommandListCreateImmediate)(handle, device.handle.0, &queue, &mut commands)
-        }) {
-            unsafe { (api.zeContextDestroy)(handle) };
-            return Err(error);
-        }
-        Ok(Self {
-            handle: Handle(handle),
-            device: device.handle,
-            commands: Some(Handle(commands)),
-            ordinal,
-        })
+        call("zeCommandListCreateImmediate", || unsafe {
+            (api.zeCommandListCreateImmediate)(self.handle.0, self.device.0, &queue, &mut commands)
+        })?;
+        self.commands = Some(Handle(commands));
+        Ok(())
     }
 
     fn commands(&self) -> Result<Raw, Error> {
@@ -480,12 +524,12 @@ impl Context {
 
     pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
         if let Some(commands) = self.commands {
-            check("zeCommandListDestroy", unsafe {
+            call("zeCommandListDestroy", || unsafe {
                 (api.zeCommandListDestroy)(commands.0)
             })?;
             self.commands = None;
         }
-        check("zeContextDestroy", unsafe {
+        call("zeContextDestroy", || unsafe {
             (api.zeContextDestroy)(self.handle.0)
         })
     }
@@ -537,7 +581,7 @@ impl Context {
         let signal = std::ptr::null_mut();
         #[cfg(all(test, windows))]
         let signal = profiling::operation_signal(signal);
-        check("zeCommandListAppendMemoryCopy", unsafe {
+        call("zeCommandListAppendMemoryCopy", || unsafe {
             (api.zeCommandListAppendMemoryCopy)(
                 commands,
                 dst,

@@ -1,8 +1,8 @@
-use super::{Api, CommandList, Context, CuResult, Fence, Submission, backend_error};
+use super::{Api, CommandList, Context, CuResult, Fence, Submission, Wake, backend_error};
 use crate::cuda::RUNTIME;
-use crate::level_zero::{Queue, QueueFence};
+use crate::level_zero::{DeviceHealth, Queue, QueueFence};
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 pub(super) struct Policy {
     pub cap: usize,
     pub delay: Option<Duration>,
+    pub high_resolution: bool,
+    #[cfg(test)]
+    pub eager_after_idle: bool,
 }
 
 impl Policy {
@@ -40,7 +43,15 @@ impl Policy {
         };
         Ok(Some(Self {
             cap,
+            #[cfg(test)]
+            eager_after_idle: false,
             delay: Some(Duration::from_micros(micros)),
+            high_resolution: match std::env::var("CUDA_FOR_INTEL_BATCH_TIMER") {
+                Ok(timer) if timer == "high-resolution" => true,
+                Ok(timer) if timer == "condvar" => false,
+                Err(std::env::VarError::NotPresent) => false,
+                _ => return Err(CuResult::InvalidValue),
+            },
         }))
     }
 }
@@ -68,13 +79,17 @@ impl Slot {
 pub(super) struct Batch {
     queue: Queue,
     policy: Policy,
-    wake: Arc<Condvar>,
+    wake: Arc<Wake>,
     open: Option<Slot>,
     first: Option<Instant>,
     count: usize,
+    #[cfg(test)]
+    last_append: Option<Instant>,
     pending: VecDeque<Slot>,
     free: Vec<Slot>,
     error: Option<CuResult>,
+    uncertain_submission: bool,
+    health: Arc<DeviceHealth>,
     #[cfg(test)]
     pub stats: Stats,
 }
@@ -84,6 +99,11 @@ pub(super) struct Batch {
 pub(super) struct Stats {
     pub background: usize,
     pub last_delay: Duration,
+    pub wake_late: Duration,
+    pub lock_time: Duration,
+    pub scan_late: Duration,
+    pub close_time: Duration,
+    pub execute_time: Duration,
     pub recycled: usize,
     pub recycle_time: Duration,
     pub submitted: usize,
@@ -94,24 +114,34 @@ impl Batch {
         api: &Api,
         context: &Context,
         policy: Policy,
-        wake: Arc<Condvar>,
+        wake: Arc<Wake>,
     ) -> Result<Self, CuResult> {
         Ok(Self {
-            queue: context.create_queue(api).map_err(backend_error)?,
+            queue: context
+                .create_queue(api)
+                .inspect_err(|error| context.health.observe(error))
+                .map_err(backend_error)?,
             policy,
             wake,
             open: None,
             first: None,
             count: 0,
+            #[cfg(test)]
+            last_append: None,
             pending: VecDeque::new(),
             free: Vec::new(),
             error: None,
+            uncertain_submission: false,
+            health: Arc::clone(&context.health),
             #[cfg(test)]
             stats: Stats::default(),
         })
     }
 
     pub fn check(&self) -> Result<(), CuResult> {
+        if self.health.lost() {
+            return Err(CuResult::LaunchFailed);
+        }
         self.error.map_or(Ok(()), Err)
     }
 
@@ -140,10 +170,14 @@ impl Batch {
             let slot = if let Some(slot) = self.free.pop() {
                 slot
             } else {
-                let list = context.create_list(api).map_err(backend_error)?;
+                let list = context
+                    .create_list(api)
+                    .inspect_err(|error| self.health.observe(error))
+                    .map_err(backend_error)?;
                 let fence = match self.queue.create_fence(api) {
                     Ok(fence) => fence,
                     Err(error) => {
+                        self.health.observe(&error);
                         let mut slot = Slot {
                             list: Some(list),
                             fence: None,
@@ -171,6 +205,7 @@ impl Batch {
             };
             self.open = Some(slot);
             if let Err(error) = ordering {
+                self.health.observe(&error);
                 let error = backend_error(error);
                 self.record_failed(error, None);
                 return Err(error);
@@ -194,7 +229,17 @@ impl Batch {
         if self.count == 1 {
             self.first = Some(Instant::now());
         }
-        if self.count == self.policy.cap
+        #[cfg(test)]
+        let eager = self.policy.eager_after_idle && {
+            let now = Instant::now();
+            let last = self.last_append.replace(now);
+            self.count == 1
+                && last.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(1))
+        };
+        #[cfg(not(test))]
+        let eager = false;
+        if eager
+            || self.count == self.policy.cap
             || self.count > 1
                 && self
                     .deadline()
@@ -202,7 +247,7 @@ impl Batch {
         {
             self.flush(api)?;
         } else if self.count == 1 && self.policy.delay.is_some() {
-            self.wake.notify_one();
+            self.wake.notify();
         }
         Ok(())
     }
@@ -211,14 +256,35 @@ impl Batch {
         self.check()?;
         if self.buffered() {
             let slot = self.open.as_ref().unwrap();
-            if let Err(error) = self.queue.execute(
+            #[cfg(test)]
+            let close_start = Instant::now();
+            let close = slot.list.as_ref().unwrap().close(api);
+            #[cfg(test)]
+            {
+                self.stats.close_time = close_start.elapsed();
+            }
+            if let Err(error) = close {
+                self.health.observe(&error);
+                let error = backend_error(error);
+                self.error = Some(error);
+                return Err(error);
+            }
+            #[cfg(test)]
+            let execute_start = Instant::now();
+            let execute = self.queue.execute(
                 api,
                 slot.list.as_ref().unwrap(),
                 slot.fence.as_ref().unwrap(),
-            ) {
+            );
+            #[cfg(test)]
+            {
+                self.stats.execute_time = execute_start.elapsed();
+            }
+            if let Err(error) = execute {
+                // The driver may have accepted work before reporting failure.
+                self.uncertain_submission = true;
+                self.health.observe(&error);
                 let error = backend_error(error);
-                // A failed execute may have handed references to the driver.
-                // Keep the slot and all of its references in quarantine.
                 self.error = Some(error);
                 return Err(error);
             }
@@ -245,6 +311,16 @@ impl Batch {
         }
     }
 
+    pub fn wait_tail(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
+        if let Some(fence) = self.tail() {
+            fence
+                .wait(api.fence_wait_fn(), timeout)
+                .inspect_err(|error| self.health.observe(error))
+                .map_err(backend_error)?;
+        }
+        Ok(())
+    }
+
     pub fn tail(&self) -> Option<&Arc<QueueFence>> {
         self.pending.back().and_then(|slot| slot.fence.as_ref())
     }
@@ -259,7 +335,12 @@ impl Batch {
         self.check()?;
         while let Some(slot) = self.pending.front_mut() {
             let fence = slot.fence.as_ref().unwrap();
-            if Arc::strong_count(fence) > 1 || !fence.ready(api).map_err(backend_error)? {
+            if Arc::strong_count(fence) > 1
+                || !fence
+                    .ready(api)
+                    .inspect_err(|error| self.health.observe(error))
+                    .map_err(backend_error)?
+            {
                 break;
             }
             // Keep memory bounded after bursts. Outstanding lists are limited
@@ -273,6 +354,7 @@ impl Batch {
                     .unwrap()
                     .reset(api)
                     .and_then(|()| fence.reset(api))
+                    .inspect_err(|error| self.health.observe(error))
                     .map_err(backend_error);
                 #[cfg(test)]
                 {
@@ -296,14 +378,28 @@ impl Batch {
         Ok(())
     }
 
+    pub fn drain(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
+        if self.uncertain_submission || !self.pending.is_empty() {
+            self.queue
+                .wait(api, timeout)
+                .inspect_err(|error| self.health.observe(error))
+                .map_err(backend_error)?;
+            self.uncertain_submission = false;
+        }
+        Ok(())
+    }
+
+    // Only called after the queue has drained. Keep each still-owned handle
+    // in its slot until its native destroy succeeds, including on retries.
     pub fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
-        self.check()?;
-        if self.buffered() || !self.pending.is_empty() {
-            return Err(CuResult::NotReady);
+        while let Some(slot) = self.pending.front_mut() {
+            slot.destroy(api)?;
+            self.pending.pop_front();
         }
         if let Some(slot) = &mut self.open {
             slot.destroy(api)?;
             self.open = None;
+            self.first = None;
         }
         while let Some(slot) = self.free.last_mut() {
             slot.destroy(api)?;
@@ -313,32 +409,54 @@ impl Batch {
     }
 }
 
-pub(super) fn spawn(owner: usize, wake: Arc<Condvar>) -> Result<JoinHandle<()>, CuResult> {
+pub(super) fn spawn(
+    owner: usize,
+    wake: Arc<Wake>,
+) -> Result<JoinHandle<Result<(), CuResult>>, CuResult> {
     std::thread::Builder::new()
         .name("cuda-batch".into())
         .spawn(move || {
-            let Ok(mut guard) = RUNTIME.lock() else {
-                return;
-            };
+            let mut next = Some(Instant::now());
             loop {
-                let Some(state) = guard.as_mut() else { return };
+                let result = wake.wait(next);
+                #[cfg(test)]
+                let woke = Instant::now();
+                let Ok(mut guard) = RUNTIME.lock() else {
+                    return Err(CuResult::Unknown);
+                };
+                #[cfg(test)]
+                let lock_time = woke.elapsed();
+                let Some(state) = guard.as_mut() else {
+                    return Ok(());
+                };
                 let Some(context) = state.contexts.get_mut(&owner) else {
-                    return;
+                    return shutdown();
                 };
                 if context.streams.worker.is_none() {
-                    return;
+                    return shutdown();
                 }
-                let mut next = None;
+                next = None;
                 for batch in context
                     .streams
                     .all_mut()
                     .filter_map(|stream| stream.batch.as_mut())
                 {
+                    if let Err(error) = result {
+                        batch.error.get_or_insert(error);
+                    }
                     if batch.check().is_err() {
                         continue;
                     }
                     if let Some(deadline) = batch.deadline() {
                         if deadline <= Instant::now() {
+                            #[cfg(test)]
+                            {
+                                // A deadline can also pass during a work notification
+                                // or while acquiring the runtime lock.
+                                batch.stats.wake_late = woke.saturating_duration_since(deadline);
+                                batch.stats.lock_time = lock_time;
+                                batch.stats.scan_late = deadline.elapsed();
+                            }
                             batch.background_flush(&state.runtime.api);
                         } else {
                             next = Some(
@@ -347,16 +465,19 @@ pub(super) fn spawn(owner: usize, wake: Arc<Condvar>) -> Result<JoinHandle<()>, 
                         }
                     }
                 }
-                let result = if let Some(deadline) = next {
-                    wake.wait_timeout(guard, deadline.saturating_duration_since(Instant::now()))
-                        .map(|(guard, _)| guard)
-                        .map_err(|_| ())
-                } else {
-                    wake.wait(guard).map_err(|_| ())
-                };
-                let Ok(new_guard) = result else { return };
-                guard = new_guard;
+                if let Err(error) = result {
+                    context.teardown_error = Some(error);
+                    return Err(error);
+                }
             }
         })
         .map_err(|_| CuResult::OperatingSystem)
+}
+
+fn shutdown() -> Result<(), CuResult> {
+    #[cfg(all(test, windows))]
+    if crate::level_zero::fault::status("batch worker shutdown").is_some() {
+        return Err(CuResult::OperatingSystem);
+    }
+    Ok(())
 }

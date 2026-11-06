@@ -25,10 +25,12 @@ pub(super) fn report(label: &str, samples: &mut [Duration]) {
     samples.sort_unstable();
     let micros = |duration: Duration| duration.as_secs_f64() * 1e6;
     let p95 = (95 * samples.len()).div_ceil(100) - 1;
+    let p99 = (99 * samples.len()).div_ceil(100) - 1;
     println!(
-        "{label}: n={} median={:.3} us p95={:.3} us",
+        "{label}: n={} median={:.3} us p95={:.3} us p99={:.3} us",
         samples.len(),
         micros(samples[samples.len() / 2]),
         micros(samples[p95]),
+        micros(samples[p99]),
     );
 }

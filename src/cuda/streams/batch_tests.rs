@@ -17,7 +17,7 @@ thread_local! {
     pub(super) static POLICY: Cell<Option<Option<Policy>>> = const { Cell::new(None) };
 }
 
-fn open(policy: Option<Policy>) -> Handle {
+pub(super) fn open(policy: Option<Policy>) -> Handle {
     assert_eq!(cuInit(0), Success);
     let mut ctx = null_mut();
     POLICY.set(Some(policy));
@@ -29,7 +29,7 @@ fn open(policy: Option<Policy>) -> Handle {
 
 type Handle = Opaque;
 
-fn new_stream(flags: u32) -> Handle {
+pub(super) fn new_stream(flags: u32) -> Handle {
     let mut stream = null_mut();
     assert_eq!(unsafe { cuStreamCreate(&mut stream, flags) }, Success);
     stream
@@ -48,14 +48,14 @@ fn kernel(ptx: &CStr, name: &CStr) -> Handle {
     kernel
 }
 
-fn noop() -> Handle {
+pub(super) fn noop() -> Handle {
     kernel(
         c".version 4.1 .target sm_52 .address_size 64 .entry noop() { ret; }",
         c"noop",
     )
 }
 
-fn launch(function: Handle, stream: Handle) {
+pub(super) fn launch(function: Handle, stream: Handle) {
     assert_eq!(
         unsafe {
             cuLaunchKernel(
@@ -76,10 +76,12 @@ fn launch(function: Handle, stream: Handle) {
     );
 }
 
-const fn policy(cap: usize, micros: u64) -> Policy {
+pub(super) const fn policy(cap: usize, micros: u64) -> Policy {
     Policy {
         cap,
         delay: Some(Duration::from_micros(micros)),
+        high_resolution: false,
+        eager_after_idle: false,
     }
 }
 
@@ -91,6 +93,8 @@ fn gated_batch_buffered_queries_and_flush_triggers() {
     let ctx = open(Some(Policy {
         cap: 1024,
         delay: None,
+        high_resolution: false,
+        eager_after_idle: false,
     }));
     let stream = new_stream(1);
     let consumer = new_stream(1);
@@ -141,7 +145,7 @@ fn gated_batch_buffered_queries_and_flush_triggers() {
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
 }
 
-fn observe_kernel(stream: Handle) {
+fn observe_kernel(stream: Handle) -> Duration {
     // This is the event signaled by the launch itself on a blocking stream.
     // Inspecting it here cannot submit a list. The subsequent wait is a native
     // Level Zero wait with no CUDA polling, markers, or synchronization.
@@ -153,7 +157,9 @@ fn observe_kernel(stream: Handle) {
         ))
     })
     .unwrap();
+    let start = Instant::now();
     event.wait(wait, 10_000_000_000).unwrap();
+    start.elapsed()
 }
 
 #[test]
@@ -211,22 +217,84 @@ fn gated_batch_isolated_launch_and_concurrent_recording() {
 #[derive(Clone, Copy)]
 struct Case(&'static str, Option<Policy>);
 
-const CASES: [Case; 6] = [
-    Case("A1", None),
-    Case("C16/50", Some(policy(16, 50))),
-    Case("C16/250", Some(policy(16, 250))),
-    Case("C32/250", Some(policy(32, 250))),
-    Case("C32/1000", Some(policy(32, 1000))),
-    Case("A2", None),
-];
+fn cases() -> impl Iterator<Item = Case> {
+    [
+        Case("A1", None),
+        Case("B250", Some(policy(32, 250))),
+        Case("C50", Some(high_resolution(50))),
+        Case("C100", Some(high_resolution(100))),
+        Case("C250", Some(high_resolution(250))),
+        Case("C500", Some(high_resolution(500))),
+        Case("C1000", Some(high_resolution(1000))),
+        Case(
+            "D250",
+            Some(Policy {
+                eager_after_idle: true,
+                ..high_resolution(250)
+            }),
+        ),
+        Case("A2", None),
+    ]
+    .into_iter()
+    .filter(|case| selected("CUDA_FOR_INTEL_BENCH_CASES", case.0))
+}
 
-const EXPLICIT: Case = Case(
-    "B32-explicit-control",
-    Some(Policy {
-        cap: 32,
-        delay: None,
-    }),
-);
+pub(super) const fn high_resolution(micros: u64) -> Policy {
+    Policy {
+        high_resolution: true,
+        ..policy(32, micros)
+    }
+}
+
+fn selected(var: &str, label: &str) -> bool {
+    std::env::var(var).map_or(true, |values| values.split(',').any(|value| value == label))
+}
+
+fn process_cpu() -> Duration {
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime(u32, u32);
+    impl FileTime {
+        fn ticks(&self) -> u64 {
+            (u64::from(self.1) << 32) | u64::from(self.0)
+        }
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> Opaque;
+        fn GetProcessTimes(
+            process: Opaque,
+            create: &mut FileTime,
+            exit: &mut FileTime,
+            kernel: &mut FileTime,
+            user: &mut FileTime,
+        ) -> i32;
+    }
+    let (mut create, mut exit, mut kernel, mut user) = Default::default();
+    assert_ne!(
+        unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut create,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        },
+        0
+    );
+    Duration::from_nanos((kernel.ticks() + user.ticks()) * 100)
+}
+
+fn report_cpu(label: &str, began: Instant, cpu: Duration, samples: usize) {
+    let wall = began.elapsed().as_secs_f64();
+    let cpu = (process_cpu() - cpu).as_secs_f64();
+    println!(
+        "{label} wall={wall:.3} s CPU={cpu:.3} s ({:.1}% of one logical CPU, {:.1} us/sample)",
+        100.0 * cpu / wall,
+        cpu * 1e6 / samples as f64
+    );
+}
 
 fn report(label: &str, values: &mut [Duration]) {
     values.sort_unstable();
@@ -243,10 +311,149 @@ fn report(label: &str, values: &mut [Duration]) {
     );
 }
 
+fn loads() -> impl Iterator<Item = (&'static str, usize, usize)> {
+    let cores = thread::available_parallelism().unwrap().get();
+    [
+        ("idle", 0, 0),
+        ("moderate", (cores / 2).max(1), 0),
+        ("heavy", cores, 0),
+        ("CUDA-callers", 0, 4),
+    ]
+    .into_iter()
+    .filter(|(label, _, _)| selected("CUDA_FOR_INTEL_BENCH_LOADS", label))
+}
+
+fn under_load(cpu_workers: usize, cuda_workers: usize, run: impl FnOnce()) {
+    // Install the load context on a different thread so the benchmark keeps
+    // its own current context while the explicit query handle is in use.
+    let query_context = (cuda_workers > 0).then(|| {
+        thread::spawn(|| (open(None).addr(), new_stream(1).addr()))
+            .join()
+            .unwrap()
+    });
+    let query_stream = query_context.map_or(0, |(_, stream)| stream);
+    let stop = AtomicBool::new(false);
+    let start = Barrier::new(1 + cpu_workers + cuda_workers);
+    thread::scope(|scope| {
+        for _ in 0..cpu_workers {
+            scope.spawn(|| {
+                start.wait();
+                let mut work = 1u64;
+                while !stop.load(Ordering::Relaxed) {
+                    for _ in 0..2048 {
+                        work = black_box(work.wrapping_mul(6364136223846793005).wrapping_add(1));
+                    }
+                }
+            });
+        }
+        for _ in 0..cuda_workers {
+            scope.spawn(|| {
+                start.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    assert_eq!(cuStreamQuery(without_provenance_mut(query_stream)), Success);
+                    thread::yield_now();
+                }
+            });
+        }
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _stop = Stop(&stop);
+        start.wait();
+        run();
+    });
+    if let Some((context, _)) = query_context {
+        assert_eq!(cuCtxDestroy_v2(without_provenance_mut(context)), Success);
+    }
+}
+
+#[test]
+#[ignore = "measures Windows timeout behavior without a GPU"]
+fn gated_m10_host_timer() {
+    for high_resolution in [false, true] {
+        for micros in [50, 100, 250, 500, 1000] {
+            let wake = Wake::new(high_resolution).unwrap();
+            let mut samples = Vec::new();
+            let cpu = process_cpu();
+            let began = Instant::now();
+            for i in 0..110 {
+                let deadline = Instant::now() + Duration::from_micros(micros);
+                wake.wait(Some(deadline)).unwrap();
+                if i >= 10 {
+                    samples.push(deadline.elapsed());
+                }
+            }
+            let label = format!("host high_resolution={high_resolution} requested={micros} us");
+            report_cpu(&label, began, cpu, 110);
+            report(&format!("{label} overshoot"), &mut samples);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires kernel timestamp events on an Intel Level Zero GPU"]
+fn gated_m10_device_execution() {
+    use crate::level_zero::profiling::OperationEvents;
+    for Case(label, policy) in cases() {
+        let ctx = open(policy);
+        let stream = new_stream(1);
+        let kernel = noop();
+        let (mut timestamps, wait) = with_context(|runtime, ctx| {
+            let info = &runtime.devices[ctx.device as usize].info;
+            let events = OperationEvents::create(
+                &runtime.api,
+                &ctx.backend,
+                1,
+                info.timestamp_frequency_hz,
+                info.kernel_timestamp_valid_bits,
+                false,
+            )
+            .map_err(backend_error)?;
+            Ok((events, runtime.api.event_wait_fn()))
+        })
+        .unwrap();
+        let mut samples = Vec::new();
+        for i in 0..120 {
+            timestamps.arm(0);
+            let started = Instant::now();
+            launch(kernel, stream);
+            assert!(!OperationEvents::disarm());
+            timestamps.wait(0, wait, 10_000_000_000).unwrap();
+            let elapsed = started.elapsed();
+            let [start, end] = timestamps.query(0).unwrap();
+            let timer = timestamps.timer;
+            let ticks = timer.window(start, end, elapsed).unwrap();
+            let duration = Duration::from_secs_f64(timer.seconds(ticks));
+            assert!(duration <= elapsed);
+            if i >= 20 {
+                samples.push(duration);
+            }
+            assert_eq!(cuStreamSynchronize(stream), Success);
+            assert_eq!(cuStreamQuery(stream), Success);
+            with_context(|runtime, _| timestamps.reset(&runtime.api, 0).map_err(backend_error))
+                .unwrap();
+        }
+        report(&format!("{label} isolated device execution"), &mut samples);
+        assert_eq!(cuStreamDestroy_v2(stream), Success);
+        with_context(|runtime, _| timestamps.destroy(&runtime.api).map_err(backend_error)).unwrap();
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    }
+}
+
 #[test]
 #[ignore = "requires an Intel Level Zero GPU"]
-fn gated_m9_throughput() {
-    for Case(label, policy) in CASES.into_iter().chain([EXPLICIT]) {
+fn gated_m10_throughput() {
+    for (load, cpu, callers) in loads() {
+        under_load(cpu, callers, || run_throughput(load));
+    }
+}
+
+fn run_throughput(load: &str) {
+    for Case(case, policy) in cases() {
+        let label = format!("{load} {case}");
         let ctx = open(policy);
         let stream = new_stream(1);
         let noop = noop();
@@ -276,6 +483,8 @@ fn gated_m9_throughput() {
         ] {
             let mut enqueue = Vec::new();
             let mut complete = Vec::new();
+            let cpu = process_cpu();
+            let began = Instant::now();
             for i in 0..42 {
                 let start = Instant::now();
                 for _ in 0..ops {
@@ -309,6 +518,7 @@ fn gated_m9_throughput() {
                     complete.push(start.elapsed());
                 }
             }
+            report_cpu(&format!("{label} {workload} {ops}"), began, cpu, 42);
             report(&format!("{label} {workload} {ops} enqueue"), &mut enqueue);
             report(&format!("{label} {workload} {ops} complete"), &mut complete);
         }
@@ -332,83 +542,74 @@ fn gated_m9_throughput() {
 
 #[test]
 #[ignore = "requires an Intel Level Zero GPU"]
-fn gated_m9_forge() {
-    for Case(label, policy) in CASES.into_iter().chain([EXPLICIT]) {
-        println!("backend {label}");
-        POLICY.set(Some(policy));
-        run_bench_pipeline();
-        POLICY.set(None);
+fn gated_m10_forge() {
+    for (load, cpu, callers) in loads() {
+        under_load(cpu, callers, || {
+            for Case(case, policy) in cases() {
+                let label = format!("{load} {case}");
+                println!("backend {label}");
+                POLICY.set(Some(policy));
+                let cpu = process_cpu();
+                let began = Instant::now();
+                run_bench_pipeline();
+                report_cpu(&label, began, cpu, 1);
+                POLICY.set(None);
+            }
+        });
     }
 }
 
 #[test]
 #[ignore = "requires an Intel Level Zero GPU and exercises CPU saturation"]
-fn gated_m9_isolated_latency_under_load() {
-    let cores = thread::available_parallelism().unwrap().get();
-    for (label, cpu_workers, cuda_workers) in [
-        ("idle", 0, 0),
-        ("moderate", (cores / 2).max(1), 0),
-        ("heavy", cores, 0),
-        ("CUDA-callers", 0, 4),
-    ] {
-        for Case(case, policy) in CASES {
+fn gated_m10_isolated_latency_under_load() {
+    for (label, cpu_workers, cuda_workers) in loads() {
+        for Case(case, policy) in cases() {
+            let spaced = std::env::var_os("CUDA_FOR_INTEL_BENCH_SPACED").is_some();
+            if !spaced && policy.is_some_and(|policy| policy.eager_after_idle) {
+                continue;
+            }
+            let spacing = spaced.then(|| Wake::new(true).unwrap());
             let ctx = open(policy);
             let stream = new_stream(0);
-            let query_stream = new_stream(1).addr();
             let kernel = noop();
-            let stop = AtomicBool::new(false);
-            let start = Barrier::new(1 + cpu_workers + cuda_workers);
-            let (mut enqueue, mut complete, mut delay) = (Vec::new(), Vec::new(), Vec::new());
-            thread::scope(|scope| {
-                for _ in 0..cpu_workers {
-                    scope.spawn(|| {
-                        start.wait();
-                        let mut work = 1u64;
-                        while !stop.load(Ordering::Relaxed) {
-                            for _ in 0..2048 {
-                                work = black_box(
-                                    work.wrapping_mul(6364136223846793005).wrapping_add(1),
-                                );
-                            }
-                        }
-                    });
-                }
-                for _ in 0..cuda_workers {
-                    scope.spawn(|| {
-                        start.wait();
-                        while !stop.load(Ordering::Relaxed) {
-                            let result = cuStreamQuery(without_provenance_mut(query_stream));
-                            if result != Success {
-                                stop.store(true, Ordering::Relaxed);
-                                panic!("unrelated stream query: {result:?}");
-                            }
-                            thread::yield_now();
-                        }
-                    });
-                }
-                struct Stop<'a>(&'a AtomicBool);
-                impl Drop for Stop<'_> {
-                    fn drop(&mut self) {
-                        self.0.store(true, Ordering::Relaxed);
+            let (mut enqueue, mut complete, mut observe, mut recycle) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut phases = [const { Vec::new() }; 9];
+            let mut native_event_wait = Vec::new();
+            let mut last_recycle = Duration::ZERO;
+            let cpu = process_cpu();
+            let began = Instant::now();
+            under_load(cpu_workers, cuda_workers, || {
+                for i in 0..320 {
+                    if let Some(spacing) = &spacing {
+                        // Wait outside the latency window to exercise truly idle arrivals.
+                        spacing
+                            .wait(Some(Instant::now() + Duration::from_millis(2)))
+                            .unwrap();
                     }
-                }
-                let _stop = Stop(&stop);
-                start.wait();
-                for i in 0..520 {
                     let began = Instant::now();
                     launch(kernel, stream);
                     let api = began.elapsed();
-                    observe_kernel(stream);
+                    let wait = Instant::now();
+                    let native = observe_kernel(stream);
+                    let observed = wait.elapsed();
                     let done = began.elapsed();
                     if i >= 20 {
                         enqueue.push(api);
                         complete.push(done);
+                        observe.push(observed);
+                        native_event_wait.push(native);
                     }
                     // Safe reset after observed completion. Keep recycling out
                     // of the isolated-launch measurement for every backend.
+                    let cleanup = Instant::now();
                     assert_eq!(cuStreamSynchronize(stream), Success);
+                    let fence_wait = QueueFence::last_wait();
                     assert_eq!(cuStreamQuery(stream), Success);
-                    if policy.is_some() {
+                    if i >= 20 {
+                        recycle.push(cleanup.elapsed());
+                    }
+                    if let Some(policy) = policy {
                         let measured = with_context(|_, ctx| {
                             let stats = &ctx
                                 .streams
@@ -417,20 +618,62 @@ fn gated_m9_isolated_latency_under_load() {
                                 .as_ref()
                                 .unwrap()
                                 .stats;
-                            assert_eq!(stats.background, i + 1);
-                            Ok(stats.last_delay)
+                            assert_eq!(
+                                stats.background,
+                                if policy.eager_after_idle { 0 } else { i + 1 }
+                            );
+                            Ok([
+                                policy.delay.unwrap(),
+                                stats.wake_late,
+                                stats.lock_time,
+                                stats.scan_late,
+                                stats.close_time,
+                                stats.execute_time,
+                                stats.last_delay,
+                                fence_wait,
+                                stats.recycle_time - last_recycle,
+                            ])
                         })
                         .unwrap();
+                        last_recycle += measured[8];
                         if i >= 20 {
-                            delay.push(measured);
+                            for (index, (samples, measurement)) in
+                                phases.iter_mut().zip(measured).enumerate()
+                            {
+                                if !policy.eager_after_idle || index >= 7 {
+                                    samples.push(measurement);
+                                }
+                            }
                         }
                     }
                 }
             });
             report(&format!("{label} {case} enqueue"), &mut enqueue);
             report(&format!("{label} {case} complete"), &mut complete);
-            if !delay.is_empty() {
-                report(&format!("{label} {case} background submit"), &mut delay);
+            report_cpu(&format!("{label} {case}"), began, cpu, 320);
+            report(&format!("{label} {case} observe completion"), &mut observe);
+            report(
+                &format!("{label} {case} native event wait"),
+                &mut native_event_wait,
+            );
+            report(&format!("{label} {case} sync and reap"), &mut recycle);
+            for (phase, samples) in [
+                "buffer to deadline",
+                "deadline to wait return",
+                "runtime lock",
+                "deadline to scan",
+                "list close",
+                "queue execute",
+                "buffer to submitted",
+                "native queue fence wait",
+                "native recycling",
+            ]
+            .into_iter()
+            .zip(&mut phases)
+            {
+                if !samples.is_empty() {
+                    report(&format!("{label} {case} {phase}"), samples);
+                }
             }
             assert_eq!(cuCtxDestroy_v2(ctx), Success);
         }

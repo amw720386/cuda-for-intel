@@ -62,6 +62,7 @@ struct State {
     runtime: Runtime,
     next_handle: usize,
     contexts: HashMap<usize, CudaContext>,
+    incomplete_contexts: Vec<Context>,
 }
 
 static RUNTIME: Mutex<Option<State>> = Mutex::new(None);
@@ -168,6 +169,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
                 runtime: rt,
                 next_handle: 3, // CUDA reserves stream values 0, 1 and 2.
                 contexts: HashMap::new(),
+                incomplete_contexts: Vec::new(),
             });
             Success
         }
@@ -196,12 +198,20 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
             .ok_or(InvalidDevice)?;
         let key = reserve_handle(&mut state.next_handle)?;
         let api = &state.runtime.api;
+        state
+            .incomplete_contexts
+            .retain_mut(|context| context.destroy(api).inspect_err(diagnostic).is_err());
         let mut backend = Context::create(api, device).map_err(backend_error)?;
-        let streams = match Streams::new(api, &backend, key) {
+        let streams = match backend
+            .initialize(api)
+            .map_err(backend_error)
+            .and_then(|()| Streams::new(api, &backend, key))
+        {
             Ok(streams) => streams,
             Err(error) => {
                 if let Err(cleanup) = backend.destroy(api) {
                     diagnostic(&cleanup);
+                    state.incomplete_contexts.push(backend);
                 }
                 return Err(error);
             }
@@ -235,18 +245,14 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
             return Err(NotReady);
         }
         let result = context.destroy(&state.runtime.api);
+        let worker = context.streams.stop();
         if let Err(error) = result {
-            // A failed experimental drain may leave driver references to any
-            // part of the context. Quarantine it and stop the worker.
-            let worker = if context.streams.experimental() {
-                context.teardown_error = Some(error);
-                context.streams.stop()
-            } else {
-                None
-            };
+            // Some native resources may already have been released. Only a
+            // destroy retry can use this context after teardown has started.
+            context.teardown_error.get_or_insert(error);
             return Ok((result, worker));
         }
-        let worker = context.streams.stop();
+        let result = context.streams.execution_error().map_or(Ok(()), Err);
         state.contexts.remove(&key);
         CURRENT.with(|stack| {
             let mut stack = stack.borrow_mut();
@@ -257,10 +263,10 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
         Ok((result, worker))
     });
     status(destroyed.and_then(|(result, worker)| {
-        if let Some(worker) = worker {
-            worker.join().map_err(|_| Unknown)?;
-        }
-        result
+        let stopped = worker.map_or(Ok(()), |worker| {
+            worker.join().map_err(|_| Unknown).and_then(|result| result)
+        });
+        result.and(stopped)
     }))
 }
 
@@ -312,11 +318,16 @@ pub extern "system" fn cuCtxSynchronize() -> CuResult {
 
 impl CudaContext {
     fn check_live(&self) -> Result<(), CuResult> {
-        self.teardown_error.map_or(Ok(()), Err)
+        self.teardown_error.map_or(Ok(()), Err)?;
+        if self.backend.health.lost() {
+            return Err(LaunchFailed);
+        }
+        Ok(())
     }
 
     fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
-        self.streams.wait_all(api)?;
+        self.streams.drain_for_teardown(api)?;
+        self.streams.destroy(api)?;
         while let Some(&key) = self.modules.keys().next() {
             self.unload(api, key)?;
         }
@@ -326,7 +337,6 @@ impl CudaContext {
         while let Some((&base, _)) = self.host_allocations.first_key_value() {
             self.free_host(api, base)?;
         }
-        self.streams.destroy(api)?;
         self.backend.destroy(api).map_err(backend_error)
     }
 

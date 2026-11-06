@@ -1,6 +1,6 @@
 use super::{
     Api, Context, Error, EventDesc, EventPoolDesc, GroupCount, Handle, Header, Module, QueueDesc,
-    Raw, check,
+    Raw, call, check,
 };
 use std::ptr::null_mut;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ impl Context {
             priority: 0,
         };
         let mut list = null_mut();
-        check("zeCommandListCreateImmediate (asynchronous)", unsafe {
+        call("zeCommandListCreateImmediate (asynchronous)", || unsafe {
             (api.zeCommandListCreateImmediate)(self.handle.0, self.device.0, &desc, &mut list)
         })?;
         Ok(CommandList(Handle(list)))
@@ -63,7 +63,7 @@ impl CommandList {
         let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
         #[cfg(all(test, windows))]
         let signal = super::profiling::operation_signal(signal);
-        check("zeCommandListAppendMemoryCopy", unsafe {
+        call("zeCommandListAppendMemoryCopy", || unsafe {
             (api.zeCommandListAppendMemoryCopy)(
                 self.0.0,
                 dst,
@@ -77,7 +77,7 @@ impl CommandList {
     }
 
     pub(crate) fn signal(&self, api: &Api, fence: &Fence) -> Result<(), Error> {
-        check("zeCommandListAppendSignalEvent", unsafe {
+        call("zeCommandListAppendSignalEvent", || unsafe {
             (api.zeCommandListAppendSignalEvent)(self.0.0, fence.handle.0)
         })
     }
@@ -89,19 +89,19 @@ impl CommandList {
         waits: &[Arc<Fence>],
     ) -> Result<(), Error> {
         let mut events = WaitEvents::new(waits)?;
-        check("zeCommandListAppendBarrier", unsafe {
+        call("zeCommandListAppendBarrier", || unsafe {
             (api.zeCommandListAppendBarrier)(self.0.0, signal.handle.0, events.count, events.ptr())
         })
     }
 
     pub(crate) fn queue_barrier(&self, api: &Api) -> Result<(), Error> {
-        check("zeCommandListAppendBarrier", unsafe {
+        call("zeCommandListAppendBarrier", || unsafe {
             (api.zeCommandListAppendBarrier)(self.0.0, null_mut(), 0, null_mut())
         })
     }
 
     pub(crate) fn destroy(&self, api: &Api) -> Result<(), Error> {
-        check("zeCommandListDestroy", unsafe {
+        call("zeCommandListDestroy", || unsafe {
             (api.zeCommandListDestroy)(self.0.0)
         })
     }
@@ -111,7 +111,7 @@ impl CommandList {
     }
 
     pub(crate) fn wait_with(&self, wait: WaitFn, timeout: u64) -> Result<(), Error> {
-        check("zeCommandListHostSynchronize", unsafe {
+        call("zeCommandListHostSynchronize", || unsafe {
             wait(self.0.0, timeout)
         })
     }
@@ -148,7 +148,7 @@ impl CommandList {
         let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
         #[cfg(all(test, windows))]
         let signal = super::profiling::operation_signal(signal);
-        check("zeCommandListAppendLaunchKernel", unsafe {
+        call("zeCommandListAppendLaunchKernel", || unsafe {
             (api.zeCommandListAppendLaunchKernel)(
                 self.0.0,
                 kernel,
@@ -225,7 +225,7 @@ impl Fence {
 #[cfg(all(test, windows))]
 impl CommandList {
     pub(crate) fn gate(&self, api: &Api, gate: &Fence) -> Result<(), Error> {
-        let call = unsafe {
+        let append_wait = unsafe {
             api._library
                 .get::<unsafe extern "system" fn(Raw, u32, *mut Raw) -> u32>(
                     b"zeCommandListAppendWaitOnEvents\0",
@@ -233,8 +233,8 @@ impl CommandList {
         }
         .map_err(Error::Loader)?;
         let mut wait = gate.handle.0;
-        check("zeCommandListAppendWaitOnEvents", unsafe {
-            call(self.0.0, 1, &mut wait)
+        call("zeCommandListAppendWaitOnEvents", || unsafe {
+            append_wait(self.0.0, 1, &mut wait)
         })
     }
 }
