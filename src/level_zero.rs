@@ -3,6 +3,9 @@ use libloading::Library;
 use std::ffi::{CStr, c_char, c_void};
 use std::fmt;
 
+mod streams;
+pub(crate) use streams::{CommandList, Fence, Fences};
+
 type Raw = *mut c_void;
 type Status = u32;
 
@@ -199,6 +202,21 @@ struct GroupCount {
     z: u32,
 }
 
+#[repr(C)]
+struct EventPoolDesc {
+    header: Header,
+    flags: u32,
+    count: u32,
+}
+
+#[repr(C)]
+struct EventDesc {
+    header: Header,
+    index: u32,
+    signal: u32,
+    wait: u32,
+}
+
 macro_rules! loader_api {
     ($( $name:ident($($arg:ty),*) ),+ $(,)?) => {
         #[allow(non_snake_case)]
@@ -245,6 +263,12 @@ loader_api! {
     zeCommandListCreateImmediate(Raw, Raw, *const QueueDesc, *mut Raw),
     zeCommandListDestroy(Raw),
     zeCommandListHostSynchronize(Raw, u64),
+    zeEventPoolCreate(Raw, *const EventPoolDesc, u32, *mut Raw, *mut Raw),
+    zeEventPoolDestroy(Raw),
+    zeEventCreate(Raw, *const EventDesc, *mut Raw),
+    zeEventDestroy(Raw),
+    zeEventHostReset(Raw),
+    zeEventQueryStatus(Raw),
     zeMemAllocDevice(Raw, *const AllocDesc, usize, usize, Raw, *mut Raw),
     zeMemFree(Raw, Raw),
     zeCommandListAppendMemoryCopy(Raw, Raw, *const c_void, usize, Raw, u32, *mut Raw),
@@ -298,6 +322,7 @@ pub(crate) struct Context {
     handle: Handle,
     device: Handle,
     commands: Option<Handle>,
+    ordinal: u32,
 }
 
 pub(crate) struct Module {
@@ -384,6 +409,7 @@ impl Context {
             handle: Handle(handle),
             device: device.handle,
             commands: Some(Handle(commands)),
+            ordinal,
         })
     }
 
@@ -402,13 +428,6 @@ impl Context {
         }
         check("zeContextDestroy", unsafe {
             (api.zeContextDestroy)(self.handle.0)
-        })
-    }
-
-    pub(crate) fn synchronize(&self, api: &Api) -> Result<(), Error> {
-        let commands = self.commands()?;
-        check("zeCommandListHostSynchronize", unsafe {
-            (api.zeCommandListHostSynchronize)(commands, u64::MAX)
         })
     }
 
@@ -488,46 +507,6 @@ impl Context {
         Ok(Module {
             handle: Handle(module),
             kernel: None,
-        })
-    }
-
-    pub(crate) fn launch(
-        &self,
-        api: &Api,
-        module: &Module,
-        grid: [u32; 3],
-        block: [u32; 3],
-        args: &[&[u8]],
-    ) -> Result<(), Error> {
-        let commands = self.commands()?;
-        let kernel = module
-            .kernel
-            .ok_or(Error::Driver("launch without a kernel", 0x7800001c))?
-            .0;
-        check("zeKernelSetGroupSize", unsafe {
-            (api.zeKernelSetGroupSize)(kernel, block[0], block[1], block[2])
-        })?;
-        for (index, value) in args.iter().enumerate() {
-            check("zeKernelSetArgumentValue", unsafe {
-                (api.zeKernelSetArgumentValue)(
-                    kernel,
-                    index as u32,
-                    value.len(),
-                    value.as_ptr().cast(),
-                )
-            })?;
-        }
-        let [x, y, z] = grid;
-        let groups = GroupCount { x, y, z };
-        check("zeCommandListAppendLaunchKernel", unsafe {
-            (api.zeCommandListAppendLaunchKernel)(
-                commands,
-                kernel,
-                &groups,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-            )
         })
     }
 }

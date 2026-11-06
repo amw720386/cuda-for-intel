@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
+mod streams;
+use streams::Streams;
+
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CuResult {
@@ -22,6 +25,7 @@ pub(crate) enum CuResult {
     OperatingSystem = 304,
     InvalidHandle = 400,
     NotFound = 500,
+    NotReady = 600,
     ContextIsDestroyed = 709,
     LaunchFailed = 719,
     NotSupported = 801,
@@ -34,6 +38,7 @@ type Opaque = *mut c_void;
 
 struct CudaContext {
     backend: Context,
+    streams: Streams,
     device: c_int,
     allocations: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
@@ -60,8 +65,11 @@ thread_local! {
 }
 
 fn backend_error(error: Error) -> CuResult {
-    diagnostic(&error);
+    if !matches!(error, Error::Driver(_, 1)) {
+        diagnostic(&error);
+    }
     match error {
+        Error::Driver(_, 1) => NotReady,
         Error::Loader(_) | Error::Driver("zeInit", 0x78000001) => NoDevice,
         Error::Driver(_, 0x70000001 | 0x70000006) | Error::Build(0x70000001 | 0x70000006, _) => {
             LaunchFailed
@@ -152,7 +160,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
         Ok(rt) => {
             *guard = Some(State {
                 runtime: rt,
-                next_handle: 1,
+                next_handle: 3, // CUDA reserves stream values 0, 1 and 2.
                 contexts: HashMap::new(),
             });
             Success
@@ -181,11 +189,22 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
             .get(ordinal as usize)
             .ok_or(InvalidDevice)?;
         let key = reserve_handle(&mut state.next_handle)?;
-        let backend = Context::create(&state.runtime.api, device).map_err(backend_error)?;
+        let api = &state.runtime.api;
+        let mut backend = Context::create(api, device).map_err(backend_error)?;
+        let streams = match Streams::new(api, &backend) {
+            Ok(streams) => streams,
+            Err(error) => {
+                if let Err(cleanup) = backend.destroy(api) {
+                    diagnostic(&cleanup);
+                }
+                return Err(error);
+            }
+        };
         state.contexts.insert(
             key,
             CudaContext {
                 backend,
+                streams,
                 device: ordinal,
                 allocations: BTreeMap::new(),
                 modules: HashMap::new(),
@@ -204,12 +223,14 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
         let key = handle.addr();
         let context = state.contexts.get_mut(&key).ok_or(InvalidContext)?;
         let api = &state.runtime.api;
+        context.streams.wait_all(api)?;
         while let Some(&key) = context.modules.keys().next() {
             context.unload(api, key)?;
         }
         while let Some((&base, _)) = context.allocations.first_key_value() {
             context.free(api, base)?;
         }
+        context.streams.destroy(api)?;
         context.backend.destroy(api).map_err(backend_error)?;
         state.contexts.remove(&key);
         CURRENT.with(|stack| {
@@ -266,10 +287,7 @@ pub unsafe extern "system" fn cuCtxGetDevice(out: *mut c_int) -> CuResult {
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize() -> CuResult {
     status(with_context(|runtime, context| {
-        context
-            .backend
-            .synchronize(&runtime.api)
-            .map_err(backend_error)
+        context.streams.wait_all(&runtime.api)
     }))
 }
 
@@ -329,6 +347,10 @@ pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
         if address == 0 {
             return Ok(());
         }
+        if !context.allocations.contains_key(&(address as usize)) {
+            return Err(InvalidValue);
+        }
+        context.streams.wait_all(&runtime.api)?;
         context.free(&runtime.api, address as usize)
     }))
 }
@@ -348,6 +370,7 @@ unsafe fn copy(host: Opaque, device: u64, size: usize, to_device: bool) -> CuRes
         } else {
             (host, device)
         };
+        context.streams.wait_legacy(&runtime.api, u64::MAX)?;
         unsafe { context.backend.copy(&runtime.api, dst, src, size) }.map_err(backend_error)
     }))
 }
@@ -455,6 +478,10 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
 #[unsafe(no_mangle)]
 pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
     status(with_context(|runtime, context| {
+        if !context.modules.contains_key(&module.addr()) {
+            return Err(InvalidHandle);
+        }
+        context.streams.wait_all(&runtime.api)?;
         context.unload(&runtime.api, module.addr())
     }))
 }
@@ -528,9 +555,10 @@ pub unsafe extern "system" fn cuLaunchKernel(
     extra: *mut Opaque,
 ) -> CuResult {
     status(with_context(|runtime, context| {
-        if shared_bytes != 0 || !stream.is_null() || !extra.is_null() {
+        if shared_bytes != 0 || !extra.is_null() {
             return Err(NotSupported);
         }
+        let stream = context.streams.launch_key(stream)?;
         let module_key = context
             .functions
             .get(&function.addr())
@@ -561,10 +589,14 @@ pub unsafe extern "system" fn cuLaunchKernel(
             }
             args.push(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), param.size()) });
         }
-        context
-            .backend
-            .launch(&runtime.api, &module.backend, grid, block, &args)
-            .map_err(backend_error)
+        context.streams.launch(
+            &runtime.api,
+            &context.backend,
+            &module.backend,
+            stream,
+            (grid, block),
+            &args,
+        )
     }))
 }
 

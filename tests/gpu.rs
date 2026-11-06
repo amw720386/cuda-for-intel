@@ -843,3 +843,165 @@ fn fp32_rounding_and_contraction() {
     );
     ok!(cuCtxDestroy_v2(context));
 }
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn asynchronous_stream_order_and_lifetimes() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuCtxSynchronize(),
+        cuStreamCreate(*mut Handle, u32),
+        cuStreamDestroy_v2(Handle),
+        cuStreamSynchronize(Handle),
+        cuStreamQuery(Handle),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuModuleUnload(Handle),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemFree_v2(u64),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    let ptx = c"
+        .version 4.1
+        .target sm_52
+        .address_size 64
+        .entry increment(.param .u64 .ptr data, .param .u32 delta) {
+            .reg .b64 %ptr;
+            .reg .b32 %a;
+            .reg .b32 %b;
+            ld.param.b64 %ptr, [data];
+            ld.param.b32 %a, [delta];
+            ld.global.b32 %b, [%ptr];
+            add.s32 %b, %b, %a;
+            st.global.b32 [%ptr], %b;
+            ret;
+        }
+    ";
+    ok!(cuInit(0));
+    let (mut context, mut module, mut kernel) = (null_mut(), null_mut(), null_mut());
+    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
+    ok!(cuModuleGetFunction(
+        &mut kernel,
+        module,
+        c"increment".as_ptr()
+    ));
+    let (mut blocking, mut other_blocking, mut first, mut second) =
+        (null_mut(), null_mut(), null_mut(), null_mut());
+    let legacy = std::ptr::without_provenance_mut(1);
+    let per_thread = std::ptr::without_provenance_mut(2);
+    let invalid = std::ptr::without_provenance_mut(usize::MAX);
+    assert_eq!(unsafe { cuStreamCreate(&mut first, 2) }, 1);
+    assert!(first.is_null());
+    assert_eq!(unsafe { cuStreamCreate(null_mut(), 0) }, 1);
+    assert_eq!(unsafe { cuStreamQuery(invalid) }, 400);
+    assert_eq!(unsafe { cuStreamQuery(per_thread) }, 801);
+    assert_eq!(unsafe { cuStreamDestroy_v2(legacy) }, 400);
+
+    let size = size_of::<u32>();
+    let alloc = || {
+        let mut address = 0u64;
+        let zero = 0u32;
+        ok!(cuMemAlloc_v2(&mut address, size));
+        ok!(cuMemcpyHtoD_v2(address, (&zero as *const u32).cast(), size));
+        address
+    };
+    let shared = alloc();
+    let a = alloc();
+    let b = alloc();
+    let read = |address| {
+        let mut value = 0u32;
+        ok!(cuMemcpyDtoH_v2(
+            (&mut value as *mut u32).cast(),
+            address,
+            size
+        ));
+        value
+    };
+    let launch = |stream, mut address: u64, mut delta: u32| {
+        let mut args = [
+            (&mut address as *mut u64).cast(),
+            (&mut delta as *mut u32).cast(),
+        ];
+        unsafe {
+            cuLaunchKernel(
+                kernel,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0,
+                stream,
+                args.as_mut_ptr(),
+                null_mut(),
+            )
+        }
+    };
+    assert_eq!(launch(invalid, shared, 1), 400);
+    assert_eq!(launch(per_thread, shared, 1), 801);
+    ok!(cuStreamCreate(&mut blocking, 0));
+    ok!(cuStreamCreate(&mut other_blocking, 0));
+    ok!(cuStreamCreate(&mut first, 1));
+    ok!(cuStreamCreate(&mut second, 1));
+    ok!(cuStreamQuery(first));
+    ok!(cuStreamQuery(legacy));
+
+    let mut foreign_context = null_mut();
+    let mut foreign_stream = null_mut();
+    ok!(cuCtxCreate_v2(&mut foreign_context, 0, 0));
+    ok!(cuStreamCreate(&mut foreign_stream, 1));
+    ok!(cuStreamQuery(first)); // Explicit stream operations resolve the owner.
+    assert_eq!(launch(first, a, 1), 400);
+    ok!(cuCtxDestroy_v2(foreign_context));
+    assert_eq!(unsafe { cuStreamQuery(foreign_stream) }, 400);
+
+    for _ in 0..256 {
+        assert_eq!(launch(blocking, shared, 1), 0);
+        assert_eq!(launch(null_mut(), shared, 2), 0);
+        assert_eq!(launch(other_blocking, shared, 3), 0);
+        assert_eq!(launch(legacy, shared, 4), 0);
+    }
+    assert_eq!(launch(blocking, shared, 7), 0);
+    // A blocking copy is ordered after legacy and blocking stream work.
+    assert_eq!(read(shared), 2567);
+    ok!(cuStreamQuery(legacy));
+
+    for delta in 1..=1024 {
+        assert_eq!(launch(first, a, delta), 0);
+        assert_eq!(launch(second, b, 2 * delta), 0);
+    }
+    assert!(matches!(unsafe { cuStreamQuery(first) }, 0 | 600));
+    ok!(cuStreamSynchronize(first));
+    ok!(cuStreamQuery(first));
+    assert_eq!(read(a), 1024 * 1025 / 2);
+    ok!(cuStreamDestroy_v2(second));
+    assert_eq!(unsafe { cuStreamQuery(second) }, 400);
+    assert_eq!(unsafe { cuStreamDestroy_v2(second) }, 400);
+    ok!(cuCtxSynchronize());
+    assert_eq!(read(b), 1024 * 1025);
+
+    // Module unload and device free may occur with queued work. The runtime
+    // must keep their backend objects live until that work completes.
+    assert_eq!(launch(first, a, 5), 0);
+    ok!(cuMemFree_v2(a));
+    ok!(cuStreamQuery(first));
+    assert_eq!(launch(first, b, 11), 0);
+    ok!(cuModuleUnload(module));
+    assert_eq!(read(b), 1024 * 1025 + 11);
+    assert_eq!(launch(first, b, 1), 400);
+    ok!(cuStreamDestroy_v2(first));
+    ok!(cuStreamDestroy_v2(blocking));
+    ok!(cuStreamDestroy_v2(other_blocking));
+    ok!(cuCtxDestroy_v2(context));
+    println!(
+        "Verified legacy ordering, independent streams, retirement, and 3,072 queued launches"
+    );
+}
