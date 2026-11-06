@@ -947,6 +947,7 @@ fn asynchronous_stream_order_and_lifetimes() {
     };
     assert_eq!(launch(invalid, shared, 1), 400);
     assert_eq!(launch(per_thread, shared, 1), 801);
+    assert_eq!(launch(legacy, shared, 5), 0);
     ok!(cuStreamCreate(&mut blocking, 0));
     ok!(cuStreamCreate(&mut other_blocking, 0));
     ok!(cuStreamCreate(&mut first, 1));
@@ -971,7 +972,7 @@ fn asynchronous_stream_order_and_lifetimes() {
     }
     assert_eq!(launch(blocking, shared, 7), 0);
     // A blocking copy is ordered after legacy and blocking stream work.
-    assert_eq!(read(shared), 2567);
+    assert_eq!(read(shared), 2572);
     ok!(cuStreamQuery(legacy));
 
     for delta in 1..=1024 {

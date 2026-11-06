@@ -17,6 +17,7 @@ cargo build --locked
 cargo test --locked
 cargo run --locked --example devices
 cargo test --locked --test gpu -- --ignored --nocapture
+cargo test --locked --lib gated_stream_stays_pending -- --ignored
 ```
 
 The opt-in GPU tests load the built DLL by absolute path. They verify a memory round trip, vector addition, a 1,003-element block reduction at six block widths, and atomic contention across 23 workgroups. The reduction includes odd widths and partial final blocks. It checks bit-exact dyadic inputs, an FP32 tree-depth error bound for rounded inputs, and guard regions. GPU validation covers the Intel Core i5-1235U's Iris Xe (PCI device `8086:46a8`, Windows graphics driver `32.0.101.7085`). The Linux loader path is included for portability.
@@ -49,7 +50,17 @@ clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-un
 | Contexts | `cuCtxCreate_v2` with zero flags, `cuCtxDestroy_v2`, `cuCtxGetCurrent`, `cuCtxSetCurrent`, `cuCtxGetDevice`, `cuCtxSynchronize` |
 | Memory | `cuMemAlloc_v2`, `cuMemFree_v2`, blocking `cuMemcpyHtoD_v2` and `cuMemcpyDtoH_v2` within a single allocation owned by the current context |
 | Modules | `cuModuleLoad` from a UTF-8 path, `cuModuleLoadData` from NUL-terminated PTX text, `cuModuleGetFunction`, `cuModuleUnload` |
-| Launch | `cuLaunchKernel` with the null stream, an array of pointers to argument values, zero dynamic shared memory, and a null `extra` pointer. Launches complete synchronously. |
+| Streams | `cuStreamCreate` with default or nonblocking flags, `cuStreamDestroy_v2`, `cuStreamSynchronize`, and `cuStreamQuery` |
+| Launch | Asynchronous `cuLaunchKernel` with a supported stream, an array of pointers to argument values, zero dynamic shared memory, and a null `extra` pointer |
+
+Each stream submits in order to an asynchronous Level Zero immediate list.
+The null stream and `CU_STREAM_LEGACY` order work against blocking streams
+in the same context. Nonblocking streams are excluded from that ordering.
+Wait explicitly before reading results from nonblocking streams. Blocking
+copies follow legacy ordering and complete before returning. Context
+synchronization waits for every stream, including destroyed streams with
+queued work. Module unload and device free conservatively drain the context.
+GPU overlap depends on the Level Zero driver and hardware scheduler.
 
 The translator accepts one PTX 4.1 entry with 64-bit addressing and scalar
 32- or 64-bit parameters. Pointer parameters must use `.ptr` and point into a
@@ -77,7 +88,8 @@ atomic access support for device allocations.
 
 Cubins, fatbins, indirect branches, general predicated instructions, warp
 operations, dynamic shared memory, approximate FP32 math, alternate rounding
-modes, flush-to-zero modifiers, other barrier and atomic variants, streams, events,
+modes, flush-to-zero modifiers, other barrier and atomic variants, per-thread
+default streams, stream priorities, CUDA events, asynchronous copies,
 primary contexts, dynamic symbol lookup via
 `cuGetProcAddress`, the CUDA Runtime API and CUDA libraries are outside this
 milestone. Set `CUDA_FOR_INTEL_LOG=1` to print translation diagnostics and

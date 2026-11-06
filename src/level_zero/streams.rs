@@ -7,6 +7,18 @@ use std::sync::Arc;
 
 pub(crate) struct CommandList(Handle);
 
+// Submissions remain serialized by the frontend. Level Zero permits immediate-list
+// host synchronization from simultaneous threads.
+unsafe impl Sync for CommandList {}
+
+pub(crate) type WaitFn = unsafe extern "system" fn(Raw, u64) -> u32;
+
+impl Api {
+    pub(crate) fn stream_wait_fn(&self) -> WaitFn {
+        self.zeCommandListHostSynchronize
+    }
+}
+
 impl Context {
     pub(crate) fn create_stream(&self, api: &Api) -> Result<CommandList, Error> {
         let desc = QueueDesc {
@@ -26,6 +38,12 @@ impl Context {
 }
 
 impl CommandList {
+    pub(crate) fn signal(&self, api: &Api, fence: &Fence) -> Result<(), Error> {
+        check("zeCommandListAppendSignalEvent", unsafe {
+            (api.zeCommandListAppendSignalEvent)(self.0.0, fence.handle.0)
+        })
+    }
+
     pub(crate) fn destroy(&self, api: &Api) -> Result<(), Error> {
         check("zeCommandListDestroy", unsafe {
             (api.zeCommandListDestroy)(self.0.0)
@@ -33,8 +51,12 @@ impl CommandList {
     }
 
     pub(crate) fn wait(&self, api: &Api, timeout: u64) -> Result<(), Error> {
+        self.wait_with(api.zeCommandListHostSynchronize, timeout)
+    }
+
+    pub(crate) fn wait_with(&self, wait: WaitFn, timeout: u64) -> Result<(), Error> {
         check("zeCommandListHostSynchronize", unsafe {
-            (api.zeCommandListHostSynchronize)(self.0.0, timeout)
+            wait(self.0.0, timeout)
         })
     }
 
@@ -103,7 +125,7 @@ impl Fence {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn host_signal(&self, api: &Api) -> Result<(), Error> {
         let call = unsafe {
             api._library
@@ -114,7 +136,7 @@ impl Fence {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 impl CommandList {
     pub(crate) fn gate(&self, api: &Api, gate: &Fence) -> Result<(), Error> {
         let call = unsafe {

@@ -1,6 +1,6 @@
 use super::CuResult::*;
 use super::{
-    Api, Context, CuResult, Opaque, backend_error, reserve_handle, state, status,
+    Api, Context, CuResult, Opaque, State, backend_error, current, reserve_handle, state, status,
     with_context_handles,
 };
 use crate::level_zero::{CommandList, Fence, Fences, Module};
@@ -24,18 +24,20 @@ struct Submission {
 }
 
 struct Stream {
-    list: CommandList,
+    list: Arc<CommandList>,
     blocking: bool,
     dirty: bool,
+    generation: u64,
     pending: VecDeque<Submission>,
 }
 
 impl Stream {
     fn new(list: CommandList, blocking: bool) -> Self {
         Self {
-            list,
+            list: Arc::new(list),
             blocking,
             dirty: false,
+            generation: 0,
             pending: VecDeque::new(),
         }
     }
@@ -59,10 +61,23 @@ impl Stream {
     fn wait(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
         if self.dirty {
             self.list.wait(api, timeout).map_err(backend_error)?;
-            self.pending.clear();
-            self.dirty = false;
+            self.complete();
         }
         Ok(())
+    }
+
+    fn submitted(&mut self) {
+        self.dirty = true;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn complete(&mut self) {
+        self.pending.clear();
+        self.dirty = false;
+    }
+
+    fn has_waiters(&self) -> bool {
+        Arc::strong_count(&self.list) > 1
     }
 }
 
@@ -71,6 +86,7 @@ pub(super) struct Streams {
     live: HashMap<usize, Stream>,
     retired: Vec<Stream>,
     fences: Fences,
+    track_legacy: bool,
 }
 
 impl Streams {
@@ -81,6 +97,7 @@ impl Streams {
             live: HashMap::new(),
             retired: Vec::new(),
             fences: Fences::default(),
+            track_legacy: false,
         })
     }
 
@@ -111,10 +128,39 @@ impl Streams {
             .chain(&mut self.retired)
     }
 
+    pub(super) fn has_waiters(&self) -> bool {
+        self.legacy
+            .iter()
+            .chain(self.explicit())
+            .any(Stream::has_waiters)
+    }
+
+    fn snapshot(&self, key: Option<usize>) -> Result<Vec<(Arc<CommandList>, u64)>, CuResult> {
+        if let Some(key) = key.filter(|&key| key != 0) {
+            let stream = self.get(key)?;
+            return Ok(stream
+                .dirty
+                .then(|| (Arc::clone(&stream.list), stream.generation))
+                .into_iter()
+                .collect());
+        }
+        Ok(self
+            .legacy
+            .iter()
+            .chain(self.explicit())
+            .filter(|stream| stream.dirty && (key.is_none() || stream.blocking))
+            .map(|stream| (Arc::clone(&stream.list), stream.generation))
+            .collect())
+    }
+
     fn collect_retired(&mut self, api: &Api) -> Result<(), CuResult> {
         let mut index = 0;
         while index < self.retired.len() {
             let stream = &mut self.retired[index];
+            if stream.has_waiters() {
+                index += 1;
+                continue;
+            }
             match stream.wait(api, 0) {
                 Ok(()) => {
                     stream.list.destroy(api).map_err(backend_error)?;
@@ -123,6 +169,37 @@ impl Streams {
                 Err(NotReady) => index += 1,
                 Err(error) => return Err(error),
             }
+        }
+        Ok(())
+    }
+
+    fn next_fence(&mut self, api: &Api, context: &Context) -> Result<Arc<Fence>, CuResult> {
+        if self.fences.needs_refill() {
+            for stream in self.all_mut() {
+                stream.reap(api)?;
+            }
+        }
+        self.fences.acquire(api, context).map_err(backend_error)
+    }
+
+    fn track_legacy(&mut self, api: &Api, context: &Context) -> Result<(), CuResult> {
+        if !self.track_legacy {
+            if self.get(0)?.dirty {
+                // Capture any default work submitted before the first blocking
+                // stream existed. The marker is itself an asynchronous append.
+                let completion = self.next_fence(api, context)?;
+                let legacy = self.get_mut(0)?;
+                legacy
+                    .list
+                    .signal(api, &completion)
+                    .map_err(backend_error)?;
+                legacy.submitted();
+                legacy.pending.push_back(Submission {
+                    completion,
+                    _waits: Vec::new(),
+                });
+            }
+            self.track_legacy = true;
         }
         Ok(())
     }
@@ -138,13 +215,8 @@ impl Streams {
     ) -> Result<(), CuResult> {
         let blocking = self.get(key)?.blocking;
         self.collect_retired(api)?;
-        let signal = if blocking {
-            if self.fences.needs_refill() {
-                for stream in self.all_mut() {
-                    stream.reap(api)?;
-                }
-            }
-            Some(self.fences.acquire(api, context).map_err(backend_error)?)
+        let signal = if blocking && self.track_legacy {
+            Some(self.next_fence(api, context)?)
         } else {
             None
         };
@@ -163,7 +235,7 @@ impl Streams {
             .list
             .launch(api, module, geometry, args, signal.as_deref(), &waits)
             .map_err(backend_error)?;
-        stream.dirty = true;
+        stream.submitted();
         if let Some(completion) = signal {
             stream.pending.push_back(Submission {
                 completion,
@@ -214,6 +286,11 @@ pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> Cu
         }
         context.streams.collect_retired(&runtime.api)?;
         let key = reserve_handle(next)?;
+        if flags == 0 {
+            context
+                .streams
+                .track_legacy(&runtime.api, &context.backend)?;
+        }
         let list = context
             .backend
             .create_stream(&runtime.api)
@@ -229,22 +306,28 @@ pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> Cu
 
 // Explicit stream handles identify their owning context independently of the calling
 // thread's current context. Launch additionally requires the function's context.
+fn stream_owner(state: &State, handle: Opaque) -> Result<(usize, usize), CuResult> {
+    let key = stream_key(handle)?;
+    let owner = if key == 0 {
+        current().ok_or(InvalidContext)?
+    } else {
+        state
+            .contexts
+            .iter()
+            .find(|(_, context)| context.streams.live.contains_key(&key))
+            .map(|(&owner, _)| owner)
+            .ok_or(InvalidHandle)?
+    };
+    Ok((owner, key))
+}
+
 fn with_stream(
     handle: Opaque,
     action: impl FnOnce(&Api, &mut Streams, usize) -> Result<(), CuResult>,
 ) -> Result<(), CuResult> {
     state(|state| {
-        let key = stream_key(handle)?;
-        let context = if key == 0 {
-            let key = super::current().ok_or(InvalidContext)?;
-            state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?
-        } else {
-            state
-                .contexts
-                .values_mut()
-                .find(|context| context.streams.live.contains_key(&key))
-                .ok_or(InvalidHandle)?
-        };
+        let (owner, key) = stream_owner(state, handle)?;
+        let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
         action(&state.runtime.api, &mut context.streams, key)
     })
 }
@@ -257,7 +340,12 @@ pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
         }
         streams.collect_retired(api)?;
         let stream = streams.get_mut(key)?;
-        match stream.wait(api, 0) {
+        let ready = if stream.has_waiters() {
+            Err(NotReady)
+        } else {
+            stream.wait(api, 0)
+        };
+        match ready {
             Ok(()) => {
                 stream.list.destroy(api).map_err(backend_error)?;
                 streams.live.remove(&key);
@@ -272,31 +360,74 @@ pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
     }))
 }
 
-fn stream_wait(handle: Opaque, timeout: u64) -> CuResult {
-    status(with_stream(handle, |api, streams, key| {
-        if key == 0 {
-            streams.wait_legacy(api, timeout)?;
-        } else {
-            streams.get_mut(key)?.wait(api, timeout)?;
+fn synchronize(
+    target: impl FnOnce(&State) -> Result<(usize, Option<usize>), CuResult>,
+) -> Result<(), CuResult> {
+    let (owner, lists, wait) = state(|state| {
+        let (owner, key) = target(state)?;
+        let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
+        context.streams.collect_retired(&state.runtime.api)?;
+        Ok((
+            owner,
+            context.streams.snapshot(key)?,
+            state.runtime.api.stream_wait_fn(),
+        ))
+    })?;
+    if lists.is_empty() {
+        return Ok(());
+    }
+    // Each snapshot keeps its list alive across destruction of the public stream
+    // handle. The runtime and its Level Zero loader outlive all API calls.
+    for (list, _) in &lists {
+        list.wait_with(wait, u64::MAX).map_err(backend_error)?;
+    }
+    state(move |state| {
+        let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
+        for stream in context.streams.all_mut() {
+            if lists.iter().any(|(list, generation)| {
+                Arc::ptr_eq(list, &stream.list) && *generation == stream.generation
+            }) {
+                stream.complete();
+            }
         }
+        drop(lists);
+        context.streams.collect_retired(&state.runtime.api)?;
         Ok(())
+    })
+}
+
+pub(super) fn synchronize_context() -> CuResult {
+    status(synchronize(|_| {
+        Ok((current().ok_or(InvalidContext)?, None))
     }))
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamSynchronize(handle: Opaque) -> CuResult {
-    stream_wait(handle, u64::MAX)
+    status(synchronize(|state| {
+        let (owner, key) = stream_owner(state, handle)?;
+        Ok((owner, Some(key)))
+    }))
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamQuery(handle: Opaque) -> CuResult {
-    stream_wait(handle, 0)
+    status(with_stream(handle, |api, streams, key| {
+        if key == 0 {
+            streams.wait_legacy(api, 0)
+        } else {
+            streams.get_mut(key)?.wait(api, 0)
+        }
+    }))
 }
 
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use crate::cuda::{cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSynchronize, cuInit};
+    use crate::cuda::{
+        cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSynchronize, cuInit, cuLaunchKernel,
+        cuModuleGetFunction, cuModuleLoadData,
+    };
     use std::ptr::null_mut;
 
     #[test]
@@ -308,6 +439,16 @@ mod tests {
         let (mut gated, mut idle) = (null_mut(), null_mut());
         assert_eq!(unsafe { cuStreamCreate(&mut gated, 1) }, Success);
         assert_eq!(unsafe { cuStreamCreate(&mut idle, 0) }, Success);
+        let ptx = c".version 4.1 .target sm_52 .address_size 64 .entry noop() { ret; }";
+        let (mut module, mut kernel) = (null_mut(), null_mut());
+        assert_eq!(
+            unsafe { cuModuleLoadData(&mut module, ptx.as_ptr().cast()) },
+            Success
+        );
+        assert_eq!(
+            unsafe { cuModuleGetFunction(&mut kernel, module, c"noop".as_ptr()) },
+            Success
+        );
 
         let gate = super::super::with_context(|runtime, context| {
             let api = &runtime.api;
@@ -318,26 +459,46 @@ mod tests {
                 .map_err(backend_error)?;
             let stream = context.streams.get_mut(gated.addr())?;
             stream.list.gate(api, &gate).map_err(backend_error)?;
-            stream.dirty = true;
+            stream.submitted();
             Ok(gate)
         })
         .unwrap();
 
         // No kernel duration or elapsed-time assumptions. Only the host signal
         // below can satisfy the device wait.
+        assert_eq!(
+            unsafe { cuLaunchKernel(kernel, 1, 1, 1, 1, 1, 1, 0, gated, null_mut(), null_mut()) },
+            Success
+        );
         assert_eq!(cuStreamQuery(gated), NotReady);
         assert_eq!(cuStreamQuery(null_mut()), Success);
         assert_eq!(cuStreamSynchronize(idle), Success);
         assert_eq!(cuStreamSynchronize(null_mut()), Success);
-        assert_eq!(cuStreamDestroy_v2(gated), Success);
-        assert_eq!(cuStreamQuery(gated), InvalidHandle);
-        super::super::with_context(|runtime, context| {
-            assert_eq!(context.streams.retired.len(), 1);
-            gate.host_signal(&runtime.api).map_err(backend_error)
-        })
-        .unwrap();
-        drop(gate);
+        let gated_key = gated.addr();
+        std::thread::scope(|scope| {
+            let waiter = scope
+                .spawn(move || cuStreamSynchronize(std::ptr::without_provenance_mut(gated_key)));
+            while !super::super::with_context(|_, context| Ok(context.streams.has_waiters()))
+                .unwrap()
+            {
+                assert!(
+                    !waiter.is_finished(),
+                    "wait returned before the gate opened"
+                );
+                std::thread::yield_now();
+            }
+            assert_eq!(cuStreamQuery(null_mut()), Success);
+            assert_eq!(cuStreamDestroy_v2(gated), Success);
+            assert_eq!(cuStreamQuery(gated), InvalidHandle);
+            super::super::with_context(|runtime, context| {
+                assert_eq!(context.streams.retired.len(), 1);
+                gate.host_signal(&runtime.api).map_err(backend_error)
+            })
+            .unwrap();
+            assert_eq!(waiter.join().unwrap(), Success);
+        });
         assert_eq!(cuCtxSynchronize(), Success);
+        drop(gate);
         super::super::with_context(|_, context| {
             assert!(context.streams.retired.is_empty());
             Ok(())

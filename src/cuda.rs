@@ -223,6 +223,10 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
         let key = handle.addr();
         let context = state.contexts.get_mut(&key).ok_or(InvalidContext)?;
         let api = &state.runtime.api;
+        // Context teardown cannot invalidate a list another host call is using.
+        if context.streams.has_waiters() {
+            return Err(NotReady);
+        }
         context.streams.wait_all(api)?;
         while let Some(&key) = context.modules.keys().next() {
             context.unload(api, key)?;
@@ -286,9 +290,7 @@ pub unsafe extern "system" fn cuCtxGetDevice(out: *mut c_int) -> CuResult {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize() -> CuResult {
-    status(with_context(|runtime, context| {
-        context.streams.wait_all(&runtime.api)
-    }))
+    streams::synchronize_context()
 }
 
 impl CudaContext {

@@ -263,6 +263,7 @@ loader_api! {
     zeCommandListCreateImmediate(Raw, Raw, *const QueueDesc, *mut Raw),
     zeCommandListDestroy(Raw),
     zeCommandListHostSynchronize(Raw, u64),
+    zeCommandListAppendSignalEvent(Raw, Raw),
     zeEventPoolCreate(Raw, *const EventPoolDesc, u32, *mut Raw, *mut Raw),
     zeEventPoolDestroy(Raw),
     zeEventCreate(Raw, *const EventDesc, *mut Raw),
