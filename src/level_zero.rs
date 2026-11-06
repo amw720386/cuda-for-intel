@@ -127,6 +127,16 @@ struct ModuleProperties {
 }
 
 #[repr(C)]
+struct MemoryAccessProperties {
+    header: Header,
+    host_alloc: u32,
+    device_alloc: u32,
+    shared_single_device_alloc: u32,
+    shared_cross_device_alloc: u32,
+    shared_system_alloc: u32,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct ExtensionProperties {
     name: [c_char; 256],
@@ -226,6 +236,7 @@ loader_api! {
     zeDeviceGetProperties(Raw, *mut Properties),
     zeDeviceGetComputeProperties(Raw, *mut ComputeProperties),
     zeDeviceGetMemoryProperties(Raw, *mut u32, *mut MemoryProperties),
+    zeDeviceGetMemoryAccessProperties(Raw, *mut MemoryAccessProperties),
     zeDeviceGetModuleProperties(Raw, *mut ModuleProperties),
     zeDriverGetExtensionProperties(Raw, *mut u32, *mut ExtensionProperties),
     zeDeviceGetCommandQueueGroupProperties(Raw, *mut u32, *mut QueueGroupProperties),
@@ -270,6 +281,7 @@ pub struct DeviceInfo {
 
 pub(crate) struct Device {
     pub(crate) info: DeviceInfo,
+    pub(crate) device_memory_atomics: bool,
     driver: Handle,
     handle: Handle,
     compute_queue: Option<u32>,
@@ -578,6 +590,11 @@ impl Runtime {
                 check("zeDeviceGetModuleProperties", unsafe {
                     (api.zeDeviceGetModuleProperties)(handle, &mut module)
                 })?;
+                let mut access: MemoryAccessProperties = unsafe { std::mem::zeroed() };
+                access.header = Header::new(8);
+                check("zeDeviceGetMemoryAccessProperties", unsafe {
+                    (api.zeDeviceGetMemoryAccessProperties)(handle, &mut access)
+                })?;
                 let mut memory: MemoryProperties = unsafe { std::mem::zeroed() };
                 memory.header = Header::new(7);
                 let memory =
@@ -626,6 +643,7 @@ impl Runtime {
                     driver: Handle(driver),
                     handle: Handle(handle),
                     compute_queue,
+                    device_memory_atomics: access.device_alloc & (1 << 1) != 0,
                     info: DeviceInfo {
                         name: name(&properties.name)?,
                         device_id: properties.device,
@@ -672,6 +690,7 @@ mod tests {
         assert_eq!(size_of::<ComputeProperties>(), 88);
         assert_eq!(size_of::<MemoryProperties>(), 296);
         assert_eq!(size_of::<ModuleProperties>(), 64);
+        assert_eq!(size_of::<MemoryAccessProperties>(), 40);
         assert_eq!(size_of::<ExtensionProperties>(), 260);
     }
 

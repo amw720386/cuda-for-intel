@@ -422,3 +422,97 @@ fn compiled_ptx_block_reduction() {
     }
     ok!(cuCtxDestroy_v2(context));
 }
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn compiled_ptx_atomic_tickets() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    let ptx = std::ffi::CString::new(include_str!("../examples/atomic_tickets.ptx")).unwrap();
+    let mut module = null_mut();
+    ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
+    let mut kernel = null_mut();
+    ok!(cuModuleGetFunction(
+        &mut kernel,
+        module,
+        c"atomic_tickets".as_ptr()
+    ));
+
+    const GROUPS: u32 = 23;
+    const THREADS: u32 = 64;
+    const COUNT: u32 = GROUPS * THREADS;
+    const START: u32 = u32::MAX - COUNT / 2;
+    const GUARD: u32 = 0x1234_5678;
+    let mut tickets = vec![GUARD; COUNT as usize + 2];
+    let size = size_of::<u32>();
+    let bytes = tickets.len() * size;
+    let (mut counter, mut ticket_base) = (0u64, 0u64);
+    ok!(cuMemAlloc_v2(&mut counter, size));
+    ok!(cuMemAlloc_v2(&mut ticket_base, bytes));
+    ok!(cuMemcpyHtoD_v2(
+        counter,
+        (&START as *const u32).cast(),
+        size
+    ));
+    ok!(cuMemcpyHtoD_v2(ticket_base, tickets.as_ptr().cast(), bytes));
+    let mut ticket_ptr = ticket_base + size as u64;
+    let mut args = [
+        (&mut counter as *mut u64).cast(),
+        (&mut ticket_ptr as *mut u64).cast(),
+    ];
+
+    ok!(cuLaunchKernel(
+        kernel,
+        GROUPS,
+        1,
+        1,
+        THREADS,
+        1,
+        1,
+        0,
+        null_mut(),
+        args.as_mut_ptr(),
+        null_mut()
+    ));
+    let mut final_count = 0u32;
+    ok!(cuMemcpyDtoH_v2(
+        (&mut final_count as *mut u32).cast(),
+        counter,
+        size
+    ));
+    ok!(cuMemcpyDtoH_v2(
+        tickets.as_mut_ptr().cast(),
+        ticket_base,
+        bytes
+    ));
+    assert_eq!(final_count, START.wrapping_add(COUNT));
+    assert_eq!(tickets.first(), Some(&GUARD));
+    assert_eq!(tickets.last(), Some(&GUARD));
+    let mut offsets: Vec<_> = tickets[1..=COUNT as usize]
+        .iter()
+        .map(|&ticket| ticket.wrapping_sub(START))
+        .collect();
+    offsets.sort_unstable();
+    assert!(
+        offsets.into_iter().eq(0..COUNT),
+        "atomic tickets must be unique and complete"
+    );
+    println!(
+        "Verified {COUNT} atomic tickets across {GROUPS} workgroups, including counter wraparound"
+    );
+    ok!(cuCtxDestroy_v2(context));
+}

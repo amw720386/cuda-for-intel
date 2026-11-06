@@ -19,7 +19,7 @@ cargo run --locked --example devices
 cargo test --locked --test gpu -- --ignored --nocapture
 ```
 
-The opt-in GPU tests load the built DLL by absolute path. They verify a memory round trip, the vector-add regression, and a 1,003-element block reduction at six block widths, including odd widths and partial final blocks. The reduction checks bit-exact dyadic inputs, an FP32 tree-depth error bound for rounded inputs, and guard regions. GPU validation covers the Intel Core i5-1235U's Iris Xe (PCI device `8086:46a8`, Windows graphics driver `32.0.101.7085`). The Linux loader path is included for portability.
+The opt-in GPU tests load the built DLL by absolute path. They verify a memory round trip, vector addition, a 1,003-element block reduction at six block widths, and atomic contention across 23 workgroups. The reduction includes odd widths and partial final blocks. It checks bit-exact dyadic inputs, an FP32 tree-depth error bound for rounded inputs, and guard regions. GPU validation covers the Intel Core i5-1235U's Iris Xe (PCI device `8086:46a8`, Windows graphics driver `32.0.101.7085`). The Linux loader path is included for portability.
 
 With Khronos `spirv-val` on PATH or selected by `SPIRV_VAL`, validate the emitted OpenCL SPIR-V independently.
 
@@ -32,6 +32,7 @@ Clang 23.1.1 with the NVPTX backend generated the checked-in PTX fixtures.
 ```powershell
 clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -S examples/vector_add.cu -o examples/vector_add.ptx
 clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-unroll-loops -S examples/block_reduce.cu -o examples/block_reduce.ptx
+clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -S examples/atomic_tickets.cu -o examples/atomic_tickets.ptx
 ```
 
 ## Supported subset
@@ -60,8 +61,12 @@ limit. `bar.sync 0` synchronizes all threads in a workgroup and orders their
 shared and global accesses. Conditional paths that may bypass a barrier within
 the workgroup are rejected. Callers provide aligned buffers with valid bounds.
 
+The atomic subset is `atom.global.add.u32` on device allocations with
+device-scope relaxed ordering. The runtime requires Level Zero to report
+atomic access support for device allocations.
+
 Cubins, fatbins, indirect branches, general predicated instructions, warp
-operations, dynamic shared memory, other barrier variants, streams, events,
+operations, dynamic shared memory, other barrier and atomic variants, streams, events,
 primary contexts, dynamic symbol lookup via
 `cuGetProcAddress`, the CUDA Runtime API and CUDA libraries are outside this
 milestone. Set `CUDA_FOR_INTEL_LOG=1` to print translation diagnostics and

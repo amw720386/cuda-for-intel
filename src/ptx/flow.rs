@@ -129,7 +129,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             let block = &blocks[index];
             for inst in &block.instructions {
                 if let Some((dst, inputs)) = inst.assignment()
-                    && (matches!(inst, Instruction::Load32(..))
+                    && (matches!(inst, Instruction::Load32(..) | Instruction::AtomicAdd32(..))
                         || inputs
                             .iter()
                             .any(|src| src.starts_with("%tid.") || varying.contains(src)))

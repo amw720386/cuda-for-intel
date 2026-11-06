@@ -70,6 +70,8 @@ struct Emitter<'a> {
     initialized: HashSet<&'a str>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<&'a str, Value>,
+    device_atomics: bool,
+    fp32_add: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -129,6 +131,8 @@ impl<'a> Emitter<'a> {
             initialized: HashSet::new(),
             locals: Vec::new(),
             params: HashMap::new(),
+            device_atomics: false,
+            fp32_add: false,
         }
     }
 
@@ -408,6 +412,7 @@ impl<'a> Emitter<'a> {
                 )
             }
             Instruction::AddFloat32(dst, [a, b]) => {
+                self.fp32_add = true;
                 let a = self.read(a)?.require(Kind::B32, a)?;
                 let b = self.read(b)?.require(Kind::B32, b)?;
                 let a = self.builder.bitcast(self.f32_type, None, a)?;
@@ -435,6 +440,26 @@ impl<'a> Emitter<'a> {
                 let semantics = self.builder.constant_bit32(self.u32_type, semantics.bits());
                 self.builder.control_barrier(scope, scope, semantics)?;
                 return Ok(());
+            }
+            Instruction::AtomicAdd32(dst, address, value) => {
+                let pointer = self.word_pointer(Space::Global, address)?;
+                let value = self.integer(value, Kind::B32)?;
+                let scope = self
+                    .builder
+                    .constant_bit32(self.u32_type, Scope::Device as u32);
+                let relaxed = self
+                    .builder
+                    .constant_bit32(self.u32_type, MemorySemantics::empty().bits());
+                self.device_atomics = true;
+                let previous = self.builder.atomic_i_add(
+                    self.u32_type,
+                    None,
+                    pointer,
+                    scope,
+                    relaxed,
+                    value,
+                )?;
+                (dst, previous, Kind::B32)
             }
         };
         self.write(dst, Value { id, kind })
@@ -507,5 +532,7 @@ pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
         words: module.assemble(),
         shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
         max_threads: entry.max_threads,
+        device_atomics: emitter.device_atomics,
+        fp32_add: emitter.fp32_add,
     })
 }

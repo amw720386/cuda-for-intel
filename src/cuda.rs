@@ -377,8 +377,14 @@ fn load_ptx(
         diagnostic(&error);
         InvalidPtx
     })?;
-    let info = &runtime.devices[context.device as usize].info;
-    if info.spirv_version < 0x10000 || !info.fp32_denorms || !info.fp32_round_to_nearest {
+    let device = &runtime.devices[context.device as usize];
+    let info = &device.info;
+    if info.spirv_version < 0x10000
+        || (translated.fp32_add && (!info.fp32_denorms || !info.fp32_round_to_nearest))
+    {
+        return Err(NotSupported);
+    }
+    if translated.device_atomics && !device.device_memory_atomics {
         return Err(NotSupported);
     }
     let argument_bytes = translated.params.iter().fold(0usize, |offset, &param| {

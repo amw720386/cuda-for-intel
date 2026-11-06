@@ -88,6 +88,7 @@ enum Instruction<'a> {
     Load32(Space, &'a str, &'a str),
     AddFloat32(&'a str, [&'a str; 2]),
     Store32(Space, &'a str, &'a str),
+    AtomicAdd32(&'a str, &'a str, &'a str),
     Barrier,
 }
 
@@ -95,7 +96,9 @@ impl<'a> Instruction<'a> {
     fn assignment(&self) -> Option<(&'a str, &[&'a str])> {
         use Instruction::*;
         Some(match self {
-            Param(_, dst, _) | SharedAddress(dst, _) | Load32(_, dst, _) => (*dst, &[]),
+            Param(_, dst, _) | SharedAddress(dst, _) | Load32(_, dst, _) | AtomicAdd32(dst, ..) => {
+                (*dst, &[])
+            }
             ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) => {
                 (*dst, std::slice::from_ref(src))
             }
@@ -156,6 +159,8 @@ pub(crate) struct Translation {
     pub(crate) words: Vec<u32>,
     pub(crate) shared_bytes: u32,
     pub(crate) max_threads: Option<u32>,
+    pub(crate) device_atomics: bool,
+    pub(crate) fp32_add: bool,
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
@@ -169,6 +174,7 @@ mod tests {
 
     const VECTOR_ADD: &str = include_str!("../examples/vector_add.ptx");
     const BLOCK_REDUCE: &str = include_str!("../examples/block_reduce.ptx");
+    const ATOMIC_TICKETS: &str = include_str!("../examples/atomic_tickets.ptx");
 
     const SHARED: &str = "
         .version 4.1
@@ -278,6 +284,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_device_scope_relaxed_unsigned_atomic_add() {
+        let translated = translate(ATOMIC_TICKETS).unwrap();
+        assert!(translated.device_atomics);
+        assert!(!translated.fp32_add);
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        assert!(
+            module.functions[0]
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|inst| inst.class.opcode == Op::AtomicIAdd)
+        );
+        for op in [
+            "atom.global.add.u64",
+            "atom.acquire.gpu.global.add.u32",
+            "atom.shared.add.u32",
+        ] {
+            assert!(translate(&ATOMIC_TICKETS.replace("atom.global.add.u32", op)).is_err());
+        }
+    }
+
+    #[test]
     fn rejects_missing_register_definitions_at_joins_and_divergent_barriers() {
         let undefined = BLOCK_REDUCE.replace("mov.b32 \t%r12, 0f00000000;", "");
         assert_ne!(undefined, BLOCK_REDUCE);
@@ -305,7 +333,7 @@ mod tests {
         use std::process::{Command, Stdio};
 
         let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
-        for source in [VECTOR_ADD, SHARED, BLOCK_REDUCE] {
+        for source in [VECTOR_ADD, SHARED, BLOCK_REDUCE, ATOMIC_TICKETS] {
             let translated = translate(source).unwrap();
             let mut process = Command::new(&validator)
                 .args(["--target-env", "opencl2.2", "-"])

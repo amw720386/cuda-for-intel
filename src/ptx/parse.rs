@@ -169,6 +169,16 @@ impl<'a> Parser<'a> {
             ["cvta.to.global.u64", dst, ",", src] => Instruction::ToGlobal(dst, src),
             ["mov.b64", dst, ",", src] => Instruction::SharedAddress(dst, src),
             ["bar.sync", "0"] => Instruction::Barrier,
+            [
+                "atom.global.add.u32",
+                dst,
+                ",",
+                "[",
+                address,
+                "]",
+                ",",
+                value,
+            ] => Instruction::AtomicAdd32(dst, address, value),
             ["mov.u32", dst, ",", src] => Instruction::Builtin(dst, src),
             ["mad.lo.s32" | "mad.lo.u32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Mad32(dst, [a, b, c])
