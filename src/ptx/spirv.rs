@@ -315,6 +315,80 @@ impl<'a> Emitter<'a> {
         Ok(self.builder.bitcast(ty, None, pointer)?)
     }
 
+    fn float_vector_pointer(
+        &mut self,
+        space: Space,
+        address: &str,
+        count: u32,
+    ) -> Result<(Word, Word), Error> {
+        let vector = self.builder.type_vector(self.f32_type, count);
+        let storage = match space {
+            Space::Global => StorageClass::CrossWorkgroup,
+            Space::Shared => StorageClass::Workgroup,
+        };
+        let pointer_type = self.builder.type_pointer(None, storage, vector);
+        let byte_pointer = if space == Space::Shared && !address.starts_with('%') {
+            let array = self.shared_base(address)?;
+            self.builder.bitcast(self.shared_byte_ptr, None, array)?
+        } else {
+            self.read(address)?.require(Kind::Address(space), address)?
+        };
+        Ok((
+            vector,
+            self.builder.bitcast(pointer_type, None, byte_pointer)?,
+        ))
+    }
+
+    fn load_float_vector(
+        &mut self,
+        space: Space,
+        count: u8,
+        dst: &[&'a str; 4],
+        addr: &str,
+    ) -> Result<(), Error> {
+        let count = u32::from(count);
+        let (vector, pointer) = self.float_vector_pointer(space, addr, count)?;
+        let loaded = self.builder.load(vector, None, pointer, None, [])?;
+        self.fp32 = true;
+        for index in 0..count {
+            let component = self
+                .builder
+                .composite_extract(self.f32_type, None, loaded, [index])?;
+            let bits = self.builder.bitcast(self.u32_type, None, component)?;
+            self.write(
+                dst[index as usize],
+                Value {
+                    id: bits,
+                    kind: Kind::B32,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn store_float_vector(
+        &mut self,
+        space: Space,
+        count: u8,
+        addr: &str,
+        src: &[&'a str; 4],
+    ) -> Result<(), Error> {
+        let count = u32::from(count);
+        let (vector, pointer) = self.float_vector_pointer(space, addr, count)?;
+        let mut components = [0; 4];
+        for index in 0..count {
+            components[index as usize] = self.float_value(src[index as usize])?;
+        }
+        let value = self.builder.composite_construct(
+            vector,
+            None,
+            components[..count as usize].iter().copied(),
+        )?;
+        self.fp32 = true;
+        self.builder.store(pointer, value, None, [])?;
+        Ok(())
+    }
+
     fn float_bits(&mut self, source: &str) -> Result<Word, Error> {
         if let Some(hex) = source.strip_prefix("0f").filter(|hex| hex.len() == 8) {
             let bits = u32::from_str_radix(hex, 16)
@@ -595,11 +669,29 @@ impl<'a> Emitter<'a> {
                     Kind::B32,
                 )
             }
+            Instruction::LoadVec {
+                space,
+                count,
+                dst,
+                addr,
+            } => {
+                self.load_float_vector(space, count, &dst, addr)?;
+                return Ok(());
+            }
             Instruction::Float32(dst, op) => (dst, self.float_op(op)?, Kind::B32),
             Instruction::Store32(space, address, src) => {
                 let pointer = self.word_pointer(space, address)?;
                 let value = self.read(src)?.require(Kind::B32, src)?;
                 self.builder.store(pointer, value, None, [])?;
+                return Ok(());
+            }
+            Instruction::StoreVec {
+                space,
+                count,
+                addr,
+                src,
+            } => {
+                self.store_float_vector(space, count, addr, &src)?;
                 return Ok(());
             }
             Instruction::Barrier => {

@@ -56,14 +56,17 @@ impl<'a> Flow<'a> {
             verify_barriers(blocks, &order)?;
         }
 
+        let mut scratch = Vec::new();
         let definitions: Vec<HashSet<_>> = blocks
             .iter()
             .map(|block| {
-                block
-                    .instructions
-                    .iter()
-                    .filter_map(|inst| inst.assignment().map(|(dst, _)| dst))
-                    .collect()
+                let mut defined = HashSet::new();
+                for inst in &block.instructions {
+                    if inst.collect_definitions(&mut scratch).is_some() {
+                        defined.extend(scratch.iter().copied());
+                    }
+                }
+                defined
             })
             .collect();
         let all: HashSet<_> = definitions.iter().flatten().copied().collect();
@@ -128,13 +131,14 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
         for &index in order {
             let block = &blocks[index];
             for inst in &block.instructions {
-                if let Some((dst, inputs)) = inst.assignment()
-                    && (matches!(inst, Instruction::Load32(..) | Instruction::AtomicAdd32(..))
+                let mut defined = Vec::new();
+                if let Some(inputs) = inst.collect_definitions(&mut defined)
+                    && (inst.is_memory_load()
                         || inputs
                             .iter()
                             .any(|src| src.starts_with("%tid.") || varying.contains(src)))
                 {
-                    varying.insert(dst);
+                    varying.extend(defined.iter().copied());
                 }
             }
             let Terminator::Branch {
@@ -161,8 +165,9 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                     if matches!(inst, Instruction::Barrier) {
                         return Err(Error::new("workgroup barrier may execute divergently"));
                     }
-                    if let Some((dst, _)) = inst.assignment() {
-                        varying.insert(dst);
+                    let mut defined = Vec::new();
+                    if inst.collect_definitions(&mut defined).is_some() {
+                        varying.extend(defined.iter().copied());
                     }
                 }
                 stack.extend(blocks[next].end.successors());

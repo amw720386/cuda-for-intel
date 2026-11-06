@@ -144,34 +144,78 @@ enum Instruction<'a> {
     ShiftLeft64(&'a str, [&'a str; 2]),
     Add64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
+    LoadVec {
+        space: Space,
+        count: u8,
+        dst: [&'a str; 4],
+        addr: &'a str,
+    },
     Float32(&'a str, FloatOp<'a>),
     Store32(Space, &'a str, &'a str),
+    StoreVec {
+        space: Space,
+        count: u8,
+        addr: &'a str,
+        src: [&'a str; 4],
+    },
     AtomicAdd32(&'a str, &'a str, &'a str),
     Barrier,
 }
 
 impl<'a> Instruction<'a> {
-    fn assignment(&self) -> Option<(&'a str, &[&'a str])> {
+    /// Appends registers defined by this instruction. Returns source operands when it defines any.
+    fn collect_definitions(&self, out: &mut Vec<&'a str>) -> Option<&[&'a str]> {
         use Instruction::*;
+        out.clear();
         Some(match self {
-            Param(_, dst, ..)
-            | SharedAddress(dst, _)
-            | Load32(_, dst, _)
-            | AtomicAdd32(dst, ..) => (*dst, &[]),
-            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) => {
-                (*dst, std::slice::from_ref(src))
+            Param(_, dst, ..) | SharedAddress(dst, _) | AtomicAdd32(dst, ..) => {
+                out.push(*dst);
+                &[]
             }
-            Widen { dst, src, .. } => (*dst, std::slice::from_ref(src)),
-            Mad32(dst, src) => (*dst, src),
+            Load32(_, dst, addr) => {
+                out.push(*dst);
+                std::slice::from_ref(addr)
+            }
+            LoadVec {
+                count, dst, addr, ..
+            } => {
+                out.extend_from_slice(&dst[..usize::from(*count)]);
+                std::slice::from_ref(addr)
+            }
+            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) => {
+                out.push(*dst);
+                std::slice::from_ref(src)
+            }
+            Widen { dst, src, .. } => {
+                out.push(*dst);
+                std::slice::from_ref(src)
+            }
+            Mad32(dst, src) => {
+                out.push(*dst);
+                src
+            }
             Compare { dst, src, .. }
             | PredicateLogic { dst, src, .. }
             | Integer32(_, dst, src)
             | MulWide32(dst, src)
             | ShiftLeft64(dst, src)
-            | Add64(dst, src) => (*dst, src),
-            Float32(dst, op) => (*dst, op.inputs()),
-            Store32(..) | Barrier => return None,
+            | Add64(dst, src) => {
+                out.push(*dst);
+                src
+            }
+            Float32(dst, op) => {
+                out.push(*dst);
+                op.inputs()
+            }
+            Store32(..) | StoreVec { .. } | Barrier => return None,
         })
+    }
+
+    fn is_memory_load(&self) -> bool {
+        matches!(
+            self,
+            Self::Load32(..) | Self::LoadVec { .. } | Self::AtomicAdd32(..)
+        )
     }
 }
 
@@ -623,6 +667,49 @@ mod tests {
         );
         assert!(translate(&SOURCE.replace("rsqrt.approx.f32", "rsqrt.rn.f32")).is_err());
         assert!(translate(&SOURCE.replace("cvt.s64.s32", "cvt.s64.u32")).is_err());
+    }
+
+    #[test]
+    fn lowers_vector_float_memory() {
+        use rspirv::spirv::Op;
+
+        const SOURCE: &str = "
+            .version 8.8
+            .target sm_80
+            .address_size 64
+            .entry vector_mem(
+                .param .u64 .ptr .global in,
+                .param .u64 .ptr .global out
+            ) {
+                .reg .f32 %f<8>;
+                .reg .b64 %rd<4>;
+                .shared .align 4 .b8 scratch[16];
+                ld.param.u64 %rd1, [in];
+                ld.param.u64 %rd2, [out];
+                cvta.to.global.u64 %rd1, %rd1;
+                cvta.to.global.u64 %rd2, %rd2;
+                ld.global.v4.f32 {%f1, %f2, %f3, %f4}, [%rd1];
+                st.shared.v2.f32 [scratch], {%f1, %f2};
+                bar.sync 0;
+                ld.shared.v2.f32 {%f5, %f6}, [scratch];
+                st.global.v4.f32 [%rd2], {%f5, %f6, %f3, %f4};
+                ret;
+            }
+        ";
+        let translated = translate(SOURCE).unwrap();
+        assert_eq!(translated.kernels[0].shared_bytes, 16);
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        let ops: Vec<_> = module.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .map(|inst| inst.class.opcode)
+            .collect();
+        assert!(ops.contains(&Op::Load));
+        assert!(ops.contains(&Op::Store));
+        assert!(ops.contains(&Op::CompositeExtract));
+        assert!(ops.contains(&Op::CompositeConstruct));
+        assert!(translate(&SOURCE.replace("ld.global.v4.f32", "ld.global.v8.f32")).is_err());
     }
 
     #[test]

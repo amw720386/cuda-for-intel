@@ -305,6 +305,47 @@ impl<'a> Parser<'a> {
                 };
                 Instruction::Load32(space, dst, addr)
             }
+            [
+                op @ ("ld.global.v2.f32" | "ld.global.v4.f32" | "ld.shared.v2.f32"),
+                "{",
+                a,
+                ",",
+                b,
+                rest @ ..,
+            ] => {
+                let (count, space) = match *op {
+                    "ld.global.v4.f32" => (4u8, Space::Global),
+                    "ld.global.v2.f32" => (2, Space::Global),
+                    _ => (2, Space::Shared),
+                };
+                let (c, d, addr) = if count == 4 {
+                    match rest {
+                        [",", c, ",", d, "}", ",", "[", addr, "]"] => (*c, *d, *addr),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                } else {
+                    match rest {
+                        ["}", ",", "[", addr, "]"] => ("", "", *addr),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                };
+                Instruction::LoadVec {
+                    space,
+                    count,
+                    dst: [a, b, c, d],
+                    addr,
+                }
+            }
             ["add.f32" | "add.rn.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Add([a, b]))
             }
@@ -344,6 +385,51 @@ impl<'a> Parser<'a> {
                     Space::Shared
                 };
                 Instruction::Store32(space, addr, src)
+            }
+            [
+                op @ ("st.global.v2.f32" | "st.global.v4.f32" | "st.shared.v2.f32"),
+                "[",
+                addr,
+                "]",
+                ",",
+                "{",
+                a,
+                ",",
+                b,
+                rest @ ..,
+            ] => {
+                let (count, space) = match *op {
+                    "st.global.v4.f32" => (4u8, Space::Global),
+                    "st.global.v2.f32" => (2, Space::Global),
+                    _ => (2, Space::Shared),
+                };
+                let (c, d) = if count == 4 {
+                    match rest {
+                        [",", c, ",", d, "}"] => (*c, *d),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                } else {
+                    match rest {
+                        ["}"] => ("", ""),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                };
+                Instruction::StoreVec {
+                    space,
+                    count,
+                    addr,
+                    src: [a, b, c, d],
+                }
             }
             _ => {
                 return Err(Error::new(format!(
@@ -545,12 +631,15 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
 /// The emitter still checks dominance and requires compatible uses of the pointer.
 fn infer_direct_global_params(params: &mut [(&str, Param)], blocks: &[Block<'_>]) {
     let mut definitions = HashMap::new();
+    let mut defined = Vec::new();
     for inst in blocks.iter().flat_map(|block| &block.instructions) {
-        if let Some((dst, _)) = inst.assignment() {
-            definitions
-                .entry(dst)
-                .and_modify(|def| *def = None)
-                .or_insert(Some(inst));
+        if inst.collect_definitions(&mut defined).is_some() {
+            for &dst in &defined {
+                definitions
+                    .entry(dst)
+                    .and_modify(|def| *def = None)
+                    .or_insert(Some(inst));
+            }
         }
     }
     for inst in blocks.iter().flat_map(|block| &block.instructions) {
