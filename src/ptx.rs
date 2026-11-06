@@ -85,12 +85,14 @@ enum IntegerOp {
     Sub,
     Mul,
     And,
+    Or,
     ShiftLeft,
     ShiftRightLogical,
     ShiftRightArithmetic,
     Div,
     Rem,
     MulHighUnsigned,
+    SignExtend8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -395,6 +397,14 @@ mod tests {
     #[test]
     fn translates_ggml_rope_norm_f32_fast_math() {
         let translated = translate(include_str!("../examples/ggml_rope_norm_f32.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].fp32);
+        assert!(translated.kernels[0].fp32_fma);
+    }
+
+    #[test]
+    fn translates_ggml_q8_0_vec_dot_soft_half() {
+        let translated = translate(include_str!("../examples/ggml_q8_0_vec_dot.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(translated.kernels[0].fp32);
         assert!(translated.kernels[0].fp32_fma);

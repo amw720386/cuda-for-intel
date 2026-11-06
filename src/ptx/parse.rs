@@ -289,7 +289,7 @@ impl<'a> Parser<'a> {
             },
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
-                | "shr.u32" | "shr.s32" | "and.b32" | "div.s32" | "rem.s32"),
+                | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "rem.s32"),
                 dst,
                 ",",
                 a,
@@ -301,6 +301,7 @@ impl<'a> Parser<'a> {
                     "sub.s32" => IntegerOp::Sub,
                     "mul.lo.s32" => IntegerOp::Mul,
                     "and.b32" => IntegerOp::And,
+                    "or.b32" => IntegerOp::Or,
                     "shl.b32" => IntegerOp::ShiftLeft,
                     "mul.hi.u32" => IntegerOp::MulHighUnsigned,
                     "shr.s32" => IntegerOp::ShiftRightArithmetic,
@@ -309,6 +310,9 @@ impl<'a> Parser<'a> {
                     _ => IntegerOp::ShiftRightLogical,
                 };
                 Instruction::Integer32(op, dst, [a, b])
+            }
+            ["cvt.s32.s8", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::SignExtend8, dst, [src, src])
             }
             ["not.b32", dst, ",", src] => Instruction::Not32(dst, src),
             ["mov.b32" | "mov.f32", dst, ",", src] => Instruction::Move32(dst, src),
@@ -338,7 +342,12 @@ impl<'a> Parser<'a> {
                 Instruction::Mul64(dst, [a, b])
             }
             [
-                op @ ("ld.global.b32" | "ld.global.u32" | "ld.global.f32" | "ld.shared.b32"),
+                op @ ("ld.global.b32"
+                | "ld.global.u32"
+                | "ld.global.f32"
+                | "ld.global.nc.u32"
+                | "ld.global.nc.f32"
+                | "ld.shared.b32"),
                 dst,
                 ",",
                 "[",

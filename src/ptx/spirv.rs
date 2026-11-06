@@ -749,8 +749,15 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Sub => self.builder.i_sub(ty, None, a, b),
                     IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
                     IntegerOp::And => self.builder.bitwise_and(ty, None, a, b),
+                    IntegerOp::Or => self.builder.bitwise_or(ty, None, a, b),
                     IntegerOp::Div => self.builder.s_div(ty, None, a, b),
                     IntegerOp::Rem => self.builder.s_rem(ty, None, a, b),
+                    IntegerOp::SignExtend8 => {
+                        // PTX cvt.s32.s8 sign-extends the low 8 bits of the source.
+                        let shift = self.builder.constant_bit32(ty, 24);
+                        let raised = self.builder.shift_left_logical(ty, None, a, shift)?;
+                        self.builder.shift_right_arithmetic(ty, None, raised, shift)
+                    }
                     IntegerOp::ShiftLeft
                     | IntegerOp::ShiftRightLogical
                     | IntegerOp::ShiftRightArithmetic => {
