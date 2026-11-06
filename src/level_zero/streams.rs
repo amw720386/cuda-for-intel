@@ -164,6 +164,11 @@ pub(crate) struct Fences {
 }
 
 impl Fences {
+    #[cfg(all(test, windows))]
+    pub(crate) fn pool_count(&self) -> usize {
+        self.pools.len()
+    }
+
     pub(crate) fn needs_refill(&self) -> bool {
         self.free.is_empty() && (self.pools.is_empty() || self.next_index == POOL_SIZE)
     }

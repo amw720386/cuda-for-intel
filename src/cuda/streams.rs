@@ -504,6 +504,27 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        for _ in 0..16 {
+            let mut stream = null_mut();
+            assert_eq!(unsafe { cuStreamCreate(&mut stream, 0) }, Success);
+            for _ in 0..16 {
+                assert_eq!(
+                    unsafe {
+                        cuLaunchKernel(kernel, 1, 1, 1, 1, 1, 1, 0, stream, null_mut(), null_mut())
+                    },
+                    Success
+                );
+            }
+            assert_eq!(cuStreamSynchronize(stream), Success);
+            assert_eq!(cuStreamDestroy_v2(stream), Success);
+        }
+        super::super::with_context(|_, context| {
+            assert_eq!(context.streams.fences.pool_count(), 1);
+            assert_eq!(context.streams.live.len(), 1);
+            assert!(context.streams.retired.is_empty());
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(cuStreamDestroy_v2(idle), Success);
         assert_eq!(cuCtxDestroy_v2(context), Success);
     }
