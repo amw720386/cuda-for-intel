@@ -9,6 +9,9 @@ use std::sync::Mutex;
 mod streams;
 use streams::Streams;
 
+#[cfg(all(test, windows))]
+mod transfer_bench;
+
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CuResult {
