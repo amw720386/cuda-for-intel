@@ -259,6 +259,7 @@ impl<'a> Parser<'a> {
             ["mad.lo.s32" | "mad.lo.u32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Mad32(dst, [a, b, c])
             }
+            ["dp4a.s32.s32", dst, ",", a, ",", b, ",", c] => Instruction::Dp4a(dst, [a, b, c]),
             [
                 op @ ("setp.ge.u32" | "setp.gt.u32" | "setp.lt.u32" | "setp.le.u32" | "setp.eq.u32"
                 | "setp.ne.u32" | "setp.eq.b32" | "setp.ne.b32" | "setp.ge.s32"
@@ -463,7 +464,7 @@ impl<'a> Parser<'a> {
                 Instruction::Float32(dst, FloatOp::Ex2Approx([src]))
             }
             [
-                op @ ("st.global.b32" | "st.global.f32" | "st.shared.b32"),
+                op @ ("st.global.b32" | "st.global.u32" | "st.global.f32" | "st.shared.b32"),
                 "[",
                 addr,
                 "]",

@@ -727,6 +727,32 @@ impl<'a> Emitter<'a> {
                     Kind::B32,
                 )
             }
+            Instruction::Dp4a(dst, [a, b, c]) => {
+                // Soft-emulate CUDA dp4a.s32.s32: four signed i8×i8 products + accumulate.
+                let a = self.integer(a, Kind::B32)?;
+                let b = self.integer(b, Kind::B32)?;
+                let mut acc = self.integer(c, Kind::B32)?;
+                let ty = self.u32_type;
+                let shift24 = self.builder.constant_bit32(ty, 24);
+                for lane in 0..4u32 {
+                    let shift = self.builder.constant_bit32(ty, lane * 8);
+                    let a_byte = self.builder.shift_right_logical(ty, None, a, shift)?;
+                    let b_byte = self.builder.shift_right_logical(ty, None, b, shift)?;
+                    let a_sext = {
+                        let raised = self.builder.shift_left_logical(ty, None, a_byte, shift24)?;
+                        self.builder
+                            .shift_right_arithmetic(ty, None, raised, shift24)?
+                    };
+                    let b_sext = {
+                        let raised = self.builder.shift_left_logical(ty, None, b_byte, shift24)?;
+                        self.builder
+                            .shift_right_arithmetic(ty, None, raised, shift24)?
+                    };
+                    let prod = self.builder.i_mul(ty, None, a_sext, b_sext)?;
+                    acc = self.builder.i_add(ty, None, acc, prod)?;
+                }
+                (dst, acc, Kind::B32)
+            }
             Instruction::Compare {
                 op,
                 signed,

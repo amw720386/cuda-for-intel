@@ -142,6 +142,8 @@ enum Instruction<'a> {
     SharedAddress(&'a str, &'a str),
     Builtin(&'a str, &'a str),
     Mad32(&'a str, [&'a str; 3]),
+    /// CUDA `dp4a.s32.s32` — signed 4×8-bit dot-product accumulate.
+    Dp4a(&'a str, [&'a str; 3]),
     Compare {
         op: Comparison,
         signed: bool,
@@ -207,6 +209,10 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 &[]
             }
+            Mad32(dst, src) | Dp4a(dst, src) => {
+                out.push(*dst);
+                src
+            }
             Load32(_, dst, addr) | Load16(_, dst, addr) => {
                 out.push(*dst);
                 std::slice::from_ref(addr)
@@ -224,10 +230,6 @@ impl<'a> Instruction<'a> {
             Widen { dst, src, .. } => {
                 out.push(*dst);
                 std::slice::from_ref(src)
-            }
-            Mad32(dst, src) => {
-                out.push(*dst);
-                src
             }
             Compare { dst, src, .. }
             | PredicateLogic { dst, src, .. }
@@ -418,6 +420,12 @@ mod tests {
         let translated = translate(include_str!("../examples/ggml_half_roundtrip.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn translates_ggml_dp4a_smoke() {
+        translate(include_str!("../examples/ggml_dp4a_smoke.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     #[test]
