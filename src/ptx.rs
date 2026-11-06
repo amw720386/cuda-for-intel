@@ -93,6 +93,12 @@ enum IntegerOp {
     Rem,
     MulHighUnsigned,
     SignExtend8,
+    /// Zero-extend / truncate to u16 in the low 16 bits (`cvt.u16.u32`).
+    ToU16,
+    /// Sign-extend low 8 bits into a 16-bit value (`cvt.s16.s8`).
+    SignExtend8To16,
+    /// Arithmetic shift of a 16-bit value (`shr.s16`).
+    ShiftRightArithmetic16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,6 +111,7 @@ enum FloatOp<'a> {
     FromUnsigned([&'a str; 1]),
     FromSigned([&'a str; 1]),
     FromHalf([&'a str; 1]),
+    FromSigned16([&'a str; 1]),
     Div([&'a str; 2]),
     Sqrt([&'a str; 1]),
     RsqrtApprox([&'a str; 1]),
@@ -125,6 +132,7 @@ impl<'a> FloatOp<'a> {
             Self::FromUnsigned(inputs)
             | Self::FromSigned(inputs)
             | Self::FromHalf(inputs)
+            | Self::FromSigned16(inputs)
             | Self::Sqrt(inputs)
             | Self::RsqrtApprox(inputs)
             | Self::SinApprox(inputs)
@@ -426,6 +434,14 @@ mod tests {
     fn translates_ggml_dp4a_smoke() {
         translate(include_str!("../examples/ggml_dp4a_smoke.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[test]
+    fn translates_ggml_q8_0_auth_layout() {
+        let translated = translate(include_str!("../examples/ggml_q8_0_auth.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].fp32);
+        assert!(translated.kernels[0].fp32_fma);
     }
 
     #[test]

@@ -319,6 +319,15 @@ impl<'a> Parser<'a> {
             ["cvt.s32.s8", dst, ",", src] => {
                 Instruction::Integer32(IntegerOp::SignExtend8, dst, [src, src])
             }
+            ["cvt.u16.u32", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::ToU16, dst, [src, src])
+            }
+            ["cvt.s16.s8", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::SignExtend8To16, dst, [src, src])
+            }
+            ["shr.s16", dst, ",", a, ",", b] => {
+                Instruction::Integer32(IntegerOp::ShiftRightArithmetic16, dst, [a, b])
+            }
             ["not.b32", dst, ",", src] => Instruction::Not32(dst, src),
             ["mov.b32" | "mov.f32", dst, ",", src] => Instruction::Move32(dst, src),
             ["cvt.u64.u32", dst, ",", src] => Instruction::Widen {
@@ -445,6 +454,9 @@ impl<'a> Parser<'a> {
             }
             ["cvt.f32.f16" | "cvt.rn.f32.f16", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::FromHalf([src]))
+            }
+            ["cvt.rn.f32.s16", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::FromSigned16([src]))
             }
             ["div.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Div([a, b])),
             ["sqrt.rn.f32", dst, ",", src] => Instruction::Float32(dst, FloatOp::Sqrt([src])),

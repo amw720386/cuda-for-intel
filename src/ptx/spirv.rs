@@ -62,6 +62,7 @@ struct Emitter<'a> {
     u16_type: Word,
     u32_type: Word,
     u64_type: Word,
+    i64_type: Word,
     f16_type: Word,
     f32_type: Word,
     global_byte_ptr: Word,
@@ -108,6 +109,7 @@ impl<'a> Emitter<'a> {
         let u16_type = builder.type_int(16, 0);
         let u32_type = builder.type_int(32, 0);
         let u64_type = builder.type_int(64, 0);
+        let i64_type = builder.type_int(64, 1);
         let f16_type = builder.type_float(16, None);
         let f32_type = builder.type_float(32, None);
         let global_byte_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u8_type);
@@ -129,6 +131,7 @@ impl<'a> Emitter<'a> {
             u16_type,
             u32_type,
             u64_type,
+            i64_type,
             f16_type,
             f32_type,
             global_byte_ptr,
@@ -426,11 +429,23 @@ impl<'a> Emitter<'a> {
             .access_chain(self.shared_word_ptr, None, array, [zero])?)
     }
 
+    fn parse_byte_offset(operand: &str) -> Option<i64> {
+        if let Some(hex) = operand
+            .strip_prefix("0x")
+            .or_else(|| operand.strip_prefix("0X"))
+        {
+            i64::from_str_radix(hex, 16).ok()
+        } else {
+            operand.parse::<i64>().ok()
+        }
+    }
+
     fn addressed_byte_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
+        // PTX allows `[%rd+18]` and `[%rd+-18]` (nvcc emits the latter for struct fields).
         let (base, offset) = match address.split_once('+') {
             Some((base, offset)) => (
                 base,
-                Self::parse_u64(offset).ok_or_else(|| {
+                Self::parse_byte_offset(offset).ok_or_else(|| {
                     Error::new(format!("unsupported PTX address offset {offset}"))
                 })?,
             ),
@@ -445,7 +460,10 @@ impl<'a> Emitter<'a> {
         if offset == 0 {
             Ok(bytes_ptr)
         } else {
-            let bytes = self.builder.constant_bit64(self.u64_type, offset);
+            // Use a signed i64 index so nvcc `[%rd+-N]` lowers correctly on Level Zero.
+            let bytes = self
+                .builder
+                .constant_bit64(self.i64_type, offset as u64);
             Ok(self
                 .builder
                 .ptr_access_chain(byte_ty, None, bytes_ptr, bytes, [])?)
@@ -657,6 +675,24 @@ impl<'a> Emitter<'a> {
                 let half = self.builder.bitcast(self.f16_type, None, bits16)?;
                 self.builder.f_convert(ty, None, half)?
             }
+            FloatOp::FromSigned16([source]) => {
+                // Low 16 bits are a signed integer; sign-extend before f32 convert.
+                let bits32 = self.integer(source, Kind::B32)?;
+                let shift = self.builder.constant_bit32(self.u32_type, 16);
+                let raised = self
+                    .builder
+                    .shift_left_logical(self.u32_type, None, bits32, shift)?;
+                let sext = self
+                    .builder
+                    .shift_right_arithmetic(self.u32_type, None, raised, shift)?;
+                let converted = self.builder.convert_s_to_f(ty, None, sext)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTE)],
+                );
+                converted
+            }
             FloatOp::RsqrtApprox([source]) => {
                 let value = self.float_value(source)?;
                 self.builder.ext_inst(
@@ -815,6 +851,48 @@ impl<'a> Emitter<'a> {
                         let raised = self.builder.shift_left_logical(ty, None, a, shift)?;
                         self.builder.shift_right_arithmetic(ty, None, raised, shift)
                     }
+                    IntegerOp::ToU16 => {
+                        let mask = self.builder.constant_bit32(ty, 0xffff);
+                        self.builder.bitwise_and(ty, None, a, mask)
+                    }
+                    IntegerOp::SignExtend8To16 => {
+                        // Low 8 bits → signed 16-bit value (still held in a B32 slot).
+                        let shift = self.builder.constant_bit32(ty, 24);
+                        let raised = self.builder.shift_left_logical(ty, None, a, shift)?;
+                        let sext32 =
+                            self.builder
+                                .shift_right_arithmetic(ty, None, raised, shift)?;
+                        let mask = self.builder.constant_bit32(ty, 0xffff);
+                        self.builder.bitwise_and(ty, None, sext32, mask)
+                    }
+                    IntegerOp::ShiftRightArithmetic16 => {
+                        // Operate on the low 16 bits; keep the result as a sign-extended s16
+                        // in a B32 slot (high bits clear after mask of arithmetic result).
+                        let shift16 = self.builder.constant_bit32(ty, 16);
+                        let raised = self.builder.shift_left_logical(ty, None, a, shift16)?;
+                        let as_s32 =
+                            self.builder
+                                .shift_right_arithmetic(ty, None, raised, shift16)?;
+                        let bits = self.builder.constant_bit32(ty, 16);
+                        let zero = self.builder.constant_bit32(ty, 0);
+                        let in_range =
+                            self.builder.u_less_than(self.bool_type, None, b, bits)?;
+                        let safe = self.builder.select(ty, None, in_range, b, zero)?;
+                        let shifted =
+                            self.builder
+                                .shift_right_arithmetic(ty, None, as_s32, safe)?;
+                        let masked_shift =
+                            self.builder.select(ty, None, in_range, shifted, zero)?;
+                        // Re-pack as s16 in the low half for subsequent cvt.rn.f32.s16.
+                        let raised = self
+                            .builder
+                            .shift_left_logical(ty, None, masked_shift, shift16)?;
+                        let sext =
+                            self.builder
+                                .shift_right_arithmetic(ty, None, raised, shift16)?;
+                        let mask = self.builder.constant_bit32(ty, 0xffff);
+                        self.builder.bitwise_and(ty, None, sext, mask)
+                    }
                     IntegerOp::ShiftLeft
                     | IntegerOp::ShiftRightLogical
                     | IntegerOp::ShiftRightArithmetic => {
@@ -921,12 +999,51 @@ impl<'a> Emitter<'a> {
                 (dst, id, Kind::B64)
             }
             Instruction::Load32(space, dst, address) => {
-                let pointer = self.word_pointer(space, address)?;
-                (
-                    dst,
-                    self.builder.load(self.u32_type, None, pointer, None, [])?,
-                    Kind::B32,
-                )
+                let id = if space == Space::Global {
+                    // CUDA allows misaligned ld.global.u32 (e.g. q8_0 qs at +2 after half).
+                    // Assemble from two u16 loads so Intel Level Zero stays defined.
+                    let (base, offset) = match address.split_once('+') {
+                        Some((base, offset)) => (
+                            base,
+                            Self::parse_byte_offset(offset).ok_or_else(|| {
+                                Error::new(format!("unsupported PTX address offset {offset}"))
+                            })?,
+                        ),
+                        None => (address, 0i64),
+                    };
+                    let lo_addr = if offset == 0 {
+                        base.to_string()
+                    } else if offset > 0 {
+                        format!("{base}+{offset}")
+                    } else {
+                        format!("{base}+{offset}") // offset already includes '-'
+                    };
+                    let hi_addr = {
+                        let hi = offset + 2;
+                        if hi == 0 {
+                            base.to_string()
+                        } else if hi > 0 {
+                            format!("{base}+{hi}")
+                        } else {
+                            format!("{base}+{hi}")
+                        }
+                    };
+                    let lo_ptr = self.half_pointer(space, &lo_addr)?;
+                    let hi_ptr = self.half_pointer(space, &hi_addr)?;
+                    let lo16 = self.builder.load(self.u16_type, None, lo_ptr, None, [])?;
+                    let hi16 = self.builder.load(self.u16_type, None, hi_ptr, None, [])?;
+                    let lo = self.builder.u_convert(self.u32_type, None, lo16)?;
+                    let hi = self.builder.u_convert(self.u32_type, None, hi16)?;
+                    let shift = self.builder.constant_bit32(self.u32_type, 16);
+                    let hi = self
+                        .builder
+                        .shift_left_logical(self.u32_type, None, hi, shift)?;
+                    self.builder.bitwise_or(self.u32_type, None, lo, hi)?
+                } else {
+                    let pointer = self.word_pointer(space, address)?;
+                    self.builder.load(self.u32_type, None, pointer, None, [])?
+                };
+                (dst, id, Kind::B32)
             }
             Instruction::Load16(space, dst, address) => {
                 let pointer = self.half_pointer(space, address)?;
