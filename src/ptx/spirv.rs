@@ -1,11 +1,14 @@
-use super::{Entry, Error, Instruction, Param, Space, Translation, Width};
+use super::flow::Flow;
+use super::{
+    Comparison, Entry, Error, Instruction, IntegerOp, Param, Space, Terminator, Translation, Width,
+};
 use rspirv::binary::Assemble;
-use rspirv::dr::{Builder, Operand};
+use rspirv::dr::{Builder, Instruction as SpirvInstruction, Operand};
 use rspirv::spirv::{
     AddressingModel, BuiltIn, Capability, Decoration, ExecutionModel, FunctionControl, MemoryModel,
-    MemorySemantics, Scope, StorageClass, Word,
+    MemorySemantics, Op, Scope, StorageClass, Word,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const BUILTINS: [BuiltIn; 3] = [
     BuiltIn::WorkgroupId,
@@ -64,6 +67,8 @@ struct Emitter<'a> {
     builtins: [Word; 3],
     declarations: HashMap<String, Width>,
     registers: HashMap<&'a str, Value>,
+    initialized: HashSet<&'a str>,
+    locals: Vec<SpirvInstruction>,
     params: HashMap<&'a str, Value>,
 }
 
@@ -121,6 +126,8 @@ impl<'a> Emitter<'a> {
             builtins,
             declarations,
             registers: HashMap::new(),
+            initialized: HashSet::new(),
+            locals: Vec::new(),
             params: HashMap::new(),
         }
     }
@@ -133,11 +140,34 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn read(&self, operand: &str) -> Result<Value, Error> {
-        self.registers
+    fn value_type(&self, kind: Kind) -> Word {
+        match kind {
+            Kind::Predicate => self.bool_type,
+            Kind::B32 => self.u32_type,
+            Kind::B64 => self.u64_type,
+            Kind::Address(Space::Global) => self.global_byte_ptr,
+            Kind::Address(Space::Shared) => self.shared_byte_ptr,
+        }
+    }
+
+    fn read(&mut self, operand: &str) -> Result<Value, Error> {
+        let slot = self
+            .registers
             .get(operand)
             .copied()
-            .ok_or_else(|| Error::new(format!("undefined PTX register {operand}")))
+            .filter(|_| self.initialized.contains(operand))
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "undefined PTX register {operand} on an incoming path"
+                ))
+            })?;
+        let id = self
+            .builder
+            .load(self.value_type(slot.kind), None, slot.id, None, [])?;
+        Ok(Value {
+            id,
+            kind: slot.kind,
+        })
     }
 
     fn write(&mut self, dst: &'a str, value: Value) -> Result<(), Error> {
@@ -146,7 +176,33 @@ impl<'a> Emitter<'a> {
                 "missing or mismatched PTX declaration for {dst}"
             )));
         }
-        self.registers.insert(dst, value);
+        let slot = if let Some(slot) = self.registers.get(dst).copied() {
+            slot.require(value.kind, dst)?
+        } else {
+            let pointer = self.builder.type_pointer(
+                None,
+                StorageClass::Function,
+                self.value_type(value.kind),
+            );
+            let slot = self.builder.id();
+            // Register types are discovered during lowering. Emit the slots in the prologue.
+            self.locals.push(SpirvInstruction::new(
+                Op::Variable,
+                Some(pointer),
+                Some(slot),
+                vec![Operand::StorageClass(StorageClass::Function)],
+            ));
+            self.registers.insert(
+                dst,
+                Value {
+                    id: slot,
+                    kind: value.kind,
+                },
+            );
+            slot
+        };
+        self.builder.store(slot, value.id, None, [])?;
+        self.initialized.insert(dst);
         Ok(())
     }
 
@@ -156,7 +212,7 @@ impl<'a> Emitter<'a> {
         }
         match kind {
             Kind::B32 => operand
-                .parse()
+                .parse::<u32>()
                 .ok()
                 .map(|n| self.builder.constant_bit32(self.u32_type, n)),
             Kind::B64 => operand
@@ -200,9 +256,9 @@ impl<'a> Emitter<'a> {
                 .filter(|v| matches!(v.kind, Kind::Address(_)))
                 .copied()
         };
-        let (base, offset) = match (address(a), address(b)) {
-            (Some(base), None) => (base, b),
-            (None, Some(base)) => (base, a),
+        let (base_name, offset) = match (address(a), address(b)) {
+            (Some(_), None) => (a, b),
+            (None, Some(_)) => (b, a),
             (None, None) => {
                 let a = self.integer(a, Kind::B64)?;
                 let b = self.integer(b, Kind::B64)?;
@@ -217,10 +273,8 @@ impl<'a> Emitter<'a> {
             }
         };
         let offset = self.integer(offset, Kind::B64)?;
-        let pointer_type = match base.kind {
-            Kind::Address(Space::Shared) => self.shared_byte_ptr,
-            _ => self.global_byte_ptr,
-        };
+        let base = self.read(base_name)?;
+        let pointer_type = self.value_type(base.kind);
         // PTX adds byte offsets. Keep the base typed as a pointer for driver residency.
         let id = self
             .builder
@@ -292,15 +346,43 @@ impl<'a> Emitter<'a> {
                     Kind::B32,
                 )
             }
-            Instruction::Ge32(dst, [a, b]) => {
+            Instruction::Compare(op, dst, [a, b]) => {
                 let a = self.integer(a, Kind::B32)?;
                 let b = self.integer(b, Kind::B32)?;
-                (
-                    dst,
-                    self.builder
-                        .u_greater_than_equal(self.bool_type, None, a, b)?,
-                    Kind::Predicate,
-                )
+                let ty = self.bool_type;
+                let id = match op {
+                    Comparison::Equal => self.builder.i_equal(ty, None, a, b),
+                    Comparison::Less => self.builder.u_less_than(ty, None, a, b),
+                    Comparison::Greater => self.builder.u_greater_than(ty, None, a, b),
+                    Comparison::GreaterEqual => self.builder.u_greater_than_equal(ty, None, a, b),
+                }?;
+                (dst, id, Kind::Predicate)
+            }
+            Instruction::Integer32(op, dst, [a, b]) => {
+                if matches!(op, IntegerOp::ShiftRight) && !b.parse::<u32>().is_ok_and(|n| n < 32) {
+                    return Err(Error::new(
+                        "only immediate PTX right shifts below 32 are supported",
+                    ));
+                }
+                let a = self.integer(a, Kind::B32)?;
+                let b = self.integer(b, Kind::B32)?;
+                let ty = self.u32_type;
+                let id = match op {
+                    IntegerOp::Add => self.builder.i_add(ty, None, a, b),
+                    IntegerOp::Sub => self.builder.i_sub(ty, None, a, b),
+                    IntegerOp::ShiftRight => self.builder.shift_right_logical(ty, None, a, b),
+                }?;
+                (dst, id, Kind::B32)
+            }
+            Instruction::Move32(dst, src) => {
+                let id = if let Some(hex) = src.strip_prefix("0f").filter(|s| s.len() == 8) {
+                    let bits = u32::from_str_radix(hex, 16)
+                        .map_err(|_| Error::new("invalid PTX bit literal"))?;
+                    self.builder.constant_bit32(self.u32_type, bits)
+                } else {
+                    self.integer(src, Kind::B32)?
+                };
+                (dst, id, Kind::B32)
             }
             Instruction::MulWide32(dst, [a, b]) => {
                 let a = self.integer(a, Kind::B32)?;
@@ -360,6 +442,7 @@ impl<'a> Emitter<'a> {
 }
 
 pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
+    let flow = Flow::analyze(&entry.blocks)?;
     let mut emitter = Emitter::new(entry.registers, entry.shared);
     let types: Vec<_> = entry
         .params
@@ -387,31 +470,42 @@ pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
         emitter.params.insert(name, Value { id, kind });
     }
     emitter.builder.begin_block(None)?;
-    for inst in entry.prefix {
-        emitter.instruction(inst)?;
-    }
-    if let Some((predicate, instructions)) = entry.guarded {
-        let condition = emitter
-            .read(predicate)?
-            .require(Kind::Predicate, predicate)?;
-        let body = emitter.builder.id();
-        let done = emitter.builder.id();
-        emitter
-            .builder
-            .branch_conditional(condition, done, body, [])?;
-        emitter.builder.begin_block(Some(body))?;
-        for inst in instructions {
+    let labels: Vec<_> = entry.blocks.iter().map(|_| emitter.builder.id()).collect();
+    emitter.builder.branch(labels[0])?;
+    for index in flow.order {
+        emitter.initialized.clone_from(&flow.inputs[index]);
+        emitter.builder.begin_block(Some(labels[index]))?;
+        let block = &entry.blocks[index];
+        for &inst in &block.instructions {
             emitter.instruction(inst)?;
         }
-        emitter.builder.branch(done)?;
-        emitter.builder.begin_block(Some(done))?;
+        match block.end {
+            Terminator::Return => emitter.builder.ret()?,
+            Terminator::Jump(target) => emitter.builder.branch(labels[target])?,
+            Terminator::Branch {
+                predicate,
+                taken,
+                other,
+            } => {
+                let condition = emitter
+                    .read(predicate)?
+                    .require(Kind::Predicate, predicate)?;
+                emitter
+                    .builder
+                    .branch_conditional(condition, labels[taken], labels[other], [])?;
+            }
+        }
     }
-    emitter.builder.ret()?;
     emitter.builder.end_function()?;
+    let mut module = emitter.builder.module();
+    module.functions[0].blocks[0]
+        .instructions
+        .splice(0..0, emitter.locals);
     Ok(Translation {
         name: entry.name.to_owned(),
         params: entry.params.into_iter().map(|(_, param)| param).collect(),
-        words: emitter.builder.module().assemble(),
+        words: module.assemble(),
         shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
+        max_threads: entry.max_threads,
     })
 }

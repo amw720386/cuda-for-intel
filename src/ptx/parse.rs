@@ -1,4 +1,6 @@
-use super::{Entry, Error, Instruction, Param, Space, Width};
+use super::{
+    Block, Comparison, Entry, Error, Instruction, IntegerOp, Param, Space, Terminator, Width,
+};
 use std::collections::HashMap;
 
 fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
@@ -171,7 +173,38 @@ impl<'a> Parser<'a> {
             ["mad.lo.s32" | "mad.lo.u32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Mad32(dst, [a, b, c])
             }
-            ["setp.ge.u32", dst, ",", a, ",", b] => Instruction::Ge32(dst, [a, b]),
+            [
+                op @ ("setp.ge.u32" | "setp.gt.u32" | "setp.lt.u32" | "setp.eq.b32"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => {
+                let comparison = match *op {
+                    "setp.ge.u32" => Comparison::GreaterEqual,
+                    "setp.gt.u32" => Comparison::Greater,
+                    "setp.lt.u32" => Comparison::Less,
+                    _ => Comparison::Equal,
+                };
+                Instruction::Compare(comparison, dst, [a, b])
+            }
+            [
+                op @ ("add.s32" | "sub.s32" | "shr.u32"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => {
+                let op = match *op {
+                    "add.s32" => IntegerOp::Add,
+                    "sub.s32" => IntegerOp::Sub,
+                    _ => IntegerOp::ShiftRight,
+                };
+                Instruction::Integer32(op, dst, [a, b])
+            }
+            ["mov.b32", dst, ",", src] => Instruction::Move32(dst, src),
             ["mul.wide.u32", dst, ",", a, ",", b] => Instruction::MulWide32(dst, [a, b]),
             ["add.s64" | "add.u64", dst, ",", a, ",", b] => Instruction::Add64(dst, [a, b]),
             [
@@ -215,6 +248,97 @@ impl<'a> Parser<'a> {
         self.tokens.nth(end);
         Ok(result)
     }
+
+    fn label(&self) -> bool {
+        self.tokens.as_slice().get(1) == Some(&":")
+    }
+
+    fn blocks(&mut self) -> Result<Vec<Block<'a>>, Error> {
+        enum End<'a> {
+            Return,
+            Jump(&'a str),
+            Branch(&'a str, bool, &'a str),
+            Fallthrough,
+        }
+        let mut labels = HashMap::new();
+        let mut blocks = Vec::new();
+        while !self.eat("}") {
+            if blocks.len() == 512 {
+                return Err(Error::new("too many PTX blocks"));
+            }
+            while self.label() {
+                let label = self.identifier()?;
+                self.expect(":")?;
+                if labels.insert(label, blocks.len()).is_some() {
+                    return Err(Error::new(format!("duplicate PTX label {label}")));
+                }
+            }
+            let mut instructions = Vec::new();
+            let end = loop {
+                if self.label() || self.peek() == Some("}") {
+                    break End::Fallthrough;
+                }
+                if self.eat(".pragma") {
+                    self.expect("\"nounroll\"")?;
+                    self.expect(";")?;
+                    continue;
+                }
+                let end = if self.eat("ret") {
+                    End::Return
+                } else if self.eat("@") {
+                    let invert = self.eat("!");
+                    let predicate = self.identifier()?;
+                    if !self.eat("bra") {
+                        self.expect("bra.uni")?;
+                    }
+                    End::Branch(predicate, invert, self.identifier()?)
+                } else if self.eat("bra") || self.eat("bra.uni") {
+                    End::Jump(self.identifier()?)
+                } else {
+                    instructions.push(self.instruction()?);
+                    continue;
+                };
+                self.expect(";")?;
+                break end;
+            };
+            blocks.push((instructions, end));
+        }
+        let count = blocks.len();
+        blocks
+            .into_iter()
+            .enumerate()
+            .map(|(index, (instructions, end))| {
+                let next = || {
+                    (index + 1 < count)
+                        .then_some(index + 1)
+                        .ok_or_else(|| Error::new("PTX block falls off the end of the entry"))
+                };
+                let target = |label: &str| {
+                    labels
+                        .get(label)
+                        .copied()
+                        .ok_or_else(|| Error::new(format!("unknown PTX label {label}")))
+                };
+                let end = match end {
+                    End::Return => Terminator::Return,
+                    End::Jump(label) => Terminator::Jump(target(label)?),
+                    End::Fallthrough => Terminator::Jump(next()?),
+                    End::Branch(predicate, invert, label) => {
+                        let (mut taken, mut other) = (target(label)?, next()?);
+                        if invert {
+                            std::mem::swap(&mut taken, &mut other);
+                        }
+                        Terminator::Branch {
+                            predicate,
+                            taken,
+                            other,
+                        }
+                    }
+                };
+                Ok(Block { instructions, end })
+            })
+            .collect()
+    }
 }
 
 pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
@@ -237,6 +361,27 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
     parser.expect(".entry")?;
     let name = parser.identifier()?;
     let params = parser.params()?;
+    let max_threads = if parser.eat(".maxntid") {
+        let mut total = 1u32;
+        for axis in 0..3 {
+            total = parser
+                .take()?
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| n != 0)
+                .and_then(|n| total.checked_mul(n))
+                .ok_or_else(|| Error::new("invalid PTX .maxntid product"))?;
+            if !parser.eat(",") {
+                break;
+            }
+            if axis == 2 {
+                return Err(Error::new("too many PTX .maxntid dimensions"));
+            }
+        }
+        Some(total)
+    } else {
+        None
+    };
     parser.expect("{")?;
     let registers = parser.registers()?;
     let shared = if parser.eat(".shared") {
@@ -260,32 +405,7 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
     } else {
         None
     };
-    let mut prefix = Vec::new();
-    while !matches!(parser.peek(), Some("@" | "ret")) {
-        prefix.push(parser.instruction()?);
-    }
-    let guarded = if parser.eat("@") {
-        let predicate = parser.identifier()?;
-        parser.expect("bra")?;
-        let target = parser.identifier()?;
-        parser.expect(";")?;
-        let mut body = Vec::new();
-        while parser.peek() != Some(target) {
-            let inst = parser.instruction()?;
-            if matches!(inst, Instruction::Barrier) {
-                return Err(Error::new("workgroup barrier in a conditional region"));
-            }
-            body.push(inst);
-        }
-        parser.expect(target)?;
-        parser.expect(":")?;
-        Some((predicate, body))
-    } else {
-        None
-    };
-    parser.expect("ret")?;
-    parser.expect(";")?;
-    parser.expect("}")?;
+    let blocks = parser.blocks()?;
     if parser.peek().is_some() {
         return Err(Error::new("only a single PTX entry is supported"));
     }
@@ -294,7 +414,7 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
         params,
         registers,
         shared,
-        prefix,
-        guarded,
+        max_threads,
+        blocks,
     })
 }

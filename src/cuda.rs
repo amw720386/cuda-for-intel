@@ -44,6 +44,7 @@ struct CudaModule {
     backend: Module,
     name: CString,
     params: Vec<Param>,
+    max_threads: Option<u32>,
     function: Option<usize>,
 }
 
@@ -400,6 +401,7 @@ fn load_ptx(
             backend,
             name,
             params: translated.params,
+            max_threads: translated.max_threads,
             function: None,
         },
     );
@@ -479,7 +481,12 @@ pub unsafe extern "system" fn cuModuleGetFunction(
     }))
 }
 
-fn validate_launch(info: &DeviceInfo, grid: [u32; 3], block: [u32; 3]) -> Result<(), CuResult> {
+fn validate_launch(
+    info: &DeviceInfo,
+    grid: [u32; 3],
+    block: [u32; 3],
+    max_threads: Option<u32>,
+) -> Result<(), CuResult> {
     let fits = |size: [u32; 3], limits: [u32; 3]| {
         size.into_iter()
             .zip(limits)
@@ -492,7 +499,7 @@ fn validate_launch(info: &DeviceInfo, grid: [u32; 3], block: [u32; 3]) -> Result
         .into_iter()
         .try_fold(1u32, u32::checked_mul)
         .ok_or(InvalidValue)?;
-    if total > info.max_workgroup_size {
+    if total > info.max_workgroup_size || max_threads.is_some_and(|limit| total > limit) {
         return Err(InvalidValue);
     }
     Ok(())
@@ -523,7 +530,12 @@ pub unsafe extern "system" fn cuLaunchKernel(
         let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
         let grid = [grid_x, grid_y, grid_z];
         let block = [block_x, block_y, block_z];
-        validate_launch(&runtime.devices[context.device as usize].info, grid, block)?;
+        validate_launch(
+            &runtime.devices[context.device as usize].info,
+            grid,
+            block,
+            module.max_threads,
+        )?;
         if kernel_params.is_null() && !module.params.is_empty() {
             return Err(InvalidValue);
         }
