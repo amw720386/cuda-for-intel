@@ -154,6 +154,16 @@ fn pinned_async_transfers() {
     // Free drains queued uses, including work on a destroyed stream.
     ok!(cuMemcpyHtoDAsync_v2(device, src, SIZE, up));
     ok!(cuMemcpyDtoHAsync_v2(dst, device, SIZE, up));
+    match std::env::var("CUDA_FOR_INTEL_PINNED_COMPLETION").as_deref() {
+        Ok("stream") => ok!(cuStreamSynchronize(up)),
+        Ok("event") => {
+            ok!(cuEventRecord(event, up));
+            ok!(cuEventSynchronize(event));
+        }
+        Ok("context") => ok!(cuCtxSynchronize()),
+        Ok("retire") | Err(std::env::VarError::NotPresent) => {}
+        value => panic!("unknown pinned copy control {value:?}"),
+    }
     ok!(cuStreamDestroy_v2(up));
     assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(device, src, SIZE, up) }, 400);
     ok!(cuMemFreeHost(src));
@@ -210,5 +220,88 @@ fn pinned_async_transfers() {
     ok!(cuMemAlloc_v2(&mut device, SIZE));
     ok!(cuMemcpyHtoDAsync_v2(device, dst, SIZE, down));
     ok!(cuStreamDestroy_v2(down));
+    ok!(cuCtxDestroy_v2(ctx));
+}
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn pinned_partial_then_full_copy() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuCtxSynchronize(),
+        cuMemHostAlloc(*mut Handle, usize, u32),
+        cuMemFreeHost(Handle),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoDAsync_v2(u64, *const c_void, usize, Handle),
+        cuMemcpyDtoHAsync_v2(Handle, u64, usize, Handle),
+        cuMemcpyDtoH_v2(Handle, u64, usize),
+        cuStreamCreate(*mut Handle, u32),
+        cuStreamDestroy_v2(Handle),
+        cuStreamSynchronize(Handle),
+        cuEventCreate(*mut Handle, u32),
+        cuEventRecord(Handle, Handle),
+        cuEventSynchronize(Handle),
+    );
+    let (mut ctx, mut src, mut dst, mut up, mut down, mut event) = (
+        null_mut(),
+        null_mut(),
+        null_mut(),
+        null_mut(),
+        null_mut(),
+        null_mut(),
+    );
+    let mut device = 0;
+    const SIZE: usize = 37;
+    ok!(cuInit(0));
+    ok!(cuCtxCreate_v2(&mut ctx, 0, test_device()));
+    ok!(cuMemHostAlloc(&mut src, SIZE, 0));
+    ok!(cuMemHostAlloc(&mut dst, SIZE, 0));
+    ok!(cuMemAlloc_v2(&mut device, SIZE));
+    ok!(cuStreamCreate(&mut up, 0));
+    ok!(cuStreamCreate(&mut down, 1));
+    ok!(cuEventCreate(&mut event, 2));
+    let input = std::array::from_fn::<_, SIZE, _>(|i| (i * 7) as u8);
+    unsafe {
+        src.cast::<[u8; SIZE]>().write(input);
+        dst.cast::<u8>().write_bytes(0xA5, SIZE);
+    }
+
+    ok!(cuMemcpyHtoDAsync_v2(device, src, SIZE, down));
+    ok!(cuMemcpyDtoHAsync_v2(dst.byte_add(5), device + 3, 29, down));
+    ok!(cuEventRecord(event, down));
+    ok!(cuEventSynchronize(event));
+    let mut partial = [0xA5; SIZE];
+    partial[5..34].copy_from_slice(&input[3..32]);
+    assert_eq!(unsafe { dst.cast::<[u8; SIZE]>().read() }, partial);
+
+    ok!(cuMemcpyHtoDAsync_v2(device, src, SIZE, up));
+    ok!(cuMemcpyDtoHAsync_v2(dst, device, SIZE, up));
+    match std::env::var("CUDA_FOR_INTEL_PINNED_COMPLETION").as_deref() {
+        Ok("stream") => ok!(cuStreamSynchronize(up)),
+        Ok("event") => {
+            ok!(cuEventRecord(event, up));
+            ok!(cuEventSynchronize(event));
+        }
+        Ok("context") => ok!(cuCtxSynchronize()),
+        Ok("retire") | Err(std::env::VarError::NotPresent) => {}
+        value => panic!("unknown pinned copy control {value:?}"),
+    }
+    ok!(cuStreamDestroy_v2(up));
+    ok!(cuMemFreeHost(src));
+    let snapshot = unsafe { dst.cast::<[u8; SIZE]>().read() };
+    if snapshot != input {
+        let mut blocking = [0; SIZE];
+        ok!(cuMemcpyDtoH_v2(blocking.as_mut_ptr().cast(), device, SIZE));
+        eprintln!(
+            "partial/full diagnostic: stale_partial={}, blocking_matches_input={}",
+            snapshot == partial,
+            blocking == input
+        );
+    }
+    assert_eq!(snapshot, input);
     ok!(cuCtxDestroy_v2(ctx));
 }
