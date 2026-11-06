@@ -383,7 +383,9 @@ fn load_ptx(
     let argument_bytes = translated.params.iter().fold(0usize, |offset, &param| {
         offset.next_multiple_of(param.size()) + param.size()
     });
-    if argument_bytes > info.max_kernel_arguments_size as usize {
+    if argument_bytes > info.max_kernel_arguments_size as usize
+        || translated.shared_bytes > info.max_shared_local_memory
+    {
         return Err(NotSupported);
     }
     let name = CString::new(translated.name).map_err(|_| InvalidPtx)?;

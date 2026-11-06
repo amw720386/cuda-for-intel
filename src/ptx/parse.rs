@@ -1,4 +1,4 @@
-use super::{Entry, Error, Instruction, Param, Width};
+use super::{Entry, Error, Instruction, Param, Space, Width};
 use std::collections::HashMap;
 
 fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
@@ -165,6 +165,8 @@ impl<'a> Parser<'a> {
                 Instruction::Param(Width::B64, dst, src)
             }
             ["cvta.to.global.u64", dst, ",", src] => Instruction::ToGlobal(dst, src),
+            ["mov.b64", dst, ",", src] => Instruction::SharedAddress(dst, src),
+            ["bar.sync", "0"] => Instruction::Barrier,
             ["mov.u32", dst, ",", src] => Instruction::Builtin(dst, src),
             ["mad.lo.s32" | "mad.lo.u32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Mad32(dst, [a, b, c])
@@ -172,9 +174,37 @@ impl<'a> Parser<'a> {
             ["setp.ge.u32", dst, ",", a, ",", b] => Instruction::Ge32(dst, [a, b]),
             ["mul.wide.u32", dst, ",", a, ",", b] => Instruction::MulWide32(dst, [a, b]),
             ["add.s64" | "add.u64", dst, ",", a, ",", b] => Instruction::Add64(dst, [a, b]),
-            ["ld.global.b32", dst, ",", "[", addr, "]"] => Instruction::Load32(dst, addr),
+            [
+                op @ ("ld.global.b32" | "ld.shared.b32"),
+                dst,
+                ",",
+                "[",
+                addr,
+                "]",
+            ] => {
+                let space = if *op == "ld.global.b32" {
+                    Space::Global
+                } else {
+                    Space::Shared
+                };
+                Instruction::Load32(space, dst, addr)
+            }
             ["add.f32" | "add.rn.f32", dst, ",", a, ",", b] => Instruction::AddFloat32(dst, [a, b]),
-            ["st.global.b32", "[", addr, "]", ",", src] => Instruction::Store32(addr, src),
+            [
+                op @ ("st.global.b32" | "st.shared.b32"),
+                "[",
+                addr,
+                "]",
+                ",",
+                src,
+            ] => {
+                let space = if *op == "st.global.b32" {
+                    Space::Global
+                } else {
+                    Space::Shared
+                };
+                Instruction::Store32(space, addr, src)
+            }
             _ => {
                 return Err(Error::new(format!(
                     "unsupported PTX instruction: {}",
@@ -209,6 +239,27 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
     let params = parser.params()?;
     parser.expect("{")?;
     let registers = parser.registers()?;
+    let shared = if parser.eat(".shared") {
+        parser.expect(".align")?;
+        parser.expect("4")?;
+        parser.expect(".b8")?;
+        let name = parser.identifier()?;
+        if name.starts_with('%') {
+            return Err(Error::new("invalid PTX shared symbol"));
+        }
+        parser.expect("[")?;
+        let size = parser
+            .take()?
+            .parse::<u32>()
+            .ok()
+            .filter(|&size| size != 0 && size.is_multiple_of(4))
+            .ok_or_else(|| Error::new("shared array size must be a positive multiple of four"))?;
+        parser.expect("]")?;
+        parser.expect(";")?;
+        Some((name, size))
+    } else {
+        None
+    };
     let mut prefix = Vec::new();
     while !matches!(parser.peek(), Some("@" | "ret")) {
         prefix.push(parser.instruction()?);
@@ -220,7 +271,11 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
         parser.expect(";")?;
         let mut body = Vec::new();
         while parser.peek() != Some(target) {
-            body.push(parser.instruction()?);
+            let inst = parser.instruction()?;
+            if matches!(inst, Instruction::Barrier) {
+                return Err(Error::new("workgroup barrier in a conditional region"));
+            }
+            body.push(inst);
         }
         parser.expect(target)?;
         parser.expect(":")?;
@@ -238,6 +293,7 @@ pub(super) fn parse(source: &str) -> Result<Entry<'_>, Error> {
         name,
         params,
         registers,
+        shared,
         prefix,
         guarded,
     })

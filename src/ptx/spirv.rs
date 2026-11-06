@@ -1,9 +1,9 @@
-use super::{Entry, Error, Instruction, Param, Translation, Width};
+use super::{Entry, Error, Instruction, Param, Space, Translation, Width};
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Operand};
 use rspirv::spirv::{
     AddressingModel, BuiltIn, Capability, Decoration, ExecutionModel, FunctionControl, MemoryModel,
-    StorageClass, Word,
+    MemorySemantics, Scope, StorageClass, Word,
 };
 use std::collections::HashMap;
 
@@ -18,7 +18,7 @@ enum Kind {
     Predicate,
     B32,
     B64,
-    Address,
+    Address(Space),
 }
 
 impl Kind {
@@ -26,7 +26,7 @@ impl Kind {
         match self {
             Self::Predicate => Width::Predicate,
             Self::B32 => Width::B32,
-            Self::B64 | Self::Address => Width::B64,
+            Self::B64 | Self::Address(_) => Width::B64,
         }
     }
 }
@@ -57,6 +57,9 @@ struct Emitter<'a> {
     f32_type: Word,
     global_byte_ptr: Word,
     global_word_ptr: Word,
+    shared_byte_ptr: Word,
+    shared_word_ptr: Word,
+    shared: Option<(&'a str, Word)>,
     builtin_type: Word,
     builtins: [Word; 3],
     declarations: HashMap<String, Width>,
@@ -65,7 +68,7 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    fn new(declarations: HashMap<String, Width>) -> Self {
+    fn new(declarations: HashMap<String, Width>, shared: Option<(&'a str, u32)>) -> Self {
         let mut builder = Builder::new();
         builder.set_version(1, 0);
         for capability in [
@@ -85,6 +88,16 @@ impl<'a> Emitter<'a> {
         let f32_type = builder.type_float(32, None);
         let global_byte_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u8_type);
         let global_word_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u32_type);
+        let shared_byte_ptr = builder.type_pointer(None, StorageClass::Workgroup, u8_type);
+        let shared_word_ptr = builder.type_pointer(None, StorageClass::Workgroup, u32_type);
+        let shared = shared.map(|(name, bytes)| {
+            // Use a u32 array to retain the PTX declaration's four-byte alignment.
+            let length = builder.constant_bit32(u32_type, bytes / 4);
+            let array = builder.type_array(u32_type, length);
+            let pointer = builder.type_pointer(None, StorageClass::Workgroup, array);
+            let variable = builder.variable(pointer, None, StorageClass::Workgroup, None);
+            (name, variable)
+        });
         // OpenCL's Physical64 environment uses size_t vectors for these built-ins.
         let builtin_type = builder.type_vector(u64_type, 3);
         let builtin_ptr = builder.type_pointer(None, StorageClass::Input, builtin_type);
@@ -101,6 +114,9 @@ impl<'a> Emitter<'a> {
             f32_type,
             global_byte_ptr,
             global_word_ptr,
+            shared_byte_ptr,
+            shared_word_ptr,
+            shared,
             builtin_type,
             builtins,
             declarations,
@@ -181,7 +197,7 @@ impl<'a> Emitter<'a> {
         let address = |name: &str| {
             self.registers
                 .get(name)
-                .filter(|v| v.kind == Kind::Address)
+                .filter(|v| matches!(v.kind, Kind::Address(_)))
                 .copied()
         };
         let (base, offset) = match (address(a), address(b)) {
@@ -201,19 +217,41 @@ impl<'a> Emitter<'a> {
             }
         };
         let offset = self.integer(offset, Kind::B64)?;
+        let pointer_type = match base.kind {
+            Kind::Address(Space::Shared) => self.shared_byte_ptr,
+            _ => self.global_byte_ptr,
+        };
         // PTX adds byte offsets. Keep the base typed as a pointer for driver residency.
         let id = self
             .builder
-            .ptr_access_chain(self.global_byte_ptr, None, base.id, offset, [])?;
+            .ptr_access_chain(pointer_type, None, base.id, offset, [])?;
         Ok(Value {
             id,
-            kind: Kind::Address,
+            kind: base.kind,
         })
     }
 
-    fn word_pointer(&mut self, address: &str) -> Result<Word, Error> {
-        let pointer = self.read(address)?.require(Kind::Address, address)?;
-        Ok(self.builder.bitcast(self.global_word_ptr, None, pointer)?)
+    fn shared_base(&mut self, name: &str) -> Result<Word, Error> {
+        let (_, array) = self
+            .shared
+            .filter(|(symbol, _)| *symbol == name)
+            .ok_or_else(|| Error::new(format!("unknown PTX shared symbol {name}")))?;
+        let zero = self.builder.constant_bit32(self.u32_type, 0);
+        Ok(self
+            .builder
+            .access_chain(self.shared_word_ptr, None, array, [zero])?)
+    }
+
+    fn word_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
+        if space == Space::Shared && !address.starts_with('%') {
+            return self.shared_base(address);
+        }
+        let pointer = self.read(address)?.require(Kind::Address(space), address)?;
+        let ty = match space {
+            Space::Global => self.global_word_ptr,
+            Space::Shared => self.shared_word_ptr,
+        };
+        Ok(self.builder.bitcast(ty, None, pointer)?)
     }
 
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
@@ -233,8 +271,14 @@ impl<'a> Emitter<'a> {
             }
             Instruction::ToGlobal(dst, src) => {
                 // The frontend accepts only pointers to device allocations for this state space.
-                let id = self.read(src)?.require(Kind::Address, src)?;
-                (dst, id, Kind::Address)
+                let kind = Kind::Address(Space::Global);
+                let id = self.read(src)?.require(kind, src)?;
+                (dst, id, kind)
+            }
+            Instruction::SharedAddress(dst, src) => {
+                let pointer = self.shared_base(src)?;
+                let id = self.builder.bitcast(self.shared_byte_ptr, None, pointer)?;
+                (dst, id, Kind::Address(Space::Shared))
             }
             Instruction::Builtin(dst, src) => (dst, self.builtin(src)?, Kind::B32),
             Instruction::Mad32(dst, [a, b, c]) => {
@@ -273,8 +317,8 @@ impl<'a> Emitter<'a> {
                 let value = self.add64(a, b)?;
                 (dst, value.id, value.kind)
             }
-            Instruction::Load32(dst, address) => {
-                let pointer = self.word_pointer(address)?;
+            Instruction::Load32(space, dst, address) => {
+                let pointer = self.word_pointer(space, address)?;
                 (
                     dst,
                     self.builder.load(self.u32_type, None, pointer, None, [])?,
@@ -293,10 +337,21 @@ impl<'a> Emitter<'a> {
                     Kind::B32,
                 )
             }
-            Instruction::Store32(address, src) => {
-                let pointer = self.word_pointer(address)?;
+            Instruction::Store32(space, address, src) => {
+                let pointer = self.word_pointer(space, address)?;
                 let value = self.read(src)?.require(Kind::B32, src)?;
                 self.builder.store(pointer, value, None, [])?;
+                return Ok(());
+            }
+            Instruction::Barrier => {
+                let scope = self
+                    .builder
+                    .constant_bit32(self.u32_type, Scope::Workgroup as u32);
+                let semantics = MemorySemantics::ACQUIRE_RELEASE
+                    | MemorySemantics::WORKGROUP_MEMORY
+                    | MemorySemantics::CROSS_WORKGROUP_MEMORY;
+                let semantics = self.builder.constant_bit32(self.u32_type, semantics.bits());
+                self.builder.control_barrier(scope, scope, semantics)?;
                 return Ok(());
             }
         };
@@ -305,7 +360,7 @@ impl<'a> Emitter<'a> {
 }
 
 pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
-    let mut emitter = Emitter::new(entry.registers);
+    let mut emitter = Emitter::new(entry.registers, entry.shared);
     let types: Vec<_> = entry
         .params
         .iter()
@@ -326,7 +381,7 @@ pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
         let kind = match param {
             Param::U32 => Kind::B32,
             Param::U64 => Kind::B64,
-            Param::GlobalPtr => Kind::Address,
+            Param::GlobalPtr => Kind::Address(Space::Global),
         };
         let id = emitter.builder.function_parameter(ty)?;
         emitter.params.insert(name, Value { id, kind });
@@ -357,5 +412,6 @@ pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
         name: entry.name.to_owned(),
         params: entry.params.into_iter().map(|(_, param)| param).collect(),
         words: emitter.builder.module().assemble(),
+        shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
     })
 }
