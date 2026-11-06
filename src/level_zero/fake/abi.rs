@@ -10,31 +10,45 @@ fn create(parent: Raw, parent_kind: Kind, kind: Kind, out: *mut Raw) -> Status {
     })
 }
 
-unsafe extern "system" fn context_create(_: Raw, _: *const ContextDesc, out: *mut Raw) -> Status {
+unsafe extern "system" fn context_create(
+    parent: Raw,
+    _: *const ContextDesc,
+    out: *mut Raw,
+) -> Status {
     call_driver(|driver| {
-        unsafe { out.write(without_provenance_mut(driver.create(0, Kind::Context))) };
+        let parent = parent.addr();
+        if !DEVICES.iter().any(|device| device.0 == parent) {
+            return Err("invalid native driver");
+        }
+        unsafe { out.write(without_provenance_mut(driver.create(parent, Kind::Context))) };
         Ok(0)
     })
 }
 
 unsafe extern "system" fn queue_create(
     ctx: Raw,
-    _: Raw,
+    device: Raw,
     desc: *const QueueDesc,
     out: *mut Raw,
 ) -> Status {
-    if unsafe { (*desc).ordinal } != ORDINAL {
-        return unexpected("selected wrong compute queue ordinal");
-    }
-    create(ctx, Kind::Context, Kind::Queue, out)
+    call_driver(|driver| {
+        if unsafe { (*desc).ordinal } != driver.device_ordinal(ctx, device)? {
+            return Err("selected wrong compute queue ordinal");
+        }
+        unsafe {
+            out.write(without_provenance_mut(
+                driver.create(ctx.addr(), Kind::Queue),
+            ))
+        };
+        Ok(0)
+    })
 }
 
-fn list_create(ctx: Raw, ordinal: u32, mode: u32, out: *mut Raw) -> Status {
-    if ordinal != ORDINAL {
-        return unexpected("selected wrong list queue ordinal");
-    }
+fn list_create(ctx: Raw, device: Raw, ordinal: u32, mode: u32, out: *mut Raw) -> Status {
     call_driver(|driver| {
-        driver.get(ctx.addr(), Kind::Context)?;
+        if ordinal != driver.device_ordinal(ctx, device)? {
+            return Err("selected wrong list queue ordinal");
+        }
         let id = driver.create(ctx.addr(), Kind::List);
         driver.lists.insert(
             id,
@@ -51,21 +65,21 @@ fn list_create(ctx: Raw, ordinal: u32, mode: u32, out: *mut Raw) -> Status {
 
 unsafe extern "system" fn list_immediate(
     ctx: Raw,
-    _: Raw,
+    device: Raw,
     desc: *const QueueDesc,
     out: *mut Raw,
 ) -> Status {
     let desc = unsafe { &*desc };
-    list_create(ctx, desc.ordinal, desc.mode, out)
+    list_create(ctx, device, desc.ordinal, desc.mode, out)
 }
 
 unsafe extern "system" fn list_regular(
     ctx: Raw,
-    _: Raw,
+    device: Raw,
     desc: *const regular::ListDesc,
     out: *mut Raw,
 ) -> Status {
-    list_create(ctx, unsafe { (*desc).ordinal }, 0, out)
+    list_create(ctx, device, unsafe { (*desc).ordinal }, 0, out)
 }
 
 unsafe extern "system" fn list_close(list: Raw) -> Status {
@@ -131,13 +145,13 @@ unsafe extern "system" fn execute(queue: Raw, count: u32, lists: *mut Raw, fence
 
 unsafe extern "system" fn module_create(
     ctx: Raw,
-    _: Raw,
+    device: Raw,
     _: *const ModuleDesc,
     out: *mut Raw,
     log: *mut Raw,
 ) -> Status {
     call_driver(|driver| {
-        driver.get(ctx.addr(), Kind::Context)?;
+        driver.device_ordinal(ctx, device)?;
         unsafe {
             out.write(without_provenance_mut(
                 driver.create(ctx.addr(), Kind::Module),
@@ -150,9 +164,13 @@ unsafe extern "system" fn module_create(
     })
 }
 
-fn allocate(ctx: Raw, bytes: usize, kind: Kind, out: *mut Raw) -> Status {
+fn allocate(ctx: Raw, device: Option<Raw>, bytes: usize, kind: Kind, out: *mut Raw) -> Status {
     call_driver(|driver| {
-        driver.get(ctx.addr(), Kind::Context)?;
+        if let Some(device) = device {
+            driver.device_ordinal(ctx, device)?;
+        } else {
+            driver.get(ctx.addr(), Kind::Context)?;
+        }
         let id = driver.create(ctx.addr(), kind);
         driver
             .objects
@@ -169,10 +187,10 @@ unsafe extern "system" fn alloc_device(
     _: *const AllocDesc,
     bytes: usize,
     _: usize,
-    _: Raw,
+    device: Raw,
     out: *mut Raw,
 ) -> Status {
-    allocate(ctx, bytes, Kind::DeviceAllocation, out)
+    allocate(ctx, Some(device), bytes, Kind::DeviceAllocation, out)
 }
 
 unsafe extern "system" fn alloc_host(
@@ -182,7 +200,7 @@ unsafe extern "system" fn alloc_host(
     _: usize,
     out: *mut Raw,
 ) -> Status {
-    allocate(ctx, bytes, Kind::HostAllocation, out)
+    allocate(ctx, None, bytes, Kind::HostAllocation, out)
 }
 
 unsafe extern "system" fn free(ctx: Raw, ptr: Raw) -> Status {

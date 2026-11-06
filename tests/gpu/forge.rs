@@ -16,6 +16,7 @@ fn forge_transfer_pipeline() {
     pipeline::run_pipeline(
         None,
         std::env::var_os("CUDA_FOR_INTEL_BENCH_TRANSFERS").is_some(),
+        None,
     );
 }
 

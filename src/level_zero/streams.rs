@@ -25,12 +25,22 @@ impl Api {
 
 impl Context {
     pub(crate) fn create_stream(&self, api: &Api) -> Result<CommandList, Error> {
+        self.create_stream_at(api, self.ordinal, 1 << 1) // ZE_COMMAND_QUEUE_FLAG_IN_ORDER
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn create_copy_stream(&self, api: &Api, ordinal: u32) -> Result<CommandList, Error> {
+        // Request the selected queue explicitly and preserve in-order execution.
+        self.create_stream_at(api, ordinal, (1 << 1) | 1)
+    }
+
+    fn create_stream_at(&self, api: &Api, ordinal: u32, flags: u32) -> Result<CommandList, Error> {
         let desc = QueueDesc {
             header: Header::new(0xe),
-            ordinal: self.ordinal,
+            ordinal,
             index: 0,
-            flags: 1 << 1, // ZE_COMMAND_QUEUE_FLAG_IN_ORDER
-            mode: 2,       // ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS
+            flags,
+            mode: 2, // ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS
             priority: 0,
         };
         let mut list = null_mut();

@@ -24,7 +24,11 @@ pub(super) trait Trace {
 }
 
 #[allow(non_snake_case)]
-pub(super) fn run_pipeline(trace_factory: Option<fn() -> Box<dyn Trace>>, bench: bool) {
+pub(super) fn run_pipeline(
+    trace_factory: Option<fn() -> Box<dyn Trace>>,
+    bench: bool,
+    event_streams: Option<fn([Handle; 3]) -> [Handle; 3]>,
+) {
     let dll = library();
     symbols!(dll;
         cuInit(u32),
@@ -54,6 +58,7 @@ pub(super) fn run_pipeline(trace_factory: Option<fn() -> Box<dyn Trace>>, bench:
     for stream in &mut streams {
         ok!(cuStreamCreate(stream, 1));
     }
+    let event_streams = event_streams.map_or(streams, |create| create(streams));
     let mut events = [[null_mut(); 3]; 2];
     for event in events.iter_mut().flatten() {
         ok!(cuEventCreate(event, 2));
@@ -142,7 +147,7 @@ pub(super) fn run_pipeline(trace_factory: Option<fn() -> Box<dyn Trace>>, bench:
             let [upload, compute, download] = match mode {
                 Mode::Blocking => [null_mut(); 3],
                 Mode::SingleStream => [streams[0]; 3],
-                Mode::EventLinked => streams,
+                Mode::EventLinked => event_streams,
             };
             let copy_stream = |stream| (!matches!(mode, Mode::Blocking)).then_some(stream);
             if let Some(trace) = trace.as_mut() {

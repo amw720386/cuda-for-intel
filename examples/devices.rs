@@ -1,5 +1,9 @@
 use nvcuda::DeviceInfo;
 
+#[path = "../tests/gpu/isolation_capability.rs"]
+mod isolation_capability;
+use isolation_capability::supports_isolation;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let validation = match std::env::args().nth(1).as_deref() {
         None => false,
@@ -18,6 +22,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report(ordinal, device);
         if validation {
             validation_plan(ordinal, device);
+            if !supports_isolation(device) {
+                println!(
+                    "SKIP\t{ordinal}\tcontext_isolation\trequires SPIR-V and pinned copies on the selected compute queue"
+                );
+            } else if !devices
+                .iter()
+                .enumerate()
+                .any(|(peer, device)| peer != ordinal && supports_isolation(device))
+            {
+                println!(
+                    "SKIP\t{ordinal}\tmulti_device_context_isolation\tno second root GPU supports the isolation workload"
+                );
+            }
         }
     }
     Ok(())
@@ -233,6 +250,7 @@ fn validation_plan(ordinal: usize, device: &DeviceInfo) {
                 "dependent_forge_chain",
                 "gated_forge_device_profile",
                 "gated_forge_operation_timestamps",
+                "gated_forge_copy_queue_timestamps",
                 "gated_m10_forge",
             ],
         );
@@ -254,6 +272,7 @@ fn validation_plan(ordinal: usize, device: &DeviceInfo) {
             "global timestamp capability unavailable",
             &[
                 "gated_forge_device_profile",
+                "gated_forge_copy_queue_timestamps",
                 "gated_timestamp_storage_survives_stream_retirement",
             ],
         );
@@ -263,8 +282,19 @@ fn validation_plan(ordinal: usize, device: &DeviceInfo) {
             "kernel timestamp capability unavailable",
             &[
                 "gated_forge_operation_timestamps",
+                "gated_forge_copy_queue_timestamps",
                 "gated_m10_device_execution",
             ],
+        );
+    }
+    if !device
+        .queue_groups
+        .iter()
+        .any(|group| group.queues != 0 && group.copy_only())
+    {
+        skip(
+            "no copy-only queue with a usable index",
+            &["gated_forge_copy_queue_timestamps"],
         );
     }
 }

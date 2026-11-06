@@ -13,6 +13,10 @@ use gpu_device::ordinal as test_device;
 
 #[path = "gpu/forge.rs"]
 mod forge;
+#[path = "gpu/isolation.rs"]
+mod isolation;
+#[path = "gpu/isolation_capability.rs"]
+mod isolation_capability;
 #[path = "gpu/pinned.rs"]
 mod pinned;
 #[path = "gpu/progress.rs"]
@@ -165,12 +169,10 @@ fn compiled_ptx_vector_add() {
     ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
 
     let mut module = null_mut();
-    let path = std::ffi::CString::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/vector_add.ptx"
-    ))
-    .unwrap();
-    ok!(cuModuleLoad(&mut module, path.as_ptr()));
+    ok!(cuModuleLoad(
+        &mut module,
+        c"examples/vector_add.ptx".as_ptr()
+    ));
     ok!(cuModuleUnload(module));
     module = null_mut();
     let elf = *b"\x7fELF";

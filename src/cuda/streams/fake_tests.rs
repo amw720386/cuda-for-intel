@@ -77,16 +77,16 @@ impl Drop for Fixture {
     }
 }
 
-fn create_context(policy: Option<Policy>, out: &mut Opaque) -> CuResult {
+fn create_context(policy: Option<Policy>, device: i32, out: &mut Opaque) -> CuResult {
     TEST_POLICY.set(Some(policy));
-    let result = unsafe { cuCtxCreate_v2(out, 0, 0) };
+    let result = unsafe { cuCtxCreate_v2(out, 0, device) };
     TEST_POLICY.set(None);
     result
 }
 
 fn context(policy: Option<Policy>) -> Opaque {
     let mut out = null_mut();
-    assert_eq!(create_context(policy, &mut out), Success);
+    assert_eq!(create_context(policy, 0, &mut out), Success);
     out
 }
 
@@ -145,11 +145,73 @@ fn assert_baseline() {
 }
 
 #[test]
+fn fake_multi_device_context_isolation() {
+    let _fixture = Fixture::new();
+    let mut count = 0;
+    assert_eq!(unsafe { cuDeviceGetCount(&mut count) }, Success);
+    assert_eq!(count, 2);
+    let mut ordinal = -1;
+    assert_eq!(unsafe { cuDeviceGet(&mut ordinal, count) }, InvalidDevice);
+
+    for policy in [None, BATCH] {
+        let a = context(policy);
+        let stream_a = stream();
+        let event_a = event();
+        let function_a = function(module());
+        let (device_a, host_a) = allocations();
+        let mut large = 0;
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut large, 256) }, Success);
+        assert_eq!(launch(function_a, stream_a, device_a), Success);
+        assert_eq!(cuEventRecord(event_a, stream_a), Success);
+
+        let mut b = null_mut();
+        assert_eq!(create_context(policy, 1, &mut b), Success);
+        assert_eq!(unsafe { cuCtxGetDevice(&mut ordinal) }, Success);
+        assert_eq!(ordinal, 1);
+        let stream_b = stream();
+        let function_b = function(module());
+        let (device_b, host_b) = allocations();
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut large, 256) }, OutOfMemory);
+        assert_eq!(cuMemFree_v2(device_a), InvalidValue);
+        assert_eq!(cuMemFreeHost(host_a), InvalidValue);
+        assert_eq!(launch(function_a, stream_b, device_b), InvalidHandle);
+        assert_eq!(launch(function_b, stream_a, device_b), InvalidHandle);
+        assert_eq!(launch(function_b, stream_b, device_a), InvalidValue);
+        assert_eq!(cuStreamWaitEvent(stream_b, event_a, 0), InvalidHandle);
+        assert_eq!(cuStreamSynchronize(stream_a), Success);
+
+        // A can release its native objects while B has submitted work pending.
+        fake::pause();
+        assert_eq!(
+            unsafe { cuMemcpyHtoDAsync_v2(device_b, host_b, 64, stream_b) },
+            Success
+        );
+        with_context(|runtime, context| {
+            context
+                .streams
+                .get_mut(stream_b.addr())?
+                .flush(&runtime.api)
+        })
+        .unwrap();
+        assert!(fake::snapshot().pending > 0);
+        assert_eq!(cuCtxDestroy_v2(a), Success);
+        assert_eq!(fake::snapshot().live.get(&Kind::Context), Some(&1));
+        assert_eq!(cuStreamQuery(stream_b), NotReady);
+        assert_eq!(cuStreamQuery(stream_a), InvalidHandle);
+        fake::complete();
+        assert_eq!(launch(function_b, stream_b, device_b), Success);
+        assert_eq!(cuCtxSynchronize(), Success);
+        assert_eq!(cuCtxDestroy_v2(b), Success);
+        assert_baseline();
+    }
+}
+
+#[test]
 fn fake_fault_initialization_and_allocation() {
     let _fixture = Fixture::new();
     let mut out = null_mut();
     arm("zeContextCreate", OOM);
-    assert_eq!(create_context(None, &mut out), OutOfMemory);
+    assert_eq!(create_context(None, 0, &mut out), OutOfMemory);
     assert!(out.is_null());
     assert_baseline();
 
@@ -160,7 +222,7 @@ fn fake_fault_initialization_and_allocation() {
     ] {
         arm(call, OOM);
         arm("zeContextDestroy", FAIL);
-        assert_eq!(create_context(policy, &mut out), OutOfMemory);
+        assert_eq!(create_context(policy, 0, &mut out), OutOfMemory);
         assert!(out.is_null());
         assert_eq!(fake::snapshot().live.get(&Kind::Context), Some(&1));
         state(|state| {

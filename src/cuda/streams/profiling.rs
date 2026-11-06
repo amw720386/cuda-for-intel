@@ -36,7 +36,7 @@ mod pipeline;
 use pipeline::{Mode, Trace};
 
 pub(super) fn run_bench_pipeline() {
-    pipeline::run_pipeline(None, true);
+    pipeline::run_pipeline(None, true, None);
 }
 
 const STAGES: [&str; 7] = [
@@ -411,7 +411,8 @@ impl Trace for EventProfile {
                         .map_err(|error| error.to_string())?;
                     if self.host_start > begin || end > host_end {
                         return Err(format!(
-                            "operation {index} falls outside the host clock anchors"
+                            "operation {index} interval {begin}..{end} falls outside the host clock anchors {}..{host_end}",
+                            self.host_start
                         ));
                     }
                     Ok((begin, end))
@@ -463,6 +464,7 @@ fn gated_forge_device_profile() {
     pipeline::run_pipeline(
         Some(|| Box::new(Profile::new())),
         std::env::var_os("CUDA_FOR_INTEL_BENCH_PROFILING").is_some(),
+        None,
     );
 }
 
@@ -472,7 +474,63 @@ fn gated_forge_operation_timestamps() {
     pipeline::run_pipeline(
         Some(EventProfile::create),
         std::env::var_os("CUDA_FOR_INTEL_BENCH_PROFILING").is_some(),
+        None,
     );
+}
+
+fn copy_queue_streams([_, compute, _]: [Handle; 3]) -> [Handle; 3] {
+    let mut copy_streams = [std::ptr::null_mut(); 2];
+    for stream in &mut copy_streams {
+        linked_ok!(cuStreamCreate(stream, 1));
+        with_context(|runtime, context| {
+            let api = &runtime.api;
+            let info = &runtime.devices[context.device as usize].info;
+            let group = info
+                .queue_groups
+                .iter()
+                .find(|group| group.queues != 0 && group.copy_only())
+                .ok_or(NotSupported)?;
+            let stream = context.streams.get_mut(stream.addr())?;
+            let old = stream.immediate.as_ref().ok_or(NotSupported)?;
+            let list = context
+                .backend
+                .create_copy_stream(api, group.ordinal)
+                .map_err(backend_error)?;
+            if let Err(error) = old.destroy(api) {
+                list.destroy(api).map_err(backend_error)?;
+                return Err(backend_error(error));
+            }
+            stream.immediate = Some(std::sync::Arc::new(list));
+            Ok(())
+        })
+        .expect("create copy-only immediate stream");
+    }
+    [copy_streams[0], compute, copy_streams[1]]
+}
+
+#[test]
+#[ignore = "requires an Intel Level Zero copy-only queue and operation timestamps"]
+fn gated_forge_copy_queue_timestamps() {
+    let devices = crate::intel_devices().unwrap();
+    let info = &devices[test_device() as usize];
+    if !info
+        .queue_groups
+        .iter()
+        .any(|group| group.queues != 0 && group.copy_only())
+    {
+        println!("SKIP: no copy-only queue with a usable index");
+        return;
+    }
+    let bench = std::env::var_os("CUDA_FOR_INTEL_BENCH_PROFILING").is_some();
+    // This experiment opts specific streams into another immediate queue group.
+    super::batch::TEST_POLICY.set(Some(None));
+    pipeline::run_pipeline(
+        Some(|| Box::new(Profile::new())),
+        bench,
+        Some(copy_queue_streams),
+    );
+    pipeline::run_pipeline(Some(EventProfile::create), bench, Some(copy_queue_streams));
+    super::batch::TEST_POLICY.set(None);
 }
 
 #[test]

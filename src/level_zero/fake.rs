@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 const UNKNOWN: Status = 0x7fff_fffe;
 const NOT_READY: Status = 1;
-const ORDINAL: u32 = 7;
+// Distinct drivers, device handles and compute queue ordinals.
+const DEVICES: [(Id, Id, u32); 2] = [(1, 2, 7), (3, 4, 11)];
 const WAIT_LIMIT: Duration = Duration::from_secs(3);
 static DRIVER: Mutex<Option<Driver>> = Mutex::new(None);
 static CHANGED: Condvar = Condvar::new();
@@ -98,6 +99,16 @@ struct Driver {
 }
 
 impl Driver {
+    fn device_ordinal(&self, context: Raw, device: Raw) -> DriverResult<u32> {
+        let parent = self.get(context.addr(), Kind::Context)?.parent;
+        DEVICES
+            .iter()
+            .find_map(|&(driver, handle, ordinal)| {
+                (driver == parent && handle == device.addr()).then_some(ordinal)
+            })
+            .ok_or("native operation selected a foreign device")
+    }
+
     fn create(&mut self, parent: Id, kind: Kind) -> Id {
         self.next += 0x10000;
         self.objects.insert(
@@ -283,19 +294,20 @@ pub(super) fn unexpected(call: &'static str) -> Status {
 
 pub(crate) fn start() -> Runtime {
     assert!(lock().replace(Driver::default()).is_none());
-    Runtime {
-        api: abi::api(),
-        devices: vec![Device {
+    let devices = DEVICES
+        .into_iter()
+        .enumerate()
+        .map(|(index, (driver, handle, ordinal))| Device {
             info: DeviceInfo {
                 name: "Lifecycle fixture".into(),
                 vendor_id: 0x8086,
-                device_id: 0,
+                device_id: index as u32,
                 device_flags: 0,
                 driver_version: 0,
                 api_version: 0x10000,
                 uuid: [0; 16],
                 total_memory: 1 << 20,
-                max_allocation: 4096,
+                max_allocation: if index == 0 { 4096 } else { 128 },
                 max_workgroup_size: 256,
                 max_workgroup_dimensions: [256, 16, 16],
                 max_grid_dimensions: [65535; 3],
@@ -321,7 +333,7 @@ pub(crate) fn start() -> Runtime {
                         queues: 1,
                     },
                     QueueGroup {
-                        ordinal: ORDINAL,
+                        ordinal,
                         flags: 3,
                         queues: 2,
                     },
@@ -330,9 +342,13 @@ pub(crate) fn start() -> Runtime {
                 timestamp_valid_bits: 0,
                 kernel_timestamp_valid_bits: 0,
             },
-            driver: Handle(without_provenance_mut(1)),
-            handle: Handle(without_provenance_mut(2)),
-        }],
+            driver: Handle(without_provenance_mut(driver)),
+            handle: Handle(without_provenance_mut(handle)),
+        })
+        .collect();
+    Runtime {
+        api: abi::api(),
+        devices,
     }
 }
 
