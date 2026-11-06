@@ -64,6 +64,7 @@ enum Space {
 enum Comparison {
     Equal,
     Less,
+    LessEqual,
     Greater,
     GreaterEqual,
 }
@@ -104,9 +105,15 @@ enum Instruction<'a> {
     Builtin(&'a str, &'a str),
     Mad32(&'a str, [&'a str; 3]),
     Compare(Comparison, &'a str, [&'a str; 2]),
+    PredicateLogic {
+        and: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
     Move32(&'a str, &'a str),
     MulWide32(&'a str, [&'a str; 2]),
+    ShiftLeft64(&'a str, [&'a str; 2]),
     Add64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
     Float32(&'a str, FloatOp<'a>),
@@ -127,8 +134,10 @@ impl<'a> Instruction<'a> {
             }
             Mad32(dst, src) => (*dst, src),
             Compare(_, dst, src)
+            | PredicateLogic { dst, src, .. }
             | Integer32(_, dst, src)
             | MulWide32(dst, src)
+            | ShiftLeft64(dst, src)
             | Add64(dst, src) => (*dst, src),
             Float32(dst, op) => (*dst, op.inputs()),
             Store32(..) | Barrier => return None,
@@ -200,6 +209,38 @@ mod tests {
     const BLOCK_REDUCE: &str = include_str!("../examples/block_reduce.ptx");
     const ATOMIC_TICKETS: &str = include_str!("../examples/atomic_tickets.ptx");
     const RMSNORM: &str = include_str!("../examples/rmsnorm.ptx");
+    const GGML_ADD: &str = include_str!("../examples/ggml_add_f32.ptx");
+
+    #[test]
+    fn lowers_ggml_grid_stride_instructions() {
+        use rspirv::dr::Operand;
+        use rspirv::spirv::{BuiltIn, Op};
+
+        let translated = translate(GGML_ADD).unwrap();
+        assert_eq!(
+            translated.params,
+            [vec![Param::GlobalPtr; 3], vec![Param::U32; 5]].concat()
+        );
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        assert!(module.annotations.iter().any(|inst| {
+            inst.operands
+                .contains(&Operand::BuiltIn(BuiltIn::NumWorkgroups))
+        }));
+        for opcode in [
+            Op::LogicalOr,
+            Op::LogicalAnd,
+            Op::ULessThanEqual,
+            Op::ShiftLeftLogical,
+        ] {
+            assert!(
+                module
+                    .all_inst_iter()
+                    .any(|inst| inst.class.opcode == opcode)
+            );
+        }
+        assert!(translate(&GGML_ADD.replace("%rd10, 2;", "%rd10, 64;")).is_err());
+        assert!(translate(&GGML_ADD.replace("%p3, %p1, %p2;", "%p3, %r4, %p2;")).is_err());
+    }
 
     const SHARED: &str = "
         .version 4.1
@@ -364,6 +405,7 @@ mod tests {
             BLOCK_REDUCE,
             ATOMIC_TICKETS,
             RMSNORM,
+            GGML_ADD,
             include_str!("../examples/forge_residual.ptx"),
             include_str!("../examples/forge_reduce.ptx"),
         ] {

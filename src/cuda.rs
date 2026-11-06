@@ -13,6 +13,8 @@ use streams::Streams;
 #[path = "../tests/gpu/device.rs"]
 mod gpu_device;
 #[cfg(all(test, windows))]
+mod ollama_bench;
+#[cfg(all(test, windows))]
 mod transfer_bench;
 #[cfg(all(test, windows))]
 use gpu_device::ordinal as test_device;

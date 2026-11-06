@@ -242,6 +242,16 @@ fn validation_plan(ordinal: usize, device: &DeviceInfo) {
             );
         }
     }
+    if !fp32
+        || !copy
+        || !supported_kernel(128, 3, 44, 0, 231736)
+        || device.max_grid_dimensions[1] < 65
+    {
+        skip(
+            "GGML add requires FP32, copies, and its launch and allocation limits",
+            &["ggml_cuda_add_f32", "gated_ggml_add_device_time"],
+        );
+    }
     if !fma || !pinned || !supported_kernel(128, 512, 32, 512, 262144) {
         skip(
             "Forge requires FP32/FMA, pinned copies and its workload limits",
@@ -284,6 +294,7 @@ fn validation_plan(ordinal: usize, device: &DeviceInfo) {
                 "gated_forge_operation_timestamps",
                 "gated_forge_copy_queue_timestamps",
                 "gated_m10_device_execution",
+                "gated_ggml_add_device_time",
             ],
         );
     }

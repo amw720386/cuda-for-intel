@@ -13,10 +13,11 @@ use rspirv::spirv::{
 };
 use std::collections::{HashMap, HashSet};
 
-const BUILTINS: [BuiltIn; 3] = [
+const BUILTINS: [BuiltIn; 4] = [
     BuiltIn::WorkgroupId,
     BuiltIn::WorkgroupSize,
     BuiltIn::LocalInvocationId,
+    BuiltIn::NumWorkgroups,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,7 +68,7 @@ struct Emitter<'a> {
     shared_word_ptr: Word,
     shared: Option<(&'a str, Word)>,
     builtin_type: Word,
-    builtins: [Word; 3],
+    builtins: [Word; BUILTINS.len()],
     declarations: HashMap<String, Width>,
     registers: HashMap<&'a str, Value>,
     initialized: HashSet<&'a str>,
@@ -245,6 +246,7 @@ impl<'a> Emitter<'a> {
             "%ctaid" => self.builtins[0],
             "%ntid" => self.builtins[1],
             "%tid" => self.builtins[2],
+            "%nctaid" => self.builtins[3],
             _ => return Err(Error::new(format!("unsupported PTX built-in {src}"))),
         };
         let axis = match axis {
@@ -428,9 +430,25 @@ impl<'a> Emitter<'a> {
                 let id = match op {
                     Comparison::Equal => self.builder.i_equal(ty, None, a, b),
                     Comparison::Less => self.builder.u_less_than(ty, None, a, b),
+                    Comparison::LessEqual => self.builder.u_less_than_equal(ty, None, a, b),
                     Comparison::Greater => self.builder.u_greater_than(ty, None, a, b),
                     Comparison::GreaterEqual => self.builder.u_greater_than_equal(ty, None, a, b),
                 }?;
+                (dst, id, Kind::Predicate)
+            }
+            Instruction::PredicateLogic {
+                and,
+                dst,
+                src: [a, b],
+            } => {
+                let a = self.read(a)?.require(Kind::Predicate, a)?;
+                let b = self.read(b)?.require(Kind::Predicate, b)?;
+                let ty = self.bool_type;
+                let id = if and {
+                    self.builder.logical_and(ty, None, a, b)?
+                } else {
+                    self.builder.logical_or(ty, None, a, b)?
+                };
                 (dst, id, Kind::Predicate)
             }
             Instruction::Integer32(op, dst, [a, b]) => {
@@ -474,6 +492,19 @@ impl<'a> Emitter<'a> {
             Instruction::Add64(dst, [a, b]) => {
                 let value = self.add64(a, b)?;
                 (dst, value.id, value.kind)
+            }
+            Instruction::ShiftLeft64(dst, [value, shift]) => {
+                if !shift.parse::<u32>().is_ok_and(|n| n < 64) {
+                    return Err(Error::new(
+                        "only immediate PTX left shifts below 64 are supported",
+                    ));
+                }
+                let value = self.integer(value, Kind::B64)?;
+                let shift = self.integer(shift, Kind::B32)?;
+                let id = self
+                    .builder
+                    .shift_left_logical(self.u64_type, None, value, shift)?;
+                (dst, id, Kind::B64)
             }
             Instruction::Load32(space, dst, address) => {
                 let pointer = self.word_pointer(space, address)?;

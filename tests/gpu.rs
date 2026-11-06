@@ -17,6 +17,8 @@ mod forge;
 mod isolation;
 #[path = "gpu/isolation_capability.rs"]
 mod isolation_capability;
+#[path = "gpu/ollama.rs"]
+mod ollama;
 #[path = "gpu/pinned.rs"]
 mod pinned;
 #[path = "gpu/progress.rs"]

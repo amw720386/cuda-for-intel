@@ -186,7 +186,8 @@ impl<'a> Parser<'a> {
                 Instruction::Mad32(dst, [a, b, c])
             }
             [
-                op @ ("setp.ge.u32" | "setp.gt.u32" | "setp.lt.u32" | "setp.eq.b32"),
+                op
+                @ ("setp.ge.u32" | "setp.gt.u32" | "setp.lt.u32" | "setp.le.u32" | "setp.eq.b32"),
                 dst,
                 ",",
                 a,
@@ -197,10 +198,16 @@ impl<'a> Parser<'a> {
                     "setp.ge.u32" => Comparison::GreaterEqual,
                     "setp.gt.u32" => Comparison::Greater,
                     "setp.lt.u32" => Comparison::Less,
+                    "setp.le.u32" => Comparison::LessEqual,
                     _ => Comparison::Equal,
                 };
                 Instruction::Compare(comparison, dst, [a, b])
             }
+            [op @ ("and.pred" | "or.pred"), dst, ",", a, ",", b] => Instruction::PredicateLogic {
+                and: *op == "and.pred",
+                dst,
+                src: [a, b],
+            },
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "shr.u32"),
                 dst,
@@ -219,6 +226,7 @@ impl<'a> Parser<'a> {
             }
             ["mov.b32", dst, ",", src] => Instruction::Move32(dst, src),
             ["mul.wide.u32", dst, ",", a, ",", b] => Instruction::MulWide32(dst, [a, b]),
+            ["shl.b64", dst, ",", a, ",", b] => Instruction::ShiftLeft64(dst, [a, b]),
             ["add.s64" | "add.u64", dst, ",", a, ",", b] => Instruction::Add64(dst, [a, b]),
             [
                 op @ ("ld.global.b32" | "ld.shared.b32"),
