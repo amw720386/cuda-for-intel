@@ -1,12 +1,15 @@
 use super::flow::Flow;
+use super::rounded;
 use super::{
-    Comparison, Entry, Error, Instruction, IntegerOp, Param, Space, Terminator, Translation, Width,
+    Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
+    Translation, Width,
 };
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Instruction as SpirvInstruction, Operand};
 use rspirv::spirv::{
-    AddressingModel, BuiltIn, Capability, Decoration, ExecutionModel, FunctionControl, MemoryModel,
-    MemorySemantics, Op, Scope, StorageClass, Word,
+    AddressingModel, BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel,
+    FPRoundingMode, FunctionControl, MemoryModel, MemorySemantics, Op, OpenclStd100Op, Scope,
+    StorageClass, Word,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -71,7 +74,9 @@ struct Emitter<'a> {
     locals: Vec<SpirvInstruction>,
     params: HashMap<&'a str, Value>,
     device_atomics: bool,
-    fp32_add: bool,
+    fp32: bool,
+    fp32_fma: bool,
+    opencl: Word,
 }
 
 impl<'a> Emitter<'a> {
@@ -87,6 +92,7 @@ impl<'a> Emitter<'a> {
             builder.capability(capability);
         }
         builder.memory_model(AddressingModel::Physical64, MemoryModel::OpenCL);
+        let opencl = builder.ext_inst_import("OpenCL.std");
 
         let bool_type = builder.type_bool();
         let u8_type = builder.type_int(8, 0);
@@ -132,13 +138,16 @@ impl<'a> Emitter<'a> {
             locals: Vec::new(),
             params: HashMap::new(),
             device_atomics: false,
-            fp32_add: false,
+            fp32: false,
+            fp32_fma: false,
+            opencl,
         }
     }
 
     fn param_type(&self, param: Param) -> Word {
         match param {
             Param::U32 => self.u32_type,
+            Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
             Param::GlobalPtr => self.global_byte_ptr,
         }
@@ -312,6 +321,68 @@ impl<'a> Emitter<'a> {
         Ok(self.builder.bitcast(ty, None, pointer)?)
     }
 
+    fn float_bits(&mut self, source: &str) -> Result<Word, Error> {
+        if let Some(hex) = source.strip_prefix("0f").filter(|hex| hex.len() == 8) {
+            let bits = u32::from_str_radix(hex, 16)
+                .map_err(|_| Error::new("invalid PTX float bit literal"))?;
+            return Ok(self.builder.constant_bit32(self.u32_type, bits));
+        }
+        self.read(source)?.require(Kind::B32, source)
+    }
+
+    fn float_value(&mut self, source: &str) -> Result<Word, Error> {
+        let bits = self.float_bits(source)?;
+        Ok(self.builder.bitcast(self.f32_type, None, bits)?)
+    }
+
+    fn float_op(&mut self, op: FloatOp<'_>) -> Result<Word, Error> {
+        let ty = self.f32_type;
+        let result = match op {
+            FloatOp::Div([a, b]) => {
+                let a = self.float_bits(a)?;
+                let b = self.float_bits(b)?;
+                return rounded::div(&mut self.builder, self.opencl, a, b);
+            }
+            FloatOp::Sqrt([source]) => {
+                let value = self.float_bits(source)?;
+                return rounded::sqrt(&mut self.builder, self.opencl, value);
+            }
+            FloatOp::Add([a, b]) | FloatOp::Mul([a, b]) => {
+                let a = self.float_value(a)?;
+                let b = self.float_value(b)?;
+                match op {
+                    FloatOp::Add(_) => self.builder.f_add(ty, None, a, b)?,
+                    _ => self.builder.f_mul(ty, None, a, b)?,
+                }
+            }
+            FloatOp::Fma([a, b, c]) => {
+                let a = self.float_value(a)?;
+                let b = self.float_value(b)?;
+                let c = self.float_value(c)?;
+                self.fp32_fma = true;
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::fma as u32,
+                    [a, b, c].map(Operand::IdRef),
+                )?
+            }
+            FloatOp::FromUnsigned([source]) => {
+                let value = self.integer(source, Kind::B32)?;
+                let converted = self.builder.convert_u_to_f(ty, None, value)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTE)],
+                );
+                converted
+            }
+        };
+        self.fp32 = true;
+        Ok(self.builder.bitcast(self.u32_type, None, result)?)
+    }
+
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
         let (dst, id, kind) = match inst {
             Instruction::Param(width, dst, src) => {
@@ -374,6 +445,7 @@ impl<'a> Emitter<'a> {
                 let id = match op {
                     IntegerOp::Add => self.builder.i_add(ty, None, a, b),
                     IntegerOp::Sub => self.builder.i_sub(ty, None, a, b),
+                    IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
                     IntegerOp::ShiftRight => self.builder.shift_right_logical(ty, None, a, b),
                 }?;
                 (dst, id, Kind::B32)
@@ -411,19 +483,7 @@ impl<'a> Emitter<'a> {
                     Kind::B32,
                 )
             }
-            Instruction::AddFloat32(dst, [a, b]) => {
-                self.fp32_add = true;
-                let a = self.read(a)?.require(Kind::B32, a)?;
-                let b = self.read(b)?.require(Kind::B32, b)?;
-                let a = self.builder.bitcast(self.f32_type, None, a)?;
-                let b = self.builder.bitcast(self.f32_type, None, b)?;
-                let sum = self.builder.f_add(self.f32_type, None, a, b)?;
-                (
-                    dst,
-                    self.builder.bitcast(self.u32_type, None, sum)?,
-                    Kind::B32,
-                )
-            }
+            Instruction::Float32(dst, op) => (dst, self.float_op(op)?, Kind::B32),
             Instruction::Store32(space, address, src) => {
                 let pointer = self.word_pointer(space, address)?;
                 let value = self.read(src)?.require(Kind::B32, src)?;
@@ -485,16 +545,23 @@ pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
         entry.name,
         emitter.builtins,
     );
-    for ((name, param), ty) in entry.params.iter().zip(types) {
+    let values = types
+        .into_iter()
+        .map(|ty| emitter.builder.function_parameter(ty))
+        .collect::<Result<Vec<_>, _>>()?;
+    emitter.builder.begin_block(None)?;
+    for ((name, param), mut id) in entry.params.iter().zip(values) {
         let kind = match param {
             Param::U32 => Kind::B32,
+            Param::F32 => {
+                id = emitter.builder.bitcast(emitter.u32_type, None, id)?;
+                Kind::B32
+            }
             Param::U64 => Kind::B64,
             Param::GlobalPtr => Kind::Address(Space::Global),
         };
-        let id = emitter.builder.function_parameter(ty)?;
         emitter.params.insert(name, Value { id, kind });
     }
-    emitter.builder.begin_block(None)?;
     let labels: Vec<_> = entry.blocks.iter().map(|_| emitter.builder.id()).collect();
     emitter.builder.branch(labels[0])?;
     for index in flow.order {
@@ -522,6 +589,11 @@ pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
         }
     }
     emitter.builder.end_function()?;
+    if emitter.fp32 {
+        emitter
+            .builder
+            .execution_mode(function, ExecutionMode::ContractionOff, []);
+    }
     let mut module = emitter.builder.module();
     module.functions[0].blocks[0]
         .instructions
@@ -533,6 +605,7 @@ pub(super) fn emit(entry: Entry<'_>) -> Result<Translation, Error> {
         shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
         max_threads: entry.max_threads,
         device_atomics: emitter.device_atomics,
-        fp32_add: emitter.fp32_add,
+        fp32: emitter.fp32,
+        fp32_fma: emitter.fp32_fma,
     })
 }

@@ -282,6 +282,8 @@ pub struct DeviceInfo {
 pub(crate) struct Device {
     pub(crate) info: DeviceInfo,
     pub(crate) device_memory_atomics: bool,
+    pub(crate) fp32_inf_nan: bool,
+    pub(crate) fp32_fma: bool,
     driver: Handle,
     handle: Handle,
     compute_queue: Option<u32>,
@@ -644,6 +646,8 @@ impl Runtime {
                     handle: Handle(handle),
                     compute_queue,
                     device_memory_atomics: access.device_alloc & (1 << 1) != 0,
+                    fp32_inf_nan: module.fp32_flags & (1 << 1) != 0,
+                    fp32_fma: module.fp32_flags & (1 << 5) != 0,
                     info: DeviceInfo {
                         name: name(&properties.name)?,
                         device_id: properties.device,

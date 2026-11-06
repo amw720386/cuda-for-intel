@@ -1,6 +1,7 @@
 //! PTX subset to OpenCL-environment SPIR-V.
 mod flow;
 mod parse;
+mod rounded;
 mod spirv;
 
 use std::collections::HashMap;
@@ -9,6 +10,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Param {
     U32,
+    F32,
     U64,
     GlobalPtr,
 }
@@ -16,7 +18,7 @@ pub(crate) enum Param {
 impl Param {
     pub(crate) fn size(self) -> usize {
         match self {
-            Self::U32 => 4,
+            Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
         }
     }
@@ -70,7 +72,28 @@ enum Comparison {
 enum IntegerOp {
     Add,
     Sub,
+    Mul,
     ShiftRight,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FloatOp<'a> {
+    Add([&'a str; 2]),
+    Mul([&'a str; 2]),
+    Fma([&'a str; 3]),
+    FromUnsigned([&'a str; 1]),
+    Div([&'a str; 2]),
+    Sqrt([&'a str; 1]),
+}
+
+impl<'a> FloatOp<'a> {
+    fn inputs(&self) -> &[&'a str] {
+        match self {
+            Self::Add(inputs) | Self::Mul(inputs) | Self::Div(inputs) => inputs,
+            Self::Fma(inputs) => inputs,
+            Self::FromUnsigned(inputs) | Self::Sqrt(inputs) => inputs,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,7 +109,7 @@ enum Instruction<'a> {
     MulWide32(&'a str, [&'a str; 2]),
     Add64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
-    AddFloat32(&'a str, [&'a str; 2]),
+    Float32(&'a str, FloatOp<'a>),
     Store32(Space, &'a str, &'a str),
     AtomicAdd32(&'a str, &'a str, &'a str),
     Barrier,
@@ -106,8 +129,8 @@ impl<'a> Instruction<'a> {
             Compare(_, dst, src)
             | Integer32(_, dst, src)
             | MulWide32(dst, src)
-            | Add64(dst, src)
-            | AddFloat32(dst, src) => (*dst, src),
+            | Add64(dst, src) => (*dst, src),
+            Float32(dst, op) => (*dst, op.inputs()),
             Store32(..) | Barrier => return None,
         })
     }
@@ -160,7 +183,8 @@ pub(crate) struct Translation {
     pub(crate) shared_bytes: u32,
     pub(crate) max_threads: Option<u32>,
     pub(crate) device_atomics: bool,
-    pub(crate) fp32_add: bool,
+    pub(crate) fp32: bool,
+    pub(crate) fp32_fma: bool,
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
@@ -175,6 +199,7 @@ mod tests {
     const VECTOR_ADD: &str = include_str!("../examples/vector_add.ptx");
     const BLOCK_REDUCE: &str = include_str!("../examples/block_reduce.ptx");
     const ATOMIC_TICKETS: &str = include_str!("../examples/atomic_tickets.ptx");
+    const RMSNORM: &str = include_str!("../examples/rmsnorm.ptx");
 
     const SHARED: &str = "
         .version 4.1
@@ -287,7 +312,7 @@ mod tests {
     fn accepts_only_device_scope_relaxed_unsigned_atomic_add() {
         let translated = translate(ATOMIC_TICKETS).unwrap();
         assert!(translated.device_atomics);
-        assert!(!translated.fp32_add);
+        assert!(!translated.fp32);
         let module = rspirv::dr::load_words(&translated.words).unwrap();
         assert!(
             module.functions[0]
@@ -333,7 +358,7 @@ mod tests {
         use std::process::{Command, Stdio};
 
         let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
-        for source in [VECTOR_ADD, SHARED, BLOCK_REDUCE, ATOMIC_TICKETS] {
+        for source in [VECTOR_ADD, SHARED, BLOCK_REDUCE, ATOMIC_TICKETS, RMSNORM] {
             let translated = translate(source).unwrap();
             let mut process = Command::new(&validator)
                 .args(["--target-env", "opencl2.2", "-"])
@@ -352,6 +377,62 @@ mod tests {
                 translated.name
             );
             written.unwrap();
+        }
+    }
+
+    #[test]
+    fn lowers_round_to_nearest_fp32_operations_without_implicit_contraction() {
+        use rspirv::dr::Operand;
+        use rspirv::spirv::{ExecutionMode, OpenclStd100Op};
+
+        let translated = translate(RMSNORM).unwrap();
+        assert_eq!(translated.params.last(), Some(&Param::F32));
+        assert!(translated.fp32 && translated.fp32_fma);
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        assert!(module.execution_modes.iter().any(|inst| {
+            inst.operands
+                .contains(&Operand::ExecutionMode(ExecutionMode::ContractionOff))
+        }));
+        let kernel = module.functions.last().unwrap();
+        let instructions = kernel.blocks.iter().flat_map(|block| &block.instructions);
+        assert!(instructions.clone().any(|inst| {
+            inst.class.opcode == Op::ExtInst
+                && inst.operands[1] == Operand::LiteralExtInstInteger(OpenclStd100Op::fma as u32)
+        }));
+        assert!(
+            instructions
+                .clone()
+                .any(|inst| inst.class.opcode == Op::ConvertUToF)
+        );
+        assert!(
+            instructions
+                .clone()
+                .any(|inst| inst.class.opcode == Op::FMul)
+        );
+        assert!(
+            instructions
+                .clone()
+                .any(|inst| inst.class.opcode == Op::ShiftRightArithmetic)
+        );
+        assert!(
+            !instructions
+                .clone()
+                .any(|inst| inst.class.opcode == Op::FDiv)
+        );
+    }
+
+    #[test]
+    fn rejects_unimplemented_fp32_rounding_and_approximation_modes() {
+        for (original, unsupported) in [
+            ("mul.rn.f32", "mul.rz.f32"),
+            ("fma.rn.f32", "fma.rn.ftz.f32"),
+            ("fma.rn.f32", "fma.rn.sat.f32"),
+            ("cvt.rn.f32.u32", "cvt.rz.f32.u32"),
+            ("div.rn.f32", "div.approx.f32"),
+            ("sqrt.rn.f32", "sqrt.approx.f32"),
+        ] {
+            assert!(RMSNORM.contains(original));
+            assert!(translate(&RMSNORM.replace(original, unsupported)).is_err());
         }
     }
 

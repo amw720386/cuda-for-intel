@@ -380,7 +380,9 @@ fn load_ptx(
     let device = &runtime.devices[context.device as usize];
     let info = &device.info;
     if info.spirv_version < 0x10000
-        || (translated.fp32_add && (!info.fp32_denorms || !info.fp32_round_to_nearest))
+        || (translated.fp32
+            && (!info.fp32_denorms || !info.fp32_round_to_nearest || !device.fp32_inf_nan))
+        || (translated.fp32_fma && !device.fp32_fma)
     {
         return Err(NotSupported);
     }

@@ -1,5 +1,6 @@
 use super::{
-    Block, Comparison, Entry, Error, Instruction, IntegerOp, Param, Space, Terminator, Width,
+    Block, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
+    Width,
 };
 use std::collections::HashMap;
 
@@ -91,6 +92,7 @@ impl<'a> Parser<'a> {
             self.expect(".param")?;
             let ty = match self.take()? {
                 ".u32" | ".b32" => Param::U32,
+                ".f32" => Param::F32,
                 ".u64" | ".b64" if self.eat(".ptr") => {
                     // Generic pointer parameters are restricted to device memory at launch.
                     self.eat(".global");
@@ -200,7 +202,7 @@ impl<'a> Parser<'a> {
                 Instruction::Compare(comparison, dst, [a, b])
             }
             [
-                op @ ("add.s32" | "sub.s32" | "shr.u32"),
+                op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "shr.u32"),
                 dst,
                 ",",
                 a,
@@ -210,6 +212,7 @@ impl<'a> Parser<'a> {
                 let op = match *op {
                     "add.s32" => IntegerOp::Add,
                     "sub.s32" => IntegerOp::Sub,
+                    "mul.lo.s32" => IntegerOp::Mul,
                     _ => IntegerOp::ShiftRight,
                 };
                 Instruction::Integer32(op, dst, [a, b])
@@ -232,7 +235,18 @@ impl<'a> Parser<'a> {
                 };
                 Instruction::Load32(space, dst, addr)
             }
-            ["add.f32" | "add.rn.f32", dst, ",", a, ",", b] => Instruction::AddFloat32(dst, [a, b]),
+            ["add.f32" | "add.rn.f32", dst, ",", a, ",", b] => {
+                Instruction::Float32(dst, FloatOp::Add([a, b]))
+            }
+            ["mul.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Mul([a, b])),
+            ["fma.rn.f32", dst, ",", a, ",", b, ",", c] => {
+                Instruction::Float32(dst, FloatOp::Fma([a, b, c]))
+            }
+            ["cvt.rn.f32.u32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::FromUnsigned([src]))
+            }
+            ["div.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Div([a, b])),
+            ["sqrt.rn.f32", dst, ",", src] => Instruction::Float32(dst, FloatOp::Sqrt([src])),
             [
                 op @ ("st.global.b32" | "st.shared.b32"),
                 "[",
