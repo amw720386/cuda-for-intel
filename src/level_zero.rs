@@ -14,6 +14,7 @@ pub(crate) mod fault;
 mod regular;
 pub(crate) use regular::{Queue, QueueFence};
 mod streams;
+pub(crate) use streams::KernelArg;
 pub(crate) use streams::{CommandList, Fence, Fences};
 #[cfg(test)]
 pub(crate) mod profiling;

@@ -7,6 +7,11 @@ use std::sync::Arc;
 
 pub(crate) struct CommandList(pub(super) Handle);
 
+pub(crate) struct KernelArg {
+    pub(crate) value: *const std::ffi::c_void,
+    pub(crate) size: usize,
+}
+
 // Submissions remain serialized by the frontend. Level Zero permits immediate-list
 // host synchronization from simultaneous threads.
 unsafe impl Sync for CommandList {}
@@ -131,7 +136,7 @@ impl CommandList {
         api: &Api,
         kernel: Handle,
         geometry: ([u32; 3], [u32; 3]),
-        args: &[&[u8]],
+        args: &[KernelArg],
         signal: Option<&Fence>,
         waits: &[Arc<Fence>],
     ) -> Result<(), Error> {
@@ -142,12 +147,7 @@ impl CommandList {
         })?;
         for (index, value) in args.iter().enumerate() {
             call("zeKernelSetArgumentValue", || unsafe {
-                (api.zeKernelSetArgumentValue)(
-                    kernel,
-                    index as u32,
-                    value.len(),
-                    value.as_ptr().cast(),
-                )
+                (api.zeKernelSetArgumentValue)(kernel, index as u32, value.size, value.value)
             })?;
         }
         let mut events = WaitEvents::new(waits)?;

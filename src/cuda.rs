@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
 mod discovery;
+mod launch_args;
 mod primary;
 mod streams;
 mod trace;
@@ -671,9 +672,7 @@ fn load_ptx(
     }
     let mut entries = HashMap::with_capacity(translated.kernels.len());
     for kernel in translated.kernels {
-        let argument_bytes = kernel.params.iter().fold(0usize, |offset, &param| {
-            offset.next_multiple_of(param.alignment()) + param.size()
-        });
+        let argument_bytes = launch_args::size(&kernel.params);
         if (kernel.fp32 && !info.supports_fp32())
             || (kernel.fp32_fma && !info.fp32_fma)
             || (kernel.device_atomics && !info.device_memory_atomics)
@@ -841,7 +840,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
 ) -> CuResult {
     trace::call("cuLaunchKernel", || {
         status(with_context(|runtime, context| {
-            if shared_bytes != 0 || !extra.is_null() {
+            if shared_bytes != 0 {
                 return Err(NotSupported);
             }
             let stream = context.streams.launch_key(stream)?;
@@ -860,29 +859,11 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 block,
                 entry.max_threads,
             )?;
-            if kernel_params.is_null() && !entry.params.is_empty() {
-                return Err(InvalidValue);
-            }
-            let mut args = Vec::with_capacity(entry.params.len());
-            for (index, &param) in entry.params.iter().enumerate() {
-                let value = unsafe { kernel_params.add(index).read() };
-                if value.is_null() {
-                    return Err(InvalidValue);
-                }
-                if param == Param::GlobalPtr {
-                    let address = unsafe { value.cast::<u64>().read_unaligned() };
-                    if !contains_range(&context.allocations, address as usize, 1) {
-                        return Err(InvalidValue);
-                    }
-                }
-                let bytes = unsafe { std::slice::from_raw_parts(value.cast::<u8>(), param.size()) };
-                match param {
-                    Param::Words(_) => {
-                        args.extend(bytes.as_chunks::<4>().0.iter().map(|word| word.as_slice()))
-                    }
-                    _ => args.push(bytes),
-                }
-            }
+            let args = unsafe {
+                launch_args::read(&entry.params, kernel_params, extra, |address| {
+                    contains_range(&context.allocations, address as usize, 1)
+                })?
+            };
             context.streams.launch(
                 &runtime.api,
                 &context.backend,

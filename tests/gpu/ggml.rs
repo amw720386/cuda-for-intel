@@ -127,7 +127,7 @@ fn ggml_cuda_scale_clamp_chain() {
         ));
         actual
     };
-    let launch = |kernel, src: usize, dst: usize, floats, stream| {
+    let launch_with = |kernel, src: usize, dst: usize, floats, stream, packed: bool| {
         args(
             [buffers[src] + 4, buffers[dst] + 4],
             floats,
@@ -135,23 +135,54 @@ fn ggml_cuda_scale_clamp_chain() {
             divs,
             strides[src],
             strides[dst],
-            |params| unsafe {
-                cuLaunchKernel(
-                    kernel,
-                    count.div_ceil(256),
-                    1,
-                    1,
-                    256,
-                    1,
-                    1,
-                    0,
-                    stream,
-                    params,
+            |params| {
+                let launch = |params, extra| unsafe {
+                    cuLaunchKernel(
+                        kernel,
+                        count.div_ceil(256),
+                        1,
+                        1,
+                        256,
+                        1,
+                        1,
+                        0,
+                        stream,
+                        params,
+                        extra,
+                    )
+                };
+                if !packed {
+                    return launch(params, null_mut());
+                }
+                let mut buffer = [0u8; 88];
+                let mut offset = 0;
+                for (index, size) in [8, 8, 4, 4, 4, 12, 12, 12, 4, 4, 4, 4, 4, 4]
+                    .into_iter()
+                    .enumerate()
+                {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            params.add(index).read().cast::<u8>(),
+                            buffer.as_mut_ptr().add(offset),
+                            size,
+                        );
+                    }
+                    offset += size;
+                }
+                let mut size = buffer.len();
+                let mut extra = [
+                    std::ptr::without_provenance_mut(1),
+                    buffer.as_mut_ptr().cast(),
+                    std::ptr::without_provenance_mut(2),
+                    from_mut(&mut size).cast(),
                     null_mut(),
-                )
+                ];
+                launch(null_mut(), extra.as_mut_ptr())
             },
         )
     };
+    let launch =
+        |kernel, src, dst, floats, stream| launch_with(kernel, src, dst, floats, stream, false);
     let assert_values = |actual: Vec<f32>, reference: &[f32]| {
         for (index, (&got, &want)) in actual.iter().zip(reference).enumerate() {
             if want.is_nan() {
@@ -200,7 +231,11 @@ fn ggml_cuda_scale_clamp_chain() {
     for iteration in 0..8 {
         upload(1, &initial[1]);
         upload(2, &initial[2]);
-        assert_eq!(launch(scale, 0, 1, [factor, bias], streams[0]), 0);
+        let packed = iteration >= 4;
+        assert_eq!(
+            launch_with(scale, 0, 1, [factor, bias], streams[0], packed),
+            0
+        );
         let consumer = if iteration % 2 == 0 {
             streams[0]
         } else {
@@ -208,7 +243,7 @@ fn ggml_cuda_scale_clamp_chain() {
             ok!(cuStreamWaitEvent(streams[1], ready, 0));
             streams[1]
         };
-        assert_eq!(launch(clamp, 1, 2, limits, consumer), 0);
+        assert_eq!(launch_with(clamp, 1, 2, limits, consumer, packed), 0);
         ok!(cuStreamSynchronize(consumer));
         assert_values(read(1), &expected[1]);
         assert_values(read(2), &expected[2]);

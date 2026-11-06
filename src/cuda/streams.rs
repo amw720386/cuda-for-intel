@@ -4,6 +4,7 @@ use super::{
     with_context_handles,
 };
 use crate::cuda::trace;
+use crate::level_zero::KernelArg;
 use crate::level_zero::{CommandList, Fence, Fences, Handle};
 use crate::level_zero::{DeviceHealth, QueueFence};
 use batch::{Batch, Policy};
@@ -434,7 +435,7 @@ impl Streams {
         kernel: Handle,
         key: usize,
         geometry: ([u32; 3], [u32; 3]),
-        args: &[&[u8]],
+        args: &[KernelArg],
     ) -> Result<(), CuResult> {
         let blocking = self.get(key)?.blocking;
         self.collect_retired(api)?;
