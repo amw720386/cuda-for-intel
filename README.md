@@ -32,7 +32,11 @@ one stream and on three event-linked streams. It compares both modes with an
 FP64 CPU reference and checks guard regions after completion.
 The pinned-memory pipeline also compares blocking, single-stream asynchronous,
 and event-linked upload/compute/download with one or two reusable buffer sets.
-The `devices` example reports Level Zero queue groups and timestamp capabilities.
+The `devices` example reports Level Zero driver and device capabilities. On
+Windows, run `pwsh -File scripts/validate-gpu.ps1` to check all detected Intel GPUs
+with immediate lists and experimental batching. Use `-Device` to select ordinals
+or `-PerformancePasses 0` for correctness only. The runner logs capability skips
+and results in `docs/gpu-validation.log`.
 On the tested Iris Xe driver, one queue group serves both compute and copies.
 The runtime submits CUDA streams to that group.
 
