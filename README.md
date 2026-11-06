@@ -1,6 +1,6 @@
 # CUDA for Intel
 
-An independent Rust implementation of a small CUDA Driver API subset for Intel GPUs. Precompiled CUDA vector addition and shared-memory block reduction run on Intel Iris Xe (Alder Lake) under Windows x64.
+An independent Rust implementation of a small CUDA Driver API subset for Intel GPUs. Precompiled CUDA vector addition, shared-memory block reduction, and FP32 RMSNorm run on Intel Iris Xe (Alder Lake) under Windows x64.
 
 ```text
 CUDA Driver API → PTX parser and SPIR-V emitter → Level Zero → Intel GPU
@@ -21,6 +21,11 @@ cargo test --locked --test gpu -- --ignored --nocapture
 
 The opt-in GPU tests load the built DLL by absolute path. They verify a memory round trip, vector addition, a 1,003-element block reduction at six block widths, and atomic contention across 23 workgroups. The reduction includes odd widths and partial final blocks. It checks bit-exact dyadic inputs, an FP32 tree-depth error bound for rounded inputs, and guard regions. GPU validation covers the Intel Core i5-1235U's Iris Xe (PCI device `8086:46a8`, Windows graphics driver `32.0.101.7085`). The Linux loader path is included for portability.
 
+The RMSNorm regression compares four rows against an FP64 CPU reference at
+hidden sizes 32, 96, 256, 896, and 1024, using block widths 32, 63, and 128.
+It checks two epsilon values, guards, and determinism. A separate GPU test
+checks the rounding of individual FP32 instructions.
+
 With Khronos `spirv-val` on PATH or selected by `SPIRV_VAL`, validate the emitted OpenCL SPIR-V independently.
 
 ```powershell
@@ -33,6 +38,7 @@ Clang 23.1.1 with the NVPTX backend generated the checked-in PTX fixtures.
 clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -S examples/vector_add.cu -o examples/vector_add.ptx
 clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-unroll-loops -S examples/block_reduce.cu -o examples/block_reduce.ptx
 clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -S examples/atomic_tickets.cu -o examples/atomic_tickets.ptx
+clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-unroll-loops -ffp-contract=off -S examples/rmsnorm.cu -o examples/rmsnorm.ptx
 ```
 
 ## Supported subset
@@ -49,8 +55,12 @@ The translator accepts one PTX 4.1 entry with 64-bit addressing and scalar
 32- or 64-bit parameters. Pointer parameters must use `.ptr` and point into a
 device allocation in the current context. The instruction subset covers parameter
 loads, `cvta.to.global.u64`, reads of `%ctaid`, `%ntid`, and `%tid`, selected integer
-arithmetic and comparisons, 32-bit global loads and stores, and round-to-nearest
-FP32 add. The compiler handles direct and predicated branches with reconvergence,
+arithmetic and comparisons, and 32-bit global loads and stores. FP32 support
+includes scalar parameters, round-to-nearest add, multiply, fused multiply-add,
+unsigned-to-float conversion, divide, and square root. Divide and square root
+use integer significand arithmetic on the GPU. Explicit FMA remains fused and
+separate multiply/add operations keep their own rounding steps. The compiler
+handles direct and predicated branches with reconvergence,
 including loops, and requires a definition on every incoming path for each read.
 Each virtual register retains its scalar or address-space type.
 
@@ -66,7 +76,8 @@ device-scope relaxed ordering. The runtime requires Level Zero to report
 atomic access support for device allocations.
 
 Cubins, fatbins, indirect branches, general predicated instructions, warp
-operations, dynamic shared memory, other barrier and atomic variants, streams, events,
+operations, dynamic shared memory, approximate FP32 math, alternate rounding
+modes, flush-to-zero modifiers, other barrier and atomic variants, streams, events,
 primary contexts, dynamic symbol lookup via
 `cuGetProcAddress`, the CUDA Runtime API and CUDA libraries are outside this
 milestone. Set `CUDA_FOR_INTEL_LOG=1` to print translation diagnostics and

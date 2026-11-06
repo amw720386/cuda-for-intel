@@ -516,3 +516,330 @@ fn compiled_ptx_atomic_tickets() {
     );
     ok!(cuCtxDestroy_v2(context));
 }
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn compiled_ptx_rmsnorm() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemFree_v2(u64),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    let ptx = std::ffi::CString::new(include_str!("../examples/rmsnorm.ptx")).unwrap();
+    let unsupported = std::ffi::CString::new(
+        ptx.to_str()
+            .unwrap()
+            .replace("sqrt.rn.f32", "sqrt.approx.f32"),
+    )
+    .unwrap();
+    let mut module = null_mut();
+    assert_eq!(
+        unsafe { cuModuleLoadData(&mut module, unsupported.as_ptr().cast()) },
+        218
+    );
+    assert!(module.is_null());
+    ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
+    let mut kernel = null_mut();
+    ok!(cuModuleGetFunction(
+        &mut kernel,
+        module,
+        c"rmsnorm".as_ptr()
+    ));
+
+    const ROWS: usize = 4;
+    const GUARD: usize = 8;
+    const SENTINEL: f32 = -99_999.0;
+    let mut rng = 0x9e37_79b9u32;
+    let mut random = || {
+        rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (rng >> 8) as f32 * (1.0 / 8_388_608.0) - 1.0
+    };
+    let launch = |threads, args| unsafe {
+        cuLaunchKernel(
+            kernel,
+            ROWS as u32,
+            1,
+            1,
+            threads,
+            1,
+            1,
+            0,
+            null_mut(),
+            args,
+            null_mut(),
+        )
+    };
+    let size = size_of::<f32>();
+
+    for dim in [32usize, 96, 256, 896, 1024] {
+        let mut input = Vec::with_capacity(ROWS * dim);
+        for scale in [1.0f32, 4.0, 0.0, 1.0e-10] {
+            input.extend((0..dim).map(|_| random() * scale));
+        }
+        let weights: Vec<_> = (0..dim).map(|_| 0.5 + 1.5 * random()).collect();
+        let guarded = vec![SENTINEL; ROWS * dim + 2 * GUARD];
+        let bytes = guarded.len() * size;
+        let mut actual = guarded.clone();
+        let (mut x, mut weight, mut output) = (0u64, 0u64, 0u64);
+        ok!(cuMemAlloc_v2(&mut x, input.len() * size));
+        ok!(cuMemAlloc_v2(&mut weight, weights.len() * size));
+        ok!(cuMemAlloc_v2(&mut output, bytes));
+        ok!(cuMemcpyHtoD_v2(
+            x,
+            input.as_ptr().cast(),
+            input.len() * size
+        ));
+        ok!(cuMemcpyHtoD_v2(
+            weight,
+            weights.as_ptr().cast(),
+            weights.len() * size
+        ));
+        let mut y = output + (GUARD * size) as u64;
+        let mut columns = dim as u32;
+        let mut epsilon = 1e-5f32;
+        let mut args = [
+            (&mut x as *mut u64).cast(),
+            (&mut weight as *mut u64).cast(),
+            (&mut y as *mut u64).cast(),
+            (&mut columns as *mut u32).cast(),
+            (&mut epsilon as *mut f32).cast(),
+        ];
+        assert_eq!(launch(129, args.as_mut_ptr()), 1);
+        assert_eq!(launch(32, null_mut()), 1);
+        let mut null_pointer = 0u64;
+        let mut bad_args = args;
+        bad_args[2] = (&mut null_pointer as *mut u64).cast();
+        assert_eq!(launch(32, bad_args.as_mut_ptr()), 1);
+
+        for eps in [1e-12f32, 1e-5] {
+            epsilon = eps;
+            for threads in [32u32, 63, 128] {
+                // Nonnegative squares give a relative summation bound from the FMA chain
+                // and the shared-memory tree. Allow eight more FP32 rounding steps and a
+                // factor of two for the remaining normalization arithmetic.
+                let depth = columns.div_ceil(threads) + threads.next_power_of_two().ilog2();
+                let ku = f64::from(depth + 8) * f64::from(f32::EPSILON) / 2.0;
+                let relative_limit = 2.0 * ku / (1.0 - ku);
+
+                let mut first = Vec::new();
+                for _ in 0..2 {
+                    ok!(cuMemcpyHtoD_v2(output, guarded.as_ptr().cast(), bytes));
+                    assert_eq!(
+                        launch(threads, args.as_mut_ptr()),
+                        0,
+                        "launch {dim}x{threads}"
+                    );
+                    ok!(cuMemcpyDtoH_v2(actual.as_mut_ptr().cast(), output, bytes));
+                    assert!(
+                        actual[..GUARD]
+                            .iter()
+                            .chain(&actual[GUARD + ROWS * dim..])
+                            .all(|&value| value.to_bits() == SENTINEL.to_bits())
+                    );
+                    let bits = actual[GUARD..GUARD + ROWS * dim]
+                        .iter()
+                        .map(|&value| value.to_bits());
+                    if first.is_empty() {
+                        first.extend(bits);
+                    } else {
+                        assert!(
+                            first.iter().copied().eq(bits),
+                            "nondeterministic {dim}x{threads}"
+                        );
+                    }
+                }
+
+                let mut max_abs = 0.0f64;
+                let mut max_rel = 0.0f64;
+                for (row, values) in input.chunks_exact(dim).enumerate() {
+                    let mean =
+                        values.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>() / dim as f64;
+                    let rms = (mean + f64::from(epsilon)).sqrt();
+                    for (col, (&x, &w)) in values.iter().zip(&weights).enumerate() {
+                        let expected = f64::from(x) * f64::from(w) / rms;
+                        let result = f64::from(actual[GUARD + row * dim + col]);
+                        let error = (result - expected).abs();
+                        assert!(
+                            error <= relative_limit * expected.abs(),
+                            "dim {dim}, block {threads}, epsilon {eps:e}, row {row}, col {col}: {result} != {expected}"
+                        );
+                        max_abs = max_abs.max(error);
+                        if expected != 0.0 {
+                            max_rel = max_rel.max(error / expected.abs());
+                        }
+                    }
+                }
+                println!(
+                    "RMSNorm dim={dim:4} block={threads:3} eps={eps:.0e} abs={max_abs:.9e} rel={max_rel:.9e} limit={relative_limit:.9e}"
+                );
+            }
+        }
+        ok!(cuMemFree_v2(x));
+        ok!(cuMemFree_v2(weight));
+        ok!(cuMemFree_v2(output));
+    }
+    ok!(cuCtxDestroy_v2(context));
+}
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn fp32_rounding_and_contraction() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    let source = c"
+        .version 4.1
+        .target sm_52
+        .address_size 64
+        .entry check_fp32(.param .u64 .ptr input, .param .u64 .ptr output) {
+            .reg .b32 %r<13>;
+            .reg .b64 %d<5>;
+            ld.param.b64 %d0, [input];
+            ld.param.b64 %d1, [output];
+            mov.u32 %r0, %ctaid.x;
+            mov.u32 %r1, %ntid.x;
+            mov.u32 %r2, %tid.x;
+            mad.lo.u32 %r3, %r0, %r1, %r2;
+            mul.wide.u32 %d2, %r3, 12;
+            add.u64 %d3, %d0, %d2;
+            ld.global.b32 %r4, [%d3];
+            add.u64 %d3, %d3, 4;
+            ld.global.b32 %r5, [%d3];
+            add.u64 %d3, %d3, 4;
+            ld.global.b32 %r6, [%d3];
+
+            div.rn.f32 %r7, %r4, %r5;
+            sqrt.rn.f32 %r8, %r4;
+            fma.rn.f32 %r9, %r4, %r5, %r6;
+            mul.rn.f32 %r10, %r4, %r5;
+            add.rn.f32 %r11, %r10, %r6;
+            cvt.rn.f32.u32 %r12, %r4;
+
+            mul.wide.u32 %d2, %r3, 20;
+            add.u64 %d4, %d1, %d2;
+            st.global.b32 [%d4], %r7;
+            add.u64 %d4, %d4, 4;
+            st.global.b32 [%d4], %r8;
+            add.u64 %d4, %d4, 4;
+            st.global.b32 [%d4], %r9;
+            add.u64 %d4, %d4, 4;
+            st.global.b32 [%d4], %r11;
+            add.u64 %d4, %d4, 4;
+            st.global.b32 [%d4], %r12;
+            ret;
+        }
+    ";
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    let mut module = null_mut();
+    ok!(cuModuleLoadData(&mut module, source.as_ptr().cast()));
+    let mut kernel = null_mut();
+    ok!(cuModuleGetFunction(
+        &mut kernel,
+        module,
+        c"check_fp32".as_ptr()
+    ));
+
+    const LANES: usize = 4096;
+    let tiny = f32::from_bits(1);
+    let mut cases = vec![
+        [1.0 + f32::EPSILON, 1.0 - f32::EPSILON, -1.0],
+        [f32::MAX, 2.0, -f32::MAX],
+        [tiny, 2.0, 0.0],
+        [tiny * 3.0, 2.0, 0.0],
+        [f32::MIN_POSITIVE, 2.0, -tiny],
+        [-tiny, 2.0, tiny],
+        [-0.0, 2.0, -0.0],
+        [0.0, -0.0, 1.0],
+        [1.0, -0.0, 1.0],
+        [f32::INFINITY, f32::INFINITY, 1.0],
+        [1.0, f32::NEG_INFINITY, 1.0],
+        [f32::NAN, 1.0, 0.0],
+        [1.0, f32::NAN, 0.0],
+        [f32::from_bits(0x0100_0001), 1.0, 0.0],
+        [f32::from_bits(0x0100_0003), 1.0, 0.0],
+    ];
+    let mut rng = 0x85eb_ca6bu32;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        f32::from_bits(rng)
+    };
+    cases.resize_with(LANES, || [next(), next(), next()]);
+    let mut result = vec![[0.0f32; 5]; LANES];
+    let in_bytes = std::mem::size_of_val(cases.as_slice());
+    let out_bytes = std::mem::size_of_val(result.as_slice());
+    let (mut input, mut output) = (0u64, 0u64);
+    ok!(cuMemAlloc_v2(&mut input, in_bytes));
+    ok!(cuMemAlloc_v2(&mut output, out_bytes));
+    ok!(cuMemcpyHtoD_v2(input, cases.as_ptr().cast(), in_bytes));
+    let mut args = [
+        (&mut input as *mut u64).cast(),
+        (&mut output as *mut u64).cast(),
+    ];
+    ok!(cuLaunchKernel(
+        kernel,
+        LANES as u32 / 64,
+        1,
+        1,
+        64,
+        1,
+        1,
+        0,
+        null_mut(),
+        args.as_mut_ptr(),
+        null_mut()
+    ));
+    ok!(cuMemcpyDtoH_v2(
+        result.as_mut_ptr().cast(),
+        output,
+        out_bytes
+    ));
+    let names = ["divide", "sqrt", "fma", "mul + add", "convert"];
+    for (index, (&[a, b, c], results)) in cases.iter().zip(&result).enumerate() {
+        let reference = [
+            a / b,
+            a.sqrt(),
+            a.mul_add(b, c),
+            std::hint::black_box(a * b) + c,
+            a.to_bits() as f32,
+        ];
+        for ((&actual, expected), name) in results.iter().zip(reference).zip(names) {
+            assert!(
+                (expected.is_nan() && actual.is_nan()) || expected.to_bits() == actual.to_bits(),
+                "{name} case {index}, inputs {:08x?}, got {:08x}, expected {:08x}",
+                [a.to_bits(), b.to_bits(), c.to_bits()],
+                actual.to_bits(),
+                expected.to_bits()
+            );
+        }
+    }
+    println!(
+        "Verified {LANES} FP32 bit-pattern cases across division, sqrt, FMA, unfused multiply-add and conversion"
+    );
+    ok!(cuCtxDestroy_v2(context));
+}
