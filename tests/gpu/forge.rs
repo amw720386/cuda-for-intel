@@ -3,10 +3,24 @@ use std::ffi::{CString, c_char, c_void};
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
 
+#[path = "pipeline.rs"]
+mod pipeline;
+
 const GUARD: usize = 8;
 const SENTINEL: f32 = -99_999.0;
 const EPSILON: f32 = 1e-5;
 const BATCH: usize = 32;
+const KERNELS: [(&std::ffi::CStr, &str); 3] = [
+    (c"rmsnorm", include_str!("../../examples/rmsnorm.ptx")),
+    (
+        c"forge_residual",
+        include_str!("../../examples/forge_residual.ptx"),
+    ),
+    (
+        c"forge_reduce",
+        include_str!("../../examples/forge_reduce.ptx"),
+    ),
+];
 
 fn arg<T>(value: &T) -> Handle {
     std::ptr::from_ref(value).cast_mut().cast()
@@ -58,18 +72,7 @@ fn dependent_forge_chain() {
     for event in &mut events {
         ok!(cuEventCreate(event, 2));
     }
-    let kernels = [
-        (c"rmsnorm", include_str!("../../examples/rmsnorm.ptx")),
-        (
-            c"forge_residual",
-            include_str!("../../examples/forge_residual.ptx"),
-        ),
-        (
-            c"forge_reduce",
-            include_str!("../../examples/forge_reduce.ptx"),
-        ),
-    ]
-    .map(|(name, source)| {
+    let kernels = KERNELS.map(|(name, source)| {
         let (mut module, mut kernel) = (null_mut(), null_mut());
         let ptx = CString::new(source).unwrap();
         ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));

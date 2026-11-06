@@ -475,7 +475,8 @@ pub extern "system" fn cuStreamQuery(handle: Opaque) -> CuResult {
 mod tests {
     use super::*;
     use crate::cuda::{
-        cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSynchronize, cuInit, cuLaunchKernel,
+        cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSynchronize, cuInit, cuLaunchKernel, cuMemAlloc_v2,
+        cuMemFreeHost, cuMemHostAlloc, cuMemcpyDtoHAsync_v2, cuMemcpyHtoDAsync_v2,
         cuModuleGetFunction, cuModuleLoadData,
     };
     use std::ptr::null_mut;
@@ -489,6 +490,14 @@ mod tests {
         let (mut gated, mut idle) = (null_mut(), null_mut());
         assert_eq!(unsafe { cuStreamCreate(&mut gated, 1) }, Success);
         assert_eq!(unsafe { cuStreamCreate(&mut idle, 0) }, Success);
+        let (mut src, mut dst, mut device) = (null_mut(), null_mut(), 0);
+        assert_eq!(unsafe { cuMemHostAlloc(&mut src, 1, 0) }, Success);
+        assert_eq!(unsafe { cuMemHostAlloc(&mut dst, 1, 0) }, Success);
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut device, 1) }, Success);
+        unsafe {
+            src.cast::<u8>().write(42);
+            dst.cast::<u8>().write(0);
+        }
         let ptx = c".version 4.1 .target sm_52 .address_size 64 .entry noop() { ret; }";
         let (mut module, mut kernel) = (null_mut(), null_mut());
         assert_eq!(
@@ -517,7 +526,15 @@ mod tests {
         // No kernel duration or elapsed-time assumptions. Only the host signal
         // below can satisfy the device wait.
         assert_eq!(
+            unsafe { cuMemcpyHtoDAsync_v2(device, src, 1, gated) },
+            Success
+        );
+        assert_eq!(
             unsafe { cuLaunchKernel(kernel, 1, 1, 1, 1, 1, 1, 0, gated, null_mut(), null_mut()) },
+            Success
+        );
+        assert_eq!(
+            unsafe { cuMemcpyDtoHAsync_v2(dst, device, 1, gated) },
             Success
         );
         assert_eq!(cuStreamQuery(gated), NotReady);
@@ -548,6 +565,9 @@ mod tests {
             assert_eq!(waiter.join().unwrap(), Success);
         });
         assert_eq!(cuCtxSynchronize(), Success);
+        assert_eq!(unsafe { dst.cast::<u8>().read() }, 42);
+        assert_eq!(cuMemFreeHost(src), Success);
+        assert_eq!(cuMemFreeHost(dst), Success);
         drop(gate);
         super::super::with_context(|_, context| {
             assert!(context.streams.retired.is_empty());

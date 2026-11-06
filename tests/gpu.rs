@@ -9,6 +9,8 @@ type Handle = *mut c_void;
 
 #[path = "gpu/forge.rs"]
 mod forge;
+#[path = "gpu/pinned.rs"]
+mod pinned;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
