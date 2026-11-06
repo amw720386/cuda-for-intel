@@ -17,6 +17,8 @@ mod discovery;
 mod forge;
 #[path = "gpu/ggml.rs"]
 mod ggml;
+#[path = "gpu/ggml_norm.rs"]
+mod ggml_norm;
 #[path = "gpu/isolation.rs"]
 mod isolation;
 #[path = "gpu/isolation_capability.rs"]

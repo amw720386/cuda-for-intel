@@ -420,10 +420,31 @@ impl<'a> Emitter<'a> {
         if space == Space::Shared && !address.starts_with('%') {
             return self.shared_base(address);
         }
-        let pointer = self.read(address)?.require(Kind::Address(space), address)?;
+        let (base, offset) = match address.split_once('+') {
+            Some((base, offset)) => (
+                base,
+                Self::parse_u64(offset).ok_or_else(|| {
+                    Error::new(format!("unsupported PTX address offset {offset}"))
+                })?,
+            ),
+            None => (address, 0),
+        };
+        let pointer = self.read(base)?.require(Kind::Address(space), base)?;
         let ty = match space {
             Space::Global => self.global_word_ptr,
             Space::Shared => self.shared_word_ptr,
+        };
+        let pointer = if offset == 0 {
+            pointer
+        } else {
+            let bytes = self.builder.constant_bit64(self.u64_type, offset);
+            let byte_ty = match space {
+                Space::Global => self.global_byte_ptr,
+                Space::Shared => self.shared_byte_ptr,
+            };
+            let bytes_ptr = self.builder.bitcast(byte_ty, None, pointer)?;
+            self.builder
+                .ptr_access_chain(byte_ty, None, bytes_ptr, bytes, [])?
         };
         Ok(self.builder.bitcast(ty, None, pointer)?)
     }
@@ -528,11 +549,12 @@ impl<'a> Emitter<'a> {
                 let value = self.float_bits(source)?;
                 return rounded::sqrt(&mut self.builder, self.opencl, value);
             }
-            FloatOp::Add([a, b]) | FloatOp::Mul([a, b]) => {
+            FloatOp::Add([a, b]) | FloatOp::Sub([a, b]) | FloatOp::Mul([a, b]) => {
                 let a = self.float_value(a)?;
                 let b = self.float_value(b)?;
                 match op {
                     FloatOp::Add(_) => self.builder.f_add(ty, None, a, b)?,
+                    FloatOp::Sub(_) => self.builder.f_sub(ty, None, a, b)?,
                     _ => self.builder.f_mul(ty, None, a, b)?,
                 }
             }
@@ -708,6 +730,7 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Add => self.builder.i_add(ty, None, a, b),
                     IntegerOp::Sub => self.builder.i_sub(ty, None, a, b),
                     IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
+                    IntegerOp::And => self.builder.bitwise_and(ty, None, a, b),
                     IntegerOp::ShiftRight => {
                         // PTX clamps at 32, but SPIR-V shifts at or above 32 are undefined.
                         let bits = self.builder.constant_bit32(ty, 32);
@@ -727,6 +750,14 @@ impl<'a> Emitter<'a> {
                 }?;
                 (dst, id, Kind::B32)
             }
+            Instruction::Not32(dst, src) => {
+                let src = self.integer(src, Kind::B32)?;
+                (
+                    dst,
+                    self.builder.not(self.u32_type, None, src)?,
+                    Kind::B32,
+                )
+            }
             Instruction::Move32(dst, src) => {
                 let id = if let Some(hex) = src.strip_prefix("0f").filter(|s| s.len() == 8) {
                     let bits = u32::from_str_radix(hex, 16)
@@ -737,11 +768,32 @@ impl<'a> Emitter<'a> {
                 };
                 (dst, id, Kind::B32)
             }
-            Instruction::MulWide32(dst, [a, b]) => {
+            Instruction::MulWide32 {
+                signed,
+                dst,
+                src: [a, b],
+            } => {
                 let a = self.integer(a, Kind::B32)?;
                 let b = self.integer(b, Kind::B32)?;
-                let a = self.builder.u_convert(self.u64_type, None, a)?;
-                let b = self.builder.u_convert(self.u64_type, None, b)?;
+                let a = if signed {
+                    self.builder.s_convert(self.u64_type, None, a)?
+                } else {
+                    self.builder.u_convert(self.u64_type, None, a)?
+                };
+                let b = if signed {
+                    self.builder.s_convert(self.u64_type, None, b)?
+                } else {
+                    self.builder.u_convert(self.u64_type, None, b)?
+                };
+                (
+                    dst,
+                    self.builder.i_mul(self.u64_type, None, a, b)?,
+                    Kind::B64,
+                )
+            }
+            Instruction::Mul64(dst, [a, b]) => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
                 (
                     dst,
                     self.builder.i_mul(self.u64_type, None, a, b)?,

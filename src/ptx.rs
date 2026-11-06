@@ -84,6 +84,7 @@ enum IntegerOp {
     Add,
     Sub,
     Mul,
+    And,
     ShiftRight,
     MulHighUnsigned,
 }
@@ -91,6 +92,7 @@ enum IntegerOp {
 #[derive(Clone, Copy, Debug)]
 enum FloatOp<'a> {
     Add([&'a str; 2]),
+    Sub([&'a str; 2]),
     Mul([&'a str; 2]),
     MinMax { min: bool, src: [&'a str; 2] },
     Fma([&'a str; 3]),
@@ -104,7 +106,9 @@ enum FloatOp<'a> {
 impl<'a> FloatOp<'a> {
     fn inputs(&self) -> &[&'a str] {
         match self {
-            Self::Add(inputs) | Self::Mul(inputs) | Self::Div(inputs) => inputs,
+            Self::Add(inputs) | Self::Sub(inputs) | Self::Mul(inputs) | Self::Div(inputs) => {
+                inputs
+            }
             Self::Fma(inputs) => inputs,
             Self::MinMax { src, .. } => src,
             Self::FromUnsigned(inputs)
@@ -134,8 +138,13 @@ enum Instruction<'a> {
         src: [&'a str; 2],
     },
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
+    Not32(&'a str, &'a str),
     Move32(&'a str, &'a str),
-    MulWide32(&'a str, [&'a str; 2]),
+    MulWide32 {
+        signed: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
     Widen {
         signed: bool,
         dst: &'a str,
@@ -143,6 +152,7 @@ enum Instruction<'a> {
     },
     ShiftLeft64(&'a str, [&'a str; 2]),
     Add64(&'a str, [&'a str; 2]),
+    Mul64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
     LoadVec {
         space: Space,
@@ -190,7 +200,7 @@ impl<'a> Instruction<'a> {
                 out.extend_from_slice(&dst[..usize::from(*count)]);
                 std::slice::from_ref(addr)
             }
-            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) => {
+            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) | Not32(dst, src) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
@@ -205,9 +215,10 @@ impl<'a> Instruction<'a> {
             Compare { dst, src, .. }
             | PredicateLogic { dst, src, .. }
             | Integer32(_, dst, src)
-            | MulWide32(dst, src)
+            | MulWide32 { dst, src, .. }
             | ShiftLeft64(dst, src)
-            | Add64(dst, src) => {
+            | Add64(dst, src)
+            | Mul64(dst, src) => {
                 out.push(*dst);
                 src
             }
@@ -352,6 +363,14 @@ mod tests {
             assert_eq!(kernel.params[5..8], [Param::Words(3); 3]);
             assert_eq!(function.parameters.len(), 20);
         }
+    }
+
+    #[test]
+    fn translates_ggml_norm_f32_li32_snippet() {
+        let source = include_str!("../examples/ggml_norm_f32_32.ptx");
+        let translated = translate(source).unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].fp32);
+        assert!(translated.kernels[0].shared_bytes >= 32 * 4);
     }
 
     #[test]
@@ -848,7 +867,7 @@ mod tests {
             ("add.f32 \t%r8, %r6, %r7", "add.f32 %r8, %r6, %r0"),
             ("@%p1 bra", "@%p0 bra"),
             ("$L__BB0_2:", "other_label:"),
-            ("[%rd3]", "[%rd3+4]"),
+            ("[%rd3]", "[%rd3+x]"),
             (".reg .b64", ".reg .b32"),
             (".ptr .align 1", ".ptr .shared"),
         ] {
