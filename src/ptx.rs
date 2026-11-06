@@ -104,6 +104,7 @@ enum FloatOp<'a> {
     Fma([&'a str; 3]),
     FromUnsigned([&'a str; 1]),
     FromSigned([&'a str; 1]),
+    FromHalf([&'a str; 1]),
     Div([&'a str; 2]),
     Sqrt([&'a str; 1]),
     RsqrtApprox([&'a str; 1]),
@@ -123,6 +124,7 @@ impl<'a> FloatOp<'a> {
             Self::MinMax { src, .. } => src,
             Self::FromUnsigned(inputs)
             | Self::FromSigned(inputs)
+            | Self::FromHalf(inputs)
             | Self::Sqrt(inputs)
             | Self::RsqrtApprox(inputs)
             | Self::SinApprox(inputs)
@@ -168,6 +170,7 @@ enum Instruction<'a> {
     Add64(&'a str, [&'a str; 2]),
     Mul64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
+    Load16(Space, &'a str, &'a str),
     LoadVec {
         space: Space,
         count: u8,
@@ -204,7 +207,7 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 &[]
             }
-            Load32(_, dst, addr) => {
+            Load32(_, dst, addr) | Load16(_, dst, addr) => {
                 out.push(*dst);
                 std::slice::from_ref(addr)
             }
@@ -254,7 +257,7 @@ impl<'a> Instruction<'a> {
     fn is_memory_load(&self) -> bool {
         matches!(
             self,
-            Self::Load32(..) | Self::LoadVec { .. } | Self::AtomicAdd32(..)
+            Self::Load32(..) | Self::Load16(..) | Self::LoadVec { .. } | Self::AtomicAdd32(..)
         )
     }
 
@@ -408,6 +411,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(translated.kernels[0].fp32);
         assert!(translated.kernels[0].fp32_fma);
+    }
+
+    #[test]
+    fn translates_ggml_half_roundtrip_f16() {
+        let translated = translate(include_str!("../examples/ggml_half_roundtrip.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].fp32);
     }
 
     #[test]

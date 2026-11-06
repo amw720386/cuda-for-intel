@@ -25,6 +25,8 @@ mod ggml_rms_norm;
 mod ggml_rope;
 #[path = "gpu/ggml_q8_0.rs"]
 mod ggml_q8_0;
+#[path = "gpu/ggml_half.rs"]
+mod ggml_half;
 #[path = "gpu/isolation.rs"]
 mod isolation;
 #[path = "gpu/isolation_capability.rs"]

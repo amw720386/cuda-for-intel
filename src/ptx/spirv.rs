@@ -59,10 +59,13 @@ impl Value {
 struct Emitter<'a> {
     builder: Builder,
     bool_type: Word,
+    u16_type: Word,
     u32_type: Word,
     u64_type: Word,
+    f16_type: Word,
     f32_type: Word,
     global_byte_ptr: Word,
+    global_half_ptr: Word,
     global_word_ptr: Word,
     shared_byte_ptr: Word,
     shared_word_ptr: Word,
@@ -91,7 +94,9 @@ impl<'a> Emitter<'a> {
             Capability::Addresses,
             Capability::Kernel,
             Capability::Int8,
+            Capability::Int16,
             Capability::Int64,
+            Capability::Float16,
         ] {
             builder.capability(capability);
         }
@@ -100,10 +105,13 @@ impl<'a> Emitter<'a> {
 
         let bool_type = builder.type_bool();
         let u8_type = builder.type_int(8, 0);
+        let u16_type = builder.type_int(16, 0);
         let u32_type = builder.type_int(32, 0);
         let u64_type = builder.type_int(64, 0);
+        let f16_type = builder.type_float(16, None);
         let f32_type = builder.type_float(32, None);
         let global_byte_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u8_type);
+        let global_half_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u16_type);
         let global_word_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u32_type);
         let shared_byte_ptr = builder.type_pointer(None, StorageClass::Workgroup, u8_type);
         let shared_word_ptr = builder.type_pointer(None, StorageClass::Workgroup, u32_type);
@@ -118,10 +126,13 @@ impl<'a> Emitter<'a> {
         Self {
             builder,
             bool_type,
+            u16_type,
             u32_type,
             u64_type,
+            f16_type,
             f32_type,
             global_byte_ptr,
+            global_half_ptr,
             global_word_ptr,
             shared_byte_ptr,
             shared_word_ptr,
@@ -415,10 +426,7 @@ impl<'a> Emitter<'a> {
             .access_chain(self.shared_word_ptr, None, array, [zero])?)
     }
 
-    fn word_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
-        if space == Space::Shared && !address.starts_with('%') {
-            return self.shared_base(address);
-        }
+    fn addressed_byte_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
         let (base, offset) = match address.split_once('+') {
             Some((base, offset)) => (
                 base,
@@ -429,23 +437,39 @@ impl<'a> Emitter<'a> {
             None => (address, 0),
         };
         let pointer = self.read(base)?.require(Kind::Address(space), base)?;
+        let byte_ty = match space {
+            Space::Global => self.global_byte_ptr,
+            Space::Shared => self.shared_byte_ptr,
+        };
+        let bytes_ptr = self.builder.bitcast(byte_ty, None, pointer)?;
+        if offset == 0 {
+            Ok(bytes_ptr)
+        } else {
+            let bytes = self.builder.constant_bit64(self.u64_type, offset);
+            Ok(self
+                .builder
+                .ptr_access_chain(byte_ty, None, bytes_ptr, bytes, [])?)
+        }
+    }
+
+    fn word_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
+        if space == Space::Shared && !address.starts_with('%') {
+            return self.shared_base(address);
+        }
+        let bytes_ptr = self.addressed_byte_pointer(space, address)?;
         let ty = match space {
             Space::Global => self.global_word_ptr,
             Space::Shared => self.shared_word_ptr,
         };
-        let pointer = if offset == 0 {
-            pointer
-        } else {
-            let bytes = self.builder.constant_bit64(self.u64_type, offset);
-            let byte_ty = match space {
-                Space::Global => self.global_byte_ptr,
-                Space::Shared => self.shared_byte_ptr,
-            };
-            let bytes_ptr = self.builder.bitcast(byte_ty, None, pointer)?;
-            self.builder
-                .ptr_access_chain(byte_ty, None, bytes_ptr, bytes, [])?
-        };
-        Ok(self.builder.bitcast(ty, None, pointer)?)
+        Ok(self.builder.bitcast(ty, None, bytes_ptr)?)
+    }
+
+    fn half_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
+        if space != Space::Global {
+            return Err(Error::new("only global PTX u16 loads are supported"));
+        }
+        let bytes_ptr = self.addressed_byte_pointer(space, address)?;
+        Ok(self.builder.bitcast(self.global_half_ptr, None, bytes_ptr)?)
     }
 
     fn float_vector_pointer(
@@ -625,6 +649,13 @@ impl<'a> Emitter<'a> {
                     [Operand::FPRoundingMode(FPRoundingMode::RTE)],
                 );
                 converted
+            }
+            FloatOp::FromHalf([source]) => {
+                // PTX cvt.f32.f16 reads the low 16 bits of the source as IEEE half.
+                let bits32 = self.integer(source, Kind::B32)?;
+                let bits16 = self.builder.u_convert(self.u16_type, None, bits32)?;
+                let half = self.builder.bitcast(self.f16_type, None, bits16)?;
+                self.builder.f_convert(ty, None, half)?
             }
             FloatOp::RsqrtApprox([source]) => {
                 let value = self.float_value(source)?;
@@ -870,6 +901,14 @@ impl<'a> Emitter<'a> {
                     self.builder.load(self.u32_type, None, pointer, None, [])?,
                     Kind::B32,
                 )
+            }
+            Instruction::Load16(space, dst, address) => {
+                let pointer = self.half_pointer(space, address)?;
+                let bits16 = self
+                    .builder
+                    .load(self.u16_type, None, pointer, None, [])?;
+                let bits32 = self.builder.u_convert(self.u32_type, None, bits16)?;
+                (dst, bits32, Kind::B32)
             }
             Instruction::LoadVec {
                 space,

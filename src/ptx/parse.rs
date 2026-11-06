@@ -146,7 +146,8 @@ impl<'a> Parser<'a> {
         while self.eat(".reg") {
             let width = match self.take()? {
                 ".pred" => Width::Predicate,
-                ".b32" | ".u32" | ".s32" | ".f32" => Width::B32,
+                // 16-bit regs are tracked as B32 slots holding zero-extended values.
+                ".b16" | ".u16" | ".s16" | ".b32" | ".u32" | ".s32" | ".f32" => Width::B32,
                 ".b64" | ".u64" | ".s64" => Width::B64,
                 ty => return Err(Error::new(format!("unsupported PTX register type {ty}"))),
             };
@@ -186,7 +187,10 @@ impl<'a> Parser<'a> {
             .iter()
             .position(|&token| token == ";")
             .ok_or_else(|| Error::new("unterminated PTX instruction"))?;
-        let result = match &slice[..end] {
+        // nvcc wraps some helpers (notably __half2float) as `{ inst; }`.
+        let braced = slice.first() == Some(&"{");
+        let body = if braced { &slice[1..end] } else { &slice[..end] };
+        let result = match body {
             [
                 "ld.param.b32" | "ld.param.u32" | "ld.param.f32",
                 dst,
@@ -362,6 +366,17 @@ impl<'a> Parser<'a> {
                 Instruction::Load32(space, dst, addr)
             }
             [
+                op @ ("ld.global.u16" | "ld.global.b16" | "ld.global.nc.u16" | "ld.global.nc.b16"),
+                dst,
+                ",",
+                "[",
+                addr,
+                "]",
+            ] => {
+                let _ = op;
+                Instruction::Load16(Space::Global, dst, addr)
+            }
+            [
                 op @ ("ld.global.v2.f32" | "ld.global.v4.f32" | "ld.shared.v2.f32"),
                 "{",
                 a,
@@ -426,6 +441,9 @@ impl<'a> Parser<'a> {
             }
             ["cvt.rn.f32.s32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::FromSigned([src]))
+            }
+            ["cvt.f32.f16" | "cvt.rn.f32.f16", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::FromHalf([src]))
             }
             ["div.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Div([a, b])),
             ["sqrt.rn.f32", dst, ",", src] => Instruction::Float32(dst, FloatOp::Sqrt([src])),
@@ -512,6 +530,9 @@ impl<'a> Parser<'a> {
             }
         };
         self.tokens.nth(end);
+        if braced {
+            self.expect("}")?;
+        }
         Ok(result)
     }
 
