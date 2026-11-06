@@ -288,8 +288,8 @@ impl<'a> Parser<'a> {
                 src: [a, b],
             },
             [
-                op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shr.u32"
-                | "shr.s32" | "and.b32"),
+                op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
+                | "shr.u32" | "shr.s32" | "and.b32" | "div.s32" | "rem.s32"),
                 dst,
                 ",",
                 a,
@@ -301,8 +301,11 @@ impl<'a> Parser<'a> {
                     "sub.s32" => IntegerOp::Sub,
                     "mul.lo.s32" => IntegerOp::Mul,
                     "and.b32" => IntegerOp::And,
+                    "shl.b32" => IntegerOp::ShiftLeft,
                     "mul.hi.u32" => IntegerOp::MulHighUnsigned,
                     "shr.s32" => IntegerOp::ShiftRightArithmetic,
+                    "div.s32" => IntegerOp::Div,
+                    "rem.s32" => IntegerOp::Rem,
                     _ => IntegerOp::ShiftRightLogical,
                 };
                 Instruction::Integer32(op, dst, [a, b])
@@ -335,7 +338,7 @@ impl<'a> Parser<'a> {
                 Instruction::Mul64(dst, [a, b])
             }
             [
-                op @ ("ld.global.b32" | "ld.global.f32" | "ld.shared.b32"),
+                op @ ("ld.global.b32" | "ld.global.u32" | "ld.global.f32" | "ld.shared.b32"),
                 dst,
                 ",",
                 "[",
@@ -393,7 +396,7 @@ impl<'a> Parser<'a> {
             ["add.f32" | "add.rn.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Add([a, b]))
             }
-            ["sub.f32" | "sub.rn.f32", dst, ",", a, ",", b] => {
+            ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Sub([a, b]))
             }
             [op @ ("min.f32" | "max.f32"), dst, ",", a, ",", b] => Instruction::Float32(
@@ -403,10 +406,10 @@ impl<'a> Parser<'a> {
                     src: [a, b],
                 },
             ),
-            ["mul.f32" | "mul.rn.f32", dst, ",", a, ",", b] => {
+            ["mul.f32" | "mul.rn.f32" | "mul.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Mul([a, b]))
             }
-            ["fma.rn.f32", dst, ",", a, ",", b, ",", c] => {
+            ["fma.rn.f32" | "fma.rn.ftz.f32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Float32(dst, FloatOp::Fma([a, b, c]))
             }
             ["cvt.rn.f32.u32", dst, ",", src] => {
@@ -419,6 +422,18 @@ impl<'a> Parser<'a> {
             ["sqrt.rn.f32", dst, ",", src] => Instruction::Float32(dst, FloatOp::Sqrt([src])),
             ["rsqrt.approx.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::RsqrtApprox([src]))
+            }
+            ["sin.approx.f32" | "sin.approx.ftz.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::SinApprox([src]))
+            }
+            ["cos.approx.f32" | "cos.approx.ftz.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::CosApprox([src]))
+            }
+            ["lg2.approx.f32" | "lg2.approx.ftz.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Lg2Approx([src]))
+            }
+            ["ex2.approx.f32" | "ex2.approx.ftz.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Ex2Approx([src]))
             }
             [
                 op @ ("st.global.b32" | "st.global.f32" | "st.shared.b32"),

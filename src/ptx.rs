@@ -85,8 +85,11 @@ enum IntegerOp {
     Sub,
     Mul,
     And,
+    ShiftLeft,
     ShiftRightLogical,
     ShiftRightArithmetic,
+    Div,
+    Rem,
     MulHighUnsigned,
 }
 
@@ -102,6 +105,10 @@ enum FloatOp<'a> {
     Div([&'a str; 2]),
     Sqrt([&'a str; 1]),
     RsqrtApprox([&'a str; 1]),
+    SinApprox([&'a str; 1]),
+    CosApprox([&'a str; 1]),
+    Lg2Approx([&'a str; 1]),
+    Ex2Approx([&'a str; 1]),
 }
 
 impl<'a> FloatOp<'a> {
@@ -115,7 +122,11 @@ impl<'a> FloatOp<'a> {
             Self::FromUnsigned(inputs)
             | Self::FromSigned(inputs)
             | Self::Sqrt(inputs)
-            | Self::RsqrtApprox(inputs) => inputs,
+            | Self::RsqrtApprox(inputs)
+            | Self::SinApprox(inputs)
+            | Self::CosApprox(inputs)
+            | Self::Lg2Approx(inputs)
+            | Self::Ex2Approx(inputs) => inputs,
         }
     }
 }
@@ -379,6 +390,14 @@ mod tests {
         let translated = translate(include_str!("../examples/ggml_rms_norm_f32_32.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn translates_ggml_rope_norm_f32_fast_math() {
+        let translated = translate(include_str!("../examples/ggml_rope_norm_f32.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].fp32);
+        assert!(translated.kernels[0].fp32_fma);
     }
 
     #[test]
@@ -709,7 +728,7 @@ mod tests {
     fn rejects_unimplemented_fp32_rounding_and_approximation_modes() {
         for (original, unsupported) in [
             ("mul.rn.f32", "mul.rz.f32"),
-            ("fma.rn.f32", "fma.rn.ftz.f32"),
+            ("fma.rn.f32", "fma.rz.f32"),
             ("fma.rn.f32", "fma.rn.sat.f32"),
             ("cvt.rn.f32.u32", "cvt.rz.f32.u32"),
             ("div.rn.f32", "div.approx.f32"),

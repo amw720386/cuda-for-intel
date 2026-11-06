@@ -21,6 +21,8 @@ mod ggml;
 mod ggml_norm;
 #[path = "gpu/ggml_rms_norm.rs"]
 mod ggml_rms_norm;
+#[path = "gpu/ggml_rope.rs"]
+mod ggml_rope;
 #[path = "gpu/isolation.rs"]
 mod isolation;
 #[path = "gpu/isolation_capability.rs"]

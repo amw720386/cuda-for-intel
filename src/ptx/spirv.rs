@@ -636,6 +636,25 @@ impl<'a> Emitter<'a> {
                     [Operand::IdRef(value)],
                 )?
             }
+            FloatOp::SinApprox([source])
+            | FloatOp::CosApprox([source])
+            | FloatOp::Lg2Approx([source])
+            | FloatOp::Ex2Approx([source]) => {
+                let value = self.float_value(source)?;
+                let opcode = match op {
+                    FloatOp::SinApprox(_) => OpenclStd100Op::native_sin,
+                    FloatOp::CosApprox(_) => OpenclStd100Op::native_cos,
+                    FloatOp::Lg2Approx(_) => OpenclStd100Op::native_log2,
+                    _ => OpenclStd100Op::native_exp2,
+                };
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    opcode as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
         };
         self.fp32 = true;
         Ok(self.builder.bitcast(self.u32_type, None, result)?)
@@ -730,16 +749,24 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Sub => self.builder.i_sub(ty, None, a, b),
                     IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
                     IntegerOp::And => self.builder.bitwise_and(ty, None, a, b),
-                    IntegerOp::ShiftRightLogical | IntegerOp::ShiftRightArithmetic => {
+                    IntegerOp::Div => self.builder.s_div(ty, None, a, b),
+                    IntegerOp::Rem => self.builder.s_rem(ty, None, a, b),
+                    IntegerOp::ShiftLeft
+                    | IntegerOp::ShiftRightLogical
+                    | IntegerOp::ShiftRightArithmetic => {
                         // PTX clamps at 32, but SPIR-V shifts at or above 32 are undefined.
                         let bits = self.builder.constant_bit32(ty, 32);
                         let zero = self.builder.constant_bit32(ty, 0);
                         let in_range = self.builder.u_less_than(self.bool_type, None, b, bits)?;
                         let safe = self.builder.select(ty, None, in_range, b, zero)?;
-                        let shifted = if matches!(op, IntegerOp::ShiftRightArithmetic) {
-                            self.builder.shift_right_arithmetic(ty, None, a, safe)?
-                        } else {
-                            self.builder.shift_right_logical(ty, None, a, safe)?
+                        let shifted = match op {
+                            IntegerOp::ShiftLeft => {
+                                self.builder.shift_left_logical(ty, None, a, safe)?
+                            }
+                            IntegerOp::ShiftRightArithmetic => {
+                                self.builder.shift_right_arithmetic(ty, None, a, safe)?
+                            }
+                            _ => self.builder.shift_right_logical(ty, None, a, safe)?,
                         };
                         self.builder.select(ty, None, in_range, shifted, zero)
                     }
