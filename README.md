@@ -66,7 +66,15 @@ clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-un
 | Events | `cuEventCreate`, `cuEventRecord`, `cuEventQuery`, `cuEventSynchronize`, `cuEventDestroy_v2`, and `cuStreamWaitEvent` |
 | Launch | Asynchronous `cuLaunchKernel` with a supported stream, an array of pointers to argument values, zero dynamic shared memory, and a null `extra` pointer |
 
-Each stream submits in order to an asynchronous Level Zero immediate list.
+By default, each stream submits in order to an asynchronous Level Zero immediate list.
+On Windows, regular command-list batching is available for experiments. Build with
+`--features experimental-batching` and set `CUDA_FOR_INTEL_BATCH_CAP` to a list
+capacity from 1 to 1024. `CUDA_FOR_INTEL_BATCH_US` sets the worker's deadline in
+microseconds and defaults to 250. Set `CUDA_FOR_INTEL_BATCH_TIMER=high-resolution`
+to use a Windows high-resolution waitable timer (Windows 10 version 1803 or later).
+The batching worker uses a condition variable by default. Both timer paths
+flush on size, synchronization and producer dependencies as well as deadlines.
+Actual wake times depend on the Windows scheduler.
 The null stream and `CU_STREAM_LEGACY` order work against blocking streams
 in the same context. Nonblocking streams are excluded from that ordering.
 Wait explicitly before reading results from nonblocking streams. Blocking
