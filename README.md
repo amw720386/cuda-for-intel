@@ -35,6 +35,11 @@ after building the release DLL. The report includes separate Ollama CPU and
 Vulkan baselines and the blockers found when loading the stock CUDA backend.
 [Milestone 13 results and reproduction](docs/milestone-13.md)
 
+Milestone 14 adds Driver API discovery, versioned entry-point resolution,
+primary contexts and multi-entry PTX modules. The stock CUDA 13 runner
+reaches the resolver and stops at `cuGetExportTable`.
+[Milestone 14 audit, traces and validation](docs/milestone-14.md)
+
 The Forge-style test queues RMSNorm, residual addition, and row reduction on
 one stream and on three event-linked streams. It compares both modes with an
 FP64 CPU reference and checks guard regions after completion.
@@ -73,8 +78,9 @@ clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-un
 
 | Area | Supported entry points and behavior |
 | --- | --- |
-| Discovery | `cuInit` with zero flags, `cuDeviceGetCount`, `cuDeviceGet`, `cuDeviceGetName`, `cuDeviceTotalMem_v2`, `cuDeviceGetAttribute` for workgroup and grid dimensions, threads per block, and shared local memory limit |
-| Contexts | `cuCtxCreate_v2` with zero flags, `cuCtxDestroy_v2`, `cuCtxGetCurrent`, `cuCtxSetCurrent`, `cuCtxGetDevice`, `cuCtxSynchronize` |
+| Discovery | `cuInit` with zero flags, `cuDriverGetVersion`, `cuDeviceGetCount`, `cuDeviceGet`, `cuDeviceGetName`, `cuDeviceTotalMem_v2`, `cuDeviceGetPCIBusId` when Level Zero exposes it, and `cuDeviceGetAttribute` for launch limits, integrated devices and PCI identity |
+| Entry points and errors | `cuGetProcAddress` and `cuGetProcAddress_v2` for supported ABI versions, `cuGetErrorName`, and `cuGetErrorString`. The reported version 13000 is the negotiation ceiling. Compute capability remains unsupported. |
+| Contexts | `cuCtxCreate_v2` with zero flags, `cuCtxDestroy_v2`, `cuCtxGetCurrent`, `cuCtxSetCurrent`, `cuCtxGetDevice`, `cuCtxSynchronize`, and primary-context retain, release, state, reset, and zero flags |
 | Memory | `cuMemAlloc_v2`, `cuMemFree_v2`, blocking `cuMemcpyHtoD_v2` and `cuMemcpyDtoH_v2` within a single allocation owned by the current context |
 | Pinned transfers | `cuMemHostAlloc` with default flags, `cuMemFreeHost`, `cuMemcpyHtoDAsync_v2`, and `cuMemcpyDtoHAsync_v2` |
 | Modules | `cuModuleLoad` from a UTF-8 path, `cuModuleLoadData` from NUL-terminated PTX text, `cuModuleGetFunction`, `cuModuleUnload` |
@@ -117,7 +123,7 @@ the latest recording at enqueue time and remains valid after re-recording or
 destroying the event handle. Context destruction returns `CUDA_ERROR_NOT_READY`
 while an explicit stream or event host wait is active.
 
-The translator accepts one PTX 4.1 entry with 64-bit addressing and scalar
+The translator accepts PTX 4.1 modules with one or more entries, 64-bit addressing and scalar
 32- or 64-bit parameters. Pointer parameters must use `.ptr` and point into a
 device allocation in the current context. The instruction subset covers parameter
 loads, `cvta.to.global.u64`, reads of `%ctaid`, `%ntid`, `%tid`, and `%nctaid`,
@@ -146,11 +152,11 @@ Cubins, fatbins, indirect branches, general predicated instructions, warp
 operations, dynamic shared memory, approximate FP32 math, alternate rounding
 modes, flush-to-zero modifiers, other barrier and atomic variants, per-thread
 default streams, stream priorities, event timing, blocking-sync and IPC event
-flags, cross-context event waits,
-primary contexts, dynamic symbol lookup via
-`cuGetProcAddress`, the CUDA Runtime API and CUDA libraries are outside this
-milestone. Set `CUDA_FOR_INTEL_LOG=1` to print translation diagnostics and
-Level Zero failures to stderr.
+flags, cross-context event waits, private CUDA export tables, the CUDA Runtime
+API and CUDA libraries are outside the supported subset. Set
+`CUDA_FOR_INTEL_TRACE=1` before launch to log API results, resolution requests
+and Level Zero failures to stderr. Set `CUDA_FOR_INTEL_LOG=1` for verbose
+translation and driver diagnostics.
 
 ## References and license
 
