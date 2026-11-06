@@ -42,6 +42,28 @@ impl Context {
 }
 
 impl CommandList {
+    pub(crate) unsafe fn copy(
+        &self,
+        api: &Api,
+        (dst, src): (Raw, *const std::ffi::c_void),
+        size: usize,
+        signal: Option<&Fence>,
+        waits: &[Arc<Fence>],
+    ) -> Result<(), Error> {
+        let mut events = WaitEvents::new(waits)?;
+        check("zeCommandListAppendMemoryCopy", unsafe {
+            (api.zeCommandListAppendMemoryCopy)(
+                self.0.0,
+                dst,
+                src,
+                size,
+                signal.map_or(null_mut(), |fence| fence.handle.0),
+                events.count,
+                events.ptr(),
+            )
+        })
+    }
+
     pub(crate) fn signal(&self, api: &Api, fence: &Fence) -> Result<(), Error> {
         check("zeCommandListAppendSignalEvent", unsafe {
             (api.zeCommandListAppendSignalEvent)(self.0.0, fence.handle.0)

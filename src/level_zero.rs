@@ -179,6 +179,12 @@ struct AllocDesc {
 }
 
 #[repr(C)]
+struct HostAllocDesc {
+    header: Header,
+    flags: u32,
+}
+
+#[repr(C)]
 struct ModuleDesc {
     header: Header,
     format: u32,
@@ -273,6 +279,7 @@ loader_api! {
     zeEventQueryStatus(Raw),
     zeEventHostSynchronize(Raw, u64),
     zeMemAllocDevice(Raw, *const AllocDesc, usize, usize, Raw, *mut Raw),
+    zeMemAllocHost(Raw, *const HostAllocDesc, usize, usize, *mut Raw),
     zeMemFree(Raw, Raw),
     zeCommandListAppendMemoryCopy(Raw, Raw, *const c_void, usize, Raw, u32, *mut Raw),
     zeModuleCreate(Raw, Raw, *const ModuleDesc, *mut Raw, *mut Raw),
@@ -444,6 +451,19 @@ impl Context {
         let mut out = std::ptr::null_mut();
         check("zeMemAllocDevice", unsafe {
             (api.zeMemAllocDevice)(self.handle.0, &desc, size, 0, self.device.0, &mut out)
+        })?;
+        Ok(out.expose_provenance())
+    }
+
+    pub(crate) fn alloc_host(&self, api: &Api, size: usize) -> Result<usize, Error> {
+        self.commands()?;
+        let desc = HostAllocDesc {
+            header: Header::new(0x16),
+            flags: 0,
+        };
+        let mut out = std::ptr::null_mut();
+        check("zeMemAllocHost", unsafe {
+            (api.zeMemAllocHost)(self.handle.0, &desc, size, 4096, &mut out)
         })?;
         Ok(out.expose_provenance())
     }

@@ -30,6 +30,8 @@ checks the rounding of individual FP32 instructions.
 The Forge-style test queues RMSNorm, residual addition, and row reduction on
 one stream and on three event-linked streams. It compares both modes with an
 FP64 CPU reference and checks guard regions after completion.
+The pinned-memory pipeline also compares blocking, single-stream asynchronous,
+and event-linked upload/compute/download with one or two reusable buffer sets.
 
 With Khronos `spirv-val` on PATH or selected by `SPIRV_VAL`, validate the emitted OpenCL SPIR-V independently.
 
@@ -55,6 +57,7 @@ clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-un
 | Discovery | `cuInit` with zero flags, `cuDeviceGetCount`, `cuDeviceGet`, `cuDeviceGetName`, `cuDeviceTotalMem_v2`, `cuDeviceGetAttribute` for workgroup and grid dimensions, threads per block, and shared local memory limit |
 | Contexts | `cuCtxCreate_v2` with zero flags, `cuCtxDestroy_v2`, `cuCtxGetCurrent`, `cuCtxSetCurrent`, `cuCtxGetDevice`, `cuCtxSynchronize` |
 | Memory | `cuMemAlloc_v2`, `cuMemFree_v2`, blocking `cuMemcpyHtoD_v2` and `cuMemcpyDtoH_v2` within a single allocation owned by the current context |
+| Pinned transfers | `cuMemHostAlloc` with default flags, `cuMemFreeHost`, `cuMemcpyHtoDAsync_v2`, and `cuMemcpyDtoHAsync_v2` |
 | Modules | `cuModuleLoad` from a UTF-8 path, `cuModuleLoadData` from NUL-terminated PTX text, `cuModuleGetFunction`, `cuModuleUnload` |
 | Streams | `cuStreamCreate` with default or nonblocking flags, `cuStreamDestroy_v2`, `cuStreamSynchronize`, and `cuStreamQuery` |
 | Events | `cuEventCreate`, `cuEventRecord`, `cuEventQuery`, `cuEventSynchronize`, `cuEventDestroy_v2`, and `cuStreamWaitEvent` |
@@ -68,6 +71,16 @@ copies follow legacy ordering and complete before returning. Context
 synchronization waits for every stream, including destroyed streams with
 queued work. Module unload and device free conservatively drain the context.
 GPU overlap depends on the Level Zero driver and hardware scheduler.
+
+Async copies require both ranges to fit inside live allocations of the
+appropriate type in the current context. Allocate the host side with
+`cuMemHostAlloc` and keep its contents available to the GPU until completion.
+Zero-byte copies validate the context and stream and enqueue nothing. Host
+allocations are 4 KiB aligned and require a positive size. Free them by base
+pointer in their owning context. Host free drains that context, and context
+destruction reclaims any remaining pinned allocations after queued work finishes.
+Portable, mapped and write-combined host allocations, host registration, and
+memory IPC are outside this subset. Use the blocking API for pageable buffers.
 
 Events and their streams must belong to the current context. Creation accepts
 `CU_EVENT_DEFAULT` and `CU_EVENT_DISABLE_TIMING`. Both provide synchronization
@@ -105,7 +118,7 @@ Cubins, fatbins, indirect branches, general predicated instructions, warp
 operations, dynamic shared memory, approximate FP32 math, alternate rounding
 modes, flush-to-zero modifiers, other barrier and atomic variants, per-thread
 default streams, stream priorities, event timing, blocking-sync and IPC event
-flags, cross-context event waits, asynchronous copies,
+flags, cross-context event waits,
 primary contexts, dynamic symbol lookup via
 `cuGetProcAddress`, the CUDA Runtime API and CUDA libraries are outside this
 milestone. Set `CUDA_FOR_INTEL_LOG=1` to print translation diagnostics and

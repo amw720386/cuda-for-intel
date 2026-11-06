@@ -41,6 +41,7 @@ struct CudaContext {
     streams: Streams,
     device: c_int,
     allocations: BTreeMap<usize, usize>,
+    host_allocations: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
     functions: HashMap<usize, usize>,
 }
@@ -207,6 +208,7 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
                 streams,
                 device: ordinal,
                 allocations: BTreeMap::new(),
+                host_allocations: BTreeMap::new(),
                 modules: HashMap::new(),
                 functions: HashMap::new(),
             },
@@ -233,6 +235,9 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
         }
         while let Some((&base, _)) = context.allocations.first_key_value() {
             context.free(api, base)?;
+        }
+        while let Some((&base, _)) = context.host_allocations.first_key_value() {
+            context.free_host(api, base)?;
         }
         context.streams.destroy(api)?;
         context.backend.destroy(api).map_err(backend_error)?;
@@ -294,6 +299,12 @@ pub extern "system" fn cuCtxSynchronize() -> CuResult {
 }
 
 impl CudaContext {
+    fn free_host(&mut self, api: &Api, base: usize) -> Result<(), CuResult> {
+        self.backend.free(api, base).map_err(backend_error)?;
+        self.host_allocations.remove(&base);
+        Ok(())
+    }
+
     fn free(&mut self, api: &Api, base: usize) -> Result<(), CuResult> {
         if !self.allocations.contains_key(&base) {
             return Err(InvalidValue);
@@ -355,6 +366,94 @@ pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
         context.streams.wait_all(&runtime.api)?;
         context.free(&runtime.api, address as usize)
     }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemHostAlloc(
+    out: *mut Opaque,
+    size: usize,
+    flags: c_uint,
+) -> CuResult {
+    status(with_context(|runtime, context| {
+        if out.is_null() || size == 0 || flags & !7 != 0 {
+            return Err(InvalidValue);
+        }
+        if flags != 0 {
+            return Err(NotSupported);
+        }
+        if size as u64 > runtime.devices[context.device as usize].info.max_allocation {
+            return Err(OutOfMemory);
+        }
+        let base = context
+            .backend
+            .alloc_host(&runtime.api, size)
+            .map_err(backend_error)?;
+        context.host_allocations.insert(base, size);
+        unsafe { out.write(std::ptr::with_exposed_provenance_mut(base)) };
+        Ok(())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuMemFreeHost(host: Opaque) -> CuResult {
+    status(with_context(|runtime, context| {
+        if !context.host_allocations.contains_key(&host.addr()) {
+            return Err(InvalidValue);
+        }
+        context.streams.wait_all(&runtime.api)?;
+        context.free_host(&runtime.api, host.addr())
+    }))
+}
+
+unsafe fn copy_async(
+    host: Opaque,
+    device: u64,
+    size: usize,
+    stream: Opaque,
+    to_device: bool,
+) -> CuResult {
+    status(with_context(|runtime, context| {
+        let key = context.streams.launch_key(stream)?;
+        if size == 0 {
+            return Ok(());
+        }
+        if !contains_range(&context.allocations, device as usize, size)
+            || !contains_range(&context.host_allocations, host.addr(), size)
+        {
+            return Err(InvalidValue);
+        }
+        let device = std::ptr::with_exposed_provenance_mut(device as usize);
+        let (dst, src) = if to_device {
+            (device, host)
+        } else {
+            (host, device)
+        };
+        unsafe {
+            context
+                .streams
+                .copy(&runtime.api, &context.backend, key, (dst, src), size)
+        }
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemcpyHtoDAsync_v2(
+    dst: u64,
+    src: *const c_void,
+    size: usize,
+    stream: Opaque,
+) -> CuResult {
+    unsafe { copy_async(src.cast_mut(), dst, size, stream, true) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemcpyDtoHAsync_v2(
+    dst: Opaque,
+    src: u64,
+    size: usize,
+    stream: Opaque,
+) -> CuResult {
+    unsafe { copy_async(dst, src, size, stream, false) }
 }
 
 unsafe fn copy(host: Opaque, device: u64, size: usize, to_device: bool) -> CuResult {

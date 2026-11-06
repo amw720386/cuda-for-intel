@@ -244,6 +244,39 @@ impl Streams {
         Ok(())
     }
 
+    pub(super) unsafe fn copy(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        pointers: (Opaque, *const std::ffi::c_void),
+        size: usize,
+    ) -> Result<(), CuResult> {
+        let blocking = self.get(key)?.blocking;
+        self.collect_retired(api)?;
+        let signal = if blocking && self.track_legacy {
+            Some(self.next_fence(api, context)?)
+        } else {
+            None
+        };
+        let waits = self.legacy_waits(key, blocking);
+        let stream = self.get_mut(key)?;
+        unsafe {
+            stream
+                .list
+                .copy(api, pointers, size, signal.as_deref(), &waits)
+        }
+        .map_err(backend_error)?;
+        stream.submitted();
+        if let Some(completion) = signal {
+            stream.pending.push_back(Submission {
+                completion,
+                _waits: waits,
+            });
+        }
+        Ok(())
+    }
+
     fn legacy_waits(&self, key: usize, blocking: bool) -> Vec<Arc<Fence>> {
         if key == 0 {
             self.explicit()
