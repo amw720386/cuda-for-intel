@@ -1,0 +1,561 @@
+use super::batch::TEST_POLICY;
+use super::events::{
+    cuEventCreate, cuEventDestroy_v2, cuEventQuery, cuEventRecord, cuEventSynchronize,
+    cuStreamWaitEvent,
+};
+use super::*;
+use crate::cuda::*;
+use crate::level_zero::{
+    fake::{self, Kind},
+    fault::{arm, arm_worker, consumed, nth, pause_worker_execute},
+};
+use std::ptr::{null_mut, without_provenance_mut};
+use std::sync::{Barrier, MutexGuard};
+use std::thread;
+
+const OOM: u32 = 0x70000002;
+const LOST: u32 = 0x70000001;
+const FAIL: u32 = 0x7fff_fffe;
+const IMAGE: &std::ffi::CStr =
+    c".version 4.1 .target sm_52 .address_size 64 .entry k(.param .u64 .ptr .global dst) { ret; }";
+const BATCH: Option<Policy> = Some(Policy {
+    cap: 32,
+    delay: None,
+    high_resolution: false,
+    eager_after_idle: false,
+});
+
+struct Fixture {
+    _serial: MutexGuard<'static, ()>,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let serial = TEST_RUNTIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            RUNTIME
+                .lock()
+                .unwrap()
+                .replace(State {
+                    runtime: fake::start(),
+                    next_handle: 3,
+                    contexts: HashMap::new(),
+                    incomplete_contexts: Vec::new(),
+                })
+                .is_none()
+        );
+        assert_eq!(cuInit(0), Success);
+        Self { _serial: serial }
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let (state, workers) = {
+            let mut runtime = RUNTIME.lock().unwrap();
+            let mut state = runtime.take().unwrap();
+            let workers: Vec<_> = state
+                .contexts
+                .values_mut()
+                .filter_map(|context| context.streams.stop())
+                .collect();
+            (state, workers)
+        };
+        for worker in workers {
+            let _ = worker.join();
+        }
+        CURRENT.with_borrow_mut(Vec::clear);
+        TEST_POLICY.set(None);
+        println!("native ledger: {:?}", fake::snapshot());
+        fake::finish();
+        assert!(
+            thread::panicking()
+                || (state.contexts.is_empty() && state.incomplete_contexts.is_empty())
+        );
+    }
+}
+
+fn create_context(policy: Option<Policy>, out: &mut Opaque) -> CuResult {
+    TEST_POLICY.set(Some(policy));
+    let result = unsafe { cuCtxCreate_v2(out, 0, 0) };
+    TEST_POLICY.set(None);
+    result
+}
+
+fn context(policy: Option<Policy>) -> Opaque {
+    let mut out = null_mut();
+    assert_eq!(create_context(policy, &mut out), Success);
+    out
+}
+
+fn stream() -> Opaque {
+    let mut out = null_mut();
+    assert_eq!(unsafe { cuStreamCreate(&mut out, 1) }, Success);
+    out
+}
+
+fn event() -> Opaque {
+    let mut out = null_mut();
+    assert_eq!(unsafe { cuEventCreate(&mut out, 2) }, Success);
+    out
+}
+
+fn module() -> Opaque {
+    let mut out = null_mut();
+    assert_eq!(
+        unsafe { cuModuleLoadData(&mut out, IMAGE.as_ptr().cast()) },
+        Success
+    );
+    out
+}
+
+fn function(module: Opaque) -> Opaque {
+    let mut out = null_mut();
+    assert_eq!(
+        unsafe { cuModuleGetFunction(&mut out, module, c"k".as_ptr()) },
+        Success
+    );
+    out
+}
+
+fn allocations() -> (u64, Opaque) {
+    let (mut device, mut host) = (0, null_mut());
+    assert_eq!(unsafe { cuMemAlloc_v2(&mut device, 64) }, Success);
+    assert_eq!(unsafe { cuMemHostAlloc(&mut host, 64, 0) }, Success);
+    (device, host)
+}
+
+fn launch(function: Opaque, stream: Opaque, address: u64) -> CuResult {
+    let mut arg = std::ptr::from_ref(&address).cast_mut().cast();
+    unsafe { cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, stream, &mut arg, null_mut()) }
+}
+
+fn assert_baseline() {
+    let stats = fake::snapshot();
+    assert!(stats.live.is_empty(), "{stats:?}");
+    assert_eq!(stats.pending, 0, "{stats:?}");
+    assert_eq!(stats.recorded, 0, "{stats:?}");
+    assert_eq!(stats.waiters, 0, "{stats:?}");
+    assert!(stats.ledger.violations.is_empty(), "{stats:?}");
+    assert_eq!(stats.ledger.created, stats.ledger.released, "{stats:?}");
+    assert_eq!(stats.ledger.submitted, stats.ledger.completed, "{stats:?}");
+    assert!(consumed());
+}
+
+#[test]
+fn fake_fault_initialization_and_allocation() {
+    let _fixture = Fixture::new();
+    let mut out = null_mut();
+    arm("zeContextCreate", OOM);
+    assert_eq!(create_context(None, &mut out), OutOfMemory);
+    assert!(out.is_null());
+    assert_baseline();
+
+    for (call, policy) in [
+        ("zeCommandListCreateImmediate", None),
+        ("zeCommandListCreateImmediate (asynchronous)", None),
+        ("zeCommandQueueCreate", BATCH),
+    ] {
+        arm(call, OOM);
+        arm("zeContextDestroy", FAIL);
+        assert_eq!(create_context(policy, &mut out), OutOfMemory);
+        assert!(out.is_null());
+        assert_eq!(fake::snapshot().live.get(&Kind::Context), Some(&1));
+        state(|state| {
+            assert_eq!(state.incomplete_contexts.len(), 1);
+            assert!(state.contexts.is_empty());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = context(policy);
+        assert_eq!(fake::snapshot().live.get(&Kind::Context), Some(&1));
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+
+    for policy in [None, BATCH] {
+        let ctx = context(policy);
+        let mut device = u64::MAX;
+        let mut host = null_mut();
+        nth("zeMemAllocDevice", 2, OOM);
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut device, 64) }, Success);
+        let mut second = u64::MAX;
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut second, 64) }, OutOfMemory);
+        assert_eq!(second, u64::MAX);
+        arm("zeMemAllocHost", OOM);
+        assert_eq!(unsafe { cuMemHostAlloc(&mut host, 64, 0) }, OutOfMemory);
+        assert!(host.is_null());
+        arm("zeMemFree", FAIL);
+        assert_eq!(cuMemFree_v2(device), Unknown);
+        assert_eq!(fake::snapshot().live.get(&Kind::DeviceAllocation), Some(&1));
+        assert_eq!(cuMemFree_v2(device), Success);
+        assert_eq!(cuMemFree_v2(device), InvalidValue);
+        for _ in 0..32 {
+            let (device, host) = allocations();
+            assert_eq!(cuMemFree_v2(device), Success);
+            assert_eq!(cuMemFreeHost(host), Success);
+        }
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_fault_module_retry_and_handle_lifetimes() {
+    let _fixture = Fixture::new();
+    for policy in [None, BATCH] {
+        let ctx = context(policy);
+        let mut out = null_mut();
+        arm("zeModuleCreate", OOM);
+        assert_eq!(
+            unsafe { cuModuleLoadData(&mut out, IMAGE.as_ptr().cast()) },
+            OutOfMemory
+        );
+        assert!(out.is_null());
+        arm("zeModuleBuildLogDestroy", FAIL);
+        let m = module();
+        assert_eq!(fake::snapshot().live.get(&Kind::BuildLog), Some(&1));
+        arm("zeKernelCreate", OOM);
+        assert_eq!(
+            unsafe { cuModuleGetFunction(&mut out, m, c"k".as_ptr()) },
+            OutOfMemory
+        );
+        assert!(out.is_null());
+        let f = function(m);
+        let (device, _) = allocations();
+        arm("zeModuleDestroy", FAIL);
+        assert_eq!(cuModuleUnload(m), Unknown);
+        assert_eq!(fake::snapshot().live.get(&Kind::Module), Some(&1));
+        assert_eq!(fake::snapshot().live.get(&Kind::Kernel), None);
+        assert_eq!(launch(f, null_mut(), device), InvalidHandle);
+        assert_eq!(
+            unsafe { cuModuleGetFunction(&mut out, m, c"k".as_ptr()) },
+            InvalidHandle
+        );
+        assert!(out.is_null());
+        assert_eq!(cuModuleUnload(m), Success);
+        assert_eq!(cuModuleUnload(m), InvalidHandle);
+        for _ in 0..24 {
+            let m = module();
+            let _ = function(m);
+            assert_eq!(cuModuleUnload(m), Success);
+        }
+        arm("zeModuleBuildLogDestroy", FAIL);
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        assert_eq!(cuCtxSetCurrent(ctx), Unknown);
+        assert_eq!(fake::snapshot().live.get(&Kind::BuildLog), Some(&1));
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_fault_event_create_and_stream_teardown() {
+    let _fixture = Fixture::new();
+    for policy in [None, BATCH] {
+        let ctx = context(policy);
+        let s = stream();
+        let e = event();
+        for call in ["zeEventPoolCreate", "zeEventCreate"] {
+            arm(call, OOM);
+            assert_eq!(cuEventRecord(e, s), OutOfMemory, "{call}");
+            assert_eq!(cuEventQuery(e), Success);
+        }
+        assert_eq!(cuEventRecord(e, s), Success);
+        assert_eq!(cuEventSynchronize(e), Success);
+        arm("zeEventQueryStatus", FAIL);
+        assert_eq!(cuEventQuery(e), Unknown);
+        arm("zeEventHostSynchronize", FAIL);
+        assert_eq!(cuEventSynchronize(e), Unknown);
+        assert_eq!(cuEventSynchronize(e), Success);
+        assert_eq!(cuEventDestroy_v2(e), Success);
+        assert_eq!(cuEventQuery(e), InvalidHandle);
+        let destroy = if policy.is_some() {
+            "zeCommandQueueDestroy"
+        } else {
+            "zeCommandListDestroy"
+        };
+        arm(destroy, FAIL);
+        assert_eq!(cuStreamDestroy_v2(s), Unknown);
+        assert_eq!(cuStreamQuery(s), InvalidHandle);
+        for _ in 0..64 {
+            assert_eq!(cuStreamDestroy_v2(stream()), Success);
+        }
+        arm("zeEventDestroy", FAIL);
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        assert_eq!(fake::snapshot().live.get(&Kind::Event), Some(&1));
+        arm("zeEventPoolDestroy", FAIL);
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        assert_eq!(fake::snapshot().live.get(&Kind::Event), None);
+        assert_eq!(fake::snapshot().live.get(&Kind::EventPool), Some(&1));
+        arm("zeContextDestroy", FAIL);
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        assert_eq!(fake::snapshot().live.get(&Kind::Context), Some(&1));
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_fault_event_pool_recycles_only_unreferenced_events() {
+    let _fixture = Fixture::new();
+    for policy in [None, BATCH] {
+        let ctx = context(policy);
+        let s = stream();
+        let held = event();
+        let e = event();
+        assert_eq!(cuEventRecord(held, s), Success);
+        for _ in 0..63 {
+            assert_eq!(cuEventRecord(e, s), Success);
+            assert_eq!(cuStreamSynchronize(s), Success);
+            assert_eq!(cuStreamQuery(s), Success);
+        }
+        assert_eq!(fake::snapshot().live.get(&Kind::Event), Some(&64));
+        arm("zeEventHostReset", FAIL);
+        assert_eq!(cuEventRecord(e, s), Unknown);
+        assert_eq!(cuEventQuery(held), Success);
+        assert_eq!(cuEventRecord(e, s), Success);
+        assert_eq!(cuEventQuery(held), Success);
+        assert_eq!(fake::snapshot().live.get(&Kind::EventPool), Some(&1));
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_fault_batch_recording_and_fence_paths() {
+    let _fixture = Fixture::new();
+    let ctx = context(BATCH);
+    let s = stream();
+    let e = event();
+    for call in ["zeCommandListCreate", "zeFenceCreate"] {
+        arm(call, OOM);
+        assert_eq!(cuEventRecord(e, s), OutOfMemory, "{call}");
+        assert_eq!(fake::snapshot().live.get(&Kind::Fence), None);
+    }
+    assert_eq!(cuEventRecord(e, s), Success);
+    arm("zeFenceHostSynchronize", FAIL);
+    assert_eq!(cuStreamSynchronize(s), Unknown);
+    assert_eq!(cuStreamSynchronize(s), Success);
+    arm("zeFenceQueryStatus", FAIL);
+    assert_eq!(cuStreamQuery(s), Unknown);
+    assert_eq!(cuStreamQuery(s), Success);
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+
+    for failure in ["zeCommandListReset", "zeFenceReset"] {
+        let ctx = context(BATCH);
+        let s = stream();
+        assert_eq!(cuEventRecord(event(), s), Success);
+        assert_eq!(cuStreamSynchronize(s), Success);
+        arm(failure, FAIL);
+        assert_eq!(cuStreamQuery(s), Unknown);
+        assert_eq!(cuStreamQuery(s), Unknown);
+        arm("zeFenceDestroy", FAIL);
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        assert_eq!(fake::snapshot().live.get(&Kind::Fence), Some(&1));
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        assert_eq!(cuCtxDestroy_v2(ctx), InvalidContext);
+        assert_baseline();
+    }
+
+    for (policy, failure) in [
+        (None, "zeCommandListAppendLaunchKernel"),
+        (BATCH, "zeCommandListAppendLaunchKernel"),
+        (BATCH, "zeCommandListClose"),
+        (BATCH, "zeCommandQueueExecuteCommandLists"),
+    ] {
+        let ctx = context(policy);
+        let s = stream();
+        let f = function(module());
+        let (address, _) = allocations();
+        assert_eq!(launch(f, s, address), Success);
+        let before = fake::snapshot();
+        arm(failure, FAIL);
+        let status = if failure == "zeCommandListAppendLaunchKernel" {
+            launch(f, s, address)
+        } else {
+            cuStreamSynchronize(s)
+        };
+        assert_eq!(status, Unknown, "{failure}");
+        assert_eq!(cuStreamSynchronize(s), Unknown);
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        let after = fake::snapshot();
+        assert_eq!(after.ledger.submitted, before.ledger.submitted);
+        assert_eq!(
+            after.ledger.discarded_recorded - before.ledger.discarded_recorded,
+            before.recorded
+        );
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_fault_accepted_work_and_unconfirmed_cleanup() {
+    let _fixture = Fixture::new();
+    let ctx = context(BATCH);
+    let s = stream();
+    let f = function(module());
+    let (device, host) = allocations();
+    fake::pause();
+    assert_eq!(
+        unsafe { cuMemcpyHtoDAsync_v2(device, host, 64, s) },
+        Success
+    );
+    assert_eq!(launch(f, s, device), Success);
+    fake::fail_after_execute(FAIL);
+    assert_eq!(cuStreamSynchronize(s), Unknown);
+    let before = fake::snapshot();
+    assert_eq!(before.pending, 1);
+    assert_eq!(before.ledger.submitted, 2);
+    assert_eq!(before.ledger.completed, 0);
+    assert_eq!(cuMemFree_v2(device), Unknown);
+    arm("zeCommandQueueSynchronize", 1);
+    assert_eq!(cuCtxDestroy_v2(ctx), NotReady);
+    let after = fake::snapshot();
+    assert_eq!(after.live, before.live);
+    assert_eq!(after.ledger.released, before.ledger.released);
+    assert_eq!(after.pending, 1);
+    assert_eq!(cuCtxSetCurrent(ctx), NotReady);
+    fake::complete();
+    assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+    assert_eq!(cuCtxDestroy_v2(ctx), InvalidContext);
+    assert_baseline();
+
+    for policy in [None, BATCH] {
+        let ctx = context(policy);
+        let mut out = 0;
+        arm("zeMemAllocDevice", LOST);
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut out, 64) }, LaunchFailed);
+        assert_eq!(out, 0);
+        assert_eq!(cuStreamQuery(null_mut()), LaunchFailed);
+        assert_eq!(cuCtxDestroy_v2(ctx), LaunchFailed);
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_fault_pending_dependencies_and_concurrent_waiters() {
+    let _fixture = Fixture::new();
+    for policy in [None, BATCH] {
+        let ctx = context(policy);
+        let producer = stream();
+        let consumer = stream();
+        let e = event();
+        let f = function(module());
+        let (device, host) = allocations();
+        fake::pause();
+        assert_eq!(
+            unsafe { cuMemcpyHtoDAsync_v2(device, host, 64, producer) },
+            Success
+        );
+        assert_eq!(cuEventRecord(e, producer), Success);
+        assert_eq!(cuStreamWaitEvent(consumer, e, 0), Success);
+        assert_eq!(cuStreamDestroy_v2(producer), Success);
+        assert_eq!(cuStreamQuery(producer), InvalidHandle);
+        assert_eq!(cuEventDestroy_v2(e), Success);
+        assert_eq!(cuEventQuery(e), InvalidHandle);
+
+        let (ctx_key, stream_key, f_key) = (ctx.addr(), consumer.addr(), f.addr());
+        let start = Barrier::new(4);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    assert_eq!(cuCtxSetCurrent(without_provenance_mut(ctx_key)), Success);
+                    start.wait();
+                    for _ in 0..24 {
+                        assert_eq!(
+                            launch(
+                                without_provenance_mut(f_key),
+                                without_provenance_mut(stream_key),
+                                device
+                            ),
+                            Success
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(cuStreamQuery(consumer), NotReady);
+        thread::scope(|scope| {
+            let waiter = scope.spawn(|| cuStreamSynchronize(without_provenance_mut(stream_key)));
+            let waiting = fake::until(|s| s.waiters == 1);
+            let pending = fake::snapshot();
+            let destroy = cuCtxDestroy_v2(ctx);
+            fake::complete();
+            assert!(waiting);
+            assert_eq!(destroy, NotReady);
+            assert!(pending.pending > 0);
+            assert_eq!(pending.live.get(&Kind::DeviceAllocation), Some(&1));
+            assert_eq!(pending.live.get(&Kind::HostAllocation), Some(&1));
+            assert_eq!(pending.live.get(&Kind::Kernel), Some(&1));
+            assert!(pending.live.contains_key(&Kind::Event));
+            assert_eq!(waiter.join().unwrap(), Success);
+        });
+        assert_eq!(cuStreamDestroy_v2(consumer), Success);
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+}
+
+#[test]
+fn fake_fault_worker_progress_failure_and_shutdown() {
+    let _fixture = Fixture::new();
+    let policy = BATCH.map(|p| Policy {
+        delay: Some(Duration::from_micros(250)),
+        ..p
+    });
+    let ctx = context(policy);
+    let s = stream();
+    fake::pause();
+    assert_eq!(cuEventRecord(event(), s), Success);
+    assert!(fake::until(|s| s.pending == 1));
+    arm("zeCommandQueueSynchronize", 1);
+    assert_eq!(cuCtxDestroy_v2(ctx), NotReady);
+    assert_eq!(fake::snapshot().pending, 1);
+    fake::complete();
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+
+    let ctx = context(policy);
+    let e = event();
+    arm_worker("zeCommandQueueExecuteCommandLists", FAIL);
+    assert_eq!(cuEventRecord(e, stream()), Success);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match cuEventQuery(e) {
+            Unknown => break,
+            NotReady if Instant::now() < deadline => thread::yield_now(),
+            result => panic!("worker error did not propagate: {result:?}"),
+        }
+    }
+    assert_eq!(cuEventSynchronize(e), Unknown);
+    assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+    assert_baseline();
+
+    let ctx = context(policy);
+    let (entered, resume) = pause_worker_execute();
+    assert_eq!(cuEventRecord(event(), stream()), Success);
+    entered.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(RUNTIME.try_lock().is_err());
+    let key = ctx.addr();
+    let start = Barrier::new(2);
+    thread::scope(|scope| {
+        let destroy = scope.spawn(|| {
+            start.wait();
+            cuCtxDestroy_v2(without_provenance_mut(key))
+        });
+        start.wait();
+        resume.send(()).unwrap();
+        assert_eq!(destroy.join().unwrap(), Success);
+    });
+    assert_baseline();
+
+    let ctx = context(policy);
+    arm_worker("batch worker shutdown", FAIL);
+    assert_eq!(cuCtxDestroy_v2(ctx), OperatingSystem);
+    assert_eq!(cuCtxDestroy_v2(ctx), InvalidContext);
+    assert_baseline();
+}

@@ -17,6 +17,8 @@ mod batch;
 mod batch_tests;
 mod batch_wake;
 mod events;
+#[cfg(test)]
+mod fake_tests;
 #[cfg(all(test, windows))]
 mod profiling;
 #[cfg(all(test, windows))]
@@ -751,7 +753,7 @@ mod tests {
     use crate::cuda::{
         cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSynchronize, cuInit, cuLaunchKernel, cuMemAlloc_v2,
         cuMemFreeHost, cuMemHostAlloc, cuMemcpyDtoHAsync_v2, cuMemcpyHtoDAsync_v2,
-        cuModuleGetFunction, cuModuleLoadData,
+        cuModuleGetFunction, cuModuleLoadData, test_device,
     };
     use std::ptr::null_mut;
 
@@ -760,7 +762,10 @@ mod tests {
     fn gated_stream_stays_pending_without_blocking_other_sync() {
         assert_eq!(cuInit(0), Success);
         let mut context = null_mut();
-        assert_eq!(unsafe { cuCtxCreate_v2(&mut context, 0, 0) }, Success);
+        assert_eq!(
+            unsafe { cuCtxCreate_v2(&mut context, 0, test_device()) },
+            Success
+        );
         let (mut gated, mut idle) = (null_mut(), null_mut());
         assert_eq!(unsafe { cuStreamCreate(&mut gated, 1) }, Success);
         assert_eq!(unsafe { cuStreamCreate(&mut idle, 0) }, Success);

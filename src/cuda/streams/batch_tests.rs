@@ -5,7 +5,6 @@ use super::events::{
 use super::profiling::{arg, run_bench_pipeline};
 use super::*;
 use crate::cuda::*;
-use std::cell::Cell;
 use std::hint::black_box;
 use std::ptr::{null_mut, without_provenance_mut};
 use std::sync::Barrier;
@@ -13,15 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-thread_local! {
-    pub(super) static POLICY: Cell<Option<Option<Policy>>> = const { Cell::new(None) };
-}
+pub(super) use super::batch::TEST_POLICY as POLICY;
 
 pub(super) fn open(policy: Option<Policy>) -> Handle {
     assert_eq!(cuInit(0), Success);
     let mut ctx = null_mut();
     POLICY.set(Some(policy));
-    let result = unsafe { cuCtxCreate_v2(&mut ctx, 0, 0) };
+    let result = unsafe { cuCtxCreate_v2(&mut ctx, 0, test_device()) };
     POLICY.set(None);
     assert_eq!(result, Success);
     ctx

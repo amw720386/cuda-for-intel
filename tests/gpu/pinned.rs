@@ -1,4 +1,4 @@
-use super::{Handle, library, ok, symbols};
+use super::{Handle, library, ok, symbols, test_device};
 use std::ffi::c_void;
 use std::ptr::{null_mut, without_provenance_mut};
 
@@ -33,7 +33,7 @@ fn pinned_async_transfers() {
     let (mut up, mut down, mut event) = (null_mut(), null_mut(), null_mut());
     let (mut device, mut other_device) = (0, 0);
     const SIZE: usize = 37;
-    ok!(cuCtxCreate_v2(&mut ctx, 0, 0));
+    ok!(cuCtxCreate_v2(&mut ctx, 0, test_device()));
     assert_eq!(unsafe { cuMemHostAlloc(null_mut(), SIZE, 0) }, 1);
     assert_eq!(unsafe { cuMemHostAlloc(&mut src, 0, 0) }, 1);
     for flags in 1..=7 {
@@ -92,7 +92,7 @@ fn pinned_async_transfers() {
     ok!(cuMemcpyHtoDAsync_v2(0, null_mut(), 0, up));
     ok!(cuMemcpyDtoHAsync_v2(null_mut(), u64::MAX, 0, null_mut()));
 
-    ok!(cuCtxCreate_v2(&mut foreign, 0, 0));
+    ok!(cuCtxCreate_v2(&mut foreign, 0, test_device()));
     ok!(cuMemAlloc_v2(&mut other_device, SIZE));
     let (mut other_host, mut other_stream) = (null_mut(), null_mut());
     ok!(cuMemHostAlloc(&mut other_host, SIZE, 0));

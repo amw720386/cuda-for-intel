@@ -1,11 +1,11 @@
 use super::streams::WaitFn;
-use super::{Api, CommandList, Context, Error, Handle, Header, QueueDesc, call, check};
+use super::{Api, CommandList, Context, Error, Handle, Header, QueueDesc, call, check, invoke};
 use std::ptr::null_mut;
 
 #[repr(C)]
 pub(super) struct ListDesc {
     header: Header,
-    ordinal: u32,
+    pub(super) ordinal: u32,
     flags: u32,
 }
 
@@ -114,7 +114,9 @@ impl CommandList {
 
 impl QueueFence {
     pub(crate) fn ready(&self, api: &Api) -> Result<bool, Error> {
-        match unsafe { (api.zeFenceQueryStatus)(self.0.0) } {
+        match invoke("zeFenceQueryStatus", || unsafe {
+            (api.zeFenceQueryStatus)(self.0.0)
+        }) {
             1 => Ok(false),
             status => check("zeFenceQueryStatus", status).map(|()| true),
         }

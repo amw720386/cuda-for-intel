@@ -18,12 +18,12 @@ impl Clock {
         let timer =
             Timer::new(frequency.unwrap_or_default(), bits).ok_or(Error::InvalidProperties)?;
         let append = unsafe {
-            api._library
+            api.library()
                 .get(b"zeCommandListAppendWriteGlobalTimestamp\0")
         }
         .map_err(Error::Loader)?;
-        let sample =
-            unsafe { api._library.get(b"zeDeviceGetGlobalTimestamps\0") }.map_err(Error::Loader)?;
+        let sample = unsafe { api.library().get(b"zeDeviceGetGlobalTimestamps\0") }
+            .map_err(Error::Loader)?;
         Ok(Self {
             append: *append,
             sample: *sample,
@@ -114,11 +114,11 @@ impl OperationEvents {
     ) -> Result<Self, Error> {
         let timer =
             Timer::new(frequency.unwrap_or_default(), bits).ok_or(Error::InvalidProperties)?;
-        let query =
-            unsafe { api._library.get(b"zeEventQueryKernelTimestamp\0") }.map_err(Error::Loader)?;
+        let query = unsafe { api.library().get(b"zeEventQueryKernelTimestamp\0") }
+            .map_err(Error::Loader)?;
         let mapped = if map_to_host {
             Some(
-                *unsafe { api._library.get(b"zeEventQueryKernelTimestampsExt\0") }
+                *unsafe { api.library().get(b"zeEventQueryKernelTimestampsExt\0") }
                     .map_err(Error::Loader)?,
             )
         } else {

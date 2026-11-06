@@ -4,7 +4,9 @@ use super::events::{
     cuStreamWaitEvent,
 };
 use super::*;
-use crate::cuda::{cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSetCurrent, cuInit, cuLaunchKernel};
+use crate::cuda::{
+    cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSetCurrent, cuInit, cuLaunchKernel, test_device,
+};
 use crate::level_zero::fault::{arm, arm_worker, consumed, pause_worker_execute};
 use std::ptr::{null_mut, without_provenance_mut};
 use std::thread;
@@ -39,7 +41,10 @@ fn gated_recovery_initialization_and_destruction_retry() {
         arm(call, OOM);
         arm("zeContextDestroy", UNKNOWN);
         let mut out = null_mut();
-        assert_eq!(unsafe { cuCtxCreate_v2(&mut out, 0, 0) }, OutOfMemory);
+        assert_eq!(
+            unsafe { cuCtxCreate_v2(&mut out, 0, test_device()) },
+            OutOfMemory
+        );
         POLICY.set(None);
         assert!(out.is_null());
         assert!(consumed());

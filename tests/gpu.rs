@@ -7,6 +7,10 @@ use std::ptr::null_mut;
 
 type Handle = *mut c_void;
 
+#[path = "gpu/device.rs"]
+mod gpu_device;
+use gpu_device::ordinal as test_device;
+
 #[path = "gpu/forge.rs"]
 mod forge;
 #[path = "gpu/pinned.rs"]
@@ -69,14 +73,18 @@ fn device_memory_round_trip() {
     ok!(cuDeviceGetCount(&mut count));
     assert!(count > 0);
     let mut name = [0; 256];
-    ok!(cuDeviceGetName(name.as_mut_ptr(), name.len() as i32, 0));
+    ok!(cuDeviceGetName(
+        name.as_mut_ptr(),
+        name.len() as i32,
+        test_device()
+    ));
     println!(
         "Device: {}",
         unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy()
     );
 
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let mut current = null_mut();
     ok!(cuCtxGetCurrent(&mut current));
     assert_eq!(current, context);
@@ -154,7 +162,7 @@ fn compiled_ptx_vector_add() {
     );
     ok!(cuInit(0));
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
 
     let mut module = null_mut();
     let path = std::ffi::CString::new(concat!(
@@ -305,11 +313,11 @@ fn compiled_ptx_block_reduction() {
     );
     ok!(cuInit(0));
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let source = include_str!("../examples/block_reduce.ptx");
     let mut module = null_mut();
     let mut shared_limit = 0;
-    ok!(cuDeviceGetAttribute(&mut shared_limit, 8, 0));
+    ok!(cuDeviceGetAttribute(&mut shared_limit, 8, test_device()));
     let oversized_bytes = (shared_limit as u32 + 1).next_multiple_of(4);
     let oversized =
         std::ffi::CString::new(source.replace("[512]", &format!("[{oversized_bytes}]"))).unwrap();
@@ -450,7 +458,7 @@ fn compiled_ptx_atomic_tickets() {
     );
     ok!(cuInit(0));
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let ptx = std::ffi::CString::new(include_str!("../examples/atomic_tickets.ptx")).unwrap();
     let mut module = null_mut();
     ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
@@ -545,7 +553,7 @@ fn compiled_ptx_rmsnorm() {
     );
     ok!(cuInit(0));
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let ptx = std::ffi::CString::new(include_str!("../examples/rmsnorm.ptx")).unwrap();
     let unsupported = std::ffi::CString::new(
         ptx.to_str()
@@ -762,7 +770,7 @@ fn fp32_rounding_and_contraction() {
     ";
     ok!(cuInit(0));
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let mut module = null_mut();
     ok!(cuModuleLoadData(&mut module, source.as_ptr().cast()));
     let mut kernel = null_mut();
@@ -894,7 +902,7 @@ fn asynchronous_stream_order_and_lifetimes() {
     ";
     ok!(cuInit(0));
     let (mut context, mut module, mut kernel) = (null_mut(), null_mut(), null_mut());
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
     ok!(cuModuleGetFunction(
         &mut kernel,
@@ -969,7 +977,7 @@ fn asynchronous_stream_order_and_lifetimes() {
 
     let mut foreign_context = null_mut();
     let mut foreign_stream = null_mut();
-    ok!(cuCtxCreate_v2(&mut foreign_context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut foreign_context, 0, test_device()));
     ok!(cuStreamCreate(&mut foreign_stream, 1));
     ok!(cuStreamQuery(first)); // Explicit stream operations resolve the owner.
     assert_eq!(launch(first, a, 1), 400);

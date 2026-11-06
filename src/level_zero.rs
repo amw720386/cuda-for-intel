@@ -7,7 +7,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
+pub(crate) mod fake;
+#[cfg(test)]
 pub(crate) mod fault;
 mod regular;
 pub(crate) use regular::{Queue, QueueFence};
@@ -73,13 +75,17 @@ fn check(call: &'static str, status: Status) -> Result<(), Error> {
     }
 }
 
-// Fail before entering the driver so tests never corrupt driver state.
-fn call(name: &'static str, invoke: impl FnOnce() -> Status) -> Result<(), Error> {
-    #[cfg(all(test, windows))]
-    if let Some(status) = fault::status(name) {
-        return check(name, status);
+// Fail before entering the driver so tests can also use real hardware safely.
+fn invoke(_name: &'static str, native: impl FnOnce() -> Status) -> Status {
+    #[cfg(test)]
+    if let Some(status) = fault::status(_name) {
+        return status;
     }
-    check(name, invoke())
+    native()
+}
+
+fn call(name: &'static str, native: impl FnOnce() -> Status) -> Result<(), Error> {
+    check(name, invoke(name, native))
 }
 
 #[repr(C)]
@@ -96,6 +102,19 @@ impl Header {
             next: std::ptr::null_mut(),
         }
     }
+}
+
+#[repr(C)]
+struct DriverProperties {
+    header: Header,
+    version: u32,
+    uuid: [u8; 16],
+}
+
+#[repr(C)]
+struct FloatAtomics {
+    header: Header,
+    flags: [u32; 3],
 }
 
 #[repr(C)]
@@ -256,7 +275,10 @@ macro_rules! loader_api {
         #[allow(non_snake_case)]
         pub(crate) struct Api {
             $( $name: unsafe extern "system" fn($($arg),*) -> Status, )+
+            #[cfg(not(test))]
             _library: Library,
+            #[cfg(test)]
+            _library: Option<Library>,
         }
 
         impl Api {
@@ -274,8 +296,29 @@ macro_rules! loader_api {
                 Ok(Self {
                     $( $name: unsafe { library.get(concat!(stringify!($name), "\0").as_bytes()) }
                         .map(|symbol| *symbol).map_err(Error::Loader)?, )+
+                    #[cfg(not(test))]
                     _library: library,
+                    #[cfg(test)]
+                    _library: Some(library),
                 })
+            }
+
+            #[cfg(test)]
+            fn stub() -> Self {
+                Self {
+                    $( $name: {
+                        unsafe extern "system" fn unsupported($(_: $arg),*) -> Status {
+                            fake::unexpected(stringify!($name))
+                        }
+                        unsupported
+                    }, )+
+                    _library: None,
+                }
+            }
+
+            #[cfg(all(test, windows))]
+            fn library(&self) -> &Library {
+                self._library.as_ref().expect("hardware profiling requires the native loader")
             }
         }
     };
@@ -284,6 +327,8 @@ macro_rules! loader_api {
 loader_api! {
     zeInit(u32),
     zeDriverGet(*mut u32, *mut Raw),
+    zeDriverGetApiVersion(Raw, *mut u32),
+    zeDriverGetProperties(Raw, *mut DriverProperties),
     zeDeviceGet(Raw, *mut u32, *mut Raw),
     zeDeviceGetProperties(Raw, *mut Properties),
     zeDeviceGetComputeProperties(Raw, *mut ComputeProperties),
@@ -337,7 +382,11 @@ loader_api! {
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
     pub name: String,
+    pub vendor_id: u32,
     pub device_id: u32,
+    pub device_flags: u32,
+    pub driver_version: u32,
+    pub api_version: u32,
     pub uuid: [u8; 16],
     pub total_memory: u64,
     pub max_allocation: u64,
@@ -349,6 +398,17 @@ pub struct DeviceInfo {
     pub spirv_version: u32,
     pub fp32_denorms: bool,
     pub fp32_round_to_nearest: bool,
+    pub fp32_inf_nan: bool,
+    pub fp32_fma: bool,
+    pub device_memory_atomics: bool,
+    pub module_flags: u32,
+    /// Floating-point capability flags in FP16, FP32, FP64 order.
+    pub floating_point_flags: [u32; 3],
+    /// Atomic-operation flags in FP16, FP32, FP64 order, if queried successfully.
+    pub float_atomic_flags: Option<[u32; 3]>,
+    /// Host, device, single-device shared, cross-device shared, system shared.
+    pub memory_access_flags: [u32; 5],
+    pub memory_heaps: Vec<MemoryHeap>,
     pub max_kernel_arguments_size: u32,
     pub driver_extensions: Vec<(String, u32)>,
     pub queue_groups: Vec<QueueGroup>,
@@ -356,6 +416,25 @@ pub struct DeviceInfo {
     pub timestamp_frequency_hz: Option<u64>,
     pub timestamp_valid_bits: u32,
     pub kernel_timestamp_valid_bits: u32,
+}
+
+impl DeviceInfo {
+    pub fn compute_queue(&self) -> Option<QueueGroup> {
+        select_compute_queue(&self.queue_groups)
+    }
+
+    pub fn supports_fp32(&self) -> bool {
+        self.fp32_denorms && self.fp32_round_to_nearest && self.fp32_inf_nan
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryHeap {
+    pub name: String,
+    pub size: u64,
+    pub clock_mhz: u32,
+    pub bus_width: u32,
+    pub flags: u32,
 }
 
 /// An ordinal and its capabilities as reported by Level Zero.
@@ -380,21 +459,17 @@ impl QueueGroup {
     }
 }
 
-fn select_compute_queue(groups: &[QueueGroup]) -> Option<u32> {
+fn select_compute_queue(groups: &[QueueGroup]) -> Option<QueueGroup> {
     groups
         .iter()
+        .copied()
         .find(|group| group.queues != 0 && group.compute())
-        .map(|group| group.ordinal)
 }
 
 pub(crate) struct Device {
     pub(crate) info: DeviceInfo,
-    pub(crate) device_memory_atomics: bool,
-    pub(crate) fp32_inf_nan: bool,
-    pub(crate) fp32_fma: bool,
     driver: Handle,
     handle: Handle,
-    compute_queue: Option<u32>,
 }
 
 pub(crate) struct Runtime {
@@ -422,6 +497,7 @@ pub(crate) struct Context {
     handle: Handle,
     device: Handle,
     commands: Option<Handle>,
+    build_logs: Vec<Handle>,
     ordinal: u32,
 }
 
@@ -439,7 +515,7 @@ impl Module {
                 name: name.as_ptr(),
             };
             let mut kernel = std::ptr::null_mut();
-            check("zeKernelCreate", unsafe {
+            call("zeKernelCreate", || unsafe {
                 (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
             })?;
             self.kernel = Some(Handle(kernel));
@@ -449,12 +525,12 @@ impl Module {
 
     pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
         if let Some(kernel) = self.kernel {
-            check("zeKernelDestroy", unsafe {
+            call("zeKernelDestroy", || unsafe {
                 (api.zeKernelDestroy)(kernel.0)
             })?;
             self.kernel = None;
         }
-        check("zeModuleDestroy", unsafe {
+        call("zeModuleDestroy", || unsafe {
             (api.zeModuleDestroy)(self.handle.0)
         })
     }
@@ -480,14 +556,16 @@ fn build_log(api: &Api, handle: Raw) -> String {
 impl Context {
     pub(crate) fn create(api: &Api, device: &Device) -> Result<Self, Error> {
         let ordinal = device
-            .compute_queue
-            .ok_or(Error::Driver("select compute queue", 0x78000003))?;
+            .info
+            .compute_queue()
+            .ok_or(Error::Driver("select compute queue", 0x78000003))?
+            .ordinal;
         let desc = ContextDesc {
             header: Header::new(0xd),
             flags: 0,
         };
         let mut handle = std::ptr::null_mut();
-        check("zeContextCreate", unsafe {
+        call("zeContextCreate", || unsafe {
             (api.zeContextCreate)(device.driver.0, &desc, &mut handle)
         })?;
         Ok(Self {
@@ -495,6 +573,7 @@ impl Context {
             handle: Handle(handle),
             device: device.handle,
             commands: None,
+            build_logs: Vec::new(),
             ordinal,
         })
     }
@@ -523,6 +602,12 @@ impl Context {
     }
 
     pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
+        while let Some(log) = self.build_logs.last() {
+            call("zeModuleBuildLogDestroy", || unsafe {
+                (api.zeModuleBuildLogDestroy)(log.0)
+            })?;
+            self.build_logs.pop();
+        }
         if let Some(commands) = self.commands {
             call("zeCommandListDestroy", || unsafe {
                 (api.zeCommandListDestroy)(commands.0)
@@ -542,7 +627,7 @@ impl Context {
             ordinal: 0,
         };
         let mut out = std::ptr::null_mut();
-        check("zeMemAllocDevice", unsafe {
+        call("zeMemAllocDevice", || unsafe {
             (api.zeMemAllocDevice)(self.handle.0, &desc, size, 0, self.device.0, &mut out)
         })?;
         Ok(out.expose_provenance())
@@ -555,14 +640,14 @@ impl Context {
             flags: 0,
         };
         let mut out = std::ptr::null_mut();
-        check("zeMemAllocHost", unsafe {
+        call("zeMemAllocHost", || unsafe {
             (api.zeMemAllocHost)(self.handle.0, &desc, size, 4096, &mut out)
         })?;
         Ok(out.expose_provenance())
     }
 
     pub(crate) fn free(&self, api: &Api, address: usize) -> Result<(), Error> {
-        check("zeMemFree", unsafe {
+        call("zeMemFree", || unsafe {
             (api.zeMemFree)(
                 self.handle.0,
                 std::ptr::with_exposed_provenance_mut(address),
@@ -594,7 +679,7 @@ impl Context {
         })
     }
 
-    pub(crate) fn load_module(&self, api: &Api, words: &[u32]) -> Result<Module, Error> {
+    pub(crate) fn load_module(&mut self, api: &Api, words: &[u32]) -> Result<Module, Error> {
         self.commands()?;
         let desc = ModuleDesc {
             header: Header::new(0x1b),
@@ -606,16 +691,22 @@ impl Context {
         };
         let mut module = std::ptr::null_mut();
         let mut log = std::ptr::null_mut();
-        let status = unsafe {
+        let status = invoke("zeModuleCreate", || unsafe {
             (api.zeModuleCreate)(self.handle.0, self.device.0, &desc, &mut module, &mut log)
-        };
+        });
         let message = if !log.is_null() {
             let message = if status == 0 {
                 String::new()
             } else {
                 build_log(api, log)
             };
-            unsafe { (api.zeModuleBuildLogDestroy)(log) };
+            if call("zeModuleBuildLogDestroy", || unsafe {
+                (api.zeModuleBuildLogDestroy)(log)
+            })
+            .is_err()
+            {
+                self.build_logs.push(Handle(log));
+            }
             message
         } else {
             String::new()
@@ -668,7 +759,7 @@ impl Runtime {
             let handles = enumerate("zeDeviceGet", std::ptr::null_mut(), |count, out| unsafe {
                 (api.zeDeviceGet)(driver, count, out)
             })?;
-            let mut extensions = None;
+            let mut metadata = None;
             for handle in handles {
                 // These C output structures contain only integers and pointers.
                 let mut properties: Properties = unsafe { std::mem::zeroed() };
@@ -705,7 +796,19 @@ impl Runtime {
                     .iter()
                     .try_fold(0u64, |total, region| total.checked_add(region.total_size))
                     .ok_or(Error::InvalidProperties)?;
-                if extensions.is_none() {
+                if metadata.is_none() {
+                    let mut driver_info = DriverProperties {
+                        header: Header::new(1),
+                        version: 0,
+                        uuid: [0; 16],
+                    };
+                    let mut version = 0;
+                    check("zeDriverGetProperties", unsafe {
+                        (api.zeDriverGetProperties)(driver, &mut driver_info)
+                    })?;
+                    check("zeDriverGetApiVersion", unsafe {
+                        (api.zeDriverGetApiVersion)(driver, &mut version)
+                    })?;
                     let initial: ExtensionProperties = unsafe { std::mem::zeroed() };
                     let values = enumerate(
                         "zeDriverGetExtensionProperties",
@@ -714,12 +817,14 @@ impl Runtime {
                             (api.zeDriverGetExtensionProperties)(driver, count, out)
                         },
                     )?;
-                    extensions = Some(
+                    metadata = Some((
+                        driver_info.version,
+                        version,
                         values
                             .iter()
                             .map(|ext| Ok((name(&ext.name)?, ext.version)))
                             .collect::<Result<Vec<_>, Error>>()?,
-                    );
+                    ));
                 }
                 let subgroup_sizes = compute
                     .subgroup_sizes
@@ -744,7 +849,27 @@ impl Runtime {
                         queues: group.queues,
                     })
                     .collect();
-                let compute_queue = select_compute_queue(&queue_groups);
+                let (driver_version, api_version, extensions) = metadata.as_ref().unwrap();
+                let mut atomic = FloatAtomics {
+                    header: Header::new(0x10003),
+                    flags: [0; 3],
+                };
+                let float_atomic_flags = if extensions
+                    .iter()
+                    .any(|(name, _)| name == "ZE_extension_float_atomics")
+                {
+                    // Query independently so an optional extension failure does
+                    // not erase the core floating-point properties.
+                    let mut query: ModuleProperties = unsafe { std::mem::zeroed() };
+                    query.header = Header {
+                        stype: 5,
+                        next: std::ptr::from_mut(&mut atomic).cast(),
+                    };
+                    (unsafe { (api.zeDeviceGetModuleProperties)(handle, &mut query) } == 0)
+                        .then_some(atomic.flags)
+                } else {
+                    None
+                };
                 let mut timer: Properties = unsafe { std::mem::zeroed() };
                 timer.header = Header::new(0x0002_0006); // ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES_1_2
                 let timestamp_frequency_hz =
@@ -754,13 +879,14 @@ impl Runtime {
                 devices.push(Device {
                     driver: Handle(driver),
                     handle: Handle(handle),
-                    compute_queue,
-                    device_memory_atomics: access.device_alloc & (1 << 1) != 0,
-                    fp32_inf_nan: module.fp32_flags & (1 << 1) != 0,
-                    fp32_fma: module.fp32_flags & (1 << 5) != 0,
+
                     info: DeviceInfo {
                         name: name(&properties.name)?,
+                        vendor_id: properties.vendor,
                         device_id: properties.device,
+                        device_flags: properties.flags,
+                        driver_version: *driver_version,
+                        api_version: *api_version,
                         uuid: properties.uuid,
                         total_memory,
                         max_allocation: properties.max_alloc_size,
@@ -772,8 +898,37 @@ impl Runtime {
                         spirv_version: module.spirv_version,
                         fp32_denorms: module.fp32_flags & 1 != 0,
                         fp32_round_to_nearest: module.fp32_flags & 4 != 0,
+                        fp32_inf_nan: module.fp32_flags & (1 << 1) != 0,
+                        fp32_fma: module.fp32_flags & (1 << 5) != 0,
+                        device_memory_atomics: access.device_alloc & (1 << 1) != 0,
+                        module_flags: module.flags,
+                        floating_point_flags: [
+                            module.fp16_flags,
+                            module.fp32_flags,
+                            module.fp64_flags,
+                        ],
+                        float_atomic_flags,
+                        memory_access_flags: [
+                            access.host_alloc,
+                            access.device_alloc,
+                            access.shared_single_device_alloc,
+                            access.shared_cross_device_alloc,
+                            access.shared_system_alloc,
+                        ],
+                        memory_heaps: memory
+                            .iter()
+                            .map(|heap| {
+                                Ok(MemoryHeap {
+                                    name: name(&heap.name)?,
+                                    size: heap.total_size,
+                                    clock_mhz: heap.max_clock_rate,
+                                    bus_width: heap.max_bus_width,
+                                    flags: heap.flags,
+                                })
+                            })
+                            .collect::<Result<_, Error>>()?,
                         max_kernel_arguments_size: module.max_arguments_size,
-                        driver_extensions: extensions.as_ref().cloned().unwrap_or_default(),
+                        driver_extensions: extensions.clone(),
                         queue_groups,
                         timestamp_frequency_hz,
                         timestamp_valid_bits: properties.timestamp_valid_bits,
@@ -805,6 +960,8 @@ mod tests {
         assert_eq!(size_of::<Properties>(), 368);
         assert_eq!(offset_of!(Properties, max_alloc_size), 40);
         assert_eq!(offset_of!(Properties, name), 112);
+        assert_eq!(size_of::<DriverProperties>(), 40);
+        assert_eq!(size_of::<FloatAtomics>(), 32);
         assert_eq!(size_of::<ComputeProperties>(), 88);
         assert_eq!(size_of::<MemoryProperties>(), 296);
         assert_eq!(size_of::<ModuleProperties>(), 64);
@@ -833,9 +990,9 @@ mod tests {
                 queues: 1,
             },
         ];
-        assert_eq!(select_compute_queue(&groups), Some(7));
+        assert_eq!(select_compute_queue(&groups), Some(groups[2]));
         assert_eq!(select_compute_queue(&groups[..2]), None);
-        assert_eq!(select_compute_queue(&groups[2..]), Some(7));
+        assert_eq!(select_compute_queue(&groups[2..]), Some(groups[2]));
         assert!(groups[1].copy_only());
         assert!(groups[2].copy() && !groups[2].copy_only());
     }

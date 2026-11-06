@@ -1,4 +1,4 @@
-use super::{Handle, library, ok, symbols};
+use super::{Handle, library, ok, symbols, test_device};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr::null_mut;
 use std::time::Instant;
@@ -44,7 +44,7 @@ fn dependent_forge_chain() {
     );
     ok!(cuInit(0));
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let mut streams = [null_mut(); 3];
     for stream in &mut streams {
         ok!(cuStreamCreate(stream, 1));
@@ -293,7 +293,7 @@ fn event_driver_api() {
     let (mut context, mut other, mut event, mut other_event) =
         (null_mut(), null_mut(), null_mut(), null_mut());
     let (mut producer, mut consumer, mut foreign) = (null_mut(), null_mut(), null_mut());
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     ok!(cuStreamCreate(&mut producer, 1));
     ok!(cuStreamCreate(&mut consumer, 1));
     assert_eq!(unsafe { cuEventCreate(null_mut(), 2) }, 1);
@@ -308,7 +308,7 @@ fn event_driver_api() {
     assert_eq!(unsafe { cuStreamWaitEvent(consumer, event, 1) }, 1);
     assert_eq!(unsafe { cuEventRecord(null_mut(), producer) }, 400);
     assert_eq!(unsafe { cuStreamWaitEvent(consumer, context, 0) }, 400);
-    ok!(cuCtxCreate_v2(&mut other, 0, 0));
+    ok!(cuCtxCreate_v2(&mut other, 0, test_device()));
     ok!(cuStreamCreate(&mut foreign, 1));
     ok!(cuEventCreate(&mut other_event, 0));
     assert_eq!(unsafe { cuEventRecord(event, foreign) }, 400);
@@ -360,7 +360,7 @@ fn event_driver_api() {
         let mut cold = Vec::new();
         for sample in 0..111 {
             let (mut fresh, mut first) = (null_mut(), null_mut());
-            ok!(cuCtxCreate_v2(&mut fresh, 0, 0));
+            ok!(cuCtxCreate_v2(&mut fresh, 0, test_device()));
             ok!(cuEventCreate(&mut first, 2));
             let start = Instant::now();
             ok!(cuEventRecord(first, null_mut()));

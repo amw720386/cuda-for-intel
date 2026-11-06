@@ -1,5 +1,5 @@
 use super::{BATCH, EPSILON, GUARD, KERNELS, SENTINEL, arg, report};
-use super::{Handle, library, ok, symbols};
+use super::{Handle, library, ok, symbols, test_device};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr::null_mut;
 use std::time::Instant;
@@ -49,7 +49,7 @@ pub(super) fn run_pipeline(trace_factory: Option<fn() -> Box<dyn Trace>>, bench:
     );
     ok!(cuInit(0));
     let mut context = null_mut();
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let mut streams = [null_mut(); 3];
     for stream in &mut streams {
         ok!(cuStreamCreate(stream, 1));

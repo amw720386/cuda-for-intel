@@ -1,4 +1,4 @@
-use super::{Handle, library, ok, symbols};
+use super::{Handle, library, ok, symbols, test_device};
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ fn event_linked_transfers_make_progress_without_synchronize() {
     ok!(cuInit(0));
     let (mut context, mut producer, mut consumer, mut uploaded) =
         (null_mut(), null_mut(), null_mut(), null_mut());
-    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     ok!(cuStreamCreate(&mut producer, 1));
     ok!(cuStreamCreate(&mut consumer, 1));
     ok!(cuEventCreate(&mut uploaded, 2));

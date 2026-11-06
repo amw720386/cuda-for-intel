@@ -163,7 +163,8 @@ mod tests {
     use super::*;
     use crate::cuda::streams::{cuStreamCreate, cuStreamDestroy_v2, cuStreamQuery};
     use crate::cuda::{
-        cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSetCurrent, cuCtxSynchronize, cuInit, with_context,
+        cuCtxCreate_v2, cuCtxDestroy_v2, cuCtxSetCurrent, cuCtxSynchronize, cuInit, test_device,
+        with_context,
     };
     use std::ptr::{null_mut, without_provenance_mut};
     use std::time::{Duration, Instant};
@@ -174,7 +175,10 @@ mod tests {
         assert_eq!(cuInit(0), Success);
         let (mut context, mut producer, mut consumer) = (null_mut(), null_mut(), null_mut());
         let (mut event, mut later, mut prefix) = (null_mut(), null_mut(), null_mut());
-        assert_eq!(unsafe { cuCtxCreate_v2(&mut context, 0, 0) }, Success);
+        assert_eq!(
+            unsafe { cuCtxCreate_v2(&mut context, 0, test_device()) },
+            Success
+        );
         assert_eq!(unsafe { cuStreamCreate(&mut producer, 1) }, Success);
         assert_eq!(unsafe { cuStreamCreate(&mut consumer, 0) }, Success);
         assert_eq!(unsafe { cuEventCreate(&mut event, 2) }, Success);

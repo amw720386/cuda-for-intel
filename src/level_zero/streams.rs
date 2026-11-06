@@ -1,6 +1,6 @@
 use super::{
     Api, Context, Error, EventDesc, EventPoolDesc, GroupCount, Handle, Header, Module, QueueDesc,
-    Raw, call, check,
+    Raw, call, check, invoke,
 };
 use std::ptr::null_mut;
 use std::sync::Arc;
@@ -130,11 +130,11 @@ impl CommandList {
             .ok_or(Error::Driver("launch without a kernel", 0x7800001c))?
             .0;
         let ([x, y, z], [bx, by, bz]) = geometry;
-        check("zeKernelSetGroupSize", unsafe {
+        call("zeKernelSetGroupSize", || unsafe {
             (api.zeKernelSetGroupSize)(kernel, bx, by, bz)
         })?;
         for (index, value) in args.iter().enumerate() {
-            check("zeKernelSetArgumentValue", unsafe {
+            call("zeKernelSetArgumentValue", || unsafe {
                 (api.zeKernelSetArgumentValue)(
                     kernel,
                     index as u32,
@@ -199,13 +199,15 @@ impl Fence {
     }
 
     pub(crate) fn wait(&self, wait: WaitFn, timeout: u64) -> Result<(), Error> {
-        check("zeEventHostSynchronize", unsafe {
+        call("zeEventHostSynchronize", || unsafe {
             wait(self.handle.0, timeout)
         })
     }
 
     pub(crate) fn ready(&self, api: &Api) -> Result<bool, Error> {
-        match unsafe { (api.zeEventQueryStatus)(self.handle.0) } {
+        match invoke("zeEventQueryStatus", || unsafe {
+            (api.zeEventQueryStatus)(self.handle.0)
+        }) {
             1 => Ok(false), // ZE_RESULT_NOT_READY
             status => check("zeEventQueryStatus", status).map(|()| true),
         }
@@ -214,7 +216,7 @@ impl Fence {
     #[cfg(all(test, windows))]
     pub(crate) fn host_signal(&self, api: &Api) -> Result<(), Error> {
         let call = unsafe {
-            api._library
+            api.library()
                 .get::<unsafe extern "system" fn(Raw) -> u32>(b"zeEventHostSignal\0")
         }
         .map_err(Error::Loader)?;
@@ -226,7 +228,7 @@ impl Fence {
 impl CommandList {
     pub(crate) fn gate(&self, api: &Api, gate: &Fence) -> Result<(), Error> {
         let append_wait = unsafe {
-            api._library
+            api.library()
                 .get::<unsafe extern "system" fn(Raw, u32, *mut Raw) -> u32>(
                     b"zeCommandListAppendWaitOnEvents\0",
                 )
@@ -265,7 +267,7 @@ impl Fences {
             while index < self.live.len() {
                 let fence = &self.live[index];
                 if Arc::strong_count(fence) == 1 {
-                    check("zeEventHostReset", unsafe {
+                    call("zeEventHostReset", || unsafe {
                         (api.zeEventHostReset)(fence.handle.0)
                     })?;
                     self.free.push(self.live.swap_remove(index));
@@ -281,7 +283,7 @@ impl Fences {
                 };
                 let mut pool = null_mut();
                 let mut device = context.device.0;
-                check("zeEventPoolCreate", unsafe {
+                call("zeEventPoolCreate", || unsafe {
                     (api.zeEventPoolCreate)(context.handle.0, &desc, 1, &mut device, &mut pool)
                 })?;
                 self.pools.push(Handle(pool));
@@ -299,7 +301,7 @@ impl Fences {
                 wait: 1 << 1,   // ZE_EVENT_SCOPE_FLAG_DEVICE
             };
             let mut event = null_mut();
-            check("zeEventCreate", unsafe {
+            call("zeEventCreate", || unsafe {
                 (api.zeEventCreate)(pool.0, &desc, &mut event)
             })?;
             self.next_index += 1;
@@ -314,14 +316,14 @@ impl Fences {
     pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
         for events in [&mut self.free, &mut self.live] {
             while let Some(fence) = events.last() {
-                check("zeEventDestroy", unsafe {
+                call("zeEventDestroy", || unsafe {
                     (api.zeEventDestroy)(fence.handle.0)
                 })?;
                 events.pop();
             }
         }
         while let Some(pool) = self.pools.last() {
-            check("zeEventPoolDestroy", unsafe {
+            call("zeEventPoolDestroy", || unsafe {
                 (api.zeEventPoolDestroy)(pool.0)
             })?;
             self.pools.pop();

@@ -484,7 +484,7 @@ fn gated_timestamp_storage_survives_stream_retirement() {
     assert_eq!(cuInit(0), Success);
     for _ in 0..8 {
         let (mut context, mut stream) = (null_mut(), null_mut());
-        linked_ok!(cuCtxCreate_v2(&mut context, 0, 0));
+        linked_ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
         linked_ok!(cuStreamCreate(&mut stream, 1));
         let mut profile = Profile::new();
         profile.begin();

@@ -6,6 +6,7 @@ use std::time::Duration;
 struct Fault {
     call: &'static str,
     status: Status,
+    skip: usize,
 }
 
 thread_local! {
@@ -16,7 +17,18 @@ type Pause = (mpsc::Sender<()>, mpsc::Receiver<()>);
 static PAUSE_EXECUTE: Mutex<Option<Pause>> = Mutex::new(None);
 
 pub(crate) fn arm(call: &'static str, status: Status) {
-    LOCAL.with_borrow_mut(|faults| faults.push(Fault { call, status }));
+    nth(call, 1, status);
+}
+
+pub(crate) fn nth(call: &'static str, occurrence: usize, status: Status) {
+    assert!(occurrence != 0);
+    LOCAL.with_borrow_mut(|faults| {
+        faults.push(Fault {
+            call,
+            status,
+            skip: occurrence - 1,
+        })
+    });
 }
 
 pub(crate) fn consumed() -> bool {
@@ -28,7 +40,11 @@ pub(crate) fn arm_worker(call: &'static str, status: Status) {
         WORKER
             .lock()
             .unwrap()
-            .replace(Fault { call, status })
+            .replace(Fault {
+                call,
+                status,
+                skip: 0
+            })
             .is_none()
     );
 }
@@ -49,7 +65,12 @@ pub(crate) fn pause_worker_execute() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
 pub(crate) fn status(call: &str) -> Option<Status> {
     if let Some(status) = LOCAL.with_borrow_mut(|faults| {
         let index = faults.iter().position(|fault| fault.call == call)?;
-        Some(faults.remove(index).status)
+        if faults[index].skip == 0 {
+            Some(faults.remove(index).status)
+        } else {
+            faults[index].skip -= 1;
+            None
+        }
     }) {
         return Some(status);
     }

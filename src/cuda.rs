@@ -10,7 +10,12 @@ mod streams;
 use streams::Streams;
 
 #[cfg(all(test, windows))]
+#[path = "../tests/gpu/device.rs"]
+mod gpu_device;
+#[cfg(all(test, windows))]
 mod transfer_bench;
+#[cfg(all(test, windows))]
+use gpu_device::ordinal as test_device;
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +61,7 @@ struct CudaModule {
     params: Vec<Param>,
     max_threads: Option<u32>,
     function: Option<usize>,
+    unloading: bool,
 }
 
 struct State {
@@ -66,6 +72,8 @@ struct State {
 }
 
 static RUNTIME: Mutex<Option<State>> = Mutex::new(None);
+#[cfg(test)]
+static TEST_RUNTIME: Mutex<()> = Mutex::new(());
 thread_local! {
     static CURRENT: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
@@ -286,8 +294,12 @@ pub unsafe extern "system" fn cuCtxGetCurrent(out: *mut Opaque) -> CuResult {
 pub extern "system" fn cuCtxSetCurrent(handle: Opaque) -> CuResult {
     status(state(|state| {
         let key = handle.addr();
-        if key != 0 && !state.contexts.contains_key(&key) {
-            return Err(InvalidContext);
+        if key != 0 {
+            state
+                .contexts
+                .get(&key)
+                .ok_or(InvalidContext)?
+                .check_live()?;
         }
         CURRENT.with(|stack| {
             let mut stack = stack.borrow_mut();
@@ -341,7 +353,10 @@ impl CudaContext {
     }
 
     fn free_host(&mut self, api: &Api, base: usize) -> Result<(), CuResult> {
-        self.backend.free(api, base).map_err(backend_error)?;
+        self.backend
+            .free(api, base)
+            .inspect_err(|error| self.backend.health.observe(error))
+            .map_err(backend_error)?;
         self.host_allocations.remove(&base);
         Ok(())
     }
@@ -350,17 +365,27 @@ impl CudaContext {
         if !self.allocations.contains_key(&base) {
             return Err(InvalidValue);
         }
-        self.backend.free(api, base).map_err(backend_error)?;
+        self.backend
+            .free(api, base)
+            .inspect_err(|error| self.backend.health.observe(error))
+            .map_err(backend_error)?;
         self.allocations.remove(&base);
         Ok(())
     }
 
     fn unload(&mut self, api: &Api, key: usize) -> Result<(), CuResult> {
         let module = self.modules.get_mut(&key).ok_or(InvalidHandle)?;
-        module.backend.destroy(api).map_err(backend_error)?;
-        if let Some(function) = module.function {
+        // A failed module destroy can follow a successful kernel destroy.
+        // Keep the module for a retry, while retiring its function handles.
+        module.unloading = true;
+        if let Some(function) = module.function.take() {
             self.functions.remove(&function);
         }
+        module
+            .backend
+            .destroy(api)
+            .inspect_err(|error| self.backend.health.observe(error))
+            .map_err(backend_error)?;
         self.modules.remove(&key);
         Ok(())
     }
@@ -388,6 +413,7 @@ pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuRes
         let address = context
             .backend
             .alloc(&runtime.api, size)
+            .inspect_err(|error| context.backend.health.observe(error))
             .map_err(backend_error)?;
         context.allocations.insert(address, size);
         unsafe { out.write(address as u64) };
@@ -428,6 +454,7 @@ pub unsafe extern "system" fn cuMemHostAlloc(
         let base = context
             .backend
             .alloc_host(&runtime.api, size)
+            .inspect_err(|error| context.backend.health.observe(error))
             .map_err(backend_error)?;
         context.host_allocations.insert(base, size);
         unsafe { out.write(std::ptr::with_exposed_provenance_mut(base)) };
@@ -513,7 +540,9 @@ unsafe fn copy(host: Opaque, device: u64, size: usize, to_device: bool) -> CuRes
             (host, device)
         };
         context.streams.wait_legacy(&runtime.api, u64::MAX)?;
-        unsafe { context.backend.copy(&runtime.api, dst, src, size) }.map_err(backend_error)
+        unsafe { context.backend.copy(&runtime.api, dst, src, size) }
+            .inspect_err(|error| context.backend.health.observe(error))
+            .map_err(backend_error)
     }))
 }
 
@@ -545,13 +574,12 @@ fn load_ptx(
     let device = &runtime.devices[context.device as usize];
     let info = &device.info;
     if info.spirv_version < 0x10000
-        || (translated.fp32
-            && (!info.fp32_denorms || !info.fp32_round_to_nearest || !device.fp32_inf_nan))
-        || (translated.fp32_fma && !device.fp32_fma)
+        || (translated.fp32 && !info.supports_fp32())
+        || (translated.fp32_fma && !info.fp32_fma)
     {
         return Err(NotSupported);
     }
-    if translated.device_atomics && !device.device_memory_atomics {
+    if translated.device_atomics && !info.device_memory_atomics {
         return Err(NotSupported);
     }
     let argument_bytes = translated.params.iter().fold(0usize, |offset, &param| {
@@ -567,6 +595,7 @@ fn load_ptx(
     let backend = context
         .backend
         .load_module(&runtime.api, &translated.words)
+        .inspect_err(|error| context.backend.health.observe(error))
         .map_err(backend_error)?;
     context.modules.insert(
         key,
@@ -576,6 +605,7 @@ fn load_ptx(
             params: translated.params,
             max_threads: translated.max_threads,
             function: None,
+            unloading: false,
         },
     );
     Ok(key)
@@ -640,6 +670,9 @@ pub unsafe extern "system" fn cuModuleGetFunction(
         }
         let module_key = module.addr();
         let module = context.modules.get_mut(&module_key).ok_or(InvalidHandle)?;
+        if module.unloading {
+            return Err(InvalidHandle);
+        }
         if unsafe { CStr::from_ptr(name) } != module.name.as_c_str() {
             return Err(NotFound);
         }
@@ -650,6 +683,7 @@ pub unsafe extern "system" fn cuModuleGetFunction(
         module
             .backend
             .create_kernel(&runtime.api, &module.name)
+            .inspect_err(|error| context.backend.health.observe(error))
             .map_err(backend_error)?;
         module.function = Some(function);
         context.functions.insert(function, module_key);
@@ -840,6 +874,7 @@ mod tests {
 
     #[test]
     fn device_queries_require_initialization() {
+        let _serial = TEST_RUNTIME.lock().unwrap();
         let mut out = -1;
         assert_eq!(unsafe { cuDeviceGetCount(&mut out) }, NotInitialized);
         assert_eq!(out, -1);

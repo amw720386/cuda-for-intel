@@ -15,10 +15,15 @@ pub(super) struct Policy {
     pub eager_after_idle: bool,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static TEST_POLICY: std::cell::Cell<Option<Option<Policy>>> = const { std::cell::Cell::new(None) };
+}
+
 impl Policy {
     pub fn configured() -> Result<Option<Self>, CuResult> {
-        #[cfg(all(test, windows))]
-        if let Some(policy) = super::batch_tests::POLICY.get() {
+        #[cfg(test)]
+        if let Some(policy) = TEST_POLICY.get() {
             return Ok(policy);
         }
         if !cfg!(feature = "experimental-batching") {
@@ -475,7 +480,7 @@ pub(super) fn spawn(
 }
 
 fn shutdown() -> Result<(), CuResult> {
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     if crate::level_zero::fault::status("batch worker shutdown").is_some() {
         return Err(CuResult::OperatingSystem);
     }

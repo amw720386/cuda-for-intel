@@ -27,11 +27,14 @@ fn report(label: &str, samples: &mut [Duration], bytes: Option<usize>) {
 fn pinned_transfer_benchmark() {
     assert_eq!(cuInit(0), Success);
     let (mut cuda, mut stream) = (null_mut(), null_mut());
-    assert_eq!(unsafe { cuCtxCreate_v2(&mut cuda, 0, 0) }, Success);
+    assert_eq!(
+        unsafe { cuCtxCreate_v2(&mut cuda, 0, test_device()) },
+        Success
+    );
     assert_eq!(unsafe { cuStreamCreate(&mut stream, 1) }, Success);
     let runtime = Runtime::load().unwrap();
     let api = &runtime.api;
-    let mut direct = Context::create(api, &runtime.devices[0]).unwrap();
+    let mut direct = Context::create(api, &runtime.devices[test_device() as usize]).unwrap();
     direct.initialize(api).unwrap();
     let list = direct.create_stream(api).unwrap();
 
