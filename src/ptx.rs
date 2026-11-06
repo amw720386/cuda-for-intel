@@ -85,7 +85,8 @@ enum IntegerOp {
     Sub,
     Mul,
     And,
-    ShiftRight,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
     MulHighUnsigned,
 }
 
@@ -374,6 +375,13 @@ mod tests {
     }
 
     #[test]
+    fn translates_ggml_rms_norm_f32_li32() {
+        let translated = translate(include_str!("../examples/ggml_rms_norm_f32_32.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
     fn lowers_shfl_sync_bfly_through_shared_scratch() {
         const SHFL: &str = r#"
             .version 8.8
@@ -582,13 +590,27 @@ mod tests {
 
     #[test]
     fn rejects_missing_register_definitions_at_joins_and_divergent_barriers() {
-        let undefined = BLOCK_REDUCE.replace("mov.b32 \t%r12, 0f00000000;", "");
-        assert_ne!(undefined, BLOCK_REDUCE);
+        // A register that is never written on any path must still be rejected.
+        let undefined = r#"
+.version 8.8
+.target sm_80
+.address_size 64
+.visible .entry never_defined(
+	.param .u64 never_defined_param_0
+)
+{
+	.reg .b32 %r<2>;
+	.reg .b64 %rd<3>;
+	ld.param.b64 %rd1, [never_defined_param_0];
+	cvta.to.global.u64 %rd0, %rd1;
+	st.global.b32 [%rd0], %r1;
+	ret;
+}
+"#;
+        let err = translate(undefined).unwrap_err().to_string();
         assert!(
-            translate(&undefined)
-                .unwrap_err()
-                .to_string()
-                .contains("undefined PTX register %r12")
+            err.contains("undefined PTX register %r1"),
+            "unexpected error: {err}"
         );
 
         let divergent = BLOCK_REDUCE.replace("@%p3 bra \t$L__BB0_8;", "@%p3 bra \t$L__BB0_3;");

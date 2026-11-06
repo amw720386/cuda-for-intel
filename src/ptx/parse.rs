@@ -289,7 +289,7 @@ impl<'a> Parser<'a> {
             },
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shr.u32"
-                | "and.b32"),
+                | "shr.s32" | "and.b32"),
                 dst,
                 ",",
                 a,
@@ -302,7 +302,8 @@ impl<'a> Parser<'a> {
                     "mul.lo.s32" => IntegerOp::Mul,
                     "and.b32" => IntegerOp::And,
                     "mul.hi.u32" => IntegerOp::MulHighUnsigned,
-                    _ => IntegerOp::ShiftRight,
+                    "shr.s32" => IntegerOp::ShiftRightArithmetic,
+                    _ => IntegerOp::ShiftRightLogical,
                 };
                 Instruction::Integer32(op, dst, [a, b])
             }

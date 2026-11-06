@@ -162,16 +162,15 @@ impl<'a> Emitter<'a> {
     }
 
     fn read(&mut self, operand: &str) -> Result<Value, Error> {
-        let slot = self
-            .registers
-            .get(operand)
-            .copied()
-            .filter(|_| self.initialized.contains(operand))
-            .ok_or_else(|| {
-                Error::new(format!(
-                    "undefined PTX register {operand} on an incoming path"
-                ))
-            })?;
+        // A register slot must have been written on some path. CUDA PTX often
+        // guards both the defining load and later uses with the same predicate,
+        // so the join into the use can look uninitialized under path-insensitive
+        // analysis even though the use is unreachable when the value is absent.
+        let slot = self.registers.get(operand).copied().ok_or_else(|| {
+            Error::new(format!(
+                "undefined PTX register {operand} on an incoming path"
+            ))
+        })?;
         let id = self
             .builder
             .load(self.value_type(slot.kind), None, slot.id, None, [])?;
@@ -731,13 +730,17 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Sub => self.builder.i_sub(ty, None, a, b),
                     IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
                     IntegerOp::And => self.builder.bitwise_and(ty, None, a, b),
-                    IntegerOp::ShiftRight => {
+                    IntegerOp::ShiftRightLogical | IntegerOp::ShiftRightArithmetic => {
                         // PTX clamps at 32, but SPIR-V shifts at or above 32 are undefined.
                         let bits = self.builder.constant_bit32(ty, 32);
                         let zero = self.builder.constant_bit32(ty, 0);
                         let in_range = self.builder.u_less_than(self.bool_type, None, b, bits)?;
                         let safe = self.builder.select(ty, None, in_range, b, zero)?;
-                        let shifted = self.builder.shift_right_logical(ty, None, a, safe)?;
+                        let shifted = if matches!(op, IntegerOp::ShiftRightArithmetic) {
+                            self.builder.shift_right_arithmetic(ty, None, a, safe)?
+                        } else {
+                            self.builder.shift_right_logical(ty, None, a, safe)?
+                        };
                         self.builder.select(ty, None, in_range, shifted, zero)
                     }
                     IntegerOp::MulHighUnsigned => self.builder.ext_inst(
