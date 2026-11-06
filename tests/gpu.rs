@@ -11,6 +11,8 @@ type Handle = *mut c_void;
 mod forge;
 #[path = "gpu/pinned.rs"]
 mod pinned;
+#[path = "gpu/progress.rs"]
+mod progress;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
