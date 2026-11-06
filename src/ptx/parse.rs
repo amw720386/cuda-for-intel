@@ -228,22 +228,31 @@ impl<'a> Parser<'a> {
                 Instruction::Mad32(dst, [a, b, c])
             }
             [
-                op
-                @ ("setp.ge.u32" | "setp.gt.u32" | "setp.lt.u32" | "setp.le.u32" | "setp.eq.b32"),
+                op @ ("setp.ge.u32" | "setp.gt.u32" | "setp.lt.u32" | "setp.le.u32" | "setp.eq.u32"
+                | "setp.ne.u32" | "setp.eq.b32" | "setp.ne.b32" | "setp.ge.s32"
+                | "setp.gt.s32" | "setp.lt.s32" | "setp.le.s32" | "setp.eq.s32"
+                | "setp.ne.s32"),
                 dst,
                 ",",
                 a,
                 ",",
                 b,
             ] => {
-                let comparison = match *op {
-                    "setp.ge.u32" => Comparison::GreaterEqual,
-                    "setp.gt.u32" => Comparison::Greater,
-                    "setp.lt.u32" => Comparison::Less,
-                    "setp.le.u32" => Comparison::LessEqual,
-                    _ => Comparison::Equal,
+                let signed = op.ends_with(".s32");
+                let comparison = match &op[5..7] {
+                    "ge" => Comparison::GreaterEqual,
+                    "gt" => Comparison::Greater,
+                    "lt" => Comparison::Less,
+                    "le" => Comparison::LessEqual,
+                    "eq" => Comparison::Equal,
+                    _ => Comparison::NotEqual,
                 };
-                Instruction::Compare(comparison, dst, [a, b])
+                Instruction::Compare {
+                    op: comparison,
+                    signed,
+                    dst,
+                    src: [a, b],
+                }
             }
             [op @ ("and.pred" | "or.pred"), dst, ",", a, ",", b] => Instruction::PredicateLogic {
                 and: *op == "and.pred",
@@ -268,7 +277,16 @@ impl<'a> Parser<'a> {
                 Instruction::Integer32(op, dst, [a, b])
             }
             ["mov.b32", dst, ",", src] => Instruction::Move32(dst, src),
-            ["cvt.u64.u32", dst, ",", src] => Instruction::WidenUnsigned(dst, src),
+            ["cvt.u64.u32", dst, ",", src] => Instruction::Widen {
+                signed: false,
+                dst,
+                src,
+            },
+            ["cvt.s64.s32", dst, ",", src] => Instruction::Widen {
+                signed: true,
+                dst,
+                src,
+            },
             ["mul.wide.u32", dst, ",", a, ",", b] => Instruction::MulWide32(dst, [a, b]),
             ["shl.b64", dst, ",", a, ",", b] => Instruction::ShiftLeft64(dst, [a, b]),
             ["add.s64" | "add.u64", dst, ",", a, ",", b] => Instruction::Add64(dst, [a, b]),
@@ -304,8 +322,14 @@ impl<'a> Parser<'a> {
             ["cvt.rn.f32.u32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::FromUnsigned([src]))
             }
+            ["cvt.rn.f32.s32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::FromSigned([src]))
+            }
             ["div.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Div([a, b])),
             ["sqrt.rn.f32", dst, ",", src] => Instruction::Float32(dst, FloatOp::Sqrt([src])),
+            ["rsqrt.approx.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::RsqrtApprox([src]))
+            }
             [
                 op @ ("st.global.b32" | "st.global.f32" | "st.shared.b32"),
                 "[",

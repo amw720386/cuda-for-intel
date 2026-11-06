@@ -408,6 +408,26 @@ impl<'a> Emitter<'a> {
                 );
                 converted
             }
+            FloatOp::FromSigned([source]) => {
+                let value = self.integer(source, Kind::B32)?;
+                let converted = self.builder.convert_s_to_f(ty, None, value)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTE)],
+                );
+                converted
+            }
+            FloatOp::RsqrtApprox([source]) => {
+                let value = self.float_value(source)?;
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::rsqrt as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
         };
         self.fp32 = true;
         Ok(self.builder.bitcast(self.u32_type, None, result)?)
@@ -449,16 +469,32 @@ impl<'a> Emitter<'a> {
                     Kind::B32,
                 )
             }
-            Instruction::Compare(op, dst, [a, b]) => {
+            Instruction::Compare {
+                op,
+                signed,
+                dst,
+                src: [a, b],
+            } => {
                 let a = self.integer(a, Kind::B32)?;
                 let b = self.integer(b, Kind::B32)?;
                 let ty = self.bool_type;
-                let id = match op {
-                    Comparison::Equal => self.builder.i_equal(ty, None, a, b),
-                    Comparison::Less => self.builder.u_less_than(ty, None, a, b),
-                    Comparison::LessEqual => self.builder.u_less_than_equal(ty, None, a, b),
-                    Comparison::Greater => self.builder.u_greater_than(ty, None, a, b),
-                    Comparison::GreaterEqual => self.builder.u_greater_than_equal(ty, None, a, b),
+                let id = match (op, signed) {
+                    (Comparison::Equal, _) => self.builder.i_equal(ty, None, a, b),
+                    (Comparison::NotEqual, _) => self.builder.i_not_equal(ty, None, a, b),
+                    (Comparison::Less, false) => self.builder.u_less_than(ty, None, a, b),
+                    (Comparison::LessEqual, false) => {
+                        self.builder.u_less_than_equal(ty, None, a, b)
+                    }
+                    (Comparison::Greater, false) => self.builder.u_greater_than(ty, None, a, b),
+                    (Comparison::GreaterEqual, false) => {
+                        self.builder.u_greater_than_equal(ty, None, a, b)
+                    }
+                    (Comparison::Less, true) => self.builder.s_less_than(ty, None, a, b),
+                    (Comparison::LessEqual, true) => self.builder.s_less_than_equal(ty, None, a, b),
+                    (Comparison::Greater, true) => self.builder.s_greater_than(ty, None, a, b),
+                    (Comparison::GreaterEqual, true) => {
+                        self.builder.s_greater_than_equal(ty, None, a, b)
+                    }
                 }?;
                 (dst, id, Kind::Predicate)
             }
@@ -525,13 +561,14 @@ impl<'a> Emitter<'a> {
                     Kind::B64,
                 )
             }
-            Instruction::WidenUnsigned(dst, src) => {
+            Instruction::Widen { signed, dst, src } => {
                 let src = self.integer(src, Kind::B32)?;
-                (
-                    dst,
-                    self.builder.u_convert(self.u64_type, None, src)?,
-                    Kind::B64,
-                )
+                let id = if signed {
+                    self.builder.s_convert(self.u64_type, None, src)?
+                } else {
+                    self.builder.u_convert(self.u64_type, None, src)?
+                };
+                (dst, id, Kind::B64)
             }
             Instruction::Add64(dst, [a, b]) => {
                 let value = self.add64(a, b)?;

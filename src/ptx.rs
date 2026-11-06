@@ -72,6 +72,7 @@ enum Space {
 #[derive(Clone, Copy, Debug)]
 enum Comparison {
     Equal,
+    NotEqual,
     Less,
     LessEqual,
     Greater,
@@ -94,8 +95,10 @@ enum FloatOp<'a> {
     MinMax { min: bool, src: [&'a str; 2] },
     Fma([&'a str; 3]),
     FromUnsigned([&'a str; 1]),
+    FromSigned([&'a str; 1]),
     Div([&'a str; 2]),
     Sqrt([&'a str; 1]),
+    RsqrtApprox([&'a str; 1]),
 }
 
 impl<'a> FloatOp<'a> {
@@ -104,7 +107,10 @@ impl<'a> FloatOp<'a> {
             Self::Add(inputs) | Self::Mul(inputs) | Self::Div(inputs) => inputs,
             Self::Fma(inputs) => inputs,
             Self::MinMax { src, .. } => src,
-            Self::FromUnsigned(inputs) | Self::Sqrt(inputs) => inputs,
+            Self::FromUnsigned(inputs)
+            | Self::FromSigned(inputs)
+            | Self::Sqrt(inputs)
+            | Self::RsqrtApprox(inputs) => inputs,
         }
     }
 }
@@ -116,7 +122,12 @@ enum Instruction<'a> {
     SharedAddress(&'a str, &'a str),
     Builtin(&'a str, &'a str),
     Mad32(&'a str, [&'a str; 3]),
-    Compare(Comparison, &'a str, [&'a str; 2]),
+    Compare {
+        op: Comparison,
+        signed: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
     PredicateLogic {
         and: bool,
         dst: &'a str,
@@ -125,7 +136,11 @@ enum Instruction<'a> {
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
     Move32(&'a str, &'a str),
     MulWide32(&'a str, [&'a str; 2]),
-    WidenUnsigned(&'a str, &'a str),
+    Widen {
+        signed: bool,
+        dst: &'a str,
+        src: &'a str,
+    },
     ShiftLeft64(&'a str, [&'a str; 2]),
     Add64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
@@ -143,11 +158,12 @@ impl<'a> Instruction<'a> {
             | SharedAddress(dst, _)
             | Load32(_, dst, _)
             | AtomicAdd32(dst, ..) => (*dst, &[]),
-            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) | WidenUnsigned(dst, src) => {
+            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) => {
                 (*dst, std::slice::from_ref(src))
             }
+            Widen { dst, src, .. } => (*dst, std::slice::from_ref(src)),
             Mad32(dst, src) => (*dst, src),
-            Compare(_, dst, src)
+            Compare { dst, src, .. }
             | PredicateLogic { dst, src, .. }
             | Integer32(_, dst, src)
             | MulWide32(dst, src)
@@ -286,7 +302,7 @@ mod tests {
             ("param_4]", "param_4+4]"),
             ("cvta.to.global.u64", "cvta.to.shared.u64"),
             ("mul.hi.u32", "mul.hi.s32"),
-            ("cvt.u64.u32", "cvt.s64.s32"),
+            ("cvt.u64.u32", "cvt.u64.s32"),
             ("min.f32", "min.ftz.f32"),
             ("max.f32", "max.NaN.f32"),
             ("ld.global.f32", "ld.global.v2.f32"),
@@ -545,6 +561,68 @@ mod tests {
             assert!(RMSNORM.contains(original));
             assert!(translate(&RMSNORM.replace(original, unsupported)).is_err());
         }
+    }
+
+    #[test]
+    fn lowers_signed_compares_widens_and_approx_rsqrt() {
+        use rspirv::spirv::{Op, OpenclStd100Op};
+
+        const SOURCE: &str = "
+            .version 8.8
+            .target sm_80
+            .address_size 64
+            .entry norm_ops(
+                .param .u64 .ptr .global a,
+                .param .u64 .ptr .global b
+            ) {
+                .reg .pred %p<4>;
+                .reg .b32 %r<8>;
+                .reg .f32 %f<4>;
+                .reg .b64 %rd<4>;
+                ld.param.u64 %rd1, [a];
+                ld.param.u64 %rd2, [b];
+                cvta.to.global.u64 %rd1, %rd1;
+                cvta.to.global.u64 %rd2, %rd2;
+                ld.global.b32 %r1, [%rd1];
+                mov.b32 %r2, 4294967294;
+                setp.lt.s32 %p1, %r1, %r2;
+                setp.ne.s32 %p2, %r1, %r2;
+                @%p1 bra skip;
+                cvt.s64.s32 %rd3, %r1;
+                cvt.rn.f32.s32 %f1, %r1;
+                rsqrt.approx.f32 %f2, %f1;
+                st.global.f32 [%rd2], %f2;
+            skip:
+                ret;
+            }
+        ";
+        let translated = translate(SOURCE).unwrap();
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        let ops: Vec<_> = module.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .map(|inst| inst.class.opcode)
+            .collect();
+        assert!(ops.contains(&Op::SLessThan));
+        assert!(ops.contains(&Op::INotEqual));
+        assert!(ops.contains(&Op::SConvert));
+        assert!(ops.contains(&Op::ConvertSToF));
+        assert!(
+            module.functions[0]
+                .blocks
+                .iter()
+                .flat_map(|b| &b.instructions)
+                .any(|inst| {
+                    inst.class.opcode == Op::ExtInst
+                        && inst.operands.get(1)
+                            == Some(&rspirv::dr::Operand::LiteralExtInstInteger(
+                                OpenclStd100Op::rsqrt as u32,
+                            ))
+                })
+        );
+        assert!(translate(&SOURCE.replace("rsqrt.approx.f32", "rsqrt.rn.f32")).is_err());
+        assert!(translate(&SOURCE.replace("cvt.s64.s32", "cvt.s64.u32")).is_err());
     }
 
     #[test]
