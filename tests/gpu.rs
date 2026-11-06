@@ -275,3 +275,150 @@ fn compiled_ptx_vector_add() {
     // Context destruction also releases its three live allocations.
     ok!(cuCtxDestroy_v2(context));
 }
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn compiled_ptx_block_reduction() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuCtxSynchronize(),
+        cuDeviceGetAttribute(*mut i32, i32, i32),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+    let source = include_str!("../examples/block_reduce.ptx");
+    let mut module = null_mut();
+    let mut shared_limit = 0;
+    ok!(cuDeviceGetAttribute(&mut shared_limit, 8, 0));
+    let oversized_bytes = (shared_limit as u32 + 1).next_multiple_of(4);
+    let oversized =
+        std::ffi::CString::new(source.replace("[512]", &format!("[{oversized_bytes}]"))).unwrap();
+    assert_eq!(
+        unsafe { cuModuleLoadData(&mut module, oversized.as_ptr().cast()) },
+        801
+    );
+    assert!(module.is_null());
+    let ptx = std::ffi::CString::new(source).unwrap();
+    ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
+    let mut kernel = null_mut();
+    ok!(cuModuleGetFunction(
+        &mut kernel,
+        module,
+        c"block_reduce".as_ptr()
+    ));
+
+    const N: usize = 1003;
+    const GUARD: usize = 8;
+    const SENTINEL: f32 = -99_999.0;
+    const SHAPES: [u32; 6] = [1, 16, 31, 64, 95, 128];
+    let mut input = vec![1000.0f32; N + 128];
+    let mut output = vec![SENTINEL; N + 2 * GUARD];
+    let input_bytes = input.len() * size_of::<f32>();
+    let output_bytes = output.len() * size_of::<f32>();
+    let (mut input_ptr, mut output_base) = (0, 0);
+    ok!(cuMemAlloc_v2(&mut input_ptr, input_bytes));
+    ok!(cuMemAlloc_v2(&mut output_base, output_bytes));
+    let mut output_ptr = output_base + (GUARD * size_of::<f32>()) as u64;
+    let mut count = N as u32;
+    let mut args = [
+        (&mut input_ptr as *mut u64).cast(),
+        (&mut output_ptr as *mut u64).cast(),
+        (&mut count as *mut u32).cast(),
+    ];
+    let launch = |groups, threads, args| unsafe {
+        cuLaunchKernel(
+            kernel,
+            groups,
+            1,
+            1,
+            threads,
+            1,
+            1,
+            0,
+            null_mut(),
+            args,
+            null_mut(),
+        )
+    };
+    assert_eq!(launch(1, 129, args.as_mut_ptr()), 1);
+    let mut null_input = 0u64;
+    let mut bad_args = args;
+    bad_args[0] = (&mut null_input as *mut u64).cast();
+    assert_eq!(launch(1, 16, bad_args.as_mut_ptr()), 1);
+
+    for (label, divisor) in [("exact", 4.0), ("rounded", 7.0)] {
+        for (i, item) in input[..N].iter_mut().enumerate() {
+            *item = ((i * 31 % 97) as f32 - 48.0) / divisor;
+        }
+        ok!(cuMemcpyHtoD_v2(
+            input_ptr,
+            input.as_ptr().cast(),
+            input_bytes
+        ));
+        for threads in SHAPES {
+            output.fill(SENTINEL);
+            ok!(cuMemcpyHtoD_v2(
+                output_base,
+                output.as_ptr().cast(),
+                output_bytes
+            ));
+            let groups = count.div_ceil(threads);
+            assert_eq!(
+                launch(groups, threads, args.as_mut_ptr()),
+                0,
+                "cuLaunchKernel, {threads} threads"
+            );
+            ok!(cuCtxSynchronize());
+            ok!(cuMemcpyDtoH_v2(
+                output.as_mut_ptr().cast(),
+                output_base,
+                output_bytes
+            ));
+            let (prefix, payload) = output.split_at(GUARD);
+            let (results, suffix) = payload.split_at(groups as usize);
+            assert!(prefix.iter().chain(suffix).all(|&value| value == SENTINEL));
+            let mut max_error = 0.0f64;
+            // Each input participates in at most ceil(log2(threads)) rounded additions.
+            let u = f64::from(f32::EPSILON) / 2.0;
+            let ku = f64::from(threads.next_power_of_two().ilog2()) * u;
+            let gamma = ku / (1.0 - ku);
+            for (block, (tile, &actual)) in
+                input[..N].chunks(threads as usize).zip(results).enumerate()
+            {
+                let expected: f64 = tile.iter().map(|&value| f64::from(value)).sum();
+                let magnitude: f64 = tile.iter().map(|&value| f64::from(value).abs()).sum();
+                let error = (f64::from(actual) - expected).abs();
+                let tolerance = if label == "exact" {
+                    assert_eq!(
+                        actual.to_bits(),
+                        (expected as f32).to_bits(),
+                        "block {block}, width {threads}"
+                    );
+                    0.0
+                } else {
+                    gamma * magnitude
+                };
+                assert!(
+                    error <= tolerance,
+                    "{label}, block {block}, width {threads}: got {actual}, expected {expected}, tolerance {tolerance}"
+                );
+                max_error = max_error.max(error);
+            }
+            println!(
+                "Reduction ({label}), {groups} blocks of {threads}: max absolute error {max_error:.9e}, guards intact"
+            );
+        }
+    }
+    ok!(cuCtxDestroy_v2(context));
+}

@@ -1,6 +1,6 @@
 # CUDA for Intel
 
-An independent Rust implementation of a small CUDA Driver API subset for Intel GPUs. The first milestone runs precompiled CUDA PTX on Intel Iris Xe (Alder Lake) under Windows x64.
+An independent Rust implementation of a small CUDA Driver API subset for Intel GPUs. Precompiled CUDA vector addition and shared-memory block reduction run on Intel Iris Xe (Alder Lake) under Windows x64.
 
 ```text
 CUDA Driver API → PTX parser and SPIR-V emitter → Level Zero → Intel GPU
@@ -19,13 +19,19 @@ cargo run --locked --example devices
 cargo test --locked --test gpu -- --ignored --nocapture
 ```
 
-The opt-in GPU tests load the built DLL by absolute path. They verify a device-memory round trip and run the same precompiled PTX with two block sizes, comparing 1,003 FP32 sums and checking that 21 guard elements remain untouched. This was verified on the Intel Core i5-1235U's Iris Xe (PCI device `8086:46a8`, Windows graphics driver `32.0.101.7085`). The Linux loader path is included for portability. GPU validation currently covers Windows x64 on that adapter.
+The opt-in GPU tests load the built DLL by absolute path. They verify a memory round trip, the vector-add regression, and a 1,003-element block reduction at six block widths, including odd widths and partial final blocks. The reduction checks bit-exact dyadic inputs, an FP32 tree-depth error bound for rounded inputs, and guard regions. GPU validation covers the Intel Core i5-1235U's Iris Xe (PCI device `8086:46a8`, Windows graphics driver `32.0.101.7085`). The Linux loader path is included for portability.
 
-Clang 23.1.1 with the NVPTX backend generated the checked-in PTX from
-[vector_add.cu](examples/vector_add.cu). Regenerate it with the following command.
+With Khronos `spirv-val` on PATH or selected by `SPIRV_VAL`, validate the emitted OpenCL SPIR-V independently.
+
+```powershell
+cargo test --locked --lib validate_opencl_spirv -- --ignored
+```
+
+Clang 23.1.1 with the NVPTX backend generated the checked-in PTX fixtures.
 
 ```powershell
 clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -S examples/vector_add.cu -o examples/vector_add.ptx
+clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-unroll-loops -S examples/block_reduce.cu -o examples/block_reduce.ptx
 ```
 
 ## Supported subset
@@ -40,15 +46,23 @@ clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -S exam
 
 The translator accepts one PTX 4.1 entry with 64-bit addressing and scalar
 32- or 64-bit parameters. Pointer parameters must use `.ptr` and point into a
-device allocation in the current context. Supported instructions cover parameter
-loads, `cvta.to.global.u64`, reads of `%ctaid`, `%ntid`, and `%tid`, low 32-bit
-multiply-add, unsigned wide 32-bit multiply, 64-bit add, unsigned 32-bit
-greater-or-equal comparison, one predicated branch to the final return, 32-bit
-global loads and stores, and round-to-nearest FP32 add. Callers must provide
-correctly aligned buffers large enough for the kernel's accesses.
+device allocation in the current context. The instruction subset covers parameter
+loads, `cvta.to.global.u64`, reads of `%ctaid`, `%ntid`, and `%tid`, selected integer
+arithmetic and comparisons, 32-bit global loads and stores, and round-to-nearest
+FP32 add. The compiler handles direct and predicated branches with reconvergence,
+including loops, and requires a definition on every incoming path for each read.
+Each virtual register retains its scalar or address-space type.
 
-Cubins, fatbins, arbitrary PTX control flow, warp operations, shared-memory
-operations, streams, events, primary contexts, dynamic symbol lookup via
+An entry may declare one static `.shared .align 4 .b8` array and access it
+with 32-bit shared loads and stores. The runtime checks its size against Level
+Zero's local-memory limit and enforces `.maxntid` as a total threads-per-block
+limit. `bar.sync 0` synchronizes all threads in a workgroup and orders their
+shared and global accesses. Conditional paths that may bypass a barrier within
+the workgroup are rejected. Callers provide aligned buffers with valid bounds.
+
+Cubins, fatbins, indirect branches, general predicated instructions, warp
+operations, dynamic shared memory, other barrier variants, streams, events,
+primary contexts, dynamic symbol lookup via
 `cuGetProcAddress`, the CUDA Runtime API and CUDA libraries are outside this
 milestone. Set `CUDA_FOR_INTEL_LOG=1` to print translation diagnostics and
 Level Zero failures to stderr.
