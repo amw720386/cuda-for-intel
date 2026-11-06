@@ -7,6 +7,9 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
 mod discovery;
+#[cfg(windows)]
+mod dxgi_luid;
+mod export_table;
 mod launch_args;
 mod primary;
 mod streams;
@@ -185,9 +188,21 @@ fn device(ordinal: c_int, action: impl FnOnce(&DeviceInfo) -> CuResult) -> CuRes
     .unwrap_or_else(|error| error)
 }
 
+pub(crate) fn export_log(message: impl std::fmt::Display) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("cuda-for-intel-export.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{message}");
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
-    trace::call("cuInit", || {
+    export_log(format!("cuInit flags={flags} enter"));
+    let result = trace::call("cuInit", || {
         if flags != 0 {
             return InvalidValue;
         }
@@ -217,7 +232,9 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
             }
             Err(error) => backend_error(error),
         }
-    })
+    });
+    export_log(format!("cuInit flags={flags} -> {}", result as i32));
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -878,7 +895,8 @@ pub unsafe extern "system" fn cuLaunchKernel(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuDeviceGetCount(count: *mut c_int) -> CuResult {
-    trace::call("cuDeviceGetCount", || {
+    export_log("cuDeviceGetCount enter");
+    let result = trace::call("cuDeviceGetCount", || {
         runtime(|rt| {
             if count.is_null() {
                 return Err(InvalidValue);
@@ -888,7 +906,9 @@ pub unsafe extern "system" fn cuDeviceGetCount(count: *mut c_int) -> CuResult {
             Ok(Success)
         })
         .unwrap_or_else(|error| error)
-    })
+    });
+    export_log(format!("cuDeviceGetCount -> {}", result as i32));
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -939,22 +959,245 @@ pub unsafe extern "system" fn cuDeviceTotalMem_v2(out: *mut usize, ordinal: c_in
     })
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemGetInfo_v2(free: *mut usize, total: *mut usize) -> CuResult {
+    trace::call("cuMemGetInfo_v2", || {
+        status(with_context(|runtime, context| {
+            if free.is_null() || total.is_null() {
+                return Err(InvalidValue);
+            }
+            let info = runtime
+                .devices
+                .get(context.device as usize)
+                .ok_or(InvalidDevice)?;
+            let total_mem = info.info.total_memory as usize;
+            // Conservative: report total as free until we track live allocations.
+            unsafe {
+                free.write(total_mem);
+                total.write(total_mem);
+            }
+            Ok(())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuDeviceGetUuid(out: *mut [u8; 16], ordinal: c_int) -> CuResult {
+    trace::call("cuDeviceGetUuid", || {
+        device(ordinal, |info| {
+            if out.is_null() {
+                return InvalidValue;
+            }
+            unsafe { out.write(info.uuid) };
+            Success
+        })
+    })
+}
+
+/// Windows LUID for the device — 8-byte value plus a node mask.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuDeviceGetLuid(
+    luid: *mut [u8; 8],
+    device_node_mask: *mut c_uint,
+    ordinal: c_int,
+) -> CuResult {
+    trace::call("cuDeviceGetLuid", || {
+        device(ordinal, |info| {
+            if luid.is_null() || device_node_mask.is_null() {
+                return InvalidValue;
+            }
+            // CUDA Runtime matches devices to WDDM adapters by LUID. A synthetic
+            // value makes cudart report cudaErrorInsufficientDriver (35).
+            #[cfg(windows)]
+            let bytes = dxgi_luid::adapter_luid(info.vendor_id, info.device_id);
+            #[cfg(not(windows))]
+            let bytes: Option<[u8; 8]> = None;
+            let Some(bytes) = bytes else {
+                return NotSupported;
+            };
+            if trace::enabled() {
+                trace::record(format_args!(
+                    "LUID vendor={:#x} device={:#x} bytes={:02x?}",
+                    info.vendor_id, info.device_id, bytes
+                ));
+            }
+            unsafe {
+                luid.write(bytes);
+                device_node_mask.write(1);
+            }
+            Success
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuCtxGetApiVersion(handle: Opaque, version: *mut c_uint) -> CuResult {
+    trace::call("cuCtxGetApiVersion", || {
+        status(state(|state| {
+            if version.is_null() {
+                return Err(InvalidValue);
+            }
+            let key = handle.addr();
+            if key != 0 {
+                state
+                    .contexts
+                    .get(&key)
+                    .ok_or(InvalidContext)?
+                    .check_live()?;
+            } else {
+                // Null context → current context, matching NVIDIA.
+                let current = current().ok_or(InvalidContext)?;
+                state
+                    .contexts
+                    .get(&current)
+                    .ok_or(InvalidContext)?
+                    .check_live()?;
+            }
+            // Report the Driver ABI floor used for contexts created here.
+            unsafe { version.write(3020) };
+            Ok(())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuCtxGetFlags(flags: *mut c_uint) -> CuResult {
+    trace::call("cuCtxGetFlags", || {
+        status(with_context(|_, _| {
+            if flags.is_null() {
+                return Err(InvalidValue);
+            }
+            unsafe { flags.write(0) };
+            Ok(())
+        }))
+    })
+}
+
+/// PTX feature level advertised to CUDA Runtime / applications.
+///
+/// This is a compatibility contract, not a claim of NVIDIA silicon: kernels are
+/// accepted and lowered at this ISA surface (Turing-class PTX used by GGML).
+const COMPUTE_CAPABILITY_MAJOR: u32 = 7;
+const COMPUTE_CAPABILITY_MINOR: u32 = 5;
+
+fn multiprocessor_count(info: &DeviceInfo) -> u32 {
+    // Level Zero has no CUDA SM count; derive a stable positive stand-in so
+    // cudart / GGML occupancy math does not see zero devices worth of SMs.
+    let subgroups = info.subgroup_sizes.iter().copied().max().unwrap_or(32).max(1);
+    (info.max_workgroup_size / subgroups).clamp(1, 256)
+}
+
 fn attribute(info: &DeviceInfo, attr: c_int) -> Result<c_int, CuResult> {
+    // Enumerants match CUDA's `CUdevice_attribute` (cuda-bindings DeviceAttribute).
     let value = match attr {
-        1 => info.max_workgroup_size,
-        2..=4 => info.max_workgroup_dimensions[(attr - 2) as usize],
-        5..=7 => info.max_grid_dimensions[(attr - 5) as usize],
-        8 => info.max_shared_local_memory,
-        18 => info.device_flags & 1, // ZE_DEVICE_PROPERTY_FLAG_INTEGRATED
+        1 => info.max_workgroup_size, // MAX_THREADS_PER_BLOCK
+        2..=4 => info.max_workgroup_dimensions[(attr - 2) as usize], // MAX_BLOCK_DIM_*
+        5..=7 => info.max_grid_dimensions[(attr - 5) as usize], // MAX_GRID_DIM_*
+        8 => info.max_shared_local_memory, // MAX_SHARED_MEMORY_PER_BLOCK
+        9 => 64 * 1024,                    // TOTAL_CONSTANT_MEMORY
+        10 => 32,                          // WARP_SIZE
+        11 => 1 << 20,                     // MAX_PITCH
+        12 => 65536,                       // MAX_REGISTERS_PER_BLOCK
+        13 => 1_000_000,                   // CLOCK_RATE (kHz)
+        14 => 512,                         // TEXTURE_ALIGNMENT
+        15 => 1,                           // GPU_OVERLAP
+        16 => multiprocessor_count(info),  // MULTIPROCESSOR_COUNT
+        17 => 0,                           // KERNEL_EXEC_TIMEOUT
+        18 => info.device_flags & 1, // INTEGRATED
+        19 => 1,                     // CAN_MAP_HOST_MEMORY
+        20 => 0,                     // COMPUTE_MODE_DEFAULT
+        // Texture/surface limits: cudart device bring-up rejects an all-zero
+        // texture capability surface. Report Turing-class portable limits.
+        21 => 32768,                 // MAXIMUM_TEXTURE1D_WIDTH
+        22 | 23 => 32768,            // MAXIMUM_TEXTURE2D_WIDTH/HEIGHT
+        24..=26 => 16384,            // MAXIMUM_TEXTURE3D_*
+        27 | 28 => 32768,            // MAXIMUM_TEXTURE2D_LAYERED_WIDTH/HEIGHT
+        29 => 2048,                  // MAXIMUM_TEXTURE2D_LAYERED_LAYERS
+        30 => 512,                   // SURFACE_ALIGNMENT
+        31 => 0,                     // CONCURRENT_KERNELS
+        32 => 0,                     // ECC_ENABLED
         33 | 34 | 50 => {
             let [domain, bus, device, _] = info.pci_address.ok_or(NotSupported)?;
             match attr {
-                33 => bus,
-                34 => device,
-                _ => domain,
+                33 => bus,    // PCI_BUS_ID
+                34 => device, // PCI_DEVICE_ID
+                _ => domain,  // PCI_DOMAIN_ID
             }
         }
-        _ => return Err(NotSupported),
+        35 => 0,                            // TCC_DRIVER
+        36 => 1_000_000,                    // MEMORY_CLOCK_RATE
+        37 => 256,                          // GLOBAL_MEMORY_BUS_WIDTH
+        38 => info.max_shared_local_memory, // L2_CACHE_SIZE
+        39 => info.max_workgroup_size,      // MAX_THREADS_PER_MULTIPROCESSOR
+        40 => 1,                            // ASYNC_ENGINE_COUNT
+        41 => 0,                            // UNIFIED_ADDRESSING
+        42 => 32768,                        // MAXIMUM_TEXTURE1D_LAYERED_WIDTH
+        43 => 2048,                         // MAXIMUM_TEXTURE1D_LAYERED_LAYERS
+        44 => 1,                            // CAN_TEX2D_GATHER
+        45 | 46 => 16384,                   // MAXIMUM_TEXTURE2D_GATHER_*
+        47..=49 => 2048,                    // MAXIMUM_TEXTURE3D_*_ALTERNATE
+        51 => 32,                           // TEXTURE_PITCH_ALIGNMENT
+        52 => 32768,                        // MAXIMUM_TEXTURECUBEMAP_WIDTH
+        53 => 32768,                        // MAXIMUM_TEXTURECUBEMAP_LAYERED_WIDTH
+        54 => 2048,                         // MAXIMUM_TEXTURECUBEMAP_LAYERED_LAYERS
+        55 => 32768,                        // MAXIMUM_SURFACE1D_WIDTH
+        56 | 57 => 32768,                   // MAXIMUM_SURFACE2D_*
+        58..=60 => 16384,                   // MAXIMUM_SURFACE3D_*
+        61 => 32768,                        // MAXIMUM_SURFACE1D_LAYERED_WIDTH
+        62 => 2048,                         // MAXIMUM_SURFACE1D_LAYERED_LAYERS
+        63 | 64 => 32768,                   // MAXIMUM_SURFACE2D_LAYERED_WIDTH/HEIGHT
+        65 => 2048,                         // MAXIMUM_SURFACE2D_LAYERED_LAYERS
+        66 | 67 => 32768,                   // MAXIMUM_SURFACECUBEMAP_*
+        68 => 2048,                         // MAXIMUM_SURFACECUBEMAP_LAYERED_LAYERS
+        69 => 2 * 1024 * 1024 * 1024,       // MAXIMUM_TEXTURE1D_LINEAR_WIDTH
+        70 | 71 => 32768,                   // MAXIMUM_TEXTURE2D_LINEAR_WIDTH/HEIGHT
+        72 => 1 << 20,                      // MAXIMUM_TEXTURE2D_LINEAR_PITCH
+        73 | 74 => 32768,                   // MAXIMUM_TEXTURE2D_MIPMAPPED_*
+        75 => COMPUTE_CAPABILITY_MAJOR,     // COMPUTE_CAPABILITY_MAJOR
+        76 => COMPUTE_CAPABILITY_MINOR,     // COMPUTE_CAPABILITY_MINOR
+        77 => 32768,                        // MAXIMUM_TEXTURE1D_MIPMAPPED_WIDTH
+        78 => 0,                            // STREAM_PRIORITIES_SUPPORTED
+        79 => 1,                            // GLOBAL_L1_CACHE_SUPPORTED
+        80 => 1,                            // LOCAL_L1_CACHE_SUPPORTED
+        81 => info.max_shared_local_memory, // MAX_SHARED_MEMORY_PER_MULTIPROCESSOR
+        82 => 65536,                        // MAX_REGISTERS_PER_MULTIPROCESSOR
+        83 => 0,                            // MANAGED_MEMORY
+        84 => 0,                            // MULTI_GPU_BOARD
+        85 => 0,                            // MULTI_GPU_BOARD_GROUP_ID
+        86 => 0,                            // HOST_NATIVE_ATOMIC_SUPPORTED
+        87 => 32,                           // SINGLE_TO_DOUBLE_PRECISION_PERF_RATIO
+        88 => 0,                            // PAGEABLE_MEMORY_ACCESS
+        89 => 0,                            // CONCURRENT_MANAGED_ACCESS
+        90 => 1,                            // COMPUTE_PREEMPTION_SUPPORTED
+        91 => 0,                            // CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM
+        92..=94 => 0,                       // deprecated stream memops
+        95 => 0,                            // COOPERATIVE_LAUNCH
+        96 => 0,                            // COOPERATIVE_MULTI_DEVICE_LAUNCH
+        97 => info.max_shared_local_memory, // MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+        98 => 0,                            // CAN_FLUSH_REMOTE_WRITES
+        99 => 1,                            // HOST_REGISTER_SUPPORTED
+        100 | 101 => 0,                     // pageable / direct managed access
+        102 => 0,                           // VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED
+        103..=105 => 0,                     // shareable handle types
+        106 => 16,                          // MAX_BLOCKS_PER_MULTIPROCESSOR
+        107 => 0,                           // GENERIC_COMPRESSION_SUPPORTED
+        108 => info.max_shared_local_memory, // MAX_PERSISTING_L2_CACHE_SIZE
+        109 => 128 * 1024 * 1024,           // MAX_ACCESS_POLICY_WINDOW_SIZE
+        110 => 0,                           // GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED
+        111 => 0,                           // RESERVED_SHARED_MEMORY_PER_BLOCK
+        112..=114 => 0,                     // sparse / readonly host register / timeline
+        115 => 0,                           // MEMORY_POOLS_SUPPORTED
+        116..=119 => 0,                     // GPUDirect RDMA / mempool handles
+        120..=134 => 0,                     // cluster / dma-buf / IPC / NUMA / MPS
+        _ => {
+            if trace::enabled() {
+                trace::record(format_args!(
+                    "unsupported device attribute {attr} on {}",
+                    info.name
+                ));
+            }
+            return Err(NotSupported);
+        }
     };
     // CUDA uses a signed int even where the backend can represent larger limits.
     Ok(value.min(c_int::MAX as u32) as c_int)

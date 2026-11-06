@@ -1,3 +1,4 @@
+use super::export_table::cuGetExportTable;
 use super::primary::*;
 use super::streams::events::*;
 use super::streams::{cuStreamCreate, cuStreamDestroy_v2, cuStreamQuery, cuStreamSynchronize};
@@ -145,12 +146,17 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuGetErrorString" => entry!(cuGetErrorString, 6000),
         b"cuGetProcAddress" if version >= 12000 => entry!(cuGetProcAddress_v2, 12000),
         b"cuGetProcAddress" => entry!(cuGetProcAddress, 11030),
+        // cudart 12 resolves this at driver ABI 3000.
+        b"cuGetExportTable" => entry!(cuGetExportTable, 3000),
         b"cuDeviceGet" => entry!(cuDeviceGet, 2000),
         b"cuDeviceGetCount" => entry!(cuDeviceGetCount, 2000),
         b"cuDeviceGetName" => entry!(cuDeviceGetName, 2000),
         b"cuDeviceGetAttribute" => entry!(cuDeviceGetAttribute, 2000),
         b"cuDeviceGetPCIBusId" => entry!(cuDeviceGetPCIBusId, 4010),
+        b"cuDeviceGetUuid" => entry!(cuDeviceGetUuid, 9020),
+        b"cuDeviceGetLuid" => entry!(cuDeviceGetLuid, 10000),
         b"cuDeviceTotalMem" => entry!(cuDeviceTotalMem_v2, 3020),
+        b"cuMemGetInfo" => entry!(cuMemGetInfo_v2, 3020),
         b"cuDevicePrimaryCtxGetState" => entry!(cuDevicePrimaryCtxGetState, 7000),
         b"cuDevicePrimaryCtxRetain" => entry!(cuDevicePrimaryCtxRetain, 7000),
         b"cuDevicePrimaryCtxRelease" if version >= 11000 => {
@@ -167,6 +173,8 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuCtxDestroy" => entry!(cuCtxDestroy_v2, 4000),
         b"cuCtxGetCurrent" => entry!(cuCtxGetCurrent, 4000),
         b"cuCtxSetCurrent" => entry!(cuCtxSetCurrent, 4000),
+        b"cuCtxGetApiVersion" => entry!(cuCtxGetApiVersion, 3020),
+        b"cuCtxGetFlags" => entry!(cuCtxGetFlags, 7000),
         b"cuCtxGetDevice" => entry!(cuCtxGetDevice, 2000, 13000, false),
         b"cuCtxSynchronize" => entry!(cuCtxSynchronize, 2000, 13000, false),
         b"cuMemAlloc" => entry!(cuMemAlloc_v2, 3020),
@@ -217,6 +225,19 @@ unsafe fn resolve(
         Ok(pointer) => (pointer, FOUND),
         Err(outcome) => (std::ptr::null_mut(), outcome),
     };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("cuda-for-intel-export.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            file,
+            "cuGetProcAddress {} ver={version} flags={flags} outcome={outcome} found={}",
+            trace::symbol(symbol),
+            !pointer.is_null()
+        );
+    }
     unsafe {
         out.write(pointer);
         if !query.is_null() {
@@ -291,7 +312,6 @@ mod tests {
             (c"cuCtxGetDevice", 13000, 0, VERSION),
             (c"cuMemcpyHtoD", 12000, 2, MISSING),
             (c"cuMemAlloc_v2", 12000, 0, MISSING),
-            (c"cuGetExportTable", 13000, 0, MISSING),
         ] {
             function = cuInit as *const () as Opaque;
             assert_eq!(
@@ -302,6 +322,12 @@ mod tests {
             assert_eq!(query, expected);
         }
         assert_eq!(
+            resolve(c"cuGetExportTable", &mut function, 3000, 0, &mut query),
+            Success
+        );
+        assert!(!function.is_null());
+        assert_eq!(query, FOUND);
+        assert_eq!(
             resolve(c"cuInit", &mut function, DRIVER_ABI + 10, 0, &mut query),
             InvalidValue
         );
@@ -310,10 +336,10 @@ mod tests {
             InvalidValue
         );
         assert_eq!(
-            unsafe { cuGetProcAddress(c"cuGetExportTable".as_ptr(), &mut function, 13000, 0) },
-            NotFound
+            unsafe { cuGetProcAddress(c"cuGetExportTable".as_ptr(), &mut function, 3000, 0) },
+            Success
         );
-        assert!(function.is_null());
+        assert!(!function.is_null());
         assert_eq!(
             resolve(c"cuInit", &mut function, DRIVER_ABI, 2, &mut query),
             Success

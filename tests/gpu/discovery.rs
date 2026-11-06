@@ -66,10 +66,11 @@ fn resolved_primary_context_runs_multiple_module_entries() {
     let mut integrated = -1;
     ok!(cuDeviceGetAttribute(&mut integrated, 18, dev));
     assert!(matches!(integrated, 0 | 1));
-    assert_eq!(
-        unsafe { cuDeviceGetAttribute(&mut integrated, 75, dev) },
-        801
-    );
+    let mut major = -1;
+    let mut minor = -1;
+    ok!(cuDeviceGetAttribute(&mut major, 75, dev)); // COMPUTE_CAPABILITY_MAJOR
+    ok!(cuDeviceGetAttribute(&mut minor, 76, dev)); // COMPUTE_CAPABILITY_MINOR
+    assert_eq!((major, minor), (7, 5));
 
     let (mut flags, mut active) = (u32::MAX, -1);
     let (mut context, mut current) = (null_mut(), null_mut());
