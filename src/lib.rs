@@ -4,7 +4,6 @@ compile_error!("CUDA for Intel requires 64-bit Windows or Linux");
 
 mod cuda;
 mod level_zero;
-#[cfg(test)]
 mod ptx;
 
 pub use level_zero::{DeviceInfo, Error, intel_devices};

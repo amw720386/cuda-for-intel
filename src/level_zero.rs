@@ -16,6 +16,7 @@ unsafe impl Send for Handle {}
 pub enum Error {
     Loader(libloading::Error),
     Driver(&'static str, u32),
+    Build(u32, String),
     InvalidProperties,
 }
 
@@ -25,6 +26,16 @@ impl fmt::Display for Error {
             Self::Loader(error) => write!(f, "Level Zero loader: {error}"),
             Self::Driver(call, status) => {
                 write!(f, "{call} failed with Level Zero status {status:#010x}")
+            }
+            Self::Build(status, log) => {
+                write!(
+                    f,
+                    "zeModuleCreate failed with Level Zero status {status:#010x}"
+                )?;
+                if !log.is_empty() {
+                    write!(f, "\n{log}")?;
+                }
+                Ok(())
             }
             Self::InvalidProperties => f.write_str("Level Zero returned invalid device properties"),
         }
@@ -154,6 +165,30 @@ struct AllocDesc {
     ordinal: u32,
 }
 
+#[repr(C)]
+struct ModuleDesc {
+    header: Header,
+    format: u32,
+    input_size: usize,
+    input: *const u8,
+    build_flags: *const c_char,
+    constants: *const c_void,
+}
+
+#[repr(C)]
+struct KernelDesc {
+    header: Header,
+    flags: u32,
+    name: *const c_char,
+}
+
+#[repr(C)]
+struct GroupCount {
+    x: u32,
+    y: u32,
+    z: u32,
+}
+
 macro_rules! loader_api {
     ($( $name:ident($($arg:ty),*) ),+ $(,)?) => {
         #[allow(non_snake_case)]
@@ -202,6 +237,15 @@ loader_api! {
     zeMemAllocDevice(Raw, *const AllocDesc, usize, usize, Raw, *mut Raw),
     zeMemFree(Raw, Raw),
     zeCommandListAppendMemoryCopy(Raw, Raw, *const c_void, usize, Raw, u32, *mut Raw),
+    zeModuleCreate(Raw, Raw, *const ModuleDesc, *mut Raw, *mut Raw),
+    zeModuleDestroy(Raw),
+    zeModuleBuildLogGetString(Raw, *mut usize, *mut c_char),
+    zeModuleBuildLogDestroy(Raw),
+    zeKernelCreate(Raw, *const KernelDesc, *mut Raw),
+    zeKernelDestroy(Raw),
+    zeKernelSetGroupSize(Raw, u32, u32, u32),
+    zeKernelSetArgumentValue(Raw, u32, usize, *const c_void),
+    zeCommandListAppendLaunchKernel(Raw, Raw, *const GroupCount, Raw, u32, *mut Raw),
 }
 
 /// Capabilities reported by the installed Level Zero driver.
@@ -218,6 +262,8 @@ pub struct DeviceInfo {
     pub max_shared_local_memory: u32,
     pub subgroup_sizes: Vec<u32>,
     pub spirv_version: u32,
+    pub fp32_denorms: bool,
+    pub fp32_round_to_nearest: bool,
     pub max_kernel_arguments_size: u32,
     pub driver_extensions: Vec<(String, u32)>,
 }
@@ -238,6 +284,58 @@ pub(crate) struct Context {
     handle: Handle,
     device: Handle,
     commands: Option<Handle>,
+}
+
+pub(crate) struct Module {
+    handle: Handle,
+    kernel: Option<Handle>,
+}
+
+impl Module {
+    pub(crate) fn create_kernel(&mut self, api: &Api, name: &CStr) -> Result<(), Error> {
+        if self.kernel.is_none() {
+            let desc = KernelDesc {
+                header: Header::new(0x1d),
+                flags: 0,
+                name: name.as_ptr(),
+            };
+            let mut kernel = std::ptr::null_mut();
+            check("zeKernelCreate", unsafe {
+                (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
+            })?;
+            self.kernel = Some(Handle(kernel));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
+        if let Some(kernel) = self.kernel {
+            check("zeKernelDestroy", unsafe {
+                (api.zeKernelDestroy)(kernel.0)
+            })?;
+            self.kernel = None;
+        }
+        check("zeModuleDestroy", unsafe {
+            (api.zeModuleDestroy)(self.handle.0)
+        })
+    }
+}
+
+fn build_log(api: &Api, handle: Raw) -> String {
+    let mut size = 0;
+    if unsafe { (api.zeModuleBuildLogGetString)(handle, &mut size, std::ptr::null_mut()) } != 0
+        || !(1..=1024 * 1024).contains(&size)
+    {
+        return String::new();
+    }
+    let mut bytes = vec![0; size];
+    if unsafe { (api.zeModuleBuildLogGetString)(handle, &mut size, bytes.as_mut_ptr().cast()) } != 0
+    {
+        return String::new();
+    }
+    CStr::from_bytes_until_nul(&bytes)
+        .map(|log| log.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 impl Context {
@@ -337,6 +435,81 @@ impl Context {
                 dst,
                 src,
                 size,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        })
+    }
+
+    pub(crate) fn load_module(&self, api: &Api, words: &[u32]) -> Result<Module, Error> {
+        self.commands()?;
+        let desc = ModuleDesc {
+            header: Header::new(0x1b),
+            format: 0, // ZE_MODULE_FORMAT_IL_SPIRV
+            input_size: std::mem::size_of_val(words),
+            input: words.as_ptr().cast(),
+            build_flags: std::ptr::null(),
+            constants: std::ptr::null(),
+        };
+        let mut module = std::ptr::null_mut();
+        let mut log = std::ptr::null_mut();
+        let status = unsafe {
+            (api.zeModuleCreate)(self.handle.0, self.device.0, &desc, &mut module, &mut log)
+        };
+        let message = if !log.is_null() {
+            let message = if status == 0 {
+                String::new()
+            } else {
+                build_log(api, log)
+            };
+            unsafe { (api.zeModuleBuildLogDestroy)(log) };
+            message
+        } else {
+            String::new()
+        };
+        if status != 0 {
+            return Err(Error::Build(status, message));
+        }
+        Ok(Module {
+            handle: Handle(module),
+            kernel: None,
+        })
+    }
+
+    pub(crate) fn launch(
+        &self,
+        api: &Api,
+        module: &Module,
+        grid: [u32; 3],
+        block: [u32; 3],
+        args: &[&[u8]],
+    ) -> Result<(), Error> {
+        let commands = self.commands()?;
+        let kernel = module
+            .kernel
+            .ok_or(Error::Driver("launch without a kernel", 0x7800001c))?
+            .0;
+        check("zeKernelSetGroupSize", unsafe {
+            (api.zeKernelSetGroupSize)(kernel, block[0], block[1], block[2])
+        })?;
+        for (index, value) in args.iter().enumerate() {
+            check("zeKernelSetArgumentValue", unsafe {
+                (api.zeKernelSetArgumentValue)(
+                    kernel,
+                    index as u32,
+                    value.len(),
+                    value.as_ptr().cast(),
+                )
+            })?;
+        }
+        let [x, y, z] = grid;
+        let groups = GroupCount { x, y, z };
+        check("zeCommandListAppendLaunchKernel", unsafe {
+            (api.zeCommandListAppendLaunchKernel)(
+                commands,
+                kernel,
+                &groups,
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
@@ -465,6 +638,8 @@ impl Runtime {
                         max_shared_local_memory: compute.shared_local_memory,
                         subgroup_sizes,
                         spirv_version: module.spirv_version,
+                        fp32_denorms: module.fp32_flags & 1 != 0,
+                        fp32_round_to_nearest: module.fp32_flags & 4 != 0,
                         max_kernel_arguments_size: module.max_arguments_size,
                         driver_extensions: extensions.as_ref().cloned().unwrap_or_default(),
                     },

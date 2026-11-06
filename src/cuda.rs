@@ -1,8 +1,9 @@
 //! CUDA Driver ABI. Public pointers follow CUDA's caller validity requirements.
-use crate::level_zero::{Api, Context, DeviceInfo, Error, Runtime};
+use crate::level_zero::{Api, Context, DeviceInfo, Error, Module, Runtime};
+use crate::ptx::{self, Param};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::{c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
 #[repr(i32)]
@@ -14,7 +15,14 @@ pub(crate) enum CuResult {
     NotInitialized = 3,
     NoDevice = 100,
     InvalidDevice = 101,
+    InvalidImage = 200,
     InvalidContext = 201,
+    InvalidPtx = 218,
+    FileNotFound = 301,
+    OperatingSystem = 304,
+    InvalidHandle = 400,
+    NotFound = 500,
+    ContextIsDestroyed = 709,
     LaunchFailed = 719,
     NotSupported = 801,
     Unknown = 999,
@@ -28,6 +36,15 @@ struct CudaContext {
     backend: Context,
     device: c_int,
     allocations: BTreeMap<usize, usize>,
+    modules: HashMap<usize, CudaModule>,
+    functions: HashMap<usize, usize>,
+}
+
+struct CudaModule {
+    backend: Module,
+    name: CString,
+    params: Vec<Param>,
+    function: Option<usize>,
 }
 
 struct State {
@@ -42,14 +59,32 @@ thread_local! {
 }
 
 fn backend_error(error: Error) -> CuResult {
+    diagnostic(&error);
     match error {
         Error::Loader(_) | Error::Driver("zeInit", 0x78000001) => NoDevice,
-        Error::Driver(_, 0x70000001 | 0x70000006) => LaunchFailed,
-        Error::Driver(_, 0x70000002 | 0x70000003) => OutOfMemory,
-        Error::Driver(_, 0x78000002 | 0x78000003) => NotSupported,
+        Error::Driver(_, 0x70000001 | 0x70000006) | Error::Build(0x70000001 | 0x70000006, _) => {
+            LaunchFailed
+        }
+        Error::Driver(_, 0x70000002 | 0x70000003) | Error::Build(0x70000002 | 0x70000003, _) => {
+            OutOfMemory
+        }
+        Error::Driver(_, 0x78000002 | 0x78000003) | Error::Build(0x78000002 | 0x78000003, _) => {
+            NotSupported
+        }
         Error::Driver(_, 0x78000004 | 0x78000007..=0x7800000a) => InvalidValue,
         Error::Driver(_, 0x78000005) => InvalidContext,
+        Error::Driver(_, 0x78000011) => NotFound,
+        Error::Driver(_, 0x7800001c) => InvalidHandle,
+        Error::Driver(_, 0x78000013..=0x78000017) => InvalidValue,
+        Error::Build(0x70000004 | 0x70000005, _) => InvalidPtx,
         _ => Unknown,
+    }
+}
+
+fn diagnostic(error: &impl std::fmt::Display) {
+    if std::env::var_os("CUDA_FOR_INTEL_LOG").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "CUDA for Intel: {error}");
     }
 }
 
@@ -73,11 +108,23 @@ fn current() -> Option<usize> {
 fn with_context<T>(
     action: impl FnOnce(&Runtime, &mut CudaContext) -> Result<T, CuResult>,
 ) -> Result<T, CuResult> {
+    with_context_handles(|runtime, context, _| action(runtime, context))
+}
+
+fn with_context_handles<T>(
+    action: impl FnOnce(&Runtime, &mut CudaContext, &mut usize) -> Result<T, CuResult>,
+) -> Result<T, CuResult> {
     state(|state| {
         let key = current().ok_or(InvalidContext)?;
-        let context = state.contexts.get_mut(&key).ok_or(InvalidContext)?;
-        action(&state.runtime, context)
+        let context = state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?;
+        action(&state.runtime, context, &mut state.next_handle)
     })
+}
+
+fn reserve_handle(next: &mut usize) -> Result<usize, CuResult> {
+    let key = *next;
+    *next = key.checked_add(1).ok_or(OutOfMemory)?;
+    Ok(key)
 }
 
 fn device(ordinal: c_int, action: impl FnOnce(&DeviceInfo) -> CuResult) -> CuResult {
@@ -132,16 +179,16 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
             .devices
             .get(ordinal as usize)
             .ok_or(InvalidDevice)?;
-        let key = state.next_handle;
-        let next = key.checked_add(1).ok_or(OutOfMemory)?;
+        let key = reserve_handle(&mut state.next_handle)?;
         let backend = Context::create(&state.runtime.api, device).map_err(backend_error)?;
-        state.next_handle = next;
         state.contexts.insert(
             key,
             CudaContext {
                 backend,
                 device: ordinal,
                 allocations: BTreeMap::new(),
+                modules: HashMap::new(),
+                functions: HashMap::new(),
             },
         );
         CURRENT.with(|stack| stack.borrow_mut().push(key));
@@ -156,6 +203,9 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
         let key = handle.addr();
         let context = state.contexts.get_mut(&key).ok_or(InvalidContext)?;
         let api = &state.runtime.api;
+        while let Some(&key) = context.modules.keys().next() {
+            context.unload(api, key)?;
+        }
         while let Some((&base, _)) = context.allocations.first_key_value() {
             context.free(api, base)?;
         }
@@ -173,14 +223,11 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuCtxGetCurrent(out: *mut Opaque) -> CuResult {
-    status(state(|state| {
+    status(state(|_| {
         if out.is_null() {
             return Err(InvalidValue);
         }
         let key = current().unwrap_or(0);
-        if key != 0 && !state.contexts.contains_key(&key) {
-            return Err(InvalidContext);
-        }
         unsafe { out.write(std::ptr::without_provenance_mut(key)) };
         Ok(())
     }))
@@ -232,6 +279,16 @@ impl CudaContext {
         }
         self.backend.free(api, base).map_err(backend_error)?;
         self.allocations.remove(&base);
+        Ok(())
+    }
+
+    fn unload(&mut self, api: &Api, key: usize) -> Result<(), CuResult> {
+        let module = self.modules.get_mut(&key).ok_or(InvalidHandle)?;
+        module.backend.destroy(api).map_err(backend_error)?;
+        if let Some(function) = module.function {
+            self.functions.remove(&function);
+        }
+        self.modules.remove(&key);
         Ok(())
     }
 }
@@ -306,6 +363,187 @@ pub unsafe extern "system" fn cuMemcpyHtoD_v2(
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemcpyDtoH_v2(dst: Opaque, src: u64, size: usize) -> CuResult {
     unsafe { copy(dst, src, size, false) }
+}
+
+fn load_ptx(
+    runtime: &Runtime,
+    context: &mut CudaContext,
+    next: &mut usize,
+    image: &[u8],
+) -> Result<usize, CuResult> {
+    let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
+    let translated = ptx::translate(ptx).map_err(|error| {
+        diagnostic(&error);
+        InvalidPtx
+    })?;
+    let info = &runtime.devices[context.device as usize].info;
+    if info.spirv_version < 0x10000 || !info.fp32_denorms || !info.fp32_round_to_nearest {
+        return Err(NotSupported);
+    }
+    let argument_bytes = translated.params.iter().fold(0usize, |offset, &param| {
+        offset.next_multiple_of(param.size()) + param.size()
+    });
+    if argument_bytes > info.max_kernel_arguments_size as usize {
+        return Err(NotSupported);
+    }
+    let name = CString::new(translated.name).map_err(|_| InvalidPtx)?;
+    let key = reserve_handle(next)?;
+    let backend = context
+        .backend
+        .load_module(&runtime.api, &translated.words)
+        .map_err(backend_error)?;
+    context.modules.insert(
+        key,
+        CudaModule {
+            backend,
+            name,
+            params: translated.params,
+            function: None,
+        },
+    );
+    Ok(key)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuModuleLoad(out: *mut Opaque, path: *const c_char) -> CuResult {
+    status(with_context_handles(|runtime, context, next| {
+        if out.is_null() || path.is_null() {
+            return Err(InvalidValue);
+        }
+        let path = unsafe { CStr::from_ptr(path) }
+            .to_str()
+            .map_err(|_| InvalidValue)?;
+        let image = std::fs::read(path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => FileNotFound,
+            _ => OperatingSystem,
+        })?;
+        let key = load_ptx(runtime, context, next, &image)?;
+        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+        Ok(())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c_void) -> CuResult {
+    status(with_context_handles(|runtime, context, next| {
+        if out.is_null() || image.is_null() {
+            return Err(InvalidValue);
+        }
+        // Recognize ELF and CUDA fatbin headers before treating the input as C text.
+        if matches!(unsafe { image.cast::<u8>().read() }, 0x7f | 0x50 | 0xb1) {
+            return Err(InvalidImage);
+        }
+        let image = unsafe { CStr::from_ptr(image.cast()) }.to_bytes();
+        let key = load_ptx(runtime, context, next, image)?;
+        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+        Ok(())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
+    status(with_context(|runtime, context| {
+        context.unload(&runtime.api, module.addr())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuModuleGetFunction(
+    out: *mut Opaque,
+    module: Opaque,
+    name: *const c_char,
+) -> CuResult {
+    status(with_context_handles(|runtime, context, next| {
+        if out.is_null() || name.is_null() {
+            return Err(InvalidValue);
+        }
+        let module_key = module.addr();
+        let module = context.modules.get_mut(&module_key).ok_or(InvalidHandle)?;
+        if unsafe { CStr::from_ptr(name) } != module.name.as_c_str() {
+            return Err(NotFound);
+        }
+        let function = match module.function {
+            Some(key) => key,
+            None => reserve_handle(next)?,
+        };
+        module
+            .backend
+            .create_kernel(&runtime.api, &module.name)
+            .map_err(backend_error)?;
+        module.function = Some(function);
+        context.functions.insert(function, module_key);
+        unsafe { out.write(std::ptr::without_provenance_mut(function)) };
+        Ok(())
+    }))
+}
+
+fn validate_launch(info: &DeviceInfo, grid: [u32; 3], block: [u32; 3]) -> Result<(), CuResult> {
+    let fits = |size: [u32; 3], limits: [u32; 3]| {
+        size.into_iter()
+            .zip(limits)
+            .all(|(size, limit)| (1..=limit).contains(&size))
+    };
+    if !fits(grid, info.max_grid_dimensions) || !fits(block, info.max_workgroup_dimensions) {
+        return Err(InvalidValue);
+    }
+    let total = block
+        .into_iter()
+        .try_fold(1u32, u32::checked_mul)
+        .ok_or(InvalidValue)?;
+    if total > info.max_workgroup_size {
+        return Err(InvalidValue);
+    }
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuLaunchKernel(
+    function: Opaque,
+    grid_x: u32,
+    grid_y: u32,
+    grid_z: u32,
+    block_x: u32,
+    block_y: u32,
+    block_z: u32,
+    shared_bytes: u32,
+    stream: Opaque,
+    kernel_params: *mut Opaque,
+    extra: *mut Opaque,
+) -> CuResult {
+    status(with_context(|runtime, context| {
+        if shared_bytes != 0 || !stream.is_null() || !extra.is_null() {
+            return Err(NotSupported);
+        }
+        let module_key = context
+            .functions
+            .get(&function.addr())
+            .ok_or(InvalidHandle)?;
+        let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
+        let grid = [grid_x, grid_y, grid_z];
+        let block = [block_x, block_y, block_z];
+        validate_launch(&runtime.devices[context.device as usize].info, grid, block)?;
+        if kernel_params.is_null() && !module.params.is_empty() {
+            return Err(InvalidValue);
+        }
+        let mut args = Vec::with_capacity(module.params.len());
+        for (index, &param) in module.params.iter().enumerate() {
+            let value = unsafe { kernel_params.add(index).read() };
+            if value.is_null() {
+                return Err(InvalidValue);
+            }
+            if param == Param::GlobalPtr {
+                let address = unsafe { value.cast::<u64>().read_unaligned() };
+                if !contains_range(&context.allocations, address as usize, 1) {
+                    return Err(InvalidValue);
+                }
+            }
+            args.push(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), param.size()) });
+        }
+        context
+            .backend
+            .launch(&runtime.api, &module.backend, grid, block, &args)
+            .map_err(backend_error)
+    }))
 }
 
 #[unsafe(no_mangle)]

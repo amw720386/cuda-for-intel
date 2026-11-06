@@ -104,6 +104,174 @@ fn device_memory_round_trip() {
     assert_eq!(output, input);
     ok!(cuMemFree_v2(device));
     assert_eq!(unsafe { cuMemFree_v2(device) }, 1);
-    ok!(cuCtxDestroy_v2(context));
+    let key = context.addr();
+    let (bound, wait_for_bind) = std::sync::mpsc::channel();
+    let (destroyed, wait_for_destroy) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let set_current = &cuCtxSetCurrent;
+        let synchronize = &cuCtxSynchronize;
+        scope.spawn(move || {
+            ok!(set_current(std::ptr::without_provenance_mut(key)));
+            bound.send(()).unwrap();
+            wait_for_destroy.recv().unwrap();
+            assert_eq!(unsafe { synchronize() }, 709);
+        });
+        wait_for_bind.recv().unwrap();
+        let result = unsafe { cuCtxDestroy_v2(context) };
+        destroyed.send(()).unwrap();
+        assert_eq!(result, 0);
+    });
     assert_eq!(unsafe { cuCtxSetCurrent(context) }, 201);
+}
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn compiled_ptx_vector_add() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuCtxSynchronize(),
+        cuModuleLoad(*mut Handle, *const c_char),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuModuleUnload(Handle),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, 0));
+
+    let mut module = null_mut();
+    let path = std::ffi::CString::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/vector_add.ptx"
+    ))
+    .unwrap();
+    ok!(cuModuleLoad(&mut module, path.as_ptr()));
+    ok!(cuModuleUnload(module));
+    module = null_mut();
+    let elf = *b"\x7fELF";
+    assert_eq!(
+        unsafe { cuModuleLoadData(&mut module, elf.as_ptr().cast()) },
+        200
+    );
+    let ptx = std::ffi::CString::new(include_str!("../examples/vector_add.ptx")).unwrap();
+    assert_eq!(
+        unsafe { cuModuleLoadData(&mut module, c"invalid PTX".as_ptr().cast()) },
+        218
+    );
+    assert!(module.is_null());
+    ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
+    let mut kernel = null_mut();
+    assert_eq!(
+        unsafe { cuModuleGetFunction(&mut kernel, module, c"missing".as_ptr()) },
+        500
+    );
+    ok!(cuModuleGetFunction(
+        &mut kernel,
+        module,
+        c"vector_add".as_ptr()
+    ));
+
+    const N: usize = 1003;
+    const CAPACITY: usize = 1024;
+    const SENTINEL: f32 = -99_999.0;
+    let mut left: Vec<f32> = (0..CAPACITY).map(|i| (i as f32 - 500.0) * 0.25).collect();
+    let mut right: Vec<f32> = (0..CAPACITY).map(|i| (i as f32 % 73.0) * -0.5).collect();
+    left[0] = f32::from_bits(1);
+    right[0] = f32::from_bits(1);
+    left[1] = 1.0;
+    right[1] = f32::EPSILON / 2.0;
+    let expected: Vec<f32> = (0..CAPACITY)
+        .map(|i| if i < N { left[i] + right[i] } else { SENTINEL })
+        .collect();
+    let bytes = CAPACITY * size_of::<f32>();
+    let (mut a, mut b, mut output) = (0u64, 0u64, 0u64);
+    ok!(cuMemAlloc_v2(&mut a, bytes));
+    ok!(cuMemAlloc_v2(&mut b, bytes));
+    ok!(cuMemAlloc_v2(&mut output, bytes));
+    ok!(cuMemcpyHtoD_v2(a, left.as_ptr().cast(), bytes));
+    ok!(cuMemcpyHtoD_v2(b, right.as_ptr().cast(), bytes));
+
+    let mut count = N as u32;
+    let mut args = [
+        (&mut a as *mut u64).cast(),
+        (&mut b as *mut u64).cast(),
+        (&mut output as *mut u64).cast(),
+        (&mut count as *mut u32).cast(),
+    ];
+    let launch = |kernel, groups, threads, args| unsafe {
+        cuLaunchKernel(
+            kernel,
+            groups,
+            1,
+            1,
+            threads,
+            1,
+            1,
+            0,
+            null_mut(),
+            args,
+            null_mut(),
+        )
+    };
+    assert_eq!(launch(kernel, 1, 0, args.as_mut_ptr()), 1);
+    assert_eq!(launch(kernel, 1, 32, null_mut()), 1);
+    assert_eq!(
+        unsafe {
+            cuLaunchKernel(
+                kernel,
+                1,
+                1,
+                1,
+                32,
+                1,
+                1,
+                4,
+                null_mut(),
+                args.as_mut_ptr(),
+                null_mut(),
+            )
+        },
+        801
+    );
+    let mut bad_pointer = 0u64;
+    let mut invalid_args = args;
+    invalid_args[0] = (&mut bad_pointer as *mut u64).cast();
+    assert_eq!(launch(kernel, 1, 32, invalid_args.as_mut_ptr()), 1);
+    for threads in [32, 64] {
+        let mut actual = vec![SENTINEL; CAPACITY];
+        ok!(cuMemcpyHtoD_v2(output, actual.as_ptr().cast(), bytes));
+        let groups = count.div_ceil(threads);
+        assert_eq!(
+            launch(kernel, groups, threads, args.as_mut_ptr()),
+            0,
+            "cuLaunchKernel"
+        );
+        ok!(cuCtxSynchronize());
+        ok!(cuMemcpyDtoH_v2(actual.as_mut_ptr().cast(), output, bytes));
+        for (i, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "element {i}, block size {threads}"
+            );
+        }
+        println!(
+            "Verified {N} sums and {} untouched guard elements with {groups} blocks of {threads}",
+            CAPACITY - N
+        );
+    }
+
+    ok!(cuModuleUnload(module));
+    assert_eq!(launch(kernel, 1, 32, args.as_mut_ptr()), 400);
+    assert_eq!(unsafe { cuModuleUnload(module) }, 400);
+    // Context destruction also releases its three live allocations.
+    ok!(cuCtxDestroy_v2(context));
 }
