@@ -75,18 +75,40 @@ impl CommandList {
         waits: &[Arc<Fence>],
     ) -> Result<(), Error> {
         let mut events = WaitEvents::new(waits)?;
-        let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
-        #[cfg(all(test, windows))]
-        let signal = super::profiling::operation_signal(signal);
+        // Keep waits on the copy; move any completion signal onto the following
+        // ranges barrier so host-scope fences observe destination coherence.
         call("zeCommandListAppendMemoryCopy", || unsafe {
             (api.zeCommandListAppendMemoryCopy)(
                 self.0.0,
                 dst,
                 src,
                 size,
-                signal,
+                null_mut(),
                 events.count,
                 events.ptr(),
+            )
+        })?;
+        let signal = {
+            let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+            #[cfg(all(test, windows))]
+            {
+                super::profiling::operation_signal(signal)
+            }
+            #[cfg(not(all(test, windows)))]
+            {
+                signal
+            }
+        };
+        let range = dst.cast_const();
+        call("zeCommandListAppendMemoryRangesBarrier", || unsafe {
+            (api.zeCommandListAppendMemoryRangesBarrier)(
+                self.0.0,
+                1,
+                &size,
+                &range,
+                signal,
+                0,
+                null_mut(),
             )
         })
     }

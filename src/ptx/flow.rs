@@ -162,8 +162,8 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                     continue;
                 }
                 for inst in &blocks[next].instructions {
-                    if matches!(inst, Instruction::Barrier) {
-                        return Err(Error::new("workgroup barrier may execute divergently"));
+                    if inst.is_convergent() {
+                        return Err(Error::new("barrier may execute divergently"));
                     }
                     let mut defined = Vec::new();
                     if inst.collect_definitions(&mut defined).is_some() {

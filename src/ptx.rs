@@ -159,6 +159,14 @@ enum Instruction<'a> {
         src: [&'a str; 4],
     },
     AtomicAdd32(&'a str, &'a str, &'a str),
+    /// CUDA `shfl.sync.bfly.b32` — warp butterfly exchange with an active mask.
+    /// Sources are `[value, xor_mask, clamp, membermask]`.
+    /// Optional `pred` is the dual-destination lane-valid flag (`dst|pred`).
+    ShuffleBfly {
+        dst: &'a str,
+        pred: Option<&'a str>,
+        src: [&'a str; 4],
+    },
     Barrier,
 }
 
@@ -207,6 +215,13 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 op.inputs()
             }
+            ShuffleBfly { dst, pred, src } => {
+                out.push(*dst);
+                if let Some(pred) = pred {
+                    out.push(*pred);
+                }
+                src
+            }
             Store32(..) | StoreVec { .. } | Barrier => return None,
         })
     }
@@ -216,6 +231,10 @@ impl<'a> Instruction<'a> {
             self,
             Self::Load32(..) | Self::LoadVec { .. } | Self::AtomicAdd32(..)
         )
+    }
+
+    fn is_convergent(&self) -> bool {
+        matches!(self, Self::Barrier | Self::ShuffleBfly { .. })
     }
 }
 
@@ -336,6 +355,58 @@ mod tests {
     }
 
     #[test]
+    fn lowers_shfl_sync_bfly_through_shared_scratch() {
+        const SHFL: &str = r#"
+            .version 8.8
+            .target sm_80
+            .address_size 64
+            .visible .entry shfl_bfly(
+                .param .u64 .ptr .align 1 shfl_bfly_param_0
+            )
+            .maxntid 32
+            {
+                .reg .pred %p<2>;
+                .reg .b32 %r<8>;
+                .reg .b64 %rd<4>;
+                ld.param.u64 %rd1, [shfl_bfly_param_0];
+                cvta.to.global.u64 %rd2, %rd1;
+                mov.u32 %r1, %tid.x;
+                mul.wide.u32 %rd3, %r1, 4;
+                add.s64 %rd2, %rd2, %rd3;
+                ld.global.b32 %r2, [%rd2];
+                mov.u32 %r5, 16;
+                mov.u32 %r6, 31;
+                mov.u32 %r7, -1;
+                shfl.sync.bfly.b32 %r3|%p1, %r2, %r5, %r6, %r7;
+                shfl.sync.bfly.b32 %r4, %r3, 8, 0x1f, 0xffffffff;
+                st.global.b32 [%rd2], %r4;
+                ret;
+            }
+        "#;
+        let translated = translate(SHFL).unwrap();
+        assert_eq!(translated.kernels[0].shared_bytes, 32 * 4);
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        let opcodes: Vec<_> = module.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .map(|inst| inst.class.opcode)
+            .collect();
+        assert!(opcodes.iter().filter(|&&op| op == Op::ControlBarrier).count() >= 2);
+        assert!(opcodes.contains(&Op::BitwiseXor));
+        assert!(
+            translate(&SHFL.replace("0xffffffff", "0x0000ffff"))
+                .unwrap_err()
+                .to_string()
+                .contains("membermask")
+        );
+        assert!(
+            translate(&SHFL.replace("shfl.sync.bfly.b32", "shfl.sync.up.b32"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_nvcc_operand_forms() {
         for (from, to) in [
             (".version 8.8", ".version 9.0"),
@@ -351,7 +422,7 @@ mod tests {
             ("max.f32", "max.NaN.f32"),
             ("ld.global.f32", "ld.global.v2.f32"),
             ("st.global.f32", "st.global.f16"),
-            ("shr.u32", "shfl.sync.bfly.b32"),
+            ("shr.u32", "shfl.sync.up.b32"),
         ] {
             assert!(GGML_MODERN.contains(from));
             assert!(
@@ -526,6 +597,7 @@ mod tests {
             RMSNORM,
             GGML_ADD,
             GGML_MODERN,
+            include_str!("../examples/shfl_bfly.ptx"),
             include_str!("../tests/gpu/multi_entry.ptx"),
             include_str!("../examples/forge_residual.ptx"),
             include_str!("../examples/forge_reduce.ptx"),

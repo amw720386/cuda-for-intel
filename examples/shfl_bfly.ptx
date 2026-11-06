@@ -1,0 +1,38 @@
+// Hardware-independent CUDA warp butterfly shuffle fixture.
+// Emulated via workgroup shared scratch so Intel subgroup widths of 8/16/32
+// still observe CUDA's 32-lane warp semantics.
+.version 8.8
+.target sm_80
+.address_size 64
+
+.visible .entry shfl_bfly(
+	.param .u64 .ptr .align 1 shfl_bfly_param_0,
+	.param .u64 .ptr .align 1 shfl_bfly_param_1,
+	.param .u32 shfl_bfly_param_2
+)
+.maxntid 128
+{
+	.reg .pred %p<2>;
+	.reg .b32 %r<10>;
+	.reg .b64 %rd<8>;
+	ld.param.u64 %rd1, [shfl_bfly_param_0];
+	cvta.to.global.u64 %rd2, %rd1;
+	ld.param.u64 %rd3, [shfl_bfly_param_1];
+	cvta.to.global.u64 %rd4, %rd3;
+	ld.param.u32 %r1, [shfl_bfly_param_2];
+	mov.u32 %r2, %tid.x;
+	setp.ge.u32 %p1, %r2, %r1;
+	@%p1 bra $L_done;
+	mul.wide.u32 %rd5, %r2, 4;
+	add.s64 %rd6, %rd2, %rd5;
+	ld.global.b32 %r3, [%rd6];
+	shfl.sync.bfly.b32 %r4, %r3, 16, 0x1f, 0xffffffff;
+	shfl.sync.bfly.b32 %r5, %r4, 8, 0x1f, 0xffffffff;
+	shfl.sync.bfly.b32 %r6, %r5, 4, 0x1f, 0xffffffff;
+	shfl.sync.bfly.b32 %r7, %r6, 2, 0x1f, 0xffffffff;
+	shfl.sync.bfly.b32 %r8, %r7, 1, 0x1f, 0xffffffff;
+	add.s64 %rd7, %rd4, %rd5;
+	st.global.b32 [%rd7], %r8;
+$L_done:
+	ret;
+}

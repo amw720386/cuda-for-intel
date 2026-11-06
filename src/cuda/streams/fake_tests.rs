@@ -472,7 +472,8 @@ fn fake_fault_accepted_work_and_unconfirmed_cleanup() {
     assert_eq!(cuStreamSynchronize(s), Unknown);
     let before = fake::snapshot();
     assert_eq!(before.pending, 1);
-    assert_eq!(before.ledger.submitted, 2);
+    // HtoD records a copy plus a destination ranges barrier, then the launch.
+    assert_eq!(before.ledger.submitted, 3);
     assert_eq!(before.ledger.completed, 0);
     assert_eq!(cuMemFree_v2(device), Unknown);
     arm("zeCommandQueueSynchronize", 1);

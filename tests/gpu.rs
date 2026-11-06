@@ -27,6 +27,8 @@ mod ollama;
 mod pinned;
 #[path = "gpu/progress.rs"]
 mod progress;
+#[path = "gpu/shfl.rs"]
+mod shfl;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

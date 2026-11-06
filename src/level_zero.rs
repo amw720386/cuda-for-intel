@@ -372,6 +372,15 @@ loader_api! {
     zeCommandListHostSynchronize(Raw, u64),
     zeCommandListAppendSignalEvent(Raw, Raw),
     zeCommandListAppendBarrier(Raw, Raw, u32, *mut Raw),
+    zeCommandListAppendMemoryRangesBarrier(
+        Raw,
+        u32,
+        *const usize,
+        *const *const c_void,
+        Raw,
+        u32,
+        *mut Raw
+    ),
     zeEventPoolCreate(Raw, *const EventPoolDesc, u32, *mut Raw, *mut Raw),
     zeEventPoolDestroy(Raw),
     zeEventCreate(Raw, *const EventDesc, *mut Raw),
@@ -652,9 +661,13 @@ impl Context {
 
     pub(crate) fn alloc_host(&self, api: &Api, size: usize) -> Result<usize, Error> {
         self.commands()?;
+        // Prefer uncached host pages for CUDA-style pinned staging. Cached host
+        // memory can retain a prior DtoH pattern in the CPU cache after a later
+        // DMA overwrite when completion used HostSynchronize without a host-scope
+        // event; Arc B390 reproduced that as an intermittent stale read.
         let desc = HostAllocDesc {
             header: Header::new(0x16),
-            flags: 0,
+            flags: 1 << 1, // ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED
         };
         let mut out = std::ptr::null_mut();
         call("zeMemAllocHost", || unsafe {
@@ -689,6 +702,20 @@ impl Context {
                 dst,
                 src,
                 size,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        })?;
+        // Make the destination range coherent before the synchronous list
+        // returns, including host visibility for DtoH into pinned memory.
+        let range = dst.cast_const();
+        call("zeCommandListAppendMemoryRangesBarrier", || unsafe {
+            (api.zeCommandListAppendMemoryRangesBarrier)(
+                commands,
+                1,
+                &size,
+                &range,
                 signal,
                 0,
                 std::ptr::null_mut(),

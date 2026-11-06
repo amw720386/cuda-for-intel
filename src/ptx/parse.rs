@@ -214,6 +214,28 @@ impl<'a> Parser<'a> {
             ["mov.b64", dst, ",", src] => Instruction::SharedAddress(dst, src),
             ["bar.sync", "0"] => Instruction::Barrier,
             [
+                "shfl.sync.bfly.b32",
+                dst,
+                ",",
+                value,
+                ",",
+                xor_mask,
+                ",",
+                clamp,
+                ",",
+                membermask,
+            ] => {
+                let (dst, pred) = match dst.split_once('|') {
+                    Some((dst, pred)) => (dst, Some(pred)),
+                    None => (*dst, None),
+                };
+                Instruction::ShuffleBfly {
+                    dst,
+                    pred,
+                    src: [value, xor_mask, clamp, membermask],
+                }
+            }
+            [
                 "atom.global.add.u32",
                 dst,
                 ",",
@@ -223,7 +245,13 @@ impl<'a> Parser<'a> {
                 ",",
                 value,
             ] => Instruction::AtomicAdd32(dst, address, value),
-            ["mov.u32", dst, ",", src] => Instruction::Builtin(dst, src),
+            ["mov.u32", dst, ",", src] => {
+                if src.contains('.') {
+                    Instruction::Builtin(dst, src)
+                } else {
+                    Instruction::Move32(dst, src)
+                }
+            }
             ["mad.lo.s32" | "mad.lo.u32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Mad32(dst, [a, b, c])
             }

@@ -67,6 +67,9 @@ struct Emitter<'a> {
     shared_byte_ptr: Word,
     shared_word_ptr: Word,
     shared: Option<(&'a str, Word)>,
+    /// Workgroup scratch used to emulate CUDA warp shuffles across Intel subgroup widths.
+    shuffle: Option<Word>,
+    shuffle_words: u32,
     builtin_type: Word,
     builtins: [Word; BUILTINS.len()],
     declarations: HashMap<String, Width>,
@@ -123,6 +126,8 @@ impl<'a> Emitter<'a> {
             shared_byte_ptr,
             shared_word_ptr,
             shared: None,
+            shuffle: None,
+            shuffle_words: 0,
             builtin_type,
             builtins,
             declarations: HashMap::new(),
@@ -212,22 +217,130 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    fn parse_u32(operand: &str) -> Option<u32> {
+        if let Some(hex) = operand
+            .strip_prefix("0x")
+            .or_else(|| operand.strip_prefix("0X"))
+        {
+            u32::from_str_radix(hex, 16).ok()
+        } else if let Ok(n) = operand.parse::<u32>() {
+            Some(n)
+        } else {
+            // PTX often writes all-ones as `-1`.
+            operand.parse::<i32>().ok().map(|n| n as u32)
+        }
+    }
+
+    fn parse_u64(operand: &str) -> Option<u64> {
+        if let Some(hex) = operand
+            .strip_prefix("0x")
+            .or_else(|| operand.strip_prefix("0X"))
+        {
+            u64::from_str_radix(hex, 16).ok()
+        } else if let Ok(n) = operand.parse::<u64>() {
+            Some(n)
+        } else {
+            operand.parse::<i64>().ok().map(|n| n as u64)
+        }
+    }
+
     fn integer(&mut self, operand: &str, kind: Kind) -> Result<Word, Error> {
         if operand.starts_with('%') {
             return self.read(operand)?.require(kind, operand);
         }
         match kind {
-            Kind::B32 => operand
-                .parse::<u32>()
-                .ok()
+            Kind::B32 => Self::parse_u32(operand)
                 .map(|n| self.builder.constant_bit32(self.u32_type, n)),
-            Kind::B64 => operand
-                .parse()
-                .ok()
+            Kind::B64 => Self::parse_u64(operand)
                 .map(|n| self.builder.constant_bit64(self.u64_type, n)),
             _ => None,
         }
         .ok_or_else(|| Error::new(format!("unsupported integer operand {operand}")))
+    }
+
+    fn shuffle_slot(&mut self, index: Word) -> Result<Word, Error> {
+        let array = self
+            .shuffle
+            .ok_or_else(|| Error::new("missing warp shuffle scratch buffer"))?;
+        Ok(self
+            .builder
+            .access_chain(self.shared_word_ptr, None, array, [index])?)
+    }
+
+    fn emit_shuffle_bfly(
+        &mut self,
+        dst: &'a str,
+        pred: Option<&'a str>,
+        value: &str,
+        xor_mask: &str,
+        clamp: &str,
+        membermask: &str,
+    ) -> Result<(), Error> {
+        // Full-warp CUDA reductions use clamp=31 / membermask=all-ones. Accept those
+        // as immediates or as registers that nvcc filled with the same constants.
+        if let Some(clamp) = Self::parse_u32(clamp)
+            && clamp != 0x1f
+        {
+            return Err(Error::new(
+                "only full-warp shfl.sync.bfly.b32 clamp 0x1f is supported",
+            ));
+        }
+        if let Some(membermask) = Self::parse_u32(membermask)
+            && membermask != u32::MAX
+        {
+            return Err(Error::new(
+                "only full-warp shfl.sync.bfly.b32 membermask 0xffffffff is supported",
+            ));
+        }
+        // Keep register clamp/membermask live for ABI fidelity even though the
+        // shared-memory emulation currently assumes a full 32-lane warp.
+        let _clamp = self.integer(clamp, Kind::B32)?;
+        let _membermask = self.integer(membermask, Kind::B32)?;
+        let value = self.read(value)?.require(Kind::B32, value)?;
+        let xor_mask = self.integer(xor_mask, Kind::B32)?;
+        let tid = self.builtin("%tid.x")?;
+        let lane_mask = self.builder.constant_bit32(self.u32_type, 31);
+        let warp_mask = self.builder.constant_bit32(self.u32_type, !31u32);
+        let slot = self.shuffle_slot(tid)?;
+        self.builder.store(slot, value, None, [])?;
+        let scope = self
+            .builder
+            .constant_bit32(self.u32_type, Scope::Workgroup as u32);
+        let semantics = MemorySemantics::ACQUIRE_RELEASE
+            | MemorySemantics::WORKGROUP_MEMORY
+            | MemorySemantics::CROSS_WORKGROUP_MEMORY;
+        let semantics = self.builder.constant_bit32(self.u32_type, semantics.bits());
+        self.builder.control_barrier(scope, scope, semantics)?;
+        let lane = self.builder.bitwise_and(self.u32_type, None, tid, lane_mask)?;
+        let warp = self.builder.bitwise_and(self.u32_type, None, tid, warp_mask)?;
+        let flipped = self.builder.bitwise_xor(self.u32_type, None, lane, xor_mask)?;
+        let source_lane = self
+            .builder
+            .bitwise_and(self.u32_type, None, flipped, lane_mask)?;
+        let source = self.builder.bitwise_or(self.u32_type, None, warp, source_lane)?;
+        let source_slot = self.shuffle_slot(source)?;
+        let result = self
+            .builder
+            .load(self.u32_type, None, source_slot, None, [])?;
+        self.write(
+            dst,
+            Value {
+                id: result,
+                kind: Kind::B32,
+            },
+        )?;
+        if let Some(pred) = pred {
+            // Full-warp clamp keeps every participating lane in range.
+            let truth = self.builder.constant_true(self.bool_type);
+            self.write(
+                pred,
+                Value {
+                    id: truth,
+                    kind: Kind::Predicate,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     fn builtin(&mut self, src: &str) -> Result<Word, Error> {
@@ -705,6 +818,14 @@ impl<'a> Emitter<'a> {
                 self.builder.control_barrier(scope, scope, semantics)?;
                 return Ok(());
             }
+            Instruction::ShuffleBfly {
+                dst,
+                pred,
+                src: [value, xor_mask, clamp, membermask],
+            } => {
+                self.emit_shuffle_bfly(dst, pred, value, xor_mask, clamp, membermask)?;
+                return Ok(());
+            }
             Instruction::AtomicAdd32(dst, address, value) => {
                 let pointer = self.word_pointer(Space::Global, address)?;
                 let value = self.integer(value, Kind::B32)?;
@@ -752,6 +873,28 @@ impl<'a> Emitter<'a> {
         self.device_atomics = false;
         self.fp32 = false;
         self.fp32_fma = false;
+        let needs_shuffle = entry.blocks.iter().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, Instruction::ShuffleBfly { .. }))
+        });
+        self.shuffle_words = if needs_shuffle {
+            entry.max_threads.unwrap_or(1024).max(32)
+        } else {
+            0
+        };
+        self.shuffle = (self.shuffle_words > 0).then(|| {
+            let length = self
+                .builder
+                .constant_bit32(self.u32_type, self.shuffle_words);
+            let array = self.builder.type_array(self.u32_type, length);
+            let pointer = self
+                .builder
+                .type_pointer(None, StorageClass::Workgroup, array);
+            self.builder
+                .variable(pointer, None, StorageClass::Workgroup, None)
+        });
         self.shared = entry.shared.map(|(name, bytes)| {
             // Use a u32 array to retain the PTX declaration's four-byte alignment.
             let length = self.builder.constant_bit32(self.u32_type, bytes / 4);
@@ -856,7 +999,8 @@ impl<'a> Emitter<'a> {
         Ok(KernelMetadata {
             name: entry.name.to_owned(),
             params: entry.params.into_iter().map(|(_, param)| param).collect(),
-            shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
+            shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes)
+                + self.shuffle_words.saturating_mul(4),
             max_threads: entry.max_threads,
             device_atomics: self.device_atomics,
             fp32: self.fp32,

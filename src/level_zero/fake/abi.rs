@@ -299,6 +299,22 @@ unsafe extern "system" fn append_signal(list: Raw, signal: Raw) -> Status {
     unsafe { append_barrier(list, signal, 0, null_mut()) }
 }
 
+unsafe extern "system" fn append_ranges_barrier(
+    list: Raw,
+    count: u32,
+    sizes: *const usize,
+    ranges: *const *const c_void,
+    signal: Raw,
+    waits: u32,
+    wait_events: *mut Raw,
+) -> Status {
+    if count != 1 || sizes.is_null() || ranges.is_null() {
+        return fake::unexpected("zeCommandListAppendMemoryRangesBarrier");
+    }
+    let _ = (unsafe { sizes.read() }, unsafe { ranges.read() });
+    unsafe { append_barrier(list, signal, waits, wait_events) }
+}
+
 unsafe extern "system" fn append_copy(
     list: Raw,
     dst: Raw,
@@ -447,6 +463,7 @@ pub(super) fn api() -> Api {
         zeCommandListHostSynchronize: list_wait,
         zeCommandListAppendSignalEvent: append_signal,
         zeCommandListAppendBarrier: append_barrier,
+        zeCommandListAppendMemoryRangesBarrier: append_ranges_barrier,
         zeEventPoolCreate: pool_create,
         zeEventPoolDestroy: pool_destroy,
         zeEventCreate: event_create,
