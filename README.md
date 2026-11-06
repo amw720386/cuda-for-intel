@@ -10,7 +10,17 @@ cargo run --locked --example devices
 
 The build emits `target/debug/nvcuda.dll` on Windows. Device discovery requires the system Level Zero loader and an Intel graphics driver with Level Zero support. The Linux loader path is included for portability. Windows x64 is the validation target.
 
-The current API supports initialization and device enumeration, names, memory size and selected workgroup attributes. GPU execution, CUDA contexts, memory transfers and module loading are under development.
+The current API supports initialization, device discovery, explicit contexts,
+device allocation and blocking host/device copies. Context creation supports
+zero flags and makes the context current on the calling thread. Allocations
+belong to the current context. Compute commands use a synchronous Level Zero
+immediate command list. PTX module loading and kernel launch are under development.
+
+The Windows GPU regression checks device memory transfers through the exported DLL.
+
+```powershell
+cargo test --locked --test gpu -- --ignored --nocapture
+```
 
 ## References and license
 

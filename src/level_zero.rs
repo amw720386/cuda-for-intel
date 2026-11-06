@@ -6,6 +6,12 @@ use std::fmt;
 type Raw = *mut c_void;
 type Status = u32;
 
+#[derive(Clone, Copy)]
+pub(crate) struct Handle(Raw);
+
+// The Level Zero handles are opaque tokens. The CUDA frontend serializes their use.
+unsafe impl Send for Handle {}
+
 #[derive(Debug)]
 pub enum Error {
     Loader(libloading::Error),
@@ -116,6 +122,38 @@ struct ExtensionProperties {
     version: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct QueueGroupProperties {
+    header: Header,
+    flags: u32,
+    max_fill_pattern_size: usize,
+    queues: u32,
+}
+
+#[repr(C)]
+struct ContextDesc {
+    header: Header,
+    flags: u32,
+}
+
+#[repr(C)]
+struct QueueDesc {
+    header: Header,
+    ordinal: u32,
+    index: u32,
+    flags: u32,
+    mode: u32,
+    priority: u32,
+}
+
+#[repr(C)]
+struct AllocDesc {
+    header: Header,
+    flags: u32,
+    ordinal: u32,
+}
+
 macro_rules! loader_api {
     ($( $name:ident($($arg:ty),*) ),+ $(,)?) => {
         #[allow(non_snake_case)]
@@ -155,6 +193,15 @@ loader_api! {
     zeDeviceGetMemoryProperties(Raw, *mut u32, *mut MemoryProperties),
     zeDeviceGetModuleProperties(Raw, *mut ModuleProperties),
     zeDriverGetExtensionProperties(Raw, *mut u32, *mut ExtensionProperties),
+    zeDeviceGetCommandQueueGroupProperties(Raw, *mut u32, *mut QueueGroupProperties),
+    zeContextCreate(Raw, *const ContextDesc, *mut Raw),
+    zeContextDestroy(Raw),
+    zeCommandListCreateImmediate(Raw, Raw, *const QueueDesc, *mut Raw),
+    zeCommandListDestroy(Raw),
+    zeCommandListHostSynchronize(Raw, u64),
+    zeMemAllocDevice(Raw, *const AllocDesc, usize, usize, Raw, *mut Raw),
+    zeMemFree(Raw, Raw),
+    zeCommandListAppendMemoryCopy(Raw, Raw, *const c_void, usize, Raw, u32, *mut Raw),
 }
 
 /// Capabilities reported by the installed Level Zero driver.
@@ -177,11 +224,125 @@ pub struct DeviceInfo {
 
 pub(crate) struct Device {
     pub(crate) info: DeviceInfo,
+    driver: Handle,
+    handle: Handle,
+    compute_queue: Option<u32>,
 }
 
 pub(crate) struct Runtime {
-    _api: Api,
+    pub(crate) api: Api,
     pub(crate) devices: Vec<Device>,
+}
+
+pub(crate) struct Context {
+    handle: Handle,
+    device: Handle,
+    commands: Option<Handle>,
+}
+
+impl Context {
+    pub(crate) fn create(api: &Api, device: &Device) -> Result<Self, Error> {
+        let ordinal = device
+            .compute_queue
+            .ok_or(Error::Driver("select compute queue", 0x78000003))?;
+        let desc = ContextDesc {
+            header: Header::new(0xd),
+            flags: 0,
+        };
+        let mut handle = std::ptr::null_mut();
+        check("zeContextCreate", unsafe {
+            (api.zeContextCreate)(device.driver.0, &desc, &mut handle)
+        })?;
+        let queue = QueueDesc {
+            header: Header::new(0xe),
+            ordinal,
+            index: 0,
+            flags: 0,
+            mode: 1, // ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS
+            priority: 0,
+        };
+        let mut commands = std::ptr::null_mut();
+        if let Err(error) = check("zeCommandListCreateImmediate", unsafe {
+            (api.zeCommandListCreateImmediate)(handle, device.handle.0, &queue, &mut commands)
+        }) {
+            unsafe { (api.zeContextDestroy)(handle) };
+            return Err(error);
+        }
+        Ok(Self {
+            handle: Handle(handle),
+            device: device.handle,
+            commands: Some(Handle(commands)),
+        })
+    }
+
+    fn commands(&self) -> Result<Raw, Error> {
+        self.commands
+            .map(|handle| handle.0)
+            .ok_or(Error::Driver("use closed command list", 0x78000005))
+    }
+
+    pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
+        if let Some(commands) = self.commands {
+            check("zeCommandListDestroy", unsafe {
+                (api.zeCommandListDestroy)(commands.0)
+            })?;
+            self.commands = None;
+        }
+        check("zeContextDestroy", unsafe {
+            (api.zeContextDestroy)(self.handle.0)
+        })
+    }
+
+    pub(crate) fn synchronize(&self, api: &Api) -> Result<(), Error> {
+        let commands = self.commands()?;
+        check("zeCommandListHostSynchronize", unsafe {
+            (api.zeCommandListHostSynchronize)(commands, u64::MAX)
+        })
+    }
+
+    pub(crate) fn alloc(&self, api: &Api, size: usize) -> Result<usize, Error> {
+        self.commands()?;
+        let desc = AllocDesc {
+            header: Header::new(0x15),
+            flags: 0,
+            ordinal: 0,
+        };
+        let mut out = std::ptr::null_mut();
+        check("zeMemAllocDevice", unsafe {
+            (api.zeMemAllocDevice)(self.handle.0, &desc, size, 0, self.device.0, &mut out)
+        })?;
+        Ok(out.expose_provenance())
+    }
+
+    pub(crate) fn free(&self, api: &Api, address: usize) -> Result<(), Error> {
+        check("zeMemFree", unsafe {
+            (api.zeMemFree)(
+                self.handle.0,
+                std::ptr::with_exposed_provenance_mut(address),
+            )
+        })
+    }
+
+    pub(crate) unsafe fn copy(
+        &self,
+        api: &Api,
+        dst: Raw,
+        src: *const c_void,
+        size: usize,
+    ) -> Result<(), Error> {
+        let commands = self.commands()?;
+        check("zeCommandListAppendMemoryCopy", unsafe {
+            (api.zeCommandListAppendMemoryCopy)(
+                commands,
+                dst,
+                src,
+                size,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        })
+    }
 }
 
 fn enumerate<T: Clone>(
@@ -275,7 +436,23 @@ impl Runtime {
                     .get(..compute.subgroup_count as usize)
                     .ok_or(Error::InvalidProperties)?
                     .to_vec();
+                let mut group: QueueGroupProperties = unsafe { std::mem::zeroed() };
+                group.header = Header::new(6);
+                let groups = enumerate(
+                    "zeDeviceGetCommandQueueGroupProperties",
+                    group,
+                    |count, out| unsafe {
+                        (api.zeDeviceGetCommandQueueGroupProperties)(handle, count, out)
+                    },
+                )?;
+                let compute_queue = groups
+                    .iter()
+                    .position(|group| group.flags & 1 != 0 && group.queues != 0)
+                    .map(|index| index as u32);
                 devices.push(Device {
+                    driver: Handle(driver),
+                    handle: Handle(handle),
+                    compute_queue,
                     info: DeviceInfo {
                         name: name(&properties.name)?,
                         device_id: properties.device,
@@ -294,7 +471,7 @@ impl Runtime {
                 });
             }
         }
-        Ok(Self { _api: api, devices })
+        Ok(Self { api, devices })
     }
 }
 
