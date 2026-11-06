@@ -17,7 +17,7 @@ pub(super) const KERNELS: [(&std::ffi::CStr, &str); 3] = [
     ),
 ];
 
-pub(super) fn arg<T>(value: &T) -> Handle {
+pub(crate) fn arg<T>(value: &T) -> Handle {
     std::ptr::from_ref(value).cast_mut().cast()
 }
 

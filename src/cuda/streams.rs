@@ -3,10 +3,16 @@ use super::{
     Api, Context, CuResult, Opaque, State, backend_error, current, reserve_handle, state, status,
     with_context_handles,
 };
+use crate::level_zero::QueueFence;
 use crate::level_zero::{CommandList, Fence, Fences, Module};
+use batch::{Batch, Policy};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar};
+use std::thread::JoinHandle;
 
+mod batch;
+#[cfg(all(test, windows))]
+mod batch_tests;
 mod events;
 #[cfg(all(test, windows))]
 mod profiling;
@@ -22,13 +28,25 @@ fn stream_key(handle: Opaque) -> Result<usize, CuResult> {
     }
 }
 
+#[derive(Clone)]
 struct Submission {
     completion: Arc<Fence>,
     _waits: Vec<Arc<Fence>>,
 }
 
+struct Recording {
+    producer: usize,
+    fence: Arc<Fence>,
+}
+
+enum Completion {
+    Immediate(Arc<CommandList>, u64),
+    Regular(Arc<QueueFence>),
+}
+
 struct Stream {
-    list: Arc<CommandList>,
+    immediate: Option<Arc<CommandList>>,
+    batch: Option<Box<Batch>>,
     blocking: bool,
     dirty: bool,
     generation: u64,
@@ -36,14 +54,36 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(list: CommandList, blocking: bool) -> Self {
-        Self {
-            list: Arc::new(list),
+    fn new(
+        api: &Api,
+        context: &Context,
+        blocking: bool,
+        policy: Option<Policy>,
+        wake: &Arc<Condvar>,
+    ) -> Result<Self, CuResult> {
+        let (immediate, batch) = match policy {
+            Some(policy) => (
+                None,
+                Some(Box::new(Batch::new(
+                    api,
+                    context,
+                    policy,
+                    Arc::clone(wake),
+                )?)),
+            ),
+            None => (
+                Some(Arc::new(context.create_stream(api).map_err(backend_error)?)),
+                None,
+            ),
+        };
+        Ok(Self {
+            immediate,
+            batch,
             blocking,
             dirty: false,
             generation: 0,
             pending: VecDeque::new(),
-        }
+        })
     }
 
     fn tail(&self) -> Option<Arc<Fence>> {
@@ -62,12 +102,98 @@ impl Stream {
         Ok(())
     }
 
+    fn flush(&mut self, api: &Api) -> Result<(), CuResult> {
+        if let Some(batch) = &mut self.batch {
+            batch.flush(api)?;
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Option<Completion> {
+        if let Some(batch) = &self.batch {
+            batch
+                .tail()
+                .map(|fence| Completion::Regular(Arc::clone(fence)))
+        } else {
+            self.dirty.then(|| {
+                Completion::Immediate(
+                    Arc::clone(self.immediate.as_ref().unwrap()),
+                    self.generation,
+                )
+            })
+        }
+    }
+
     fn wait(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
-        if self.dirty {
-            self.list.wait(api, timeout).map_err(backend_error)?;
+        if let Some(batch) = &mut self.batch {
+            batch.check()?;
+            if batch.buffered() {
+                return Err(NotReady);
+            }
+            if let Some(fence) = batch.tail() {
+                fence
+                    .wait(api.fence_wait_fn(), timeout)
+                    .map_err(backend_error)?;
+            }
+            batch.reap(api)?;
+            self.complete();
+        } else if self.dirty {
+            self.immediate
+                .as_ref()
+                .unwrap()
+                .wait(api, timeout)
+                .map_err(backend_error)?;
             self.complete();
         }
         Ok(())
+    }
+
+    fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
+        if let Some(batch) = &mut self.batch {
+            batch.destroy(api)
+        } else {
+            self.immediate
+                .as_ref()
+                .unwrap()
+                .destroy(api)
+                .map_err(backend_error)
+        }
+    }
+
+    fn record(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        signal: Option<Arc<Fence>>,
+        waits: Vec<Arc<Fence>>,
+        append: impl FnOnce(
+            &CommandList,
+            Option<&Fence>,
+            &[Arc<Fence>],
+        ) -> Result<(), crate::level_zero::Error>,
+    ) -> Result<(), CuResult> {
+        let list = match &mut self.batch {
+            Some(batch) => batch.recording(api, context)?,
+            None => self.immediate.as_ref().unwrap(),
+        };
+        let result = append(list, signal.as_deref(), &waits).map_err(backend_error);
+        let submission = signal.map(|completion| Submission {
+            completion,
+            _waits: waits,
+        });
+        if let Err(error) = result {
+            if let Some(batch) = &mut self.batch {
+                batch.record_failed(error, submission);
+            }
+            return Err(error);
+        }
+        self.submitted();
+        let result = match &mut self.batch {
+            Some(batch) => batch.appended(api, submission.as_ref()),
+            None => Ok(()),
+        };
+        self.pending.extend(submission);
+        result
     }
 
     fn submitted(&mut self) {
@@ -81,7 +207,10 @@ impl Stream {
     }
 
     fn has_waiters(&self) -> bool {
-        Arc::strong_count(&self.list) > 1
+        self.immediate
+            .as_ref()
+            .is_some_and(|list| Arc::strong_count(list) > 1)
+            || self.batch.as_deref().is_some_and(Batch::has_waiters)
     }
 }
 
@@ -90,16 +219,35 @@ pub(super) struct Streams {
     live: HashMap<usize, Stream>,
     retired: Vec<Stream>,
     fences: Fences,
-    events: HashMap<usize, Option<Arc<Fence>>>,
+    events: HashMap<usize, Option<Recording>>,
+    policy: Option<Policy>,
+    wake: Arc<Condvar>,
+    worker: Option<JoinHandle<()>>,
     event_waiters: Arc<()>,
     track_legacy: bool,
 }
 
 impl Streams {
-    pub(super) fn new(api: &Api, context: &Context) -> Result<Self, CuResult> {
-        let list = context.create_stream(api).map_err(backend_error)?;
+    pub(super) fn new(api: &Api, context: &Context, owner: usize) -> Result<Self, CuResult> {
+        let policy = Policy::configured()?;
+        let wake = Arc::new(Condvar::new());
+        let mut legacy = Stream::new(api, context, true, policy, &wake)?;
+        let worker = match policy
+            .and_then(|policy| policy.delay)
+            .map(|_| batch::spawn(owner, Arc::clone(&wake)))
+            .transpose()
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                legacy.destroy(api)?;
+                return Err(error);
+            }
+        };
         Ok(Self {
-            legacy: Some(Stream::new(list, true)),
+            legacy: Some(legacy),
+            policy,
+            wake,
+            worker,
             live: HashMap::new(),
             retired: Vec::new(),
             fences: Fences::default(),
@@ -145,22 +293,33 @@ impl Streams {
                 .any(Stream::has_waiters)
     }
 
-    fn snapshot(&self, key: Option<usize>) -> Result<Vec<(Arc<CommandList>, u64)>, CuResult> {
+    fn selected(&mut self, key: Option<usize>) -> Result<Vec<&mut Stream>, CuResult> {
         if let Some(key) = key.filter(|&key| key != 0) {
-            let stream = self.get(key)?;
-            return Ok(stream
-                .dirty
-                .then(|| (Arc::clone(&stream.list), stream.generation))
-                .into_iter()
-                .collect());
+            return Ok(vec![self.get_mut(key)?]);
         }
         Ok(self
-            .legacy
-            .iter()
-            .chain(self.explicit())
-            .filter(|stream| stream.dirty && (key.is_none() || stream.blocking))
-            .map(|stream| (Arc::clone(&stream.list), stream.generation))
+            .all_mut()
+            .filter(|stream| key.is_none() || stream.blocking)
             .collect())
+    }
+
+    fn snapshot(&mut self, api: &Api, key: Option<usize>) -> Result<Vec<Completion>, CuResult> {
+        self.selected(key)?
+            .into_iter()
+            .filter_map(|stream| match stream.flush(api) {
+                Ok(()) => stream.snapshot().map(Ok),
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    pub(super) fn experimental(&self) -> bool {
+        self.policy.is_some()
+    }
+
+    pub(super) fn stop(&mut self) -> Option<JoinHandle<()>> {
+        self.wake.notify_one();
+        self.worker.take()
     }
 
     fn collect_retired(&mut self, api: &Api) -> Result<(), CuResult> {
@@ -173,7 +332,7 @@ impl Streams {
             }
             match stream.wait(api, 0) {
                 Ok(()) => {
-                    stream.list.destroy(api).map_err(backend_error)?;
+                    stream.destroy(api)?;
                     self.retired.swap_remove(index);
                 }
                 Err(NotReady) => index += 1,
@@ -199,15 +358,13 @@ impl Streams {
                 // stream existed. The marker is itself an asynchronous append.
                 let completion = self.next_fence(api, context)?;
                 let legacy = self.get_mut(0)?;
-                legacy
-                    .list
-                    .signal(api, &completion)
-                    .map_err(backend_error)?;
-                legacy.submitted();
-                legacy.pending.push_back(Submission {
-                    completion,
-                    _waits: Vec::new(),
-                });
+                legacy.record(
+                    api,
+                    context,
+                    Some(completion),
+                    Vec::new(),
+                    |list, signal, _| list.signal(api, signal.unwrap()),
+                )?;
             }
             self.track_legacy = true;
         }
@@ -230,20 +387,11 @@ impl Streams {
         } else {
             None
         };
-        let waits = self.legacy_waits(key, blocking);
-        let stream = self.get_mut(key)?;
-        stream
-            .list
-            .launch(api, module, geometry, args, signal.as_deref(), &waits)
-            .map_err(backend_error)?;
-        stream.submitted();
-        if let Some(completion) = signal {
-            stream.pending.push_back(Submission {
-                completion,
-                _waits: waits,
-            });
-        }
-        Ok(())
+        let waits = self.legacy_waits(api, key, blocking)?;
+        self.get_mut(key)?
+            .record(api, context, signal, waits, |list, signal, waits| {
+                list.launch(api, module, geometry, args, signal, waits)
+            })
     }
 
     pub(super) unsafe fn copy(
@@ -261,39 +409,56 @@ impl Streams {
         } else {
             None
         };
-        let waits = self.legacy_waits(key, blocking);
-        let stream = self.get_mut(key)?;
-        unsafe {
-            stream
-                .list
-                .copy(api, pointers, size, signal.as_deref(), &waits)
-        }
-        .map_err(backend_error)?;
-        stream.submitted();
-        if let Some(completion) = signal {
-            stream.pending.push_back(Submission {
-                completion,
-                _waits: waits,
-            });
-        }
-        Ok(())
+        let waits = self.legacy_waits(api, key, blocking)?;
+        self.get_mut(key)?
+            .record(api, context, signal, waits, |list, signal, waits| unsafe {
+                list.copy(api, pointers, size, signal, waits)
+            })
     }
 
-    fn legacy_waits(&self, key: usize, blocking: bool) -> Vec<Arc<Fence>> {
+    fn legacy_waits(
+        &mut self,
+        api: &Api,
+        key: usize,
+        blocking: bool,
+    ) -> Result<Vec<Arc<Fence>>, CuResult> {
         if key == 0 {
-            self.explicit()
+            let mut waits = Vec::new();
+            for stream in self
+                .live
+                .values_mut()
+                .chain(&mut self.retired)
                 .filter(|stream| stream.blocking)
-                .filter_map(Stream::tail)
-                .collect()
+            {
+                stream.flush(api)?;
+                waits.extend(stream.tail());
+            }
+            Ok(waits)
         } else if blocking {
-            self.legacy
-                .as_ref()
-                .and_then(Stream::tail)
-                .into_iter()
-                .collect()
+            let legacy = self.get_mut(0)?;
+            legacy.flush(api)?;
+            Ok(legacy.tail().into_iter().collect())
         } else {
-            Vec::new()
+            Ok(Vec::new())
         }
+    }
+
+    fn flush_producer(
+        &mut self,
+        api: &Api,
+        producer: usize,
+        fence: &Arc<Fence>,
+    ) -> Result<(), CuResult> {
+        // A removed producer submitted its last list before retirement.
+        if let Ok(stream) = self.get_mut(producer)
+            && let Some(batch) = &mut stream.batch
+        {
+            batch.check()?;
+            if batch.contains_recording(fence) {
+                batch.flush(api)?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn launch_key(&self, handle: Opaque) -> Result<usize, CuResult> {
@@ -303,6 +468,11 @@ impl Streams {
     }
 
     pub(super) fn wait_legacy(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
+        if timeout != 0 {
+            for stream in self.all_mut().filter(|stream| stream.blocking) {
+                stream.flush(api)?;
+            }
+        }
         for stream in self.all_mut().filter(|stream| stream.blocking) {
             stream.wait(api, timeout)?;
         }
@@ -310,6 +480,11 @@ impl Streams {
     }
 
     pub(super) fn wait_all(&mut self, api: &Api) -> Result<(), CuResult> {
+        let mut flushed = Ok(());
+        for stream in self.all_mut() {
+            flushed = flushed.and(stream.flush(api));
+        }
+        flushed?;
         for stream in self.all_mut() {
             stream.wait(api, u64::MAX)?;
         }
@@ -317,12 +492,12 @@ impl Streams {
     }
 
     pub(super) fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
-        if let Some(legacy) = &self.legacy {
-            legacy.list.destroy(api).map_err(backend_error)?;
+        if let Some(legacy) = &mut self.legacy {
+            legacy.destroy(api)?;
             self.legacy = None;
         }
-        while let Some((&key, stream)) = self.live.iter().next() {
-            stream.list.destroy(api).map_err(backend_error)?;
+        while let Some((&key, stream)) = self.live.iter_mut().next() {
+            stream.destroy(api)?;
             self.live.remove(&key);
         }
         self.events.clear();
@@ -343,14 +518,15 @@ pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> Cu
                 .streams
                 .track_legacy(&runtime.api, &context.backend)?;
         }
-        let list = context
-            .backend
-            .create_stream(&runtime.api)
-            .map_err(backend_error)?;
-        context
-            .streams
-            .live
-            .insert(key, Stream::new(list, flags == 0));
+        let streams = &mut context.streams;
+        let stream = Stream::new(
+            &runtime.api,
+            &context.backend,
+            flags == 0,
+            streams.policy,
+            &streams.wake,
+        )?;
+        streams.live.insert(key, stream);
         unsafe { out.write(std::ptr::without_provenance_mut(key)) };
         Ok(())
     }))
@@ -380,6 +556,7 @@ fn with_stream(
     state(|state| {
         let (owner, key) = stream_owner(state, handle)?;
         let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
+        context.check_live()?;
         action(&state.runtime.api, &mut context.streams, key)
     })
 }
@@ -392,6 +569,7 @@ pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
         }
         streams.collect_retired(api)?;
         let stream = streams.get_mut(key)?;
+        stream.flush(api)?;
         let ready = if stream.has_waiters() {
             Err(NotReady)
         } else {
@@ -399,7 +577,7 @@ pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
         };
         match ready {
             Ok(()) => {
-                stream.list.destroy(api).map_err(backend_error)?;
+                stream.destroy(api)?;
                 streams.live.remove(&key);
             }
             Err(NotReady) => {
@@ -415,14 +593,16 @@ pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
 fn synchronize(
     target: impl FnOnce(&State) -> Result<(usize, Option<usize>), CuResult>,
 ) -> Result<(), CuResult> {
-    let (owner, lists, wait) = state(|state| {
+    let (owner, lists, immediate_wait, fence_wait) = state(|state| {
         let (owner, key) = target(state)?;
         let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
+        context.check_live()?;
         context.streams.collect_retired(&state.runtime.api)?;
         Ok((
             owner,
-            context.streams.snapshot(key)?,
+            context.streams.snapshot(&state.runtime.api, key)?,
             state.runtime.api.stream_wait_fn(),
+            state.runtime.api.fence_wait_fn(),
         ))
     })?;
     if lists.is_empty() {
@@ -430,15 +610,24 @@ fn synchronize(
     }
     // Each snapshot keeps its list alive across destruction of the public stream
     // handle. The runtime and its Level Zero loader outlive all API calls.
-    for (list, _) in &lists {
-        list.wait_with(wait, u64::MAX).map_err(backend_error)?;
+    for completion in &lists {
+        match completion {
+            Completion::Immediate(list, _) => list.wait_with(immediate_wait, u64::MAX),
+            Completion::Regular(fence) => fence.wait(fence_wait, u64::MAX),
+        }
+        .map_err(backend_error)?;
     }
     state(move |state| {
         let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
         for stream in context.streams.all_mut() {
-            if lists.iter().any(|(list, generation)| {
-                Arc::ptr_eq(list, &stream.list) && *generation == stream.generation
-            }) {
+            if let Some(immediate) = &stream.immediate
+                && lists.iter().any(|completion| {
+                    matches!(completion,
+                        Completion::Immediate(list, generation)
+                            if Arc::ptr_eq(list, immediate) && *generation == stream.generation
+                    )
+                })
+            {
                 stream.complete();
             }
         }
@@ -519,8 +708,9 @@ mod tests {
                 .acquire(api, &context.backend)
                 .map_err(backend_error)?;
             let stream = context.streams.get_mut(gated.addr())?;
-            stream.list.gate(api, &gate).map_err(backend_error)?;
-            stream.submitted();
+            stream.record(api, &context.backend, None, Vec::new(), |list, _, _| {
+                list.gate(api, &gate)
+            })?;
             Ok(gate)
         })
         .unwrap();

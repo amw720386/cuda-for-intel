@@ -12,3 +12,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 libloading = "0.8"
 rspirv = "0.13"
+
+[features]
+experimental-batching = []

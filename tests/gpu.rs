@@ -962,6 +962,9 @@ fn asynchronous_stream_order_and_lifetimes() {
     ok!(cuStreamCreate(&mut first, 1));
     ok!(cuStreamCreate(&mut second, 1));
     ok!(cuStreamQuery(first));
+    // The preceding launch may still be pending when a blocking stream is created.
+    assert!(matches!(unsafe { cuStreamQuery(legacy) }, 0 | 600));
+    ok!(cuStreamSynchronize(legacy));
     ok!(cuStreamQuery(legacy));
 
     let mut foreign_context = null_mut();

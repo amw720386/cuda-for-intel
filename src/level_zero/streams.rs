@@ -5,7 +5,7 @@ use super::{
 use std::ptr::null_mut;
 use std::sync::Arc;
 
-pub(crate) struct CommandList(Handle);
+pub(crate) struct CommandList(pub(super) Handle);
 
 // Submissions remain serialized by the frontend. Level Zero permits immediate-list
 // host synchronization from simultaneous threads.
@@ -91,6 +91,12 @@ impl CommandList {
         let mut events = WaitEvents::new(waits)?;
         check("zeCommandListAppendBarrier", unsafe {
             (api.zeCommandListAppendBarrier)(self.0.0, signal.handle.0, events.count, events.ptr())
+        })
+    }
+
+    pub(crate) fn queue_barrier(&self, api: &Api) -> Result<(), Error> {
+        check("zeCommandListAppendBarrier", unsafe {
+            (api.zeCommandListAppendBarrier)(self.0.0, null_mut(), 0, null_mut())
         })
     }
 
@@ -189,8 +195,12 @@ unsafe impl Sync for Fence {}
 
 impl Fence {
     pub(crate) fn synchronize(&self, wait: WaitFn) -> Result<(), Error> {
+        self.wait(wait, u64::MAX)
+    }
+
+    pub(crate) fn wait(&self, wait: WaitFn, timeout: u64) -> Result<(), Error> {
         check("zeEventHostSynchronize", unsafe {
-            wait(self.handle.0, u64::MAX)
+            wait(self.handle.0, timeout)
         })
     }
 

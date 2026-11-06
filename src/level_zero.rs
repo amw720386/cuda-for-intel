@@ -3,6 +3,8 @@ use libloading::Library;
 use std::ffi::{CStr, c_char, c_void};
 use std::fmt;
 
+mod regular;
+pub(crate) use regular::{Queue, QueueFence};
 mod streams;
 pub(crate) use streams::{CommandList, Fence, Fences};
 #[cfg(test)]
@@ -269,6 +271,17 @@ loader_api! {
     zeContextCreate(Raw, *const ContextDesc, *mut Raw),
     zeContextDestroy(Raw),
     zeCommandListCreateImmediate(Raw, Raw, *const QueueDesc, *mut Raw),
+    zeCommandListCreate(Raw, Raw, *const regular::ListDesc, *mut Raw),
+    zeCommandListClose(Raw),
+    zeCommandListReset(Raw),
+    zeCommandQueueCreate(Raw, Raw, *const QueueDesc, *mut Raw),
+    zeCommandQueueDestroy(Raw),
+    zeCommandQueueExecuteCommandLists(Raw, u32, *mut Raw, Raw),
+    zeFenceCreate(Raw, *const regular::FenceDesc, *mut Raw),
+    zeFenceDestroy(Raw),
+    zeFenceReset(Raw),
+    zeFenceQueryStatus(Raw),
+    zeFenceHostSynchronize(Raw, u64),
     zeCommandListDestroy(Raw),
     zeCommandListHostSynchronize(Raw, u64),
     zeCommandListAppendSignalEvent(Raw, Raw),

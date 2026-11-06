@@ -29,10 +29,15 @@ use {linked_ok as ok, linked_symbols as symbols};
 
 #[path = "../../../tests/gpu/forge_workload.rs"]
 mod forge_workload;
+pub(super) use forge_workload::arg;
 use forge_workload::*;
 #[path = "../../../tests/gpu/pipeline.rs"]
 mod pipeline;
 use pipeline::{Mode, Trace};
+
+pub(super) fn run_bench_pipeline() {
+    pipeline::run_pipeline(None, true);
+}
 
 const STAGES: [&str; 7] = [
     "HtoD input",
@@ -117,8 +122,13 @@ impl Trace for Profile {
             let api = &runtime.api;
             if let Some(stream) = stream {
                 let list = context.streams.get_mut(super::stream_key(stream)?)?;
-                unsafe { list.list.append_timestamp(&self.clock, dst) }.map_err(backend_error)?;
-                list.submitted();
+                list.record(
+                    api,
+                    &context.backend,
+                    None,
+                    Vec::new(),
+                    |list, _, _| unsafe { list.append_timestamp(&self.clock, dst) },
+                )?;
             } else {
                 // Match the wait already required by a blocking CUDA copy.
                 context.streams.wait_legacy(api, u64::MAX)?;
@@ -486,8 +496,9 @@ fn gated_timestamp_storage_survives_stream_retirement() {
                 .acquire(api, &context.backend)
                 .map_err(backend_error)?;
             let list = context.streams.get_mut(stream.addr())?;
-            list.list.gate(api, &gate).map_err(backend_error)?;
-            list.submitted();
+            list.record(api, &context.backend, None, Vec::new(), |list, _, _| {
+                list.gate(api, &gate)
+            })?;
             Ok(gate)
         })
         .unwrap();

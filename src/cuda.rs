@@ -43,6 +43,7 @@ struct CudaContext {
     backend: Context,
     streams: Streams,
     device: c_int,
+    teardown_error: Option<CuResult>,
     allocations: BTreeMap<usize, usize>,
     host_allocations: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
@@ -130,6 +131,7 @@ fn with_context_handles<T>(
     state(|state| {
         let key = current().ok_or(InvalidContext)?;
         let context = state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?;
+        context.check_live()?;
         action(&state.runtime, context, &mut state.next_handle)
     })
 }
@@ -195,7 +197,7 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
         let key = reserve_handle(&mut state.next_handle)?;
         let api = &state.runtime.api;
         let mut backend = Context::create(api, device).map_err(backend_error)?;
-        let streams = match Streams::new(api, &backend) {
+        let streams = match Streams::new(api, &backend, key) {
             Ok(streams) => streams,
             Err(error) => {
                 if let Err(cleanup) = backend.destroy(api) {
@@ -210,6 +212,7 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
                 backend,
                 streams,
                 device: ordinal,
+                teardown_error: None,
                 allocations: BTreeMap::new(),
                 host_allocations: BTreeMap::new(),
                 modules: HashMap::new(),
@@ -224,26 +227,26 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
-    status(state(|state| {
+    let destroyed = state(|state| {
         let key = handle.addr();
         let context = state.contexts.get_mut(&key).ok_or(InvalidContext)?;
-        let api = &state.runtime.api;
         // Context teardown cannot invalidate a list another host call is using.
         if context.streams.has_waiters() {
             return Err(NotReady);
         }
-        context.streams.wait_all(api)?;
-        while let Some(&key) = context.modules.keys().next() {
-            context.unload(api, key)?;
+        let result = context.destroy(&state.runtime.api);
+        if let Err(error) = result {
+            // A failed experimental drain may leave driver references to any
+            // part of the context. Quarantine it and stop the worker.
+            let worker = if context.streams.experimental() {
+                context.teardown_error = Some(error);
+                context.streams.stop()
+            } else {
+                None
+            };
+            return Ok((result, worker));
         }
-        while let Some((&base, _)) = context.allocations.first_key_value() {
-            context.free(api, base)?;
-        }
-        while let Some((&base, _)) = context.host_allocations.first_key_value() {
-            context.free_host(api, base)?;
-        }
-        context.streams.destroy(api)?;
-        context.backend.destroy(api).map_err(backend_error)?;
+        let worker = context.streams.stop();
         state.contexts.remove(&key);
         CURRENT.with(|stack| {
             let mut stack = stack.borrow_mut();
@@ -251,7 +254,13 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
                 stack.pop();
             }
         });
-        Ok(())
+        Ok((result, worker))
+    });
+    status(destroyed.and_then(|(result, worker)| {
+        if let Some(worker) = worker {
+            worker.join().map_err(|_| Unknown)?;
+        }
+        result
     }))
 }
 
@@ -302,6 +311,25 @@ pub extern "system" fn cuCtxSynchronize() -> CuResult {
 }
 
 impl CudaContext {
+    fn check_live(&self) -> Result<(), CuResult> {
+        self.teardown_error.map_or(Ok(()), Err)
+    }
+
+    fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
+        self.streams.wait_all(api)?;
+        while let Some(&key) = self.modules.keys().next() {
+            self.unload(api, key)?;
+        }
+        while let Some((&base, _)) = self.allocations.first_key_value() {
+            self.free(api, base)?;
+        }
+        while let Some((&base, _)) = self.host_allocations.first_key_value() {
+            self.free_host(api, base)?;
+        }
+        self.streams.destroy(api)?;
+        self.backend.destroy(api).map_err(backend_error)
+    }
+
     fn free_host(&mut self, api: &Api, base: usize) -> Result<(), CuResult> {
         self.backend.free(api, base).map_err(backend_error)?;
         self.host_allocations.remove(&base);
