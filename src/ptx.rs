@@ -358,7 +358,15 @@ mod tests {
         use std::process::{Command, Stdio};
 
         let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
-        for source in [VECTOR_ADD, SHARED, BLOCK_REDUCE, ATOMIC_TICKETS, RMSNORM] {
+        for source in [
+            VECTOR_ADD,
+            SHARED,
+            BLOCK_REDUCE,
+            ATOMIC_TICKETS,
+            RMSNORM,
+            include_str!("../examples/forge_residual.ptx"),
+            include_str!("../examples/forge_reduce.ptx"),
+        ] {
             let translated = translate(source).unwrap();
             let mut process = Command::new(&validator)
                 .args(["--target-env", "opencl2.2", "-"])

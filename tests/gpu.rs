@@ -7,6 +7,9 @@ use std::ptr::null_mut;
 
 type Handle = *mut c_void;
 
+#[path = "gpu/forge.rs"]
+mod forge;
+
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
         $(
@@ -24,6 +27,8 @@ macro_rules! ok {
         assert_eq!(unsafe { $name($($arg),*) }, 0, "{}", stringify!($name))
     };
 }
+
+use {ok, symbols};
 
 fn library() -> Library {
     let exe = std::env::current_exe().unwrap();
