@@ -33,10 +33,10 @@ Method: per-case isolation (`test-backend-ops test -b CUDA0 -o '<full case strin
 
 | chunk | case | status |
 |---|---|---|
-| qwen_attn_kq | `f16,type_b=f32,m=512,n=512,k=64 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / C:\Users\USER\cfi-work\llamacpp\src\ggml\src\ggml-cuda\ggml-cuda.cu:111: CUDA error |
-| qwen_attn_kqv | `f16,type_b=f32,m=64,n=32,k=128 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / C:\Users\USER\cfi-work\llamacpp\src\ggml\src\ggml-cuda\ggml-cuda.cu:111: CUDA error |
-| qwen_attn_kqv | `f16,type_b=f32,m=64,n=32,k=512 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / C:\Users\USER\cfi-work\llamacpp\src\ggml\src\ggml-cuda\ggml-cuda.cu:111: CUDA error |
-| qwen_attn_kqv | `f16,type_b=f32,m=64,n=512,k=512 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / C:\Users\USER\cfi-work\llamacpp\src\ggml\src\ggml-cuda\ggml-cuda.cu:111: CUDA error |
+| qwen_attn_kq | `f16,type_b=f32,m=512,n=512,k=64 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / ggml-cuda.cu:111: CUDA error |
+| qwen_attn_kqv | `f16,type_b=f32,m=64,n=32,k=128 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / ggml-cuda.cu:111: CUDA error |
+| qwen_attn_kqv | `f16,type_b=f32,m=64,n=32,k=512 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / ggml-cuda.cu:111: CUDA error |
+| qwen_attn_kqv | `f16,type_b=f32,m=64,n=512,k=512 bs=[2,1],nr=[7,1]` | CRASH(exit=-1073740791) CUDA error: CUBLAS_STATUS_EXECUTION_FAILED / ggml-cuda.cu:111: CUDA error |
 
 ## Perplexity, GPU vs CPU (wikitext-2 test, first 20 chunks, -c 512, flash attention off, f16 KV)
 
