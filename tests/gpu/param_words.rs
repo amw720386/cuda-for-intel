@@ -74,7 +74,6 @@ fn aggregate_param_offset16_roundtrip() {
     ok!(cuInit(0));
     let mut context = null_mut();
     ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
-    let source = std::ffi::CString::new(SOURCE.replace("%f1", "%f1")).unwrap();
     // Fix: need .reg .f32 for f1
     let source = std::ffi::CString::new(SOURCE.replace(
         ".reg .b32 %r<4>;",
