@@ -399,9 +399,9 @@ zluda/atomics/atomics_128.ptx	pass	strict-fail
 zluda/barrier/bar_red_and_pred.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.red.and.pred %pred , 1 , %cond
 zluda/barrier/membar.ptx	pass	strict-fail	
 zluda/barrier/spirv_build__bar_sync.ptx	pass	strict-fail	
-zluda/bitmanip/bfe.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
-zluda/bitmanip/bfi.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
-zluda/bitmanip/bfind_shiftamt.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
+zluda/bitmanip/bfe.ptx	pass	strict-fail	
+zluda/bitmanip/bfi.ptx	pass	strict-fail	
+zluda/bitmanip/bfind_shiftamt.ptx	pass	strict-fail	
 zluda/bitmanip/bmsk_clamp_b32.ptx	pass	strict-fail	
 zluda/bitmanip/brev.ptx	pass	strict-fail	
 zluda/bitmanip/clz.ptx	pass	strict-fail	
@@ -419,7 +419,7 @@ zluda/bitmanip/shf_l_wrap.ptx	pass	strict-fail
 zluda/bitmanip/shf_r.ptx	pass	strict-fail	
 zluda/bitmanip/shf_r_clamp.ptx	pass	strict-fail	
 zluda/bitmanip/shf_r_wrap.ptx	pass	strict-fail	
-zluda/bitmanip/vshr_clamp.ptx	unsupported	strict-fail	unsupported PTX instruction: vshr.u32.u32.u32.clamp.add temp0 , temp1 , temp2 , temp3
+zluda/bitmanip/vshr_clamp.ptx	unsupported	strict-fail	unsupported PTX instruction: vshr.u32.u32.u32.clamp.add %temp0 , %temp1 , %temp2 , %temp3
 zluda/control/assertfail.ptx	pass	strict-fail	
 zluda/control/b64tof64.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.u64 %temp
 zluda/control/block.ptx	error	strict-fail	undefined PTX register %__sc1_temp2 on an incoming path
@@ -442,7 +442,7 @@ zluda/cp_async/createpolicy.ptx	pass	strict-fail
 zluda/cvt/cvt_f16x2_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_f64_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_pack.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.pack.sat.u8.s32.b32 %result1 , %src1 , %src2 , %src3
-zluda/cvt/cvt_relu_f16x2_f32.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
+zluda/cvt/cvt_relu_f16x2_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_rn_bf16x2_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_rn_f16x2_e4m3x2.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.e4m3x2 %result , %in
 zluda/cvt/cvt_rn_f16x2_e5m2x2.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.e5m2x2 %result , %in
@@ -459,7 +459,7 @@ zluda/cvt/cvt_u64_f16.ptx	pass	strict-fail
 zluda/cvt/cvta.ptx	error	strict-fail	expected Address(Global) for %in_addr, got B64
 zluda/cvt/uint_to_fp_bf16.ptx	pass	strict-fail	
 zluda/float_math/abs.ptx	pass	strict-fail	
-zluda/float_math/add_ftz.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
+zluda/float_math/add_ftz.ptx	pass	strict-fail	
 zluda/float_math/copysign.ptx	pass	strict-fail	
 zluda/float_math/cos.ptx	pass	strict-fail	
 zluda/float_math/div_approx.ptx	pass	strict-fail	
@@ -480,17 +480,17 @@ zluda/float_math/neg.ptx	pass	strict-fail
 zluda/float_math/rcp.ptx	pass	strict-fail	
 zluda/float_math/rcp_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: rcp.rz.f64 %temp , %temp
 zluda/float_math/rsqrt.ptx	pass	strict-fail	
-zluda/float_math/set_f16.ptx	error	strict-fail	missing or mismatched PTX declaration for in16_0
-zluda/float_math/set_gt_f16x2.ptx	error	strict-fail	missing or mismatched PTX declaration for in32_0
+zluda/float_math/set_f16.ptx	pass	strict-fail	
+zluda/float_math/set_gt_f16x2.ptx	pass	strict-fail	
 zluda/float_math/sin.ptx	pass	strict-fail	
 zluda/float_math/sink.ptx	error	strict-fail	missing or mismatched PTX declaration for _
 zluda/float_math/sqrt.ptx	pass	strict-fail	
 zluda/float_math/sqrt_rn_ftz.ptx	pass	strict-fail	
 zluda/float_math/tanh.ptx	pass	strict-fail	
 zluda/integer/add.ptx	pass	strict-fail	
-zluda/integer/add_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 r0 , a0 , b0
+zluda/integer/add_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 %r0 , %a0 , %b0
 zluda/integer/add_non_coherent.ptx	pass	strict-fail	
-zluda/integer/add_s32_sat.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
+zluda/integer/add_s32_sat.ptx	pass	strict-fail	
 zluda/integer/add_tuning.ptx	pass	strict-fail	
 zluda/integer/addc_cc_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 %cc_cf , 0xffffffffffffffffU , 1
 zluda/integer/and.ptx	pass	strict-fail	
@@ -524,7 +524,7 @@ zluda/integer/shr.ptx	pass	strict-fail
 zluda/integer/shr_oob.ptx	pass	strict-fail	
 zluda/integer/sign_extend.ptx	pass	strict-fail	
 zluda/integer/sub.ptx	pass	strict-fail	
-zluda/integer/sub_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: sub.cc.u32 r0 , a0 , b0
+zluda/integer/sub_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: sub.cc.u32 %r0 , %a0 , %b0
 zluda/integer/subc_cc_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 %cc_cf , 0xffffffffffffffffU , 1
 zluda/integer/xor.ptx	pass	strict-fail	
 zluda/ldmatrix/ldmatrix.ptx	error	strict-fail	undefined PTX register %tid.x on an incoming path
@@ -539,7 +539,7 @@ zluda/memory/extern_shared_call.ptx	error	strict-fail	undefined PTX register sha
 zluda/memory/global_array.ptx	error	strict-fail	unknown PTX local symbol foobar
 zluda/memory/global_array_f32.ptx	error	strict-fail	unknown PTX local symbol foobar
 zluda/memory/implicit_param.ptx	unsupported	strict-fail	unsupported PTX instruction: .param .b32 temp_param
-zluda/memory/instruction_mode_to_global_mode__fold_denormal.ptx	unsupported	strict-fail	unsupported integer operand temp1
+zluda/memory/instruction_mode_to_global_mode__fold_denormal.ptx	error	strict-fail	undefined PTX register %temp1 on an incoming path
 zluda/memory/ld_st.ptx	pass	strict-fail	
 zluda/memory/ld_st_implicit.ptx	error	strict-fail	missing or mismatched PTX declaration for %temp
 zluda/memory/ld_st_offset.ptx	pass	strict-fail	
@@ -567,13 +567,13 @@ zluda/memory/test__vectorAdd_11.ptx	pass	strict-pass
 zluda/memory/test__vectorAdd_kernel64.ptx	error	strict-fail	unexpected slash in PTX
 zluda/memory/vector.ptx	unsupported	strict-fail	unsupported PTX register type .v2
 zluda/memory/vector4.ptx	unsupported	strict-fail	unsupported PTX register type .v4
-zluda/memory/vector8.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u32 { dst0 , dst1 , dst2 , dst3 , dst4 , dst5 , dst6 , dst7 } , [ %in_addr ]
-zluda/memory/vector8_extract.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u8 { temp0 , temp1 , temp2 , temp3 , temp4 , temp5 , temp6 , temp7 } , [ %in_addr ]
+zluda/memory/vector8.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u32 { %dst0 , %dst1 , %dst2 , %dst3 , %dst4 , %dst5 , %dst6 , %dst7 } , [ %in_addr ]
+zluda/memory/vector8_extract.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u8 { %temp0 , %temp1 , %temp2 , %temp3 , %temp4 , %temp5 , %temp6 , %temp7 } , [ %in_addr ]
 zluda/memory/vector_extract.ptx	unsupported	strict-fail	unsupported PTX register type .v4.u16
 zluda/memory/vector_operand.ptx	pass	strict-fail	
-zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { d0 , d1 , d2 , d3 } , { %a0a1 , %a2a3 , %a4a5 , %a6a7 } , { %b0b1 , %b2b3 } , { in0 , in1 , in2 , in3 }
-zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32_2x.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { d0 , d1 , d2 , d3 } , { %a0a1 , %a2a3 , %a4a5 , %a6a7 } , { %b0b1 , %b2b3 } , { in0 , in1 , in2 , in3 }
-zluda/mma/mma_m16n8k16_f32_f16_f16_f32.ptx	error	strict-fail	missing or mismatched PTX declaration for in0
+zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %d0 , %d1 , %d2 , %d3 } , { %a0a1 , %a2a3 , %a4a5 , %a6a7 } , { %b0b1 , %b2b3 } , { %in0 , %in1 , %in2 , %in3 }
+zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32_2x.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %d0 , %d1 , %d2 , %d3 } , { %a0a1 , %a2a3 , %a4a5 , %a6a7 } , { %b0b1 , %b2b3 } , { %in0 , %in1 , %in2 , %in3 }
+zluda/mma/mma_m16n8k16_f32_f16_f16_f32.ptx	pass	strict-fail	
 zluda/mma/mma_m16n8k32_s32_s8_s8_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
 zluda/mma/mma_m16n8k32_s32_s8_s8_s32_interleave.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
 zluda/shfl/shfl_sync_bfly_b32_pred.ptx	pass	strict-fail	
