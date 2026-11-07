@@ -125,6 +125,13 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
     // Treat memory loads and all definitions under divergent control as potentially varying.
     // Repeat because a loop-carried definition can affect an earlier branch.
     let mut varying = HashSet::new();
+    // Values computed from `%tid.x` by ALU instructions alone (`%tid.y/z` conditions guard
+    // rows that PTX programmers keep uniform by launching with `ntid.y == 1` where a block
+    // cooperates along x; that cannot be proven statically) (no memory in between): a branch
+    // on one of these is provably thread-divergent. Branches that are only "varying" because
+    // of an unknown load or a divergent region are assumed to be taken by all threads, as
+    // PTX programmers do for `__syncthreads` under data-dependent but block-uniform control.
+    let mut tid_derived: HashSet<&str> = HashSet::new();
     let mut local_derived: HashSet<&str> = HashSet::new();
     let mut checked_branches = vec![false; blocks.len()];
     loop {
@@ -154,6 +161,14 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                     if thread_dependent || (inst.is_memory_load() && !uniform_load) {
                         varying.extend(defined.iter().copied());
                     }
+                    let tid_dependent = !inst.is_memory_load()
+                        && inputs.iter().any(|src| {
+                            let b = base(src);
+                            src.starts_with("%tid.x") || tid_derived.contains(src) || tid_derived.contains(b.as_str())
+                        });
+                    if tid_dependent {
+                        tid_derived.extend(defined.iter().copied());
+                    }
                 }
             }
             let Terminator::Branch {
@@ -176,6 +191,10 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                     && matches!(blocks[block].end, Terminator::Return)
             };
             if exit_only(taken) || exit_only(other) {
+                continue;
+            }
+            if !tid_derived.contains(predicate) {
+                // Not provably divergent: lower the barriers under it as reached by all threads.
                 continue;
             }
             checked_branches[index] = true;
