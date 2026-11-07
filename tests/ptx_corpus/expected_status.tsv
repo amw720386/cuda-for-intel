@@ -483,7 +483,7 @@ zluda/float_math/rsqrt.ptx	pass	strict-fail
 zluda/float_math/set_f16.ptx	pass	strict-fail	
 zluda/float_math/set_gt_f16x2.ptx	pass	strict-fail	
 zluda/float_math/sin.ptx	pass	strict-fail	
-zluda/float_math/sink.ptx	error	strict-fail	missing or mismatched PTX declaration for _
+zluda/float_math/sink.ptx	pass	strict-fail	
 zluda/float_math/sqrt.ptx	pass	strict-fail	
 zluda/float_math/sqrt_rn_ftz.ptx	pass	strict-fail	
 zluda/float_math/tanh.ptx	pass	strict-fail	
@@ -527,15 +527,15 @@ zluda/integer/sub.ptx	pass	strict-fail
 zluda/integer/sub_extended.ptx	pass	strict-fail	
 zluda/integer/subc_cc_s32.ptx	pass	strict-fail	
 zluda/integer/xor.ptx	pass	strict-fail	
-zluda/ldmatrix/ldmatrix.ptx	error	strict-fail	undefined PTX register %tid.x on an incoming path
+zluda/ldmatrix/ldmatrix.ptx	error	strict-fail	expected B64 for %values_g_addr, got Address(Global)
 zluda/ldmatrix/ldmatrix_trans.ptx	unsupported	strict-fail	unsupported PTX register type .v2.b16
 zluda/memory/const.ptx	pass	strict-fail	
 zluda/memory/const_ident.ptx	unsupported	strict-fail	unsupported PTX initialiser element x
 zluda/memory/constant_f32.ptx	pass	strict-fail	
 zluda/memory/constant_negative.ptx	pass	strict-fail	
 zluda/memory/extern_func.ptx	unsupported	strict-fail	unsupported PTX instruction: call.uni ( retval0 ) , foobar , ( param0 )
-zluda/memory/extern_shared.ptx	error	strict-fail	undefined PTX register shared_mem on an incoming path
-zluda/memory/extern_shared_call.ptx	error	strict-fail	undefined PTX register shared_mem on an incoming path
+zluda/memory/extern_shared.ptx	pass	strict-fail	
+zluda/memory/extern_shared_call.ptx	pass	strict-fail	
 zluda/memory/global_array.ptx	pass	strict-fail	
 zluda/memory/global_array_f32.ptx	pass	strict-fail	
 zluda/memory/implicit_param.ptx	unsupported	strict-fail	unsupported PTX instruction: .param .b32 temp_param

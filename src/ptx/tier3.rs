@@ -39,6 +39,10 @@ pub(super) struct State {
     /// Names of module-scope `.global` / `.const` data (kept across entries).
     module_globals: Vec<String>,
     uses_gsym: bool,
+    sink_count: u32,
+    sink_max: u32,
+    sink_wide: bool,
+    uses_sr: bool,
 }
 
 impl State {
@@ -77,6 +81,12 @@ impl State {
         }
         if self.uses_gsym {
             decls.push(".reg .b64 %__gsym ;".into());
+        }
+        if self.uses_sr {
+            decls.push(".reg .b32 %__sr ;".into());
+        }
+        if self.sink_max > 0 {
+            decls.push(format!(".reg .b32 %__sink_<{}> ;", self.sink_max));
         }
         if self.cc {
             decls.push(".reg .b32 %__cc ;".into());
@@ -212,6 +222,9 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         }
         return Some(again(ctx, &copy));
     }
+    if let Some(lines) = sinks_and_special_registers(ctx, inst) {
+        return Some(lines);
+    }
     if let Some(lines) = symbol_operands(ctx, inst) {
         return Some(lines);
     }
@@ -263,6 +276,14 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         "bar" | "barrier" => barrier(ctx, inst),
         "stmatrix" => stmatrix(ctx, inst),
         "atom" | "red" => atomic_forms(ctx, inst),
+        "mov" if matches!(inst.op.as_str(), "mov.b32" | "mov.s32")
+            && inst.operands.len() == 2
+            && (inst.operand(1).starts_with("%tid.") || inst.operand(1).starts_with("%ntid.")
+                || inst.operand(1).starts_with("%ctaid.") || inst.operand(1).starts_with("%nctaid.")
+                || inst.operand(1) == "%laneid") =>
+        {
+            Some(vec![render(&inst.guard, "mov.u32", &inst.operands)])
+        }
         "shfl" => shfl_masks(ctx, inst),
         "vote" => vote_masks(ctx, inst),
         "cvt" => cvt_misc(ctx, inst),
@@ -1052,8 +1073,9 @@ pub(super) fn entry_locals(statements: &[super::Stmt]) -> Vec<Vec<(String, u32, 
 }
 
 /// Starts an entry: lays the entry's `.local` arrays out in one merged array.
-pub(super) fn begin_entry(st: &mut State, locals: Vec<(String, u32, u32)>) {
+pub(super) fn begin_entry(st: &mut State, locals: Vec<(String, u32, u32)>, dynamic: Option<&str>) {
     st.locals.clear();
+    st.sink_count = 0;
     st.shared.clear();
     st.local_bytes = 0;
     let mut offset = 0u32;
@@ -1063,6 +1085,9 @@ pub(super) fn begin_entry(st: &mut State, locals: Vec<(String, u32, u32)>) {
         st.locals.push((name, offset));
         offset += bytes;
         align = align.max(a);
+    }
+    if let Some(name) = dynamic {
+        st.shared.push(name.to_owned());
     }
     st.local_bytes = offset.next_multiple_of(4);
     st.local_align = if align >= 16 { 16 } else if align >= 8 { 8 } else { 4 };
@@ -1119,12 +1144,13 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             }
             return Some(lines);
         }
-        if ctx.t3.module_globals.contains(&base) && off != 0 {
+        if ctx.t3.module_globals.contains(&base) && (off != 0 || inst.op != "mov.u64") {
             let dst = inst.operand(0).to_owned();
-            return Some(vec![
-                render(&inst.guard, "mov.u64", &[dst.clone(), base]),
-                render(&inst.guard, "add.u64", &[dst.clone(), dst, off.to_string()]),
-            ]);
+            let mut lines = vec![render(&inst.guard, "mov.u64", &[dst.clone(), base])];
+            if off != 0 {
+                lines.push(render(&inst.guard, "add.u64", &[dst.clone(), dst, off.to_string()]));
+            }
+            return Some(lines);
         }
         return None;
     }
@@ -1525,4 +1551,60 @@ pub(super) fn module_decl(ctx: &mut Ctx, stmt: &[String]) {
             ctx.t3.module_globals.push(name);
         }
     }
+}
+
+/// `_` sink operands get a scratch register; special registers used outside `mov`
+/// are first copied into a register.
+fn sinks_and_special_registers(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let is_sink = |t: &str| t == "_";
+    let special = |t: &str| {
+        let name = t.trim().strip_prefix('%').unwrap_or("");
+        let (base, comp) = name.split_once('.').unwrap_or((name, ""));
+        matches!(base, "tid" | "ntid" | "ctaid" | "nctaid") && matches!(comp, "x" | "y" | "z")
+            || matches!(base, "laneid" | "warpid" | "nwarpid" | "smid") && comp.is_empty()
+    };
+    let has_sink = inst.operands.iter().any(|o| o.split_whitespace().any(is_sink));
+    let has_special = !inst.op.starts_with("mov.") && inst.operands.iter().any(|o| special(o));
+    if !has_sink && !has_special {
+        return None;
+    }
+    let mut lines = Vec::new();
+    let mut operands = inst.operands.clone();
+    if has_sink {
+        let wide = inst.op.contains("64") && !inst.op.starts_with("mov.");
+        let mut next = ctx.t3.sink_count;
+        for o in &mut operands {
+            let tokens: Vec<String> = o
+                .split_whitespace()
+                .map(|t| {
+                    if is_sink(t) {
+                        let name = format!("%__sink_{next}");
+                        next += 1;
+                        name
+                    } else {
+                        t.to_owned()
+                    }
+                })
+                .collect();
+            *o = tokens.join(" ");
+        }
+        let used = next - ctx.t3.sink_count;
+        ctx.t3.sink_count = next;
+        ctx.t3.sink_max = ctx.t3.sink_max.max(next);
+        ctx.t3.sink_wide = wide;
+        let _ = used;
+    }
+    if has_special {
+        for o in &mut operands {
+            if special(o) {
+                ctx.t3.uses_sr = true;
+                lines.push(format!("mov.u32 %__sr , {} ;", o.trim()));
+                *o = "%__sr".into();
+                break;
+            }
+        }
+    }
+    let copy = Inst { guard: inst.guard.clone(), op: inst.op.clone(), operands };
+    lines.extend(again(ctx, &copy));
+    Some(lines)
 }

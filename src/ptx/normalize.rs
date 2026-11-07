@@ -74,7 +74,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
         }
         if is_entry_header(&stmt) {
             ctx.widths.clear();
-            tier3::begin_entry(&mut ctx.t3, entry_locals.next().unwrap_or_default());
+            tier3::begin_entry(&mut ctx.t3, entry_locals.next().unwrap_or_default(), dynamic.as_ref().map(|(name, _)| name.as_str()));
             ctx.block_threads = block_threads(&stmt);
             let text = fix_entry_header(&stmt);
             out.push(text);

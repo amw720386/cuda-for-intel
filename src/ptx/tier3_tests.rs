@@ -438,3 +438,29 @@ fn module_scope_const_and_global_data() {
     assert!(module.types_global_values.iter().any(|i| i.class.opcode == rspirv::spirv::Op::Variable
         && i.operands.first() == Some(&rspirv::dr::Operand::StorageClass(rspirv::spirv::StorageClass::CrossWorkgroup))));
 }
+
+/// Debug helper: `PTX_IN=file.ptx cargo test show_normalized -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn show_normalized() {
+    let path = std::env::var("PTX_IN").unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    println!("{}", super::normalize::run(&text).unwrap());
+}
+
+/// Debug helper: prints the real parse/emit error that `translate` summarises.
+#[test]
+#[ignore]
+fn show_translate_error() {
+    let path = std::env::var("PTX_IN").unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    let norm = super::prepare(&text).unwrap();
+    println!("{norm}");
+    match super::parse::parse(&norm) {
+        Ok(entries) => match super::spirv::emit(entries) {
+            Ok(_) => println!("OK"),
+            Err(e) => println!("EMIT ERROR {e}"),
+        },
+        Err(e) => println!("PARSE ERROR {e}"),
+    }
+}
