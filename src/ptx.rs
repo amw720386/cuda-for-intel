@@ -874,10 +874,11 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
 }
 
 /// Merges nvcc's pairs of 16-bit loads into aligned 32-bit loads (see normalize);
-/// `CFI_OPT_LD16=0` turns it off. Measured +35% decode on Qwen2.5-0.5B Q8_0.
+/// Opt-in (`CFI_OPT_LD16=1`) until the batched-GEMM LaunchFailed seen after f00e7cc is explained.
+/// Measured +35% decode on Qwen2.5-0.5B Q8_0.
 pub(crate) fn load16_merge_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CFI_OPT_LD16").as_deref() != Some(std::ffi::OsStr::new("0")))
+    *ON.get_or_init(|| std::env::var_os("CFI_OPT_LD16").as_deref() == Some(std::ffi::OsStr::new("1")))
 }
 
 /// `CFI_OPT_SHFL=0` keeps the general computed-lane lowering for constant butterfly shuffles.
@@ -903,6 +904,12 @@ static DOT_PRODUCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// The runtime turns it on after the driver accepts a probe module; `CUDA_FOR_INTEL_DP4A=0` keeps it off.
 pub(crate) fn dot_product_enabled() -> bool {
     DOT_PRODUCT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bring-up switch for the dot-product encoding (`CFI_DP4A_MODE`): packed, signed or vec.
+pub(crate) fn dot_product_mode() -> &'static str {
+    static MODE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODE.get_or_init(|| std::env::var("CFI_DP4A_MODE").unwrap_or_else(|_| "packed".into()))
 }
 
 pub(crate) fn set_dot_product(enabled: bool) {
