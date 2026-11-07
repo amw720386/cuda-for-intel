@@ -13,6 +13,8 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
     entries.sort();
     for p in entries {
+        // The harness crate lives inside the corpus tree and symlinks back into the repo.
+        if p.file_name().is_some_and(|n| n == "harness" || n == "target") { continue; }
         if p.is_dir() { walk(&p, out) } else if p.extension().is_some_and(|e| e == "ptx") { out.push(p) }
     }
 }
