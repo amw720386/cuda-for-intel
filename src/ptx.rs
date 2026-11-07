@@ -510,6 +510,13 @@ enum Instruction<'a> {
         dst: [&'a str; 4],
         addr: &'a str,
     },
+    /// `ld.global.v2/v4.u8` — packed byte vector load, each lane zero-extended.
+    LoadVecU8 {
+        space: Space,
+        count: u8,
+        dst: [&'a str; 4],
+        addr: &'a str,
+    },
     AtomicAdd32(&'a str, &'a str, &'a str),
     /// CUDA `shfl.sync.bfly.b32` â€” warp butterfly exchange with an active mask.
     /// Sources are `[value, xor_mask, clamp, membermask]`.
@@ -606,6 +613,9 @@ impl<'a> Instruction<'a> {
                 count, dst, addr, ..
             }
             | LoadVecU16 {
+                count, dst, addr, ..
+            }
+            | LoadVecU8 {
                 count, dst, addr, ..
             } => {
                 out.extend_from_slice(&dst[..usize::from(*count)]);
@@ -715,6 +725,7 @@ impl<'a> Instruction<'a> {
                 | Self::LoadSigned { .. }
                 | Self::LoadVec { .. }
                 | Self::LoadVecU16 { .. }
+                | Self::LoadVecU8 { .. }
                 | Self::AtomicAdd32(..)
                 | Self::Atomic { .. }
                 | Self::Ext {
@@ -739,6 +750,7 @@ impl<'a> Instruction<'a> {
                 | Self::LoadSigned { space: Space::Local, .. }
                 | Self::LoadVec { space: Space::Local, .. }
                 | Self::LoadVecU16 { space: Space::Local, .. }
+                | Self::LoadVecU8 { space: Space::Local, .. }
         )
     }
 

@@ -2634,6 +2634,31 @@ impl<'a> Emitter<'a> {
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
                 (dst, bits32, Kind::B32)
             }
+            Instruction::LoadVecU8 {
+                space,
+                count,
+                dst,
+                addr,
+            } => {
+                let (base, base_off) = match addr.split_once('+') {
+                    Some((base, offset)) => (
+                        base,
+                        Self::parse_byte_offset(offset).ok_or_else(|| {
+                            Error::new(format!("unsupported PTX address offset {offset}"))
+                        })?,
+                    ),
+                    None => (addr, 0i64),
+                };
+                for index in 0..usize::from(count) {
+                    let off = base_off + index as i64;
+                    let lane_addr = if off == 0 { base.to_string() } else { format!("{base}+{off}") };
+                    let bytes = self.addressed_byte_pointer(space, &lane_addr)?;
+                    let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
+                    let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
+                    self.write(dst[index], Value { id: bits32, kind: Kind::B32 })?;
+                }
+                return Ok(());
+            }
             Instruction::LoadVecU16 {
                 space,
                 count,
