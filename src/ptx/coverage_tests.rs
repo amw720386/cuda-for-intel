@@ -814,3 +814,155 @@ fn mma_f16_shapes_match_reference() {
     check_f16_mma("m16n8k8", 8);
     check_f16_mma("m16n8k16", 16);
 }
+
+#[test]
+fn signed_subword_loads_and_shared_widths() {
+    let machine = eval_warp(
+        "",
+        ".shared .align 8 .b8 smem[64];",
+        r#"    mov.u32 %r1, smem;
+    mov.u32 %r2, 0xfedcba98;
+    st.shared.u32 [%r1], %r2;
+    st.shared.u32 [%r1+4], %r2;
+    ld.shared.s8 %r3, [%r1];
+    ld.shared.u16 %r4, [%r1+2];
+    ld.shared.s16 %r5, [%r1+2];
+    ld.shared.u64 %rd1, [%r1];
+    ld.shared.u8 %r6, [%r1+3];
+    st.shared.u16 [%r1+8], %r2;
+    ld.shared.u32 %r7, [%r1+8];
+    mov.u64 %rd2, 0x1122334455667788;
+    st.shared.u64 [%r1+16], %rd2;
+    ld.shared.u32 %r8, [%r1+20];
+    st.global.u32 [%rd15], %r3;
+    st.global.u32 [%rd15+4], %r4;
+    st.global.u32 [%rd15+8], %r5;
+    st.global.u64 [%rd15+16], %rd1;
+    st.global.u32 [%rd15+12], %r6;
+    st.global.u32 [%rd15+24], %r7;
+    st.global.u32 [%rd15+28], %r8;"#,
+        |_| {},
+    );
+    let word = |offset: u64| machine.read(OUT + offset, 4) as u32;
+    // Every lane stores the same values, so lane order does not matter.
+    assert_eq!(word(0), 0xffff_ff98);
+    assert_eq!(word(4), 0xfedc);
+    assert_eq!(word(8), 0xffff_fedc);
+    assert_eq!(machine.read(OUT + 16, 8), 0xfedc_ba98_fedc_ba98);
+    assert_eq!(word(12), 0xfe);
+    assert_eq!(word(24) & 0xffff, 0xba98);
+    assert_eq!(word(28), 0x1122_3344);
+}
+
+#[test]
+fn shared_address_conversions_round_trip_through_generic_pointers() {
+    // The nvcc idiom for __cvta_generic_to_shared and its inverse.
+    let machine = eval_warp(
+        "",
+        ".shared .align 4 .b8 first[16];\n    .shared .align 4 .b8 second[16];",
+        r#"    mov.u32 %r1, second;
+    {
+        .reg .b64 u64addr;
+        cvt.u64.u32 u64addr, %r1;
+        cvta.shared.u64 %rd1, u64addr;
+    }
+    mov.u32 %r2, 0x600dcafe;
+    st.u32 [%rd1+4], %r2;
+    ld.u32 %r3, [%rd1+4];
+    ld.shared.u32 %r4, [%r1+4];
+    {
+        .reg .u64 tmp;
+        cvta.to.shared.u64 tmp, %rd1;
+        cvt.u32.u64 %r5, tmp;
+    }
+    st.global.u32 [%rd15], %r3;
+    st.global.u32 [%rd15+4], %r4;
+    st.global.u32 [%rd15+8], %r5;
+    st.global.u32 [%rd15+12], %r1;"#,
+        |_| {},
+    );
+    assert_eq!(machine.read(OUT, 4), 0x600d_cafe);
+    assert_eq!(machine.read(OUT + 4, 4), 0x600d_cafe);
+    assert_eq!(machine.read(OUT + 8, 4), 16);
+    assert_eq!(machine.read(OUT + 12, 4), 16);
+}
+
+#[test]
+fn vector_u32_accesses_in_all_spaces_validate() {
+    lower(&kernel_with_shared(
+        "",
+        ".shared .align 16 .b8 smem[64];",
+        r#"    mov.u32 %r1, smem;
+    ld.global.nc.v4.u32 {%r2, %r3, %r4, %r5}, [%rd15];
+    st.shared.v4.u32 [%r1], {%r2, %r3, %r4, %r5};
+    ld.shared.v2.u32 {%r6, %r7}, [%r1+8];
+    st.global.v4.b32 [%rd15+16], {%r6, %r7, %r2, %r3};
+    ld.v4.u32 {%r8, %r9, %r10, %r11}, [%rd15+16];"#,
+    ));
+}
+
+fn ldmatrix_case(count: u8, trans: bool) {
+    let regs = (0..count).map(|i| format!("%r{}", 20 + i)).collect::<Vec<_>>().join(", ");
+    let trans_suffix = if trans { ".trans" } else { "" };
+    let stores: String = (0..count)
+        .map(|i| format!("    st.global.u32 [%rd13+{}], %r{};\n", 4 * i, 20 + i))
+        .collect();
+    let body = format!(
+        r#"    mov.u32 %r1, %laneid;
+    mov.u32 %r2, smem;
+    shl.b32 %r3, %r1, 4;
+    add.s32 %r3, %r3, %r2;
+    add.s64 %rd14, %rd15, 65536;
+    mul.wide.u32 %rd12, %r1, 16;
+    add.s64 %rd14, %rd14, %rd12;
+    ld.global.u32 %r4, [%rd14];
+    ld.global.u32 %r5, [%rd14+4];
+    ld.global.u32 %r6, [%rd14+8];
+    ld.global.u32 %r7, [%rd14+12];
+    st.shared.u32 [%r3], %r4;
+    st.shared.u32 [%r3+4], %r5;
+    st.shared.u32 [%r3+8], %r6;
+    st.shared.u32 [%r3+12], %r7;
+    bar.sync 0;
+    shr.u32 %r8, %r1, 3;
+    shl.b32 %r8, %r8, 7;
+    and.b32 %r9, %r1, 7;
+    shl.b32 %r9, %r9, 4;
+    add.s32 %r8, %r8, %r9;
+    add.s32 %r8, %r8, %r2;
+    ldmatrix.sync.aligned.m8n8.x{count}{trans_suffix}.shared.b16 {{{regs}}}, [%r8];
+    mul.wide.u32 %rd11, %r1, 16;
+    add.s64 %rd13, %rd15, %rd11;
+{stores}"#
+    );
+    let machine = eval_warp("", ".shared .align 16 .b8 smem[512];", &body, |machine| {
+        // 512 bytes of shared memory = four 8x8 b16 matrices (row-major, 16 B rows).
+        for byte in 0..512u64 {
+            machine.write(IN + byte, 1, (byte * 37 + 11) & 0xff);
+        }
+    });
+    let element = |matrix: u64, row: u64, col: u64| -> u32 {
+        let at = (matrix * 128 + row * 16 + col * 2) as u64;
+        (((at * 37 + 11) & 0xff) | ((((at + 1) * 37 + 11) & 0xff) << 8)) as u32
+    };
+    for lane in 0..32u64 {
+        for matrix in 0..u64::from(count) {
+            let (row, quad) = (lane / 4, lane % 4);
+            let expected = if trans {
+                element(matrix, quad * 2, row) | (element(matrix, quad * 2 + 1, row) << 16)
+            } else {
+                element(matrix, row, quad * 2) | (element(matrix, row, quad * 2 + 1) << 16)
+            };
+            let got = machine.read(OUT + lane * 16 + matrix * 4, 4) as u32;
+            assert_eq!(got, expected, "x{count} trans={trans} lane {lane} matrix {matrix}");
+        }
+    }
+}
+
+#[test]
+fn ldmatrix_matches_reference_fragment_layout() {
+    for count in [1, 2, 4] {
+        ldmatrix_case(count, false);
+        ldmatrix_case(count, true);
+    }
+}

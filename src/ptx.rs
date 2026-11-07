@@ -403,6 +403,17 @@ enum Instruction<'a> {
     StoreVec4U8(&'a str, [&'a str; 4]),
     /// `ld.global.u8` â€” zero-extend a byte into a 32-bit slot.
     Load8(Space, &'a str, &'a str),
+    /// `ld.{s8,s16}` — sign-extend a byte/halfword into the full 32-bit slot.
+    LoadSigned {
+        space: Space,
+        bits: u8,
+        dst: &'a str,
+        addr: &'a str,
+    },
+    /// `cvta.shared.u64 d, a` — shared window offset (or pointer) to a generic pointer.
+    CvtaShared(&'a str, &'a str),
+    /// `cvta.to.shared.{u32,u64} d, a` — generic pointer to a shared window offset.
+    CvtaToShared { wide: bool, dst: &'a str, src: &'a str },
     /// `ld.global.v2/v4.u16` â€” packed IEEE half / u16 vector load.
     LoadVecU16 {
         space: Space,
@@ -473,7 +484,8 @@ impl<'a> Instruction<'a> {
             Load32(_, dst, addr)
             | Load64(_, dst, addr)
             | Load16(_, dst, addr)
-            | Load8(_, dst, addr) => {
+            | Load8(_, dst, addr)
+            | LoadSigned { dst, addr, .. } => {
                 out.push(*dst);
                 std::slice::from_ref(addr)
             }
@@ -487,6 +499,8 @@ impl<'a> Instruction<'a> {
                 std::slice::from_ref(addr)
             }
             ToGlobal(dst, src)
+            | CvtaShared(dst, src)
+            | CvtaToShared { dst, src, .. }
             | Builtin(dst, src)
             | Move32(dst, src)
             | Move64(dst, src)
@@ -577,6 +591,7 @@ impl<'a> Instruction<'a> {
                 | Self::Load64(..)
                 | Self::Load16(..)
                 | Self::Load8(..)
+                | Self::LoadSigned { .. }
                 | Self::LoadVec { .. }
                 | Self::LoadVecU16 { .. }
                 | Self::AtomicAdd32(..)

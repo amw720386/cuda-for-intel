@@ -206,6 +206,14 @@ impl<'a> Parser<'a> {
         // nvcc wraps some helpers (notably __half2float) as `{ inst; }`.
         let braced = slice.first() == Some(&"{");
         let body = if braced { &slice[1..end] } else { &slice[..end] };
+        let patched: Vec<&str>;
+        let body = match body.first().and_then(|op| generic_to_global(op)) {
+            Some(op) => {
+                patched = std::iter::once(op).chain(body[1..].iter().copied()).collect();
+                &patched[..]
+            }
+            None => body,
+        };
         let result = match body {
             [
                 op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32"),
@@ -293,6 +301,13 @@ impl<'a> Parser<'a> {
                 }
             }
             ["cvta.to.global.u64", dst, ",", src] => Instruction::ToGlobal(dst, src),
+            ["cvta.shared.u64", dst, ",", src] => Instruction::CvtaShared(dst, src),
+            ["cvta.to.shared.u64", dst, ",", src] => {
+                Instruction::CvtaToShared { wide: true, dst, src }
+            }
+            ["cvta.to.shared.u32", dst, ",", src] => {
+                Instruction::CvtaToShared { wide: false, dst, src }
+            }
             ["mov.b64", dst, ",", src]
                 if !src.starts_with('%')
                     && !src.starts_with("0x")
@@ -744,6 +759,9 @@ impl<'a> Parser<'a> {
                 | "ld.global.f32"
                 | "ld.global.nc.u32"
                 | "ld.global.nc.f32"
+                | "ld.global.s32"
+                | "ld.shared.s32"
+                | "ld.local.s32"
                 | "ld.shared.b32"
                 | "ld.shared.f32"
                 | "ld.shared.u32"
@@ -766,35 +784,47 @@ impl<'a> Parser<'a> {
                 Instruction::Load32(space, dst, addr)
             }
             [
-                "ld.global.u64" | "ld.global.b64" | "ld.global.nc.u64" | "ld.global.nc.b64",
+                op @ ("ld.global.u64" | "ld.global.b64" | "ld.global.nc.u64" | "ld.global.nc.b64"
+                | "ld.global.s64" | "ld.shared.u64" | "ld.shared.b64" | "ld.local.u64"
+                | "ld.local.b64"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
-            ] => Instruction::Load64(Space::Global, dst, addr),
+            ] => Instruction::Load64(memory_space(op), dst, addr),
             [
-                op @ ("ld.global.u16" | "ld.global.b16" | "ld.global.nc.u16" | "ld.global.nc.b16"),
+                op @ ("ld.global.s8" | "ld.shared.s8" | "ld.local.s8" | "ld.global.s16"
+                | "ld.shared.s16" | "ld.local.s16" | "ld.global.nc.s8" | "ld.global.nc.s16"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
-            ] => {
-                let _ = op;
-                Instruction::Load16(Space::Global, dst, addr)
-            }
+            ] => Instruction::LoadSigned {
+                space: memory_space(op),
+                bits: if op.ends_with("s8") { 8 } else { 16 },
+                dst,
+                addr,
+            },
             [
-                op @ ("ld.global.u8" | "ld.global.b8" | "ld.global.nc.u8" | "ld.global.nc.b8"),
+                op @ ("ld.global.u16" | "ld.global.b16" | "ld.global.nc.u16" | "ld.global.nc.b16"
+                | "ld.shared.u16" | "ld.shared.b16" | "ld.local.u16" | "ld.local.b16"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
-            ] => {
-                let _ = op;
-                Instruction::Load8(Space::Global, dst, addr)
-            }
+            ] => Instruction::Load16(memory_space(op), dst, addr),
+            [
+                op @ ("ld.global.u8" | "ld.global.b8" | "ld.global.nc.u8" | "ld.global.nc.b8"
+                | "ld.shared.u8" | "ld.shared.b8" | "ld.local.u8" | "ld.local.b8"),
+                dst,
+                ",",
+                "[",
+                addr,
+                "]",
+            ] => Instruction::Load8(memory_space(op), dst, addr),
             [
                 op @ ("ld.global.v2.u16"
                 | "ld.global.nc.v2.u16"
@@ -845,19 +875,29 @@ impl<'a> Parser<'a> {
                 | "ld.global.v4.f32"
                 | "ld.global.nc.v4.f32"
                 | "ld.shared.v2.f32"
-                | "ld.local.v2.f32"),
+                | "ld.local.v2.f32"
+                | "ld.global.v2.u32"
+                | "ld.global.nc.v2.u32"
+                | "ld.global.v4.u32"
+                | "ld.global.nc.v4.u32"
+                | "ld.global.v2.b32"
+                | "ld.global.v4.b32"
+                | "ld.shared.v4.f32"
+                | "ld.shared.v2.u32"
+                | "ld.shared.v4.u32"
+                | "ld.shared.v2.b32"
+                | "ld.shared.v4.b32"
+                | "ld.local.v4.f32"
+                | "ld.local.v2.u32"
+                | "ld.local.v4.u32"),
                 "{",
                 a,
                 ",",
                 b,
                 rest @ ..,
             ] => {
-                let (count, space) = match *op {
-                    "ld.global.v4.f32" | "ld.global.nc.v4.f32" => (4u8, Space::Global),
-                    "ld.global.v2.f32" | "ld.global.nc.v2.f32" => (2, Space::Global),
-                    "ld.local.v2.f32" => (2, Space::Local),
-                    _ => (2, Space::Shared),
-                };
+                let count = if op.contains(".v4.") { 4u8 } else { 2 };
+                let space = memory_space(op);
                 let (c, d, addr) = if count == 4 {
                     match rest {
                         [",", c, ",", d, "}", ",", "[", addr, "]"] => (*c, *d, *addr),
@@ -978,40 +1018,34 @@ impl<'a> Parser<'a> {
                 Instruction::Float32(dst, FloatOp::Ex2Approx([src]))
             }
             [
-                "st.global.u8" | "st.global.b8" | "st.shared.u8" | "st.shared.b8" | "st.u8",
+                "st.global.u8" | "st.global.b8" | "st.shared.u8" | "st.shared.b8" | "st.local.u8"
+                | "st.local.b8",
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
             ] => {
-                let space = if body[0].starts_with("st.shared") {
-                    Space::Shared
-                } else {
-                    Space::Global
-                };
-                Instruction::Store8(space, addr, src)
+                Instruction::Store8(memory_space(body[0]), addr, src)
             }
             [
-                "st.global.u16" | "st.global.b16" | "st.u16",
+                "st.global.u16" | "st.global.b16" | "st.shared.u16" | "st.shared.b16"
+                | "st.local.u16" | "st.local.b16",
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
-            ] => {
-                // In this subset generic pointers are global. The emitter rejects
-                // explicitly typed local or shared addresses at this store.
-                Instruction::Store16(Space::Global, addr, src)
-            }
+            ] => Instruction::Store16(memory_space(body[0]), addr, src),
             [
-                "st.global.u64" | "st.global.b64",
+                "st.global.u64" | "st.global.b64" | "st.shared.u64" | "st.shared.b64"
+                | "st.local.u64" | "st.local.b64",
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
-            ] => Instruction::Store64(Space::Global, addr, src),
+            ] => Instruction::Store64(memory_space(body[0]), addr, src),
             [
                 "st.global.v2.u16" | "st.global.v2.b16",
                 "[",
@@ -1074,7 +1108,18 @@ impl<'a> Parser<'a> {
             [
                 op @ ("st.global.v2.f32" | "st.global.v2.u32" | "st.global.v4.f32"
                 | "st.shared.v2.f32"
-                | "st.local.v2.f32"),
+                | "st.local.v2.f32"
+                | "st.global.v4.u32"
+                | "st.global.v2.b32"
+                | "st.global.v4.b32"
+                | "st.shared.v4.f32"
+                | "st.shared.v2.u32"
+                | "st.shared.v4.u32"
+                | "st.shared.v2.b32"
+                | "st.shared.v4.b32"
+                | "st.local.v4.f32"
+                | "st.local.v2.u32"
+                | "st.local.v4.u32"),
                 "[",
                 addr,
                 "]",
@@ -1086,12 +1131,8 @@ impl<'a> Parser<'a> {
                 rest @ ..,
             ] => {
                 // v2.u32 shares the float-vector store path; bit patterns are preserved.
-                let (count, space) = match *op {
-                    "st.global.v4.f32" => (4u8, Space::Global),
-                    "st.global.v2.f32" | "st.global.v2.u32" => (2, Space::Global),
-                    "st.local.v2.f32" => (2, Space::Local),
-                    _ => (2, Space::Shared),
-                };
+                let count = if op.contains(".v4.") { 4u8 } else { 2 };
+                let space = memory_space(op);
                 let (c, d) = if count == 4 {
                     match rest {
                         [",", c, ",", d, "}"] => (*c, *d),
@@ -1254,6 +1295,54 @@ impl<'a> Parser<'a> {
                 Ok(Block { instructions, end })
             })
             .collect()
+    }
+}
+
+/// `ld.u32` / `st.f32` without a state space address generic memory. Every
+/// generic pointer in this subset is resolved when the instruction is emitted,
+/// so parse them as global accesses.
+fn generic_to_global(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "ld.u8" => "ld.global.u8",
+        "ld.b8" => "ld.global.b8",
+        "ld.s8" => "ld.global.s8",
+        "ld.u16" => "ld.global.u16",
+        "ld.b16" => "ld.global.b16",
+        "ld.s16" => "ld.global.s16",
+        "ld.u32" => "ld.global.u32",
+        "ld.b32" => "ld.global.b32",
+        "ld.s32" => "ld.global.s32",
+        "ld.f32" => "ld.global.f32",
+        "ld.u64" => "ld.global.u64",
+        "ld.b64" => "ld.global.b64",
+        "ld.v2.f32" => "ld.global.v2.f32",
+        "ld.v4.f32" => "ld.global.v4.f32",
+        "ld.v2.u32" => "ld.global.v2.u32",
+        "ld.v4.u32" => "ld.global.v4.u32",
+        "st.u8" => "st.global.u8",
+        "st.b8" => "st.global.b8",
+        "st.u16" => "st.global.u16",
+        "st.b16" => "st.global.b16",
+        "st.u32" => "st.global.u32",
+        "st.b32" => "st.global.b32",
+        "st.f32" => "st.global.f32",
+        "st.u64" => "st.global.u64",
+        "st.b64" => "st.global.b64",
+        "st.v2.f32" => "st.global.v2.f32",
+        "st.v4.f32" => "st.global.v4.f32",
+        "st.v2.u32" => "st.global.v2.u32",
+        "st.v4.u32" => "st.global.v4.u32",
+        _ => return None,
+    })
+}
+
+fn memory_space(op: &str) -> Space {
+    if op.contains(".shared.") {
+        Space::Shared
+    } else if op.contains(".local.") {
+        Space::Local
+    } else {
+        Space::Global
     }
 }
 

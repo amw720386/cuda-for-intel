@@ -588,12 +588,19 @@ impl<'a> Emitter<'a> {
         Ok(self.builder.bitcast(ty, None, bytes_ptr)?)
     }
 
+    fn typed_pointer(&mut self, space: Space, element: Word) -> Word {
+        let storage = match space {
+            Space::Global => StorageClass::CrossWorkgroup,
+            Space::Shared => StorageClass::Workgroup,
+            Space::Local => StorageClass::Function,
+        };
+        self.builder.type_pointer(None, storage, element)
+    }
+
     fn half_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
-        if space != Space::Global {
-            return Err(Error::new("only global PTX u16 loads are supported"));
-        }
         let bytes_ptr = self.addressed_byte_pointer(space, address)?;
-        Ok(self.builder.bitcast(self.global_half_ptr, None, bytes_ptr)?)
+        let ty = self.typed_pointer(space, self.u16_type);
+        Ok(self.builder.bitcast(ty, None, bytes_ptr)?)
     }
 
     fn float_vector_pointer(
@@ -1348,8 +1355,90 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    /// Space of the pointer held by the base register of `address`, for
+    /// generic (`Space::Global` as parsed) accesses through non-global pointers.
+    fn generic_space(&self, space: Space, address: &str) -> Space {
+        let base = address.split('+').next().unwrap_or(address);
+        match self.registers.get(base) {
+            Some(Value { kind: Kind::Address(actual), .. }) if space == Space::Global => *actual,
+            _ => space,
+        }
+    }
+
+    fn resolve_generic(&self, inst: Instruction<'a>) -> Instruction<'a> {
+        use Instruction::*;
+        match inst {
+            Load32(s, d, a) => Load32(self.generic_space(s, a), d, a),
+            Load64(s, d, a) => Load64(self.generic_space(s, a), d, a),
+            Load16(s, d, a) => Load16(self.generic_space(s, a), d, a),
+            Load8(s, d, a) => Load8(self.generic_space(s, a), d, a),
+            LoadSigned { space, bits, dst, addr } => LoadSigned {
+                space: self.generic_space(space, addr),
+                bits,
+                dst,
+                addr,
+            },
+            LoadVec { space, count, dst, addr } => LoadVec {
+                space: self.generic_space(space, addr),
+                count,
+                dst,
+                addr,
+            },
+            Store32(s, a, v) => Store32(self.generic_space(s, a), a, v),
+            Store64(s, a, v) => Store64(self.generic_space(s, a), a, v),
+            Store16(s, a, v) => Store16(self.generic_space(s, a), a, v),
+            Store8(s, a, v) => Store8(self.generic_space(s, a), a, v),
+            StoreVec { space, count, addr, src } => StoreVec {
+                space: self.generic_space(space, addr),
+                count,
+                addr,
+                src,
+            },
+            other => other,
+        }
+    }
+
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
+        let inst = self.resolve_generic(inst);
         let (dst, id, kind) = match inst {
+            Instruction::LoadSigned { space, bits, dst, addr } => {
+                let ty = self.u32_type;
+                let loaded = if bits == 8 {
+                    let bytes = self.addressed_byte_pointer(space, addr)?;
+                    let value = self.builder.load(self.u8_type, None, bytes, None, [])?;
+                    self.builder.s_convert(ty, None, value)?
+                } else {
+                    let pointer = self.half_pointer(space, addr)?;
+                    let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
+                    self.builder.s_convert(ty, None, value)?
+                };
+                (dst, loaded, Kind::B32)
+            }
+            Instruction::CvtaShared(dst, src) => {
+                let value = self.read(src)?;
+                let id = match value.kind {
+                    Kind::Address(Space::Shared) => value.id,
+                    Kind::B32 | Kind::B64 => {
+                        let offset = self.shared_offset32(src)?;
+                        let bytes = self.shared_pointer_at(offset)?;
+                        bytes
+                    }
+                    other => {
+                        return Err(Error::new(format!(
+                            "expected a shared address for {src}, got {other:?}"
+                        )));
+                    }
+                };
+                (dst, id, Kind::Address(Space::Shared))
+            }
+            Instruction::CvtaToShared { wide, dst, src } => {
+                let offset = self.shared_offset32(src)?;
+                if wide {
+                    (dst, self.builder.u_convert(self.u64_type, None, offset)?, Kind::B64)
+                } else {
+                    (dst, offset, Kind::B32)
+                }
+            }
             Instruction::LaneId(dst) => (dst, self.lane_id()?, Kind::B32),
             Instruction::Mma {
                 shape,
@@ -2082,9 +2171,8 @@ impl<'a> Emitter<'a> {
             }
             Instruction::Load64(space, dst, address) => {
                 let bytes_ptr = self.addressed_byte_pointer(space, address)?;
-                let pointer = self
-                    .builder
-                    .bitcast(self.global_qword_ptr, None, bytes_ptr)?;
+                let qword_ptr = self.typed_pointer(space, self.u64_type);
+                let pointer = self.builder.bitcast(qword_ptr, None, bytes_ptr)?;
                 let id = self
                     .builder
                     .load(self.u64_type, None, pointer, None, [])?;
@@ -2243,9 +2331,8 @@ impl<'a> Emitter<'a> {
             }
             Instruction::Store64(space, address, src) => {
                 let bytes_ptr = self.addressed_byte_pointer(space, address)?;
-                let pointer = self
-                    .builder
-                    .bitcast(self.global_qword_ptr, None, bytes_ptr)?;
+                let qword_ptr = self.typed_pointer(space, self.u64_type);
+                let pointer = self.builder.bitcast(qword_ptr, None, bytes_ptr)?;
                 let value = self.integer(src, Kind::B64)?;
                 self.builder.store(pointer, value, None, [])?;
                 return Ok(());
