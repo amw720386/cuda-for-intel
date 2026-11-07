@@ -582,6 +582,13 @@ mod tests {
     }
 
     #[test]
+    fn ignores_trailing_control_characters_after_the_last_entry() {
+        let source = format!("{}\u{1a}\0", include_str!("../examples/rope_neox_f32_dump.ptx").trim_end_matches(['\u{1a}', '\0']));
+        translate(&source).unwrap();
+        translate(include_str!("../examples/k_set_rows_dump.ptx")).unwrap();
+    }
+
+    #[test]
     fn lowers_ggml_grid_stride_instructions() {
         use rspirv::dr::Operand;
         use rspirv::spirv::{BuiltIn, Op};

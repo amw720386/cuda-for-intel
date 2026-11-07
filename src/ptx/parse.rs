@@ -1102,7 +1102,8 @@ fn skip_module_directives(parser: &mut Parser<'_>) -> Result<(), Error> {
                 parser.take()?;
                 skip_module_declaration(parser)?;
             }
-            other if other.chars().all(|c| c == '\0') => {
+            // Fatbin PTX is padded with NUL and often ends with a Ctrl-Z (0x1a).
+            other if other.chars().all(|c| c.is_control()) => {
                 parser.take()?;
             }
             other => {
