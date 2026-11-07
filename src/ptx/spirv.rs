@@ -1769,7 +1769,12 @@ impl<'a> Emitter<'a> {
                     let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
                     self.builder.s_convert(ty, None, value)?
                 };
-                (dst, loaded, Kind::B32)
+                if self.declarations.get(dst) == Some(&Width::B64) {
+                    let wide = self.builder.s_convert(self.u64_type, None, loaded)?;
+                    (dst, wide, Kind::B64)
+                } else {
+                    (dst, loaded, Kind::B32)
+                }
             }
             Instruction::CvtaShared(dst, src) => {
                 let value = self.read(src)?;
@@ -2618,7 +2623,13 @@ impl<'a> Emitter<'a> {
                     let pointer = self.word_pointer(space, address)?;
                     self.builder.load(self.u32_type, None, pointer, None, [])?
                 };
-                (dst, id, Kind::B32)
+                // `ld.global.s32 %rd, [..]` widens into a 64-bit register (sign-extending).
+                if self.declarations.get(dst) == Some(&Width::B64) {
+                    let wide = self.builder.s_convert(self.u64_type, None, id)?;
+                    (dst, wide, Kind::B64)
+                } else {
+                    (dst, id, Kind::B32)
+                }
             }
             Instruction::Load16(space, dst, address) => {
                 let pointer = self.half_pointer(space, address)?;
