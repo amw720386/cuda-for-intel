@@ -1,7 +1,7 @@
 use super::flow::Flow;
 use super::rounded;
 use super::{
-    Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
+    Alu3Op, Alu64Op, AtomicOp, Comparison, MmaShape, ShuffleMode, VoteMode, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
     Terminator, Translation, Width,
 };
 use rspirv::binary::Assemble;
@@ -81,6 +81,8 @@ struct Emitter<'a> {
     local: Option<(&'a str, Word)>,
     /// Set when the entry uses CUDA warp shuffles / redux (forces SubgroupSize 32).
     warp_ops: bool,
+    /// Capabilities / extensions already declared on the module.
+    declared: HashSet<&'static str>,
     builtin_type: Word,
     builtins: [Word; BUILTINS.len()],
     declarations: HashMap<String, Width>,
@@ -158,6 +160,7 @@ impl<'a> Emitter<'a> {
             shared_offsets: HashMap::new(),
             local: None,
             warp_ops: false,
+            declared: HashSet::new(),
             builtin_type,
             builtins,
             declarations: HashMap::new(),
@@ -588,12 +591,19 @@ impl<'a> Emitter<'a> {
         Ok(self.builder.bitcast(ty, None, bytes_ptr)?)
     }
 
+    fn typed_pointer(&mut self, space: Space, element: Word) -> Word {
+        let storage = match space {
+            Space::Global => StorageClass::CrossWorkgroup,
+            Space::Shared => StorageClass::Workgroup,
+            Space::Local => StorageClass::Function,
+        };
+        self.builder.type_pointer(None, storage, element)
+    }
+
     fn half_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
-        if space != Space::Global {
-            return Err(Error::new("only global PTX u16 loads are supported"));
-        }
         let bytes_ptr = self.addressed_byte_pointer(space, address)?;
-        Ok(self.builder.bitcast(self.global_half_ptr, None, bytes_ptr)?)
+        let ty = self.typed_pointer(space, self.u16_type);
+        Ok(self.builder.bitcast(ty, None, bytes_ptr)?)
     }
 
     fn float_vector_pointer(
@@ -873,6 +883,21 @@ impl<'a> Emitter<'a> {
                 let magnitude = self.builder.bitwise_and(u32_type, None, magnitude, magnitude_mask)?;
                 return Ok(self.builder.bitwise_or(u32_type, None, sign, magnitude)?);
             }
+            FloatOp::RoundNearest([source]) | FloatOp::Floor([source]) | FloatOp::Ceil([source]) => {
+                let value = self.float_value(source)?;
+                let op = match op {
+                    FloatOp::RoundNearest(_) => OpenclStd100Op::rint,
+                    FloatOp::Floor(_) => OpenclStd100Op::floor,
+                    _ => OpenclStd100Op::ceil,
+                };
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    op as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
             FloatOp::Trunc([source]) => {
                 let value = self.float_value(source)?;
                 self.builder.ext_inst(
@@ -888,8 +913,761 @@ impl<'a> Emitter<'a> {
         Ok(self.builder.bitcast(self.u32_type, None, result)?)
     }
 
+    fn opencl_int(
+        &mut self,
+        ty: Word,
+        op: OpenclStd100Op,
+        args: &[Word],
+    ) -> Result<Word, rspirv::dr::Error> {
+        self.builder.ext_inst(
+            ty,
+            None,
+            self.opencl,
+            op as u32,
+            args.iter().copied().map(Operand::IdRef),
+        )
+    }
+
+    /// `1 << clamp(len)` style mask: all-ones for `len >= 32`, zero for `len == 0`.
+    fn low_mask(&mut self, len: Word) -> Result<Word, Error> {
+        let ty = self.u32_type;
+        let c32 = self.builder.constant_bit32(ty, 32);
+        let zero = self.builder.constant_bit32(ty, 0);
+        let ones = self.builder.constant_bit32(ty, u32::MAX);
+        let small = self.builder.u_less_than(self.bool_type, None, len, c32)?;
+        let safe = self.builder.select(ty, None, small, len, zero)?;
+        let shifted = self.builder.shift_left_logical(ty, None, ones, safe)?;
+        let mask = self.builder.not(ty, None, shifted)?;
+        // len == 0 -> mask 0 (shift by 0 gives ones -> not -> 0); len >= 32 -> ones.
+        Ok(self.builder.select(ty, None, small, mask, ones)?)
+    }
+
+    fn alu3(&mut self, op: Alu3Op, src: [&str; 4]) -> Result<Word, Error> {
+        let ty = self.u32_type;
+        let c = |e: &mut Self, v: u32| e.builder.constant_bit32(ty, v);
+        match op {
+            Alu3Op::BfeUnsigned | Alu3Op::BfeSigned => {
+                let a = self.integer(src[0], Kind::B32)?;
+                let pos = self.integer(src[1], Kind::B32)?;
+                let len = self.integer(src[2], Kind::B32)?;
+                let ff = c(self, 0xff);
+                let pos = self.builder.bitwise_and(ty, None, pos, ff)?;
+                let len = self.builder.bitwise_and(ty, None, len, ff)?;
+                let mask = self.low_mask(len)?;
+                let c32 = c(self, 32);
+                let c31 = c(self, 31);
+                let zero = c(self, 0);
+                if matches!(op, Alu3Op::BfeUnsigned) {
+                    let in_range = self.builder.u_less_than(self.bool_type, None, pos, c32)?;
+                    let safe = self.builder.select(ty, None, in_range, pos, zero)?;
+                    let shifted = self.builder.shift_right_logical(ty, None, a, safe)?;
+                    let shifted = self.builder.select(ty, None, in_range, shifted, zero)?;
+                    return Ok(self.builder.bitwise_and(ty, None, shifted, mask)?);
+                }
+                // Signed: replicate bit min(pos + len - 1, 31) above the field.
+                let big = self.builder.u_less_than(self.bool_type, None, c31, pos)?;
+                let pos31 = self.builder.select(ty, None, big, c31, pos)?;
+                let shifted = self.builder.shift_right_arithmetic(ty, None, a, pos31)?;
+                let field = self.builder.bitwise_and(ty, None, shifted, mask)?;
+                let one = c(self, 1);
+                let last = self.builder.i_add(ty, None, pos, len)?;
+                let last = self.builder.i_sub(ty, None, last, one)?;
+                let over = self.builder.u_less_than(self.bool_type, None, c31, last)?;
+                let last = self.builder.select(ty, None, over, c31, last)?;
+                let sign = self.builder.shift_right_logical(ty, None, a, last)?;
+                let sign = self.builder.bitwise_and(ty, None, sign, one)?;
+                let len_zero = self.builder.i_equal(self.bool_type, None, len, zero)?;
+                let sign = self.builder.select(ty, None, len_zero, zero, sign)?;
+                let negative = self.builder.i_not_equal(self.bool_type, None, sign, zero)?;
+                let inverse = self.builder.not(ty, None, mask)?;
+                let extended = self.builder.bitwise_or(ty, None, field, inverse)?;
+                Ok(self.builder.select(ty, None, negative, extended, field)?)
+            }
+            Alu3Op::Bfi => {
+                let f = self.integer(src[0], Kind::B32)?;
+                let a = self.integer(src[1], Kind::B32)?;
+                let pos = self.integer(src[2], Kind::B32)?;
+                let len = self.integer(src[3], Kind::B32)?;
+                let ff = c(self, 0xff);
+                let pos = self.builder.bitwise_and(ty, None, pos, ff)?;
+                let len = self.builder.bitwise_and(ty, None, len, ff)?;
+                let mask = self.low_mask(len)?;
+                let c32 = c(self, 32);
+                let zero = c(self, 0);
+                let in_range = self.builder.u_less_than(self.bool_type, None, pos, c32)?;
+                let safe = self.builder.select(ty, None, in_range, pos, zero)?;
+                let field = self.builder.shift_left_logical(ty, None, mask, safe)?;
+                let moved = self.builder.shift_left_logical(ty, None, f, safe)?;
+                let moved = self.builder.bitwise_and(ty, None, moved, field)?;
+                let keep = self.builder.not(ty, None, field)?;
+                let keep = self.builder.bitwise_and(ty, None, a, keep)?;
+                let merged = self.builder.bitwise_or(ty, None, keep, moved)?;
+                Ok(self.builder.select(ty, None, in_range, merged, a)?)
+            }
+            Alu3Op::Prmt => {
+                let a = self.integer(src[0], Kind::B32)?;
+                let b = self.integer(src[1], Kind::B32)?;
+                let sel = self.integer(src[2], Kind::B32)?;
+                let a64 = self.builder.u_convert(self.u64_type, None, a)?;
+                let b64 = self.builder.u_convert(self.u64_type, None, b)?;
+                let c32 = self.builder.constant_bit64(self.u64_type, 32);
+                let hi = self.builder.shift_left_logical(self.u64_type, None, b64, c32)?;
+                let pair = self.builder.bitwise_or(self.u64_type, None, a64, hi)?;
+                let mut result = c(self, 0);
+                for lane in 0..4u32 {
+                    let nibble_shift = c(self, 4 * lane);
+                    let nibble = self.builder.shift_right_logical(ty, None, sel, nibble_shift)?;
+                    let seven = c(self, 7);
+                    let index = self.builder.bitwise_and(ty, None, nibble, seven)?;
+                    let three = c(self, 3);
+                    let bit_index = self.builder.shift_left_logical(ty, None, index, three)?;
+                    let bit_index = self.builder.u_convert(self.u64_type, None, bit_index)?;
+                    let picked = self.builder.shift_right_logical(self.u64_type, None, pair, bit_index)?;
+                    let picked = self.builder.u_convert(ty, None, picked)?;
+                    let byte_mask = c(self, 0xff);
+                    let byte = self.builder.bitwise_and(ty, None, picked, byte_mask)?;
+                    // Selector bit 3 replicates the byte's sign bit.
+                    let seven_bits = c(self, 7);
+                    let sign = self.builder.shift_right_logical(ty, None, byte, seven_bits)?;
+                    let zero = c(self, 0);
+                    let negated = self.builder.i_sub(ty, None, zero, sign)?;
+                    let smear = self.builder.bitwise_and(ty, None, negated, byte_mask)?;
+                    let eight = c(self, 8);
+                    let flag = self.builder.bitwise_and(ty, None, nibble, eight)?;
+                    let replicate = self.builder.i_not_equal(self.bool_type, None, flag, zero)?;
+                    let value = self.builder.select(ty, None, replicate, smear, byte)?;
+                    let lane_shift = c(self, 8 * lane);
+                    let placed = self.builder.shift_left_logical(ty, None, value, lane_shift)?;
+                    result = self.builder.bitwise_or(ty, None, result, placed)?;
+                }
+                Ok(result)
+            }
+            Alu3Op::Lop3 => {
+                let operands = [
+                    self.integer(src[0], Kind::B32)?,
+                    self.integer(src[1], Kind::B32)?,
+                    self.integer(src[2], Kind::B32)?,
+                ];
+                let lut = Self::parse_u32(src[3])
+                    .filter(|&lut| lut <= 0xff)
+                    .ok_or_else(|| Error::new("lop3.b32 requires an immediate lookup table"))?;
+                let mut inverted = Vec::new();
+                for operand in operands {
+                    inverted.push(self.builder.not(ty, None, operand)?);
+                }
+                let mut result = c(self, 0);
+                for index in 0..8u32 {
+                    if lut >> index & 1 == 0 {
+                        continue;
+                    }
+                    // Index bit 2 selects `a`, bit 1 selects `b`, bit 0 selects `c`.
+                    let mut term = c(self, u32::MAX);
+                    for (slot, shift) in [(0usize, 2u32), (1, 1), (2, 0)] {
+                        let wanted = if index >> shift & 1 == 1 {
+                            operands[slot]
+                        } else {
+                            inverted[slot]
+                        };
+                        term = self.builder.bitwise_and(ty, None, term, wanted)?;
+                    }
+                    result = self.builder.bitwise_or(ty, None, result, term)?;
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    fn alu64(&mut self, op: Alu64Op, src: [&str; 3]) -> Result<(Word, Kind), Error> {
+        let ty = self.u64_type;
+        let a = self.integer(src[0], Kind::B64)?;
+        let b = if matches!(op, Alu64Op::Neg | Alu64Op::AbsSigned | Alu64Op::PopCount) {
+            a
+        } else {
+            self.integer(src[1], Kind::B64)?
+        };
+        let id = match op {
+            Alu64Op::Xor => self.builder.bitwise_xor(ty, None, a, b)?,
+            Alu64Op::MaxSigned => self.opencl_int(ty, OpenclStd100Op::s_max, &[a, b])?,
+            Alu64Op::MinUnsigned => self.opencl_int(ty, OpenclStd100Op::u_min, &[a, b])?,
+            Alu64Op::MaxUnsigned => self.opencl_int(ty, OpenclStd100Op::u_max, &[a, b])?,
+            Alu64Op::Neg => {
+                let zero = self.builder.constant_bit64(ty, 0);
+                self.builder.i_sub(ty, None, zero, a)?
+            }
+            Alu64Op::AbsSigned => self.opencl_int(ty, OpenclStd100Op::s_abs, &[a])?,
+            Alu64Op::MadLo => {
+                let c = self.integer(src[2], Kind::B64)?;
+                let product = self.builder.i_mul(ty, None, a, b)?;
+                self.builder.i_add(ty, None, product, c)?
+            }
+            Alu64Op::PopCount => {
+                let count = self.builder.bit_count(ty, None, a)?;
+                return Ok((self.builder.u_convert(self.u32_type, None, count)?, Kind::B32));
+            }
+        };
+        Ok((id, Kind::B64))
+    }
+
+    fn subgroup_shuffle(&mut self, value: Word, lane: Word) -> Result<Word, Error> {
+        let scope = self
+            .builder
+            .constant_bit32(self.u32_type, Scope::Subgroup as u32);
+        Ok(self.builder.group_non_uniform_shuffle(
+            self.u32_type,
+            None,
+            scope,
+            value,
+            lane,
+        )?)
+    }
+
+    /// CUDA lane id: the linear thread index modulo 32 (subgroups are 32 wide).
+    fn lane_id(&mut self) -> Result<Word, Error> {
+        let ty = self.u32_type;
+        let tid: Vec<Word> = ["x", "y", "z"]
+            .iter()
+            .map(|axis| self.builtin(&format!("%tid.{axis}")))
+            .collect::<Result<_, _>>()?;
+        let ntid: Vec<Word> = ["x", "y"]
+            .iter()
+            .map(|axis| self.builtin(&format!("%ntid.{axis}")))
+            .collect::<Result<_, _>>()?;
+        let inner = self.builder.i_mul(ty, None, tid[2], ntid[1])?;
+        let inner = self.builder.i_add(ty, None, inner, tid[1])?;
+        let linear = self.builder.i_mul(ty, None, inner, ntid[0])?;
+        let linear = self.builder.i_add(ty, None, linear, tid[0])?;
+        let mask = self.builder.constant_bit32(ty, 31);
+        Ok(self.builder.bitwise_and(ty, None, linear, mask)?)
+    }
+
+    fn u32_const(&mut self, value: u32) -> Word {
+        self.builder.constant_bit32(self.u32_type, value)
+    }
+
+    /// Four-way byte dot product with per-operand signedness, plus accumulate.
+    fn dot4(&mut self, a: Word, b: Word, acc: Word, signed: [bool; 2]) -> Result<Word, Error> {
+        let ty = self.u32_type;
+        let c24 = self.u32_const(24);
+        let ff = self.u32_const(0xff);
+        let mut acc = acc;
+        for lane in 0..4u32 {
+            let shift = self.u32_const(lane * 8);
+            let mut bytes = [0; 2];
+            for (slot, (word, signed)) in [(a, signed[0]), (b, signed[1])].into_iter().enumerate() {
+                let moved = self.builder.shift_right_logical(ty, None, word, shift)?;
+                bytes[slot] = if signed {
+                    let raised = self.builder.shift_left_logical(ty, None, moved, c24)?;
+                    self.builder.shift_right_arithmetic(ty, None, raised, c24)?
+                } else {
+                    self.builder.bitwise_and(ty, None, moved, ff)?
+                };
+            }
+            let product = self.builder.i_mul(ty, None, bytes[0], bytes[1])?;
+            acc = self.builder.i_add(ty, None, acc, product)?;
+        }
+        Ok(acc)
+    }
+
+    /// Two IEEE halves packed in a word, as f32 products summed onto `acc`.
+    fn half2_dot(&mut self, a: Word, b: Word, acc: Word) -> Result<Word, Error> {
+        self.fp32 = true;
+        let mut acc = acc;
+        for half in 0..2u32 {
+            let shift = self.u32_const(half * 16);
+            let mut values = [0; 2];
+            for (slot, word) in [a, b].into_iter().enumerate() {
+                let moved = self.builder.shift_right_logical(self.u32_type, None, word, shift)?;
+                let bits = self.builder.u_convert(self.u16_type, None, moved)?;
+                let half = self.builder.bitcast(self.f16_type, None, bits)?;
+                values[slot] = self.builder.f_convert(self.f32_type, None, half)?;
+            }
+            let product = self.builder.f_mul(self.f32_type, None, values[0], values[1])?;
+            acc = self.builder.f_add(self.f32_type, None, acc, product)?;
+        }
+        Ok(acc)
+    }
+
+    fn emit_mma(
+        &mut self,
+        shape: MmaShape,
+        signed: [bool; 2],
+        dst: [&'a str; 4],
+        src: [&'a str; 10],
+    ) -> Result<(), Error> {
+        let ty = self.u32_type;
+        let accumulators = shape.accumulators();
+        let groups = shape.groups();
+        let halves = accumulators / 2;
+        let mut a = Vec::new();
+        for name in &src[..halves * (groups / 4)] {
+            a.push(self.integer(name, Kind::B32)?);
+        }
+        let mut b = Vec::new();
+        for name in &src[4..4 + groups / 4] {
+            b.push(self.integer(name, Kind::B32)?);
+        }
+        let mut c = Vec::new();
+        for name in &src[6..6 + accumulators] {
+            c.push(self.integer(name, Kind::B32)?);
+        }
+        let lane = self.lane_id()?;
+        let two = self.u32_const(2);
+        let three = self.u32_const(3);
+        let four = self.u32_const(4);
+        let row = self.builder.shift_right_logical(ty, None, lane, two)?;
+        let quad = self.builder.bitwise_and(ty, None, lane, three)?;
+        let row4 = self.builder.i_mul(ty, None, row, four)?;
+        let one_bit = self.u32_const(1);
+        let col_base = self.builder.shift_left_logical(ty, None, quad, one_bit)?;
+        // A words are shared by both accumulator columns of a row half; B words by both rows.
+        let mut a_words = HashMap::new();
+        let mut b_words = HashMap::new();
+        let mut results = Vec::new();
+        for (j, &start) in c.iter().enumerate() {
+            let (half, parity) = (j / 2, j % 2);
+            let column = if parity == 0 {
+                col_base
+            } else {
+                let one = self.u32_const(1);
+                self.builder.i_add(ty, None, col_base, one)?
+            };
+            let column4 = self.builder.i_mul(ty, None, column, four)?;
+            let mut acc = start;
+            if !shape.is_integer() {
+                acc = self.builder.bitcast(self.f32_type, None, acc)?;
+            }
+            for group in 0..groups {
+                let low = self.u32_const((group % 4) as u32);
+                let a_word = match a_words.get(&(half, group)) {
+                    Some(&word) => word,
+                    None => {
+                        let source = self.builder.i_add(ty, None, row4, low)?;
+                        let word = self.subgroup_shuffle(a[half + 2 * (group / 4)], source)?;
+                        a_words.insert((half, group), word);
+                        word
+                    }
+                };
+                let b_word = match b_words.get(&(parity, group)) {
+                    Some(&word) => word,
+                    None => {
+                        let source = self.builder.i_add(ty, None, column4, low)?;
+                        let word = self.subgroup_shuffle(b[group / 4], source)?;
+                        b_words.insert((parity, group), word);
+                        word
+                    }
+                };
+                acc = if shape.is_integer() {
+                    self.dot4(a_word, b_word, acc, signed)?
+                } else {
+                    self.half2_dot(a_word, b_word, acc)?
+                };
+            }
+            if !shape.is_integer() {
+                acc = self.builder.bitcast(ty, None, acc)?;
+            }
+            results.push(acc);
+        }
+        for (name, id) in dst.iter().zip(results) {
+            self.write(name, Value { id, kind: Kind::B32 })?;
+        }
+        Ok(())
+    }
+
+    /// 32-bit byte offset into the shared window for a shared address operand.
+    fn shared_offset32(&mut self, operand: &str) -> Result<Word, Error> {
+        let (base, offset) = match operand.split_once('+') {
+            Some((base, offset)) => (
+                base,
+                Self::parse_byte_offset(offset)
+                    .ok_or_else(|| Error::new(format!("unsupported PTX address offset {offset}")))?,
+            ),
+            None => (operand, 0),
+        };
+        let value = self.read(base)?;
+        let ty = self.u32_type;
+        let id = match value.kind {
+            Kind::B32 => value.id,
+            Kind::B64 => self.builder.u_convert(ty, None, value.id)?,
+            Kind::Address(Space::Shared) => {
+                let window = self.shared_window_bytes()?;
+                let pointer = self.builder.convert_ptr_to_u(self.u64_type, None, value.id)?;
+                let origin = self.builder.convert_ptr_to_u(self.u64_type, None, window)?;
+                let delta = self.builder.i_sub(self.u64_type, None, pointer, origin)?;
+                self.builder.u_convert(ty, None, delta)?
+            }
+            other => {
+                return Err(Error::new(format!(
+                    "expected a shared address for {base}, got {other:?}"
+                )));
+            }
+        };
+        if offset == 0 {
+            return Ok(id);
+        }
+        let delta = self.u32_const(offset as u32);
+        Ok(self.builder.i_add(ty, None, id, delta)?)
+    }
+
+    fn shared_pointer_at(&mut self, offset: Word) -> Result<Word, Error> {
+        let window = self.shared_window_bytes()?;
+        let wide = self.builder.u_convert(self.u64_type, None, offset)?;
+        Ok(self
+            .builder
+            .ptr_access_chain(self.shared_byte_ptr, None, window, wide, [])?)
+    }
+
+    fn emit_ldmatrix(
+        &mut self,
+        count: u8,
+        trans: bool,
+        dst: [&'a str; 4],
+        addr: &str,
+    ) -> Result<(), Error> {
+        let ty = self.u32_type;
+        let offset = self.shared_offset32(addr)?;
+        let lane = self.lane_id()?;
+        let two = self.u32_const(2);
+        let three = self.u32_const(3);
+        let row = self.builder.shift_right_logical(ty, None, lane, two)?;
+        let quad = self.builder.bitwise_and(ty, None, lane, three)?;
+        let half_ptr = self.builder.type_pointer(None, StorageClass::Workgroup, self.u16_type);
+        let word_ptr = self.shared_word_ptr;
+        let mut words = Vec::new();
+        for matrix in 0..u32::from(count) {
+            let base_lane = self.u32_const(8 * matrix);
+            let word = if !trans {
+                // Lane j of the matrix supplies the address of row j.
+                let source = self.builder.i_add(ty, None, base_lane, row)?;
+                let row_offset = self.subgroup_shuffle(offset, source)?;
+                let four = self.u32_const(4);
+                let into = self.builder.i_mul(ty, None, quad, four)?;
+                let at = self.builder.i_add(ty, None, row_offset, into)?;
+                let bytes = self.shared_pointer_at(at)?;
+                let pointer = self.builder.bitcast(word_ptr, None, bytes)?;
+                self.builder.load(ty, None, pointer, None, [])?
+            } else {
+                // The thread owns elements [2q][row] and [2q+1][row] of the matrix.
+                let one = self.u32_const(1);
+                let first = self.builder.shift_left_logical(ty, None, quad, one)?;
+                let first = self.builder.i_add(ty, None, base_lane, first)?;
+                let second = self.builder.i_add(ty, None, first, one)?;
+                let into = self.builder.shift_left_logical(ty, None, row, one)?;
+                let mut halves = [0; 2];
+                for (slot, source) in [first, second].into_iter().enumerate() {
+                    let row_offset = self.subgroup_shuffle(offset, source)?;
+                    let at = self.builder.i_add(ty, None, row_offset, into)?;
+                    let bytes = self.shared_pointer_at(at)?;
+                    let pointer = self.builder.bitcast(half_ptr, None, bytes)?;
+                    let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
+                    halves[slot] = self.builder.u_convert(ty, None, value)?;
+                }
+                let sixteen = self.u32_const(16);
+                let high = self.builder.shift_left_logical(ty, None, halves[1], sixteen)?;
+                self.builder.bitwise_or(ty, None, halves[0], high)?
+            };
+            words.push(word);
+        }
+        for (name, id) in dst.iter().zip(words) {
+            self.write(name, Value { id, kind: Kind::B32 })?;
+        }
+        Ok(())
+    }
+
+    /// Space of the pointer held by the base register of `address`, for
+    /// generic (`Space::Global` as parsed) accesses through non-global pointers.
+    fn generic_space(&self, space: Space, address: &str) -> Space {
+        let base = address.split('+').next().unwrap_or(address);
+        match self.registers.get(base) {
+            Some(Value { kind: Kind::Address(actual), .. }) if space == Space::Global => *actual,
+            _ => space,
+        }
+    }
+
+    fn resolve_generic(&self, inst: Instruction<'a>) -> Instruction<'a> {
+        use Instruction::*;
+        match inst {
+            Load32(s, d, a) => Load32(self.generic_space(s, a), d, a),
+            Load64(s, d, a) => Load64(self.generic_space(s, a), d, a),
+            Load16(s, d, a) => Load16(self.generic_space(s, a), d, a),
+            Load8(s, d, a) => Load8(self.generic_space(s, a), d, a),
+            LoadSigned { space, bits, dst, addr } => LoadSigned {
+                space: self.generic_space(space, addr),
+                bits,
+                dst,
+                addr,
+            },
+            LoadVec { space, count, dst, addr } => LoadVec {
+                space: self.generic_space(space, addr),
+                count,
+                dst,
+                addr,
+            },
+            Store32(s, a, v) => Store32(self.generic_space(s, a), a, v),
+            Store64(s, a, v) => Store64(self.generic_space(s, a), a, v),
+            Store16(s, a, v) => Store16(self.generic_space(s, a), a, v),
+            Store8(s, a, v) => Store8(self.generic_space(s, a), a, v),
+            StoreVec { space, count, addr, src } => StoreVec {
+                space: self.generic_space(space, addr),
+                count,
+                addr,
+                src,
+            },
+            other => other,
+        }
+    }
+
+    fn declare(&mut self, name: &'static str, capability: Option<Capability>, extension: Option<&str>) {
+        if self.declared.insert(name) {
+            if let Some(capability) = capability {
+                self.builder.capability(capability);
+            }
+            if let Some(extension) = extension {
+                self.builder.extension(extension);
+            }
+        }
+    }
+
+    fn emit_atomic(
+        &mut self,
+        op: AtomicOp,
+        space: Space,
+        float: bool,
+        signed: bool,
+        dst: Option<&'a str>,
+        addr: &str,
+        src: [&str; 2],
+    ) -> Result<(), Error> {
+        if space == Space::Local {
+            return Err(Error::new("atomics on local memory are not supported"));
+        }
+        let pointer = self.word_pointer(space, addr)?;
+        let ty = self.u32_type;
+        let scope_kind = if space == Space::Global { Scope::Device } else { Scope::Workgroup };
+        if space == Space::Global {
+            self.device_atomics = true;
+        }
+        let scope = self.builder.constant_bit32(ty, scope_kind as u32);
+        let relaxed = self.builder.constant_bit32(ty, MemorySemantics::empty().bits());
+        let value = self.integer(src[0], Kind::B32)?;
+        let previous = match op {
+            AtomicOp::Add if float => {
+                self.declare(
+                    "atomic_f32_add",
+                    Some(Capability::AtomicFloat32AddEXT),
+                    Some("SPV_EXT_shader_atomic_float_add"),
+                );
+                let storage = if space == Space::Global {
+                    StorageClass::CrossWorkgroup
+                } else {
+                    StorageClass::Workgroup
+                };
+                let float_ptr = self.builder.type_pointer(None, storage, self.f32_type);
+                let float_ptr = self.builder.bitcast(float_ptr, None, pointer)?;
+                let value = self.builder.bitcast(self.f32_type, None, value)?;
+                let old = self.builder.atomic_f_add_ext(
+                    self.f32_type,
+                    None,
+                    float_ptr,
+                    scope,
+                    relaxed,
+                    value,
+                )?;
+                self.builder.bitcast(ty, None, old)?
+            }
+            AtomicOp::Add => self.builder.atomic_i_add(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Min if signed => {
+                self.builder.atomic_s_min(ty, None, pointer, scope, relaxed, value)?
+            }
+            AtomicOp::Min => self.builder.atomic_u_min(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Max if signed => {
+                self.builder.atomic_s_max(ty, None, pointer, scope, relaxed, value)?
+            }
+            AtomicOp::Max => self.builder.atomic_u_max(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::And => self.builder.atomic_and(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Or => self.builder.atomic_or(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Xor => self.builder.atomic_xor(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Exch => {
+                self.builder.atomic_exchange(ty, None, pointer, scope, relaxed, value)?
+            }
+            AtomicOp::Cas => {
+                let compare = self.integer(src[1], Kind::B32)?;
+                self.builder.atomic_compare_exchange(
+                    ty, None, pointer, scope, relaxed, relaxed, value, compare,
+                )?
+            }
+        };
+        if let Some(dst) = dst {
+            self.write(dst, Value { id: previous, kind: Kind::B32 })?;
+        }
+        Ok(())
+    }
+
+    fn emit_shuffle(
+        &mut self,
+        mode: ShuffleMode,
+        dst: &'a str,
+        pred: Option<&'a str>,
+        src: [&str; 4],
+    ) -> Result<(), Error> {
+        let ty = self.u32_type;
+        let control = Self::parse_u32(src[2]).ok_or_else(|| {
+            Error::new("shfl.sync requires an immediate clamp/segment-mask operand")
+        })?;
+        if Self::parse_u32(src[3]).is_some_and(|mask| mask != u32::MAX) {
+            return Err(Error::new("only full-warp shfl.sync membermask 0xffffffff is supported"));
+        }
+        let (clamp, segment) = (control & 31, (control >> 8) & 31);
+        let value = self.read(src[0])?.require(Kind::B32, src[0])?;
+        let delta = self.integer(src[1], Kind::B32)?;
+        let lane = self.lane_id()?;
+        let segment_mask = self.u32_const(segment);
+        let min_lane = self.builder.bitwise_and(ty, None, lane, segment_mask)?;
+        let (source, valid) = match mode {
+            ShuffleMode::Idx | ShuffleMode::Down => {
+                let upper = self.u32_const(clamp & !segment & 31);
+                let max_lane = self.builder.bitwise_or(ty, None, min_lane, upper)?;
+                let j = if mode == ShuffleMode::Idx {
+                    let keep = self.u32_const(!segment & 31);
+                    let low = self.builder.bitwise_and(ty, None, delta, keep)?;
+                    self.builder.bitwise_or(ty, None, low, min_lane)?
+                } else {
+                    self.builder.i_add(ty, None, lane, delta)?
+                };
+                let valid = self.builder.u_less_than_equal(self.bool_type, None, j, max_lane)?;
+                (j, valid)
+            }
+            ShuffleMode::Up => {
+                let room = self.builder.i_sub(ty, None, lane, min_lane)?;
+                let valid = self.builder.u_less_than_equal(self.bool_type, None, delta, room)?;
+                (self.builder.i_sub(ty, None, lane, delta)?, valid)
+            }
+        };
+        let source = self.builder.select(ty, None, valid, source, lane)?;
+        let result = self.subgroup_shuffle(value, source)?;
+        self.write(dst, Value { id: result, kind: Kind::B32 })?;
+        if let Some(pred) = pred {
+            self.write(pred, Value { id: valid, kind: Kind::Predicate })?;
+        }
+        Ok(())
+    }
+
+    fn emit_vote(&mut self, mode: VoteMode, dst: &'a str, src: &str) -> Result<(), Error> {
+        let predicate = if src == "1" {
+            self.builder.constant_true(self.bool_type)
+        } else {
+            self.read(src)?.require(Kind::Predicate, src)?
+        };
+        let scope = self.builder.constant_bit32(self.u32_type, Scope::Subgroup as u32);
+        match mode {
+            VoteMode::Ballot => {
+                self.declare("ballot", Some(Capability::GroupNonUniformBallot), None);
+                let vec4 = self.builder.type_vector(self.u32_type, 4);
+                let mask = self.builder.group_non_uniform_ballot(vec4, None, scope, predicate)?;
+                let low = self.builder.composite_extract(self.u32_type, None, mask, [0])?;
+                self.write(dst, Value { id: low, kind: Kind::B32 })
+            }
+            VoteMode::All | VoteMode::Any => {
+                self.declare("vote", Some(Capability::GroupNonUniformVote), None);
+                let id = if mode == VoteMode::All {
+                    self.builder.group_non_uniform_all(self.bool_type, None, scope, predicate)?
+                } else {
+                    self.builder.group_non_uniform_any(self.bool_type, None, scope, predicate)?
+                };
+                self.write(dst, Value { id, kind: Kind::Predicate })
+            }
+        }
+    }
+
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
+        let inst = self.resolve_generic(inst);
         let (dst, id, kind) = match inst {
+            Instruction::Atomic { op, space, float, signed, dst, addr, src } => {
+                self.emit_atomic(op, space, float, signed, dst, addr, src)?;
+                return Ok(());
+            }
+            Instruction::Shuffle { mode, dst, pred, src } => {
+                self.emit_shuffle(mode, dst, pred, src)?;
+                return Ok(());
+            }
+            Instruction::Vote { mode, dst, src } => {
+                self.emit_vote(mode, dst, src)?;
+                return Ok(());
+            }
+            Instruction::Fence => {
+                let ty = self.u32_type;
+                let scope = self.builder.constant_bit32(ty, Scope::Device as u32);
+                let semantics = self.builder.constant_bit32(
+                    ty,
+                    (MemorySemantics::ACQUIRE_RELEASE
+                        | MemorySemantics::CROSS_WORKGROUP_MEMORY
+                        | MemorySemantics::WORKGROUP_MEMORY)
+                        .bits(),
+                );
+                self.builder.memory_barrier(scope, semantics)?;
+                return Ok(());
+            }
+            Instruction::LoadSigned { space, bits, dst, addr } => {
+                let ty = self.u32_type;
+                let loaded = if bits == 8 {
+                    let bytes = self.addressed_byte_pointer(space, addr)?;
+                    let value = self.builder.load(self.u8_type, None, bytes, None, [])?;
+                    self.builder.s_convert(ty, None, value)?
+                } else {
+                    let pointer = self.half_pointer(space, addr)?;
+                    let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
+                    self.builder.s_convert(ty, None, value)?
+                };
+                (dst, loaded, Kind::B32)
+            }
+            Instruction::CvtaShared(dst, src) => {
+                let value = self.read(src)?;
+                let id = match value.kind {
+                    Kind::Address(Space::Shared) => value.id,
+                    Kind::B32 | Kind::B64 => {
+                        let offset = self.shared_offset32(src)?;
+                        let bytes = self.shared_pointer_at(offset)?;
+                        bytes
+                    }
+                    other => {
+                        return Err(Error::new(format!(
+                            "expected a shared address for {src}, got {other:?}"
+                        )));
+                    }
+                };
+                (dst, id, Kind::Address(Space::Shared))
+            }
+            Instruction::CvtaToShared { wide, dst, src } => {
+                let offset = self.shared_offset32(src)?;
+                if wide {
+                    (dst, self.builder.u_convert(self.u64_type, None, offset)?, Kind::B64)
+                } else {
+                    (dst, offset, Kind::B32)
+                }
+            }
+            Instruction::LaneId(dst) => (dst, self.lane_id()?, Kind::B32),
+            Instruction::Mma {
+                shape,
+                signed,
+                dst,
+                src,
+            } => {
+                self.emit_mma(shape, signed, dst, src)?;
+                return Ok(());
+            }
+            Instruction::LdMatrix {
+                count,
+                trans,
+                dst,
+                addr,
+            } => {
+                self.emit_ldmatrix(count, trans, dst, addr)?;
+                return Ok(());
+            }
+            Instruction::Alu3(op, dst, src) => (dst, self.alu3(op, src)?, Kind::B32),
+            Instruction::Alu64(op, dst, src) => {
+                let (id, kind) = self.alu64(op, src)?;
+                (dst, id, kind)
+            }
             Instruction::Param(width, dst, src, offset) => {
                 if width == Width::B64 {
                     if let Some(value) = self.params.get(&(src, offset)).copied() {
@@ -1343,6 +2121,26 @@ impl<'a> Emitter<'a> {
                         OpenclStd100Op::u_mul_hi as u32,
                         [a, b].map(Operand::IdRef),
                     ),
+                    IntegerOp::Xor => self.builder.bitwise_xor(ty, None, a, b),
+                    IntegerOp::MinSigned => self.opencl_int(ty, OpenclStd100Op::s_min, &[a, b]),
+                    IntegerOp::MaxSigned => self.opencl_int(ty, OpenclStd100Op::s_max, &[a, b]),
+                    IntegerOp::MinUnsigned => self.opencl_int(ty, OpenclStd100Op::u_min, &[a, b]),
+                    IntegerOp::MaxUnsigned => self.opencl_int(ty, OpenclStd100Op::u_max, &[a, b]),
+                    IntegerOp::MulHighSigned => {
+                        self.opencl_int(ty, OpenclStd100Op::s_mul_hi, &[a, b])
+                    }
+                    IntegerOp::AbsSigned => self.opencl_int(ty, OpenclStd100Op::s_abs, &[a]),
+                    IntegerOp::LeadingZeros => self.opencl_int(ty, OpenclStd100Op::clz, &[a]),
+                    IntegerOp::PopCount => self.builder.bit_count(ty, None, a),
+                    IntegerOp::SignExtend16 => {
+                        let shift = self.builder.constant_bit32(ty, 16);
+                        let raised = self.builder.shift_left_logical(ty, None, a, shift)?;
+                        self.builder.shift_right_arithmetic(ty, None, raised, shift)
+                    }
+                    IntegerOp::ToU8 => {
+                        let mask = self.builder.constant_bit32(ty, 0xff);
+                        self.builder.bitwise_and(ty, None, a, mask)
+                    }
                 }?;
                 (dst, id, Kind::B32)
             }
@@ -1579,9 +2377,8 @@ impl<'a> Emitter<'a> {
             }
             Instruction::Load64(space, dst, address) => {
                 let bytes_ptr = self.addressed_byte_pointer(space, address)?;
-                let pointer = self
-                    .builder
-                    .bitcast(self.global_qword_ptr, None, bytes_ptr)?;
+                let qword_ptr = self.typed_pointer(space, self.u64_type);
+                let pointer = self.builder.bitcast(qword_ptr, None, bytes_ptr)?;
                 let id = self
                     .builder
                     .load(self.u64_type, None, pointer, None, [])?;
@@ -1708,6 +2505,48 @@ impl<'a> Emitter<'a> {
                     .decorate(converted, Decoration::SaturatedConversion, []);
                 (dst, converted, Kind::B32)
             }
+            Instruction::CvtRniS32(dst, src) => {
+                let value = self.float_value(src)?;
+                let rounded = self.builder.ext_inst(
+                    self.f32_type,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::rint as u32,
+                    [Operand::IdRef(value)],
+                )?;
+                let converted = self.builder.convert_f_to_s(self.u32_type, None, rounded)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
+                );
+                self.fp32 = true;
+                (dst, converted, Kind::B32)
+            }
+            Instruction::CvtToU32 { nearest, dst, src } => {
+                let mut value = self.float_value(src)?;
+                if nearest {
+                    value = self.builder.ext_inst(
+                        self.f32_type,
+                        None,
+                        self.opencl,
+                        OpenclStd100Op::rint as u32,
+                        [Operand::IdRef(value)],
+                    )?;
+                }
+                // PTX saturates: negatives (and NaN) give 0.
+                let zero = self.builder.constant_bit32(self.f32_type, 0);
+                let negative = self.builder.f_ord_less_than(self.bool_type, None, value, zero)?;
+                let clamped = self.builder.select(self.f32_type, None, negative, zero, value)?;
+                let converted = self.builder.convert_f_to_u(self.u32_type, None, clamped)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
+                );
+                self.fp32 = true;
+                (dst, converted, Kind::B32)
+            }
             Instruction::CvtToHalf(dst, src, toward_zero) => {
                 let value = self.float_value(src)?;
                 let half = self.builder.f_convert(self.f16_type, None, value)?;
@@ -1748,9 +2587,8 @@ impl<'a> Emitter<'a> {
             }
             Instruction::Store64(space, address, src) => {
                 let bytes_ptr = self.addressed_byte_pointer(space, address)?;
-                let pointer = self
-                    .builder
-                    .bitcast(self.global_qword_ptr, None, bytes_ptr)?;
+                let qword_ptr = self.typed_pointer(space, self.u64_type);
+                let pointer = self.builder.bitcast(qword_ptr, None, bytes_ptr)?;
                 let value = self.integer(src, Kind::B64)?;
                 self.builder.store(pointer, value, None, [])?;
                 return Ok(());
@@ -1901,7 +2739,13 @@ impl<'a> Emitter<'a> {
             block.instructions.iter().any(|inst| {
                 matches!(
                     inst,
-                    Instruction::ShuffleBfly { .. } | Instruction::ReduxSyncAdd { .. }
+                    Instruction::ShuffleBfly { .. }
+                        | Instruction::ReduxSyncAdd { .. }
+                        | Instruction::Mma { .. }
+                        | Instruction::LdMatrix { .. }
+                        | Instruction::LaneId(..)
+                        | Instruction::Shuffle { .. }
+                        | Instruction::Vote { .. }
                 )
             })
         });

@@ -124,6 +124,106 @@ enum IntegerOp {
     SignExtend8To16,
     /// Arithmetic shift of a 16-bit value (`shr.s16`).
     ShiftRightArithmetic16,
+    Xor,
+    MinSigned,
+    MaxSigned,
+    MinUnsigned,
+    MaxUnsigned,
+    MulHighSigned,
+    /// Sign-extend the low 16 bits (`cvt.s32.s16`).
+    SignExtend16,
+    /// Zero-extend / truncate to the low 8 bits (`cvt.u32.u8`, `cvt.u8.u32`).
+    ToU8,
+    /// `abs.s32` (second source ignored).
+    AbsSigned,
+    /// `popc.b32` (second source ignored).
+    PopCount,
+    /// `clz.b32` (second source ignored).
+    LeadingZeros,
+}
+
+/// Three/four-operand 32-bit bit-manipulation instructions.
+#[derive(Clone, Copy, Debug)]
+enum Alu3Op {
+    BfeUnsigned,
+    BfeSigned,
+    /// `bfi.b32 d, f, a, pos, len`.
+    Bfi,
+    /// Default-mode `prmt.b32 d, a, b, selector`.
+    Prmt,
+    /// `lop3.b32 d, a, b, c, immLut`.
+    Lop3,
+}
+
+/// 64-bit integer instructions without a dedicated variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicOp {
+    Add,
+    Min,
+    Max,
+    And,
+    Or,
+    Xor,
+    Exch,
+    Cas,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShuffleMode {
+    Idx,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VoteMode {
+    Ballot,
+    All,
+    Any,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MmaShape {
+    /// `m8n8k16` signed/unsigned 8-bit inputs, 32-bit integer accumulators (sm_75).
+    M8N8K16I8,
+    M16N8K16I8,
+    M16N8K32I8,
+    /// `m16n8k8` / `m16n8k16` half inputs with f32 accumulators.
+    M16N8K8F16,
+    M16N8K16F16,
+}
+
+impl MmaShape {
+    /// Number of C/D registers per thread.
+    fn accumulators(self) -> usize {
+        if self == Self::M8N8K16I8 { 2 } else { 4 }
+    }
+
+    /// Number of 32-bit K groups: 4 bytes or 2 halves per register.
+    fn groups(self) -> usize {
+        match self {
+            Self::M8N8K16I8 | Self::M16N8K16I8 | Self::M16N8K8F16 => 4,
+            Self::M16N8K32I8 | Self::M16N8K16F16 => 8,
+        }
+    }
+
+    fn is_integer(self) -> bool {
+        matches!(self, Self::M8N8K16I8 | Self::M16N8K16I8 | Self::M16N8K32I8)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Alu64Op {
+    Xor,
+    MaxSigned,
+    MinUnsigned,
+    MaxUnsigned,
+    Neg,
+    AbsSigned,
+    /// `mad.lo.{s,u}64 d, a, b, c`.
+    MadLo,
+    /// `popc.b64` — the destination is a 32-bit register.
+    PopCount,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,6 +253,10 @@ enum FloatOp<'a> {
     TanhApprox([&'a str; 1]),
     /// `cvt.rzi.f32.f32` â€” truncate toward zero, stay in f32.
     Trunc([&'a str; 1]),
+    /// `cvt.rni.f32.f32` (round half to even), `cvt.rmi` (floor), `cvt.rpi` (ceil).
+    RoundNearest([&'a str; 1]),
+    Floor([&'a str; 1]),
+    Ceil([&'a str; 1]),
 }
 
 impl<'a> FloatOp<'a> {
@@ -176,6 +280,9 @@ impl<'a> FloatOp<'a> {
             | Self::Abs(inputs)
             | Self::Neg(inputs)
             | Self::TanhApprox(inputs)
+            | Self::RoundNearest(inputs)
+            | Self::Floor(inputs)
+            | Self::Ceil(inputs)
             | Self::Trunc(inputs) => inputs,
         }
     }
@@ -262,6 +369,53 @@ enum Instruction<'a> {
     And64(&'a str, [&'a str; 2]),
     Or64(&'a str, [&'a str; 2]),
     MinS64(&'a str, [&'a str; 2]),
+    /// Three/four-source 32-bit bit manipulation; unused sources are `"0"`.
+    Alu3(Alu3Op, &'a str, [&'a str; 4]),
+    /// 64-bit integer op; unused sources are `"0"`.
+    Alu64(Alu64Op, &'a str, [&'a str; 3]),
+    /// `mov.u32 %r, %laneid`.
+    LaneId(&'a str),
+    /// `atom.*` / `red.*` on 32-bit words. `dst` is absent for `red`; `src` is
+    /// `[value, compare]` for `cas` (`[compare, value]` in PTX order) else `[value, "0"]`.
+    Atomic {
+        op: AtomicOp,
+        space: Space,
+        float: bool,
+        signed: bool,
+        dst: Option<&'a str>,
+        addr: &'a str,
+        src: [&'a str; 2],
+    },
+    /// `shfl.sync.{idx,up,down}.b32 d|p, a, b, c, membermask`.
+    Shuffle {
+        mode: ShuffleMode,
+        dst: &'a str,
+        pred: Option<&'a str>,
+        src: [&'a str; 4],
+    },
+    /// `vote.sync.{ballot.b32,all.pred,any.pred}` and `activemask.b32` (`src` = `"1"`).
+    Vote {
+        mode: VoteMode,
+        dst: &'a str,
+        src: &'a str,
+    },
+    /// `bar.warp.sync`, `membar.*`, `fence.*`.
+    Fence,
+    /// `mma.sync.aligned` emulated with subgroup shuffles. Sources are
+    /// `a[0..4]`, `b[4..6]`, `c[6..10]`; unused entries are `"0"`.
+    Mma {
+        shape: MmaShape,
+        signed: [bool; 2],
+        dst: [&'a str; 4],
+        src: [&'a str; 10],
+    },
+    /// `ldmatrix.sync.aligned.m8n8.xN[.trans].shared.b16`.
+    LdMatrix {
+        count: u8,
+        trans: bool,
+        dst: [&'a str; 4],
+        addr: &'a str,
+    },
     Rem64 {
         signed: bool,
         dst: &'a str,
@@ -289,6 +443,10 @@ enum Instruction<'a> {
     Float32(&'a str, FloatOp<'a>),
     /// `cvt.rzi.ftz.s32.f32` â€” floatâ†’int32 toward zero.
     CvtRziS32(&'a str, &'a str),
+    /// `cvt.rni.s32.f32` — float to int32, ties to even.
+    CvtRniS32(&'a str, &'a str),
+    /// `cvt.rzi.u32.f32` / `cvt.rni.u32.f32` — float to uint32 (negative values clamp to 0).
+    CvtToU32 { nearest: bool, dst: &'a str, src: &'a str },
     /// `cvt.rn.f16.f32` â€” f32â†’f16 bits in the low 16 bits of a b32 register.
     /// The flag selects round-toward-zero (`.rz`) instead of round-to-nearest-even.
     CvtToHalf(&'a str, &'a str, bool),
@@ -312,6 +470,17 @@ enum Instruction<'a> {
     StoreVec4U8(&'a str, [&'a str; 4]),
     /// `ld.global.u8` â€” zero-extend a byte into a 32-bit slot.
     Load8(Space, &'a str, &'a str),
+    /// `ld.{s8,s16}` — sign-extend a byte/halfword into the full 32-bit slot.
+    LoadSigned {
+        space: Space,
+        bits: u8,
+        dst: &'a str,
+        addr: &'a str,
+    },
+    /// `cvta.shared.u64 d, a` — shared window offset (or pointer) to a generic pointer.
+    CvtaShared(&'a str, &'a str),
+    /// `cvta.to.shared.{u32,u64} d, a` — generic pointer to a shared window offset.
+    CvtaToShared { wide: bool, dst: &'a str, src: &'a str },
     /// `ld.global.v2/v4.u16` â€” packed IEEE half / u16 vector load.
     LoadVecU16 {
         space: Space,
@@ -357,14 +526,49 @@ impl<'a> Instruction<'a> {
                 out.extend_from_slice(&dst[..usize::from(*count)]);
                 &[]
             }
-            Mad32(dst, src) | Dp4a(dst, src) => {
+            Mad32(dst, src) | Dp4a(dst, src) | Alu64(_, dst, src) => {
                 out.push(*dst);
                 src
+            }
+            Alu3(_, dst, src) => {
+                out.push(*dst);
+                src
+            }
+            LaneId(dst) => {
+                out.push(*dst);
+                &[]
+            }
+            Atomic { dst, addr, src, .. } => {
+                out.extend(dst.iter().copied());
+                // The address and operands are all sources; only the value operands
+                // are slices of `src`, which is enough for definition tracking.
+                let _ = addr;
+                src
+            }
+            Shuffle { dst, pred, src, .. } => {
+                out.push(*dst);
+                out.extend(pred.iter().copied());
+                src
+            }
+            Vote { dst, src, .. } => {
+                out.push(*dst);
+                std::slice::from_ref(src)
+            }
+            Mma { shape, dst, src, .. } => {
+                out.extend_from_slice(&dst[..shape.accumulators()]);
+                src
+            }
+            LdMatrix {
+                count, dst, addr, ..
+            } => {
+                out.extend_from_slice(&dst[..usize::from(*count)]);
+                std::slice::from_ref(addr)
             }
             Load32(_, dst, addr)
             | Load64(_, dst, addr)
             | Load16(_, dst, addr)
-            | Load8(_, dst, addr) => {
+            | Load8(_, dst, addr)
+            | LoadSigned { dst, addr, .. } => {
                 out.push(*dst);
                 std::slice::from_ref(addr)
             }
@@ -378,6 +582,8 @@ impl<'a> Instruction<'a> {
                 std::slice::from_ref(addr)
             }
             ToGlobal(dst, src)
+            | CvtaShared(dst, src)
+            | CvtaToShared { dst, src, .. }
             | Builtin(dst, src)
             | Move32(dst, src)
             | Move64(dst, src)
@@ -426,7 +632,10 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 op.inputs()
             }
-            CvtRziS32(dst, src) | CvtToHalf(dst, src, _) => {
+            CvtRziS32(dst, src)
+            | CvtRniS32(dst, src)
+            | CvtToU32 { dst, src, .. }
+            | CvtToHalf(dst, src, _) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
@@ -455,6 +664,7 @@ impl<'a> Instruction<'a> {
             | StoreVecU16(..)
             | StoreVec4U16(..)
             | StoreVec4U8(..)
+            | Fence
             | Barrier => {
                 return None
             }
@@ -468,9 +678,11 @@ impl<'a> Instruction<'a> {
                 | Self::Load64(..)
                 | Self::Load16(..)
                 | Self::Load8(..)
+                | Self::LoadSigned { .. }
                 | Self::LoadVec { .. }
                 | Self::LoadVecU16 { .. }
                 | Self::AtomicAdd32(..)
+                | Self::Atomic { .. }
         )
     }
 
@@ -553,6 +765,9 @@ pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
 }
 
 #[cfg(test)]
+mod coverage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rspirv::spirv::Op;
@@ -583,6 +798,13 @@ mod tests {
         assert_eq!(translated.kernels[0].params, [Param::GlobalPtr, Param::U32]);
         let module = rspirv::dr::load_words(&translated.words).unwrap();
         assert!(module.all_inst_iter().any(|inst| inst.class.opcode == Op::SConvert));
+    }
+
+    #[test]
+    fn ignores_trailing_control_characters_after_the_last_entry() {
+        let source = format!("{}\u{1a}\0", include_str!("../examples/rope_neox_f32_dump.ptx").trim_end_matches(['\u{1a}', '\0']));
+        translate(&source).unwrap();
+        translate(include_str!("../examples/k_set_rows_dump.ptx")).unwrap();
     }
 
     #[test]

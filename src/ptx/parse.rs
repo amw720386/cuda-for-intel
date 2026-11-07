@@ -1,5 +1,5 @@
 use super::{
-    Block, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
+    Alu3Op, Alu64Op, AtomicOp, Block, MmaShape, ShuffleMode, VoteMode, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
     Width,
 };
 use std::collections::HashMap;
@@ -162,7 +162,8 @@ impl<'a> Parser<'a> {
             let width = match self.take()? {
                 ".pred" => Width::Predicate,
                 // 16-bit regs are tracked as B32 slots holding zero-extended values.
-                ".b16" | ".u16" | ".s16" | ".b32" | ".u32" | ".s32" | ".f32" => Width::B32,
+                ".b16" | ".u16" | ".s16" | ".f16" | ".u8" | ".s8" | ".b8" | ".b32" | ".u32" | ".s32"
+                | ".f32" | ".f16x2" => Width::B32,
                 ".b64" | ".u64" | ".s64" => Width::B64,
                 ty => return Err(Error::new(format!("unsupported PTX register type {ty}"))),
             };
@@ -205,6 +206,14 @@ impl<'a> Parser<'a> {
         // nvcc wraps some helpers (notably __half2float) as `{ inst; }`.
         let braced = slice.first() == Some(&"{");
         let body = if braced { &slice[1..end] } else { &slice[..end] };
+        let patched: Vec<&str>;
+        let body = match body.first().and_then(|op| generic_to_global(op)) {
+            Some(op) => {
+                patched = std::iter::once(op).chain(body[1..].iter().copied()).collect();
+                &patched[..]
+            }
+            None => body,
+        };
         let result = match body {
             [
                 op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32"),
@@ -292,6 +301,13 @@ impl<'a> Parser<'a> {
                 }
             }
             ["cvta.to.global.u64", dst, ",", src] => Instruction::ToGlobal(dst, src),
+            ["cvta.shared.u64", dst, ",", src] => Instruction::CvtaShared(dst, src),
+            ["cvta.to.shared.u64", dst, ",", src] => {
+                Instruction::CvtaToShared { wide: true, dst, src }
+            }
+            ["cvta.to.shared.u32", dst, ",", src] => {
+                Instruction::CvtaToShared { wide: false, dst, src }
+            }
             ["mov.b64", dst, ",", src]
                 if !src.starts_with('%')
                     && !src.starts_with("0x")
@@ -334,6 +350,7 @@ impl<'a> Parser<'a> {
                 ",",
                 value,
             ] => Instruction::AtomicAdd32(dst, address, value),
+            ["mov.u32", dst, ",", "%laneid"] => Instruction::LaneId(dst),
             ["mov.u32", dst, ",", src] => {
                 if src.contains('.') {
                     Instruction::Builtin(dst, src)
@@ -473,6 +490,290 @@ impl<'a> Parser<'a> {
             ["not.pred", dst, ",", src] => Instruction::NotPred(dst, src),
             ["neg.s32", dst, ",", src] => Instruction::Integer32(IntegerOp::Sub, dst, ["0", src]),
             [
+                op @ ("add.u32" | "sub.u32" | "mul.lo.u32" | "shr.b32" | "xor.b32"
+                | "min.s32" | "max.s32" | "min.u32" | "max.u32" | "mul.hi.s32"
+                | "and.b16" | "or.b16" | "xor.b16" | "shr.u16"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => {
+                let op = match *op {
+                    "add.u32" => IntegerOp::Add,
+                    "sub.u32" => IntegerOp::Sub,
+                    "mul.lo.u32" => IntegerOp::Mul,
+                    "xor.b32" | "xor.b16" => IntegerOp::Xor,
+                    "min.s32" => IntegerOp::MinSigned,
+                    "max.s32" => IntegerOp::MaxSigned,
+                    "min.u32" => IntegerOp::MinUnsigned,
+                    "max.u32" => IntegerOp::MaxUnsigned,
+                    "mul.hi.s32" => IntegerOp::MulHighSigned,
+                    "and.b16" => IntegerOp::And,
+                    "or.b16" => IntegerOp::Or,
+                    // 16-bit values are zero-extended in their slot, so a logical shift is exact.
+                    _ => IntegerOp::ShiftRightLogical,
+                };
+                Instruction::Integer32(op, dst, [a, b])
+            }
+            ["abs.s32", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::AbsSigned, dst, [src, src])
+            }
+            ["popc.b32", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::PopCount, dst, [src, src])
+            }
+            ["clz.b32", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::LeadingZeros, dst, [src, src])
+            }
+            ["cvt.s32.s16", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::SignExtend16, dst, [src, src])
+            }
+            ["cvt.u32.u16" | "cvt.u16.u16", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::ToU16, dst, [src, src])
+            }
+            ["cvt.u32.u8" | "cvt.u16.u8" | "cvt.u8.u32" | "cvt.u8.u8", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::ToU8, dst, [src, src])
+            }
+            [
+                op @ ("bfe.u32" | "bfe.s32"),
+                dst,
+                ",",
+                a,
+                ",",
+                pos,
+                ",",
+                len,
+            ] => Instruction::Alu3(
+                if *op == "bfe.u32" {
+                    Alu3Op::BfeUnsigned
+                } else {
+                    Alu3Op::BfeSigned
+                },
+                dst,
+                [a, pos, len, "0"],
+            ),
+            ["bfi.b32", dst, ",", f, ",", a, ",", pos, ",", len] => {
+                Instruction::Alu3(Alu3Op::Bfi, dst, [f, a, pos, len])
+            }
+            ["prmt.b32", dst, ",", a, ",", b, ",", selector] => {
+                Instruction::Alu3(Alu3Op::Prmt, dst, [a, b, selector, "0"])
+            }
+            ["lop3.b32", dst, ",", a, ",", b, ",", c, ",", lut] => {
+                Instruction::Alu3(Alu3Op::Lop3, dst, [a, b, c, lut])
+            }
+            [op, rest @ ..] if op.starts_with("mma.sync.aligned.") => {
+                let unsupported = || {
+                    Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
+                };
+                let parts: Vec<&str> = op.split('.').collect();
+                // mma . sync . aligned . SHAPE . row . col . D . A . B . C
+                let [_, _, _, shape, "row", "col", dty, aty, bty, cty] = parts[..] else {
+                    return Err(unsupported());
+                };
+                let (shape, signed) = match (shape, dty, aty, bty, cty) {
+                    ("m8n8k16" | "m16n8k16" | "m16n8k32", "s32", "s8" | "u8", "s8" | "u8", "s32") => (
+                        match shape {
+                            "m8n8k16" => MmaShape::M8N8K16I8,
+                            "m16n8k16" => MmaShape::M16N8K16I8,
+                            _ => MmaShape::M16N8K32I8,
+                        },
+                        [aty == "s8", bty == "s8"],
+                    ),
+                    ("m16n8k8" | "m16n8k16", "f32", "f16", "f16", "f32") => (
+                        if shape == "m16n8k8" {
+                            MmaShape::M16N8K8F16
+                        } else {
+                            MmaShape::M16N8K16F16
+                        },
+                        [true, true],
+                    ),
+                    _ => return Err(unsupported()),
+                };
+                let lists = brace_lists(rest).ok_or_else(unsupported)?;
+                let [d, a, b, c] = &lists[..] else {
+                    return Err(unsupported());
+                };
+                let nc = shape.accumulators();
+                let na = (shape.groups() / 4) * (nc / 2);
+                let nb = shape.groups() / 4;
+                if d.len() != nc || c.len() != nc || a.len() != na || b.len() != nb {
+                    return Err(unsupported());
+                }
+                let mut dst = [""; 4];
+                dst[..nc].copy_from_slice(d);
+                let mut src = ["0"; 10];
+                src[..na].copy_from_slice(a);
+                src[4..4 + nb].copy_from_slice(b);
+                src[6..6 + nc].copy_from_slice(c);
+                Instruction::Mma {
+                    shape,
+                    signed,
+                    dst,
+                    src,
+                }
+            }
+            [op, rest @ ..] if op.starts_with("ldmatrix.sync.aligned.m8n8.") => {
+                let unsupported = || {
+                    Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
+                };
+                let parts: Vec<&str> = op.split('.').collect();
+                let (count, trans) = match parts[4..] {
+                    ["x1", "shared", "b16"] => (1u8, false),
+                    ["x2", "shared", "b16"] => (2, false),
+                    ["x4", "shared", "b16"] => (4, false),
+                    ["x1", "trans", "shared", "b16"] => (1, true),
+                    ["x2", "trans", "shared", "b16"] => (2, true),
+                    ["x4", "trans", "shared", "b16"] => (4, true),
+                    _ => return Err(unsupported()),
+                };
+                let (regs, after) = rest_after_list_tokens(rest).ok_or_else(unsupported)?;
+                let [",", "[", addr, "]"] = after else {
+                    return Err(unsupported());
+                };
+                if regs.len() != usize::from(count) {
+                    return Err(unsupported());
+                }
+                let mut dst = [""; 4];
+                dst[..regs.len()].copy_from_slice(&regs);
+                Instruction::LdMatrix {
+                    count,
+                    trans,
+                    dst,
+                    addr,
+                }
+            }
+            [op, rest @ ..] if op.starts_with("atom.") || op.starts_with("red.") => {
+                let unsupported = || {
+                    Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
+                };
+                let returns = op.starts_with("atom.");
+                let mut space = None;
+                let mut kind = None;
+                let mut ty = None;
+                for part in op.split('.').skip(1) {
+                    match part {
+                        "global" => space = Some(Space::Global),
+                        "shared" => space = Some(Space::Shared),
+                        // Memory-ordering and scope qualifiers do not change the lowering.
+                        "relaxed" | "acquire" | "release" | "acq_rel" | "gpu" | "cta" | "sys"
+                        | "cluster" | "sem" => {}
+                        "add" => kind = Some(AtomicOp::Add),
+                        "min" => kind = Some(AtomicOp::Min),
+                        "max" => kind = Some(AtomicOp::Max),
+                        "and" => kind = Some(AtomicOp::And),
+                        "or" => kind = Some(AtomicOp::Or),
+                        "xor" => kind = Some(AtomicOp::Xor),
+                        "exch" => kind = Some(AtomicOp::Exch),
+                        "cas" => kind = Some(AtomicOp::Cas),
+                        "u32" | "b32" | "s32" | "f32" => ty = Some(part),
+                        _ => return Err(unsupported()),
+                    }
+                }
+                let (Some(space), Some(kind), Some(ty)) = (space, kind, ty) else {
+                    return Err(unsupported());
+                };
+                let float = ty == "f32";
+                if float && kind != AtomicOp::Add {
+                    return Err(unsupported());
+                }
+                let signed = ty == "s32";
+                let (dst, rest) = if returns {
+                    match rest {
+                        [dst, ",", rest @ ..] => (Some(*dst), rest),
+                        _ => return Err(unsupported()),
+                    }
+                } else {
+                    (None, rest)
+                };
+                let src = match rest {
+                    ["[", addr, "]", ",", value] if kind != AtomicOp::Cas => (*addr, [*value, "0"]),
+                    ["[", addr, "]", ",", compare, ",", value] if kind == AtomicOp::Cas => {
+                        (*addr, [*value, *compare])
+                    }
+                    _ => return Err(unsupported()),
+                };
+                if (dst.is_none() && kind == AtomicOp::Cas) || (!returns && kind == AtomicOp::Exch) {
+                    return Err(unsupported());
+                }
+                Instruction::Atomic {
+                    op: kind,
+                    space,
+                    float,
+                    signed,
+                    dst,
+                    addr: src.0,
+                    src: src.1,
+                }
+            }
+            [
+                op @ ("shfl.sync.idx.b32" | "shfl.sync.up.b32" | "shfl.sync.down.b32"),
+                dst,
+                ",",
+                value,
+                ",",
+                delta,
+                ",",
+                clamp,
+                ",",
+                membermask,
+            ] => {
+                let (dst, pred) = match dst.split_once('|') {
+                    Some((dst, pred)) => (dst, Some(pred)),
+                    None => (*dst, None),
+                };
+                let mode = match *op {
+                    "shfl.sync.idx.b32" => ShuffleMode::Idx,
+                    "shfl.sync.up.b32" => ShuffleMode::Up,
+                    _ => ShuffleMode::Down,
+                };
+                Instruction::Shuffle {
+                    mode,
+                    dst,
+                    pred,
+                    src: [value, delta, clamp, membermask],
+                }
+            }
+            ["vote.sync.ballot.b32", dst, ",", pred, ",", _mask] => Instruction::Vote {
+                mode: VoteMode::Ballot,
+                dst,
+                src: pred,
+            },
+            ["vote.sync.all.pred", dst, ",", pred, ",", _mask] => Instruction::Vote {
+                mode: VoteMode::All,
+                dst,
+                src: pred,
+            },
+            ["vote.sync.any.pred", dst, ",", pred, ",", _mask] => Instruction::Vote {
+                mode: VoteMode::Any,
+                dst,
+                src: pred,
+            },
+            ["activemask.b32", dst] => Instruction::Vote {
+                mode: VoteMode::Ballot,
+                dst,
+                src: "1",
+            },
+            ["bar.warp.sync", _]
+            | ["membar.gl" | "membar.cta" | "membar.sys"]
+            | ["fence.sc.gpu" | "fence.acq_rel.gpu" | "fence.sc.cta" | "fence.acq_rel.cta"
+            | "fence.sc.sys" | "fence.acq_rel.sys"] => Instruction::Fence,
+            ["xor.b64", dst, ",", a, ",", b] => Instruction::Alu64(Alu64Op::Xor, dst, [a, b, "0"]),
+            ["max.s64", dst, ",", a, ",", b] => {
+                Instruction::Alu64(Alu64Op::MaxSigned, dst, [a, b, "0"])
+            }
+            ["min.u64", dst, ",", a, ",", b] => {
+                Instruction::Alu64(Alu64Op::MinUnsigned, dst, [a, b, "0"])
+            }
+            ["max.u64", dst, ",", a, ",", b] => {
+                Instruction::Alu64(Alu64Op::MaxUnsigned, dst, [a, b, "0"])
+            }
+            ["neg.s64", dst, ",", a] => Instruction::Alu64(Alu64Op::Neg, dst, [a, "0", "0"]),
+            ["abs.s64", dst, ",", a] => Instruction::Alu64(Alu64Op::AbsSigned, dst, [a, "0", "0"]),
+            ["popc.b64", dst, ",", a] => Instruction::Alu64(Alu64Op::PopCount, dst, [a, "0", "0"]),
+            ["mad.lo.s64" | "mad.lo.u64", dst, ",", a, ",", b, ",", c] => {
+                Instruction::Alu64(Alu64Op::MadLo, dst, [a, b, c])
+            }
+            [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
                 | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "div.u32"
                 | "rem.s32" | "rem.u32"),
@@ -577,6 +878,9 @@ impl<'a> Parser<'a> {
                 | "ld.global.f32"
                 | "ld.global.nc.u32"
                 | "ld.global.nc.f32"
+                | "ld.global.s32"
+                | "ld.shared.s32"
+                | "ld.local.s32"
                 | "ld.shared.b32"
                 | "ld.shared.f32"
                 | "ld.shared.u32"
@@ -599,35 +903,47 @@ impl<'a> Parser<'a> {
                 Instruction::Load32(space, dst, addr)
             }
             [
-                "ld.global.u64" | "ld.global.b64" | "ld.global.nc.u64" | "ld.global.nc.b64",
+                op @ ("ld.global.u64" | "ld.global.b64" | "ld.global.nc.u64" | "ld.global.nc.b64"
+                | "ld.global.s64" | "ld.shared.u64" | "ld.shared.b64" | "ld.local.u64"
+                | "ld.local.b64"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
-            ] => Instruction::Load64(Space::Global, dst, addr),
+            ] => Instruction::Load64(memory_space(op), dst, addr),
             [
-                op @ ("ld.global.u16" | "ld.global.b16" | "ld.global.nc.u16" | "ld.global.nc.b16"),
+                op @ ("ld.global.s8" | "ld.shared.s8" | "ld.local.s8" | "ld.global.s16"
+                | "ld.shared.s16" | "ld.local.s16" | "ld.global.nc.s8" | "ld.global.nc.s16"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
-            ] => {
-                let _ = op;
-                Instruction::Load16(Space::Global, dst, addr)
-            }
+            ] => Instruction::LoadSigned {
+                space: memory_space(op),
+                bits: if op.ends_with("s8") { 8 } else { 16 },
+                dst,
+                addr,
+            },
             [
-                op @ ("ld.global.u8" | "ld.global.b8" | "ld.global.nc.u8" | "ld.global.nc.b8"),
+                op @ ("ld.global.u16" | "ld.global.b16" | "ld.global.nc.u16" | "ld.global.nc.b16"
+                | "ld.shared.u16" | "ld.shared.b16" | "ld.local.u16" | "ld.local.b16"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
-            ] => {
-                let _ = op;
-                Instruction::Load8(Space::Global, dst, addr)
-            }
+            ] => Instruction::Load16(memory_space(op), dst, addr),
+            [
+                op @ ("ld.global.u8" | "ld.global.b8" | "ld.global.nc.u8" | "ld.global.nc.b8"
+                | "ld.shared.u8" | "ld.shared.b8" | "ld.local.u8" | "ld.local.b8"),
+                dst,
+                ",",
+                "[",
+                addr,
+                "]",
+            ] => Instruction::Load8(memory_space(op), dst, addr),
             [
                 op @ ("ld.global.v2.u16"
                 | "ld.global.nc.v2.u16"
@@ -678,19 +994,29 @@ impl<'a> Parser<'a> {
                 | "ld.global.v4.f32"
                 | "ld.global.nc.v4.f32"
                 | "ld.shared.v2.f32"
-                | "ld.local.v2.f32"),
+                | "ld.local.v2.f32"
+                | "ld.global.v2.u32"
+                | "ld.global.nc.v2.u32"
+                | "ld.global.v4.u32"
+                | "ld.global.nc.v4.u32"
+                | "ld.global.v2.b32"
+                | "ld.global.v4.b32"
+                | "ld.shared.v4.f32"
+                | "ld.shared.v2.u32"
+                | "ld.shared.v4.u32"
+                | "ld.shared.v2.b32"
+                | "ld.shared.v4.b32"
+                | "ld.local.v4.f32"
+                | "ld.local.v2.u32"
+                | "ld.local.v4.u32"),
                 "{",
                 a,
                 ",",
                 b,
                 rest @ ..,
             ] => {
-                let (count, space) = match *op {
-                    "ld.global.v4.f32" | "ld.global.nc.v4.f32" => (4u8, Space::Global),
-                    "ld.global.v2.f32" | "ld.global.nc.v2.f32" => (2, Space::Global),
-                    "ld.local.v2.f32" => (2, Space::Local),
-                    _ => (2, Space::Shared),
-                };
+                let count = if op.contains(".v4.") { 4u8 } else { 2 };
+                let space = memory_space(op);
                 let (c, d, addr) = if count == 4 {
                     match rest {
                         [",", c, ",", d, "}", ",", "[", addr, "]"] => (*c, *d, *addr),
@@ -741,6 +1067,24 @@ impl<'a> Parser<'a> {
             }
             ["cvt.rzi.f32.f32" | "cvt.rzi.ftz.f32.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Trunc([src]))
+            }
+            ["cvt.rni.f32.f32" | "cvt.rni.ftz.f32.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::RoundNearest([src]))
+            }
+            ["cvt.rmi.f32.f32" | "cvt.rmi.ftz.f32.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Floor([src]))
+            }
+            ["cvt.rpi.f32.f32" | "cvt.rpi.ftz.f32.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Ceil([src]))
+            }
+            ["cvt.rni.s32.f32" | "cvt.rni.ftz.s32.f32", dst, ",", src] => {
+                Instruction::CvtRniS32(dst, src)
+            }
+            ["cvt.rzi.u32.f32" | "cvt.rzi.ftz.u32.f32", dst, ",", src] => {
+                Instruction::CvtToU32 { nearest: false, dst, src }
+            }
+            ["cvt.rni.u32.f32" | "cvt.rni.ftz.u32.f32", dst, ",", src] => {
+                Instruction::CvtToU32 { nearest: true, dst, src }
             }
             ["cvt.rzi.ftz.s32.f32" | "cvt.rzi.s32.f32", dst, ",", src] => {
                 Instruction::CvtRziS32(dst, src)
@@ -813,40 +1157,34 @@ impl<'a> Parser<'a> {
                 Instruction::Float32(dst, FloatOp::Ex2Approx([src]))
             }
             [
-                "st.global.u8" | "st.global.b8" | "st.shared.u8" | "st.shared.b8" | "st.u8",
+                "st.global.u8" | "st.global.b8" | "st.shared.u8" | "st.shared.b8" | "st.local.u8"
+                | "st.local.b8",
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
             ] => {
-                let space = if body[0].starts_with("st.shared") {
-                    Space::Shared
-                } else {
-                    Space::Global
-                };
-                Instruction::Store8(space, addr, src)
+                Instruction::Store8(memory_space(body[0]), addr, src)
             }
             [
-                "st.global.u16" | "st.global.b16" | "st.u16",
+                "st.global.u16" | "st.global.b16" | "st.shared.u16" | "st.shared.b16"
+                | "st.local.u16" | "st.local.b16",
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
-            ] => {
-                // In this subset generic pointers are global. The emitter rejects
-                // explicitly typed local or shared addresses at this store.
-                Instruction::Store16(Space::Global, addr, src)
-            }
+            ] => Instruction::Store16(memory_space(body[0]), addr, src),
             [
-                "st.global.u64" | "st.global.b64",
+                "st.global.u64" | "st.global.b64" | "st.shared.u64" | "st.shared.b64"
+                | "st.local.u64" | "st.local.b64",
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
-            ] => Instruction::Store64(Space::Global, addr, src),
+            ] => Instruction::Store64(memory_space(body[0]), addr, src),
             [
                 "st.global.v2.u16" | "st.global.v2.b16",
                 "[",
@@ -909,7 +1247,18 @@ impl<'a> Parser<'a> {
             [
                 op @ ("st.global.v2.f32" | "st.global.v2.u32" | "st.global.v4.f32"
                 | "st.shared.v2.f32"
-                | "st.local.v2.f32"),
+                | "st.local.v2.f32"
+                | "st.global.v4.u32"
+                | "st.global.v2.b32"
+                | "st.global.v4.b32"
+                | "st.shared.v4.f32"
+                | "st.shared.v2.u32"
+                | "st.shared.v4.u32"
+                | "st.shared.v2.b32"
+                | "st.shared.v4.b32"
+                | "st.local.v4.f32"
+                | "st.local.v2.u32"
+                | "st.local.v4.u32"),
                 "[",
                 addr,
                 "]",
@@ -921,12 +1270,8 @@ impl<'a> Parser<'a> {
                 rest @ ..,
             ] => {
                 // v2.u32 shares the float-vector store path; bit patterns are preserved.
-                let (count, space) = match *op {
-                    "st.global.v4.f32" => (4u8, Space::Global),
-                    "st.global.v2.f32" | "st.global.v2.u32" => (2, Space::Global),
-                    "st.local.v2.f32" => (2, Space::Local),
-                    _ => (2, Space::Shared),
-                };
+                let count = if op.contains(".v4.") { 4u8 } else { 2 };
+                let space = memory_space(op);
                 let (c, d) = if count == 4 {
                     match rest {
                         [",", c, ",", d, "}"] => (*c, *d),
@@ -979,11 +1324,13 @@ impl<'a> Parser<'a> {
             Jump(&'a str),
             Branch(&'a str, bool, &'a str),
             Fallthrough,
+            /// `@p inst;` / `@p ret;` — executes the next block only when the guard holds.
+            Guard(&'a str, bool),
         }
         let mut labels = HashMap::new();
         let mut blocks = Vec::new();
         while !self.eat("}") {
-            if blocks.len() == 512 {
+            if blocks.len() >= 2048 {
                 return Err(Error::new("too many PTX blocks"));
             }
             while self.label() {
@@ -1008,10 +1355,25 @@ impl<'a> Parser<'a> {
                 } else if self.eat("@") {
                     let invert = self.eat("!");
                     let predicate = self.identifier()?;
-                    if !self.eat("bra") {
-                        self.expect("bra.uni")?;
+                    if self.eat("bra") || self.eat("bra.uni") {
+                        End::Branch(predicate, invert, self.identifier()?)
+                    } else if self.eat("ret") {
+                        self.expect(";")?;
+                        blocks.push((
+                            std::mem::take(&mut instructions),
+                            End::Guard(predicate, invert),
+                        ));
+                        blocks.push((Vec::new(), End::Return));
+                        continue;
+                    } else {
+                        let inst = self.instruction()?;
+                        blocks.push((
+                            std::mem::take(&mut instructions),
+                            End::Guard(predicate, invert),
+                        ));
+                        blocks.push((vec![inst], End::Fallthrough));
+                        continue;
                     }
-                    End::Branch(predicate, invert, self.identifier()?)
                 } else if self.eat("bra") || self.eat("bra.uni") {
                     End::Jump(self.identifier()?)
                 } else {
@@ -1043,6 +1405,20 @@ impl<'a> Parser<'a> {
                     End::Return => Terminator::Return,
                     End::Jump(label) => Terminator::Jump(target(label)?),
                     End::Fallthrough => Terminator::Jump(next()?),
+                    End::Guard(predicate, invert) => {
+                        let (mut taken, mut other) = (next()?, index + 2);
+                        if other >= count {
+                            return Err(Error::new("PTX block falls off the end of the entry"));
+                        }
+                        if invert {
+                            std::mem::swap(&mut taken, &mut other);
+                        }
+                        Terminator::Branch {
+                            predicate,
+                            taken,
+                            other,
+                        }
+                    }
                     End::Branch(predicate, invert, label) => {
                         let (mut taken, mut other) = (target(label)?, next()?);
                         if invert {
@@ -1059,6 +1435,76 @@ impl<'a> Parser<'a> {
             })
             .collect()
     }
+}
+
+/// `ld.u32` / `st.f32` without a state space address generic memory. Every
+/// generic pointer in this subset is resolved when the instruction is emitted,
+/// so parse them as global accesses.
+fn generic_to_global(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "ld.u8" => "ld.global.u8",
+        "ld.b8" => "ld.global.b8",
+        "ld.s8" => "ld.global.s8",
+        "ld.u16" => "ld.global.u16",
+        "ld.b16" => "ld.global.b16",
+        "ld.s16" => "ld.global.s16",
+        "ld.u32" => "ld.global.u32",
+        "ld.b32" => "ld.global.b32",
+        "ld.s32" => "ld.global.s32",
+        "ld.f32" => "ld.global.f32",
+        "ld.u64" => "ld.global.u64",
+        "ld.b64" => "ld.global.b64",
+        "ld.v2.f32" => "ld.global.v2.f32",
+        "ld.v4.f32" => "ld.global.v4.f32",
+        "ld.v2.u32" => "ld.global.v2.u32",
+        "ld.v4.u32" => "ld.global.v4.u32",
+        "st.u8" => "st.global.u8",
+        "st.b8" => "st.global.b8",
+        "st.u16" => "st.global.u16",
+        "st.b16" => "st.global.b16",
+        "st.u32" => "st.global.u32",
+        "st.b32" => "st.global.b32",
+        "st.f32" => "st.global.f32",
+        "st.u64" => "st.global.u64",
+        "st.b64" => "st.global.b64",
+        "st.v2.f32" => "st.global.v2.f32",
+        "st.v4.f32" => "st.global.v4.f32",
+        "st.v2.u32" => "st.global.v2.u32",
+        "st.v4.u32" => "st.global.v4.u32",
+        _ => return None,
+    })
+}
+
+fn memory_space(op: &str) -> Space {
+    if op.contains(".shared.") {
+        Space::Shared
+    } else if op.contains(".local.") {
+        Space::Local
+    } else {
+        Space::Global
+    }
+}
+
+/// Parses `{ a , b } , { c } ...` into register lists.
+fn brace_lists<'a>(mut tokens: &[&'a str]) -> Option<Vec<Vec<&'a str>>> {
+    let mut lists = Vec::new();
+    while !tokens.is_empty() {
+        let (regs, rest) = rest_after_list_tokens(tokens)?;
+        lists.push(regs);
+        tokens = match rest {
+            [",", rest @ ..] => rest,
+            [] => &[],
+            _ => return None,
+        };
+    }
+    Some(lists)
+}
+
+fn rest_after_list_tokens<'a, 'b>(tokens: &'b [&'a str]) -> Option<(Vec<&'a str>, &'b [&'a str])> {
+    let ["{", rest @ ..] = tokens else { return None };
+    let close = rest.iter().position(|&t| t == "}")?;
+    let regs: Vec<&str> = rest[..close].iter().copied().filter(|&t| t != ",").collect();
+    Some((regs, &rest[close + 1..]))
 }
 
 /// Skip a module-level declaration (`.global` / `.const` / …) through its
@@ -1108,7 +1554,8 @@ fn skip_module_directives(parser: &mut Parser<'_>) -> Result<(), Error> {
                 parser.take()?;
                 skip_module_declaration(parser)?;
             }
-            other if other.chars().all(|c| c == '\0') => {
+            // Fatbin PTX is padded with NUL and often ends with a Ctrl-Z (0x1a).
+            other if other.chars().all(|c| c.is_control()) => {
                 parser.take()?;
             }
             other => {
@@ -1276,7 +1723,225 @@ impl HalfExtract {
 }
 
 pub(super) fn rewrite_half_scopes(source: &str) -> String {
-    rewrite_half_extract_scopes(source)
+    rewrite_register_scopes(&rewrite_half_extract_scopes(source))
+}
+
+fn ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'%' | b'.')
+}
+
+/// Index just past the comment starting at `i`, if one starts there.
+fn skip_comment(bytes: &[u8], i: usize) -> Option<usize> {
+    if bytes[i..].starts_with(b"//") {
+        Some(bytes[i..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| i + n))
+    } else if bytes[i..].starts_with(b"/*") {
+        let end = bytes[i + 2..].windows(2).position(|w| w == b"*/");
+        Some(end.map_or(bytes.len(), |n| i + 2 + n + 2))
+    } else {
+        None
+    }
+}
+
+/// Index of the `}` matching the `{` at `open`.
+fn matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let (mut depth, mut i) = (0usize, open);
+    while i < bytes.len() {
+        if let Some(next) = skip_comment(bytes, i) {
+            i = next;
+            continue;
+        }
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Flatten nested `{ .reg ...; ... }` scopes (nvcc inline-asm helpers such as
+/// `__cvta_generic_to_shared`) into the entry body: the scope's registers are
+/// renamed to unique names and hoisted next to the entry's own `.reg`
+/// declarations, and the scope braces are dropped.
+fn rewrite_register_scopes(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut counter = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if let Some(next) = skip_comment(bytes, i) {
+            out.push_str(&source[i..next]);
+            i = next;
+            continue;
+        }
+        if bytes[i] == b'{'
+            && let Some(close) = matching_brace(bytes, i)
+        {
+            let body = &source[i + 1..close];
+            if has_nested_reg_scope(body) {
+                let mut hoisted = String::new();
+                let flat = flatten_scopes(body, &mut counter, &mut hoisted);
+                out.push('{');
+                out.push_str(&insert_after_register_declarations(&flat, &hoisted));
+                out.push('}');
+            } else {
+                out.push_str(&source[i..=close]);
+            }
+            i = close + 1;
+            continue;
+        }
+        let ch = source[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn has_nested_reg_scope(body: &str) -> bool {
+    let mut rest = body;
+    while let Some(at) = rest.find('{') {
+        if rest[at + 1..].trim_start().starts_with(".reg") {
+            return true;
+        }
+        rest = &rest[at + 1..];
+    }
+    false
+}
+
+/// Splice `hoisted` after the leading `.local`/`.reg` declaration statements.
+fn insert_after_register_declarations(body: &str, hoisted: &str) -> String {
+    if hoisted.is_empty() {
+        return body.to_owned();
+    }
+    let bytes = body.as_bytes();
+    let (mut pos, mut insert) = (0usize, 0usize);
+    loop {
+        // Skip whitespace and comments to the next statement.
+        let mut i = pos;
+        while i < bytes.len() {
+            if let Some(next) = skip_comment(bytes, i) {
+                i = next;
+            } else if bytes[i].is_ascii_whitespace() {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let rest = &body[i..];
+        if !(rest.starts_with(".reg") || rest.starts_with(".local")) {
+            break;
+        }
+        let Some(semi) = rest.find(';') else { break };
+        pos = i + semi + 1;
+        insert = pos;
+    }
+    format!("{}\n{}{}", &body[..insert], hoisted, &body[insert..])
+}
+
+/// Rewrites the scopes in `body` (an entry body or a scope body). Registers
+/// declared in a scope are renamed and their declarations appended to `hoisted`.
+fn flatten_scopes(body: &str, counter: &mut usize, hoisted: &mut String) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0usize;
+    // Previous significant byte, to tell a scope `{` from a vector operand `{`.
+    let mut prev = b';';
+    while i < bytes.len() {
+        if let Some(next) = skip_comment(bytes, i) {
+            out.push_str(&body[i..next]);
+            i = next;
+            continue;
+        }
+        let b = bytes[i];
+        if b == b'{'
+            && matches!(prev, b';' | b'}' | b':' | b'{')
+            && let Some(close) = matching_brace(bytes, i)
+        {
+            let inner = &body[i + 1..close];
+            if inner.trim_start().starts_with(".reg") {
+                *counter += 1;
+                let id = *counter;
+                let mut renames: Vec<(String, String, bool)> = Vec::new();
+                let mut rest = inner;
+                loop {
+                    let trimmed = rest.trim_start();
+                    if !trimmed.starts_with(".reg") {
+                        break;
+                    }
+                    let semi = trimmed.find(';').unwrap_or(trimmed.len() - 1);
+                    let decl = &trimmed[4..semi];
+                    let mut parts = decl.split_whitespace();
+                    let ty = parts.next().unwrap_or("");
+                    let names = parts.collect::<Vec<_>>().join("");
+                    for name in names.split(',').filter(|n| !n.is_empty()) {
+                        let (base, range) = match name.find('<') {
+                            Some(at) => (&name[..at], &name[at..]),
+                            None => (name, ""),
+                        };
+                        let new = format!("%__sc{id}_{}", base.trim_start_matches('%'));
+                        hoisted.push_str(&format!(".reg {ty} {new}{range};\n"));
+                        renames.push((base.to_owned(), new, !range.is_empty()));
+                    }
+                    rest = &trimmed[(semi + 1).min(trimmed.len())..];
+                }
+                let renamed = rename_identifiers(rest, &renames);
+                out.push_str(&flatten_scopes(&renamed, counter, hoisted));
+            } else {
+                out.push('{');
+                out.push_str(&flatten_scopes(inner, counter, hoisted));
+                out.push('}');
+            }
+            i = close + 1;
+            prev = b'}';
+            continue;
+        }
+        if !b.is_ascii_whitespace() {
+            prev = b;
+        }
+        let ch = body[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Replaces whole-identifier occurrences (`base` or `base<digits>`) by `new`.
+fn rename_identifiers(text: &str, renames: &[(String, String, bool)]) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if ident_byte(bytes[i]) && bytes[i] != b'.' {
+            let start = i;
+            while i < bytes.len() && ident_byte(bytes[i]) {
+                i += 1;
+            }
+            let word = &text[start..i];
+            let mapped = renames.iter().find_map(|(base, new, ranged)| {
+                if word == base {
+                    Some(new.clone())
+                } else if !ranged {
+                    None
+                } else {
+                    word.strip_prefix(base.as_str())
+                        .filter(|tail| !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()))
+                        .map(|tail| format!("{new}{tail}"))
+                }
+            });
+            out.push_str(mapped.as_deref().unwrap_or(word));
+        } else {
+            let ch = text[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
@@ -1284,7 +1949,12 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
         tokens: tokens(source)?.into_iter(),
     };
     parser.expect(".version")?;
-    if !matches!(parser.take()?, "4.1" | "8.8" | "9.0") {
+    // Stock CUDA 11 through 13 toolchains emit PTX ISA 7.0 through 9.x.
+    let version = parser.take()?;
+    let supported = version.split_once('.').is_some_and(|(major, minor)| {
+        minor.parse::<u32>().is_ok() && major.parse::<u32>().is_ok_and(|m| (7..=9).contains(&m))
+    }) || version == "4.1";
+    if !supported {
         return Err(Error::new("unsupported PTX version"));
     }
     parser.expect(".target")?;
