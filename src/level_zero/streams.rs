@@ -9,6 +9,7 @@ use std::sync::Arc;
 /// execute the ranges barrier, so a completion signal attached to it never fires.
 pub(crate) struct CommandList(pub(super) Handle, pub(super) bool);
 
+#[derive(Clone, Copy)]
 pub(crate) struct KernelArg {
     pub(crate) value: *const std::ffi::c_void,
     pub(crate) size: usize,

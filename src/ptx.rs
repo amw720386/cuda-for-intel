@@ -39,7 +39,13 @@ pub(crate) enum Param {
     GlobalPtr,
     /// `.param .align N .b8 name[bytes]` â€” `words` is `bytes/4`, `align` is 4/8/16.
     Words { words: u16, align: u16, trim: u8 },
+    /// A by-value aggregate too large for the native argument buffer. The kernel receives a
+    /// global pointer to a staged copy of the `bytes`-byte struct (the launch path copies it).
+    Staged { bytes: u16, align: u16 },
 }
+
+/// By-value aggregates above this size are staged in memory instead of passed word by word.
+pub(crate) const STAGE_BYTES: u16 = 1536;
 
 impl Param {
     pub(crate) fn alignment(self) -> usize {
@@ -48,6 +54,7 @@ impl Param {
             Self::U16 => 2,
             Self::U64 | Self::GlobalPtr => 8,
             Self::Words { align, .. } => usize::from(align),
+            Self::Staged { align, .. } => usize::from(align),
             Self::U32 | Self::F32 => 4,
         }
     }
@@ -59,6 +66,25 @@ impl Param {
             Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
             Self::Words { words, trim, .. } => usize::from(words) * 4 - usize::from(trim),
+            Self::Staged { bytes, .. } => usize::from(bytes),
+        }
+    }
+
+    /// Size of the corresponding native kernel argument (a staged struct is one pointer).
+    pub(crate) fn abi_size(self) -> usize {
+        match self {
+            Self::Staged { .. } => 8,
+            Self::Words { words, .. } => usize::from(words) * 4,
+            other => other.size(),
+        }
+    }
+
+    /// Native kernel arguments this parameter expands to before staging is applied.
+    pub(crate) fn host_words(self) -> usize {
+        match self {
+            Self::Words { words, .. } => usize::from(words),
+            Self::Staged { bytes, .. } => usize::from(bytes).div_ceil(4),
+            _ => 1,
         }
     }
 }

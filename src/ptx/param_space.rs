@@ -58,6 +58,8 @@ pub(super) struct PLoad<'a> {
     pub(super) ty: PTy,
     pub(super) off: i32,
     pub(super) dynamic: bool,
+    /// `base` names a staged (pointer-passed) aggregate; `off` is relative to its data.
+    pub(super) staged: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +72,11 @@ pub(super) enum ParamOp<'a> {
 impl ParamOp<'_> {
     pub(super) fn is_dynamic(&self) -> bool {
         matches!(self, Self::Addr { .. } | Self::Load(PLoad { dynamic: true, .. }))
+    }
+
+    /// Reads a staged aggregate's data through its pointer.
+    pub(super) fn is_staged(&self) -> bool {
+        matches!(self, Self::Load(PLoad { staged: true, .. }))
     }
 }
 
@@ -90,7 +97,11 @@ fn split_address(text: &str) -> Option<(&str, i32)> {
     }
 }
 
-pub(super) fn parse<'a>(body: &[&'a str], names: &[&'a str]) -> Result<Option<Instruction<'a>>, Error> {
+pub(super) fn parse<'a>(
+    body: &[&'a str],
+    names: &[&'a str],
+    staged_names: &[&'a str],
+) -> Result<Option<Instruction<'a>>, Error> {
     let Some(&op) = body.first() else {
         return Ok(None);
     };
@@ -145,9 +156,10 @@ pub(super) fn parse<'a>(body: &[&'a str], names: &[&'a str]) -> Result<Option<In
         return Err(Error::new("invalid PTX parameter offset"));
     };
     let dynamic = base.starts_with('%');
-    if !dynamic {
+    let staged = staged_names.contains(&base);
+    if !dynamic && !staged {
         // Spellings the legacy table already lowers stay there.
-        let legacy = count == 1 && matches!(ty, "u32" | "b32" | "s32" | "f32" | "u64" | "b64" | "s8")
+        let legacy = count == 1 && matches!(ty, "u32" | "b32" | "s32" | "f32" | "u64" | "b64")
             || count > 1 && ty == "f32";
         if legacy || off < 0 {
             return Ok(None);
@@ -160,6 +172,7 @@ pub(super) fn parse<'a>(body: &[&'a str], names: &[&'a str]) -> Result<Option<In
         ty: pty,
         off,
         dynamic,
+        staged,
     }))))
 }
 

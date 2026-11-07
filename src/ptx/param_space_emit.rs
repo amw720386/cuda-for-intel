@@ -54,6 +54,7 @@ impl<'a> Emitter<'a> {
                         put(self, index + k, value, 0)?;
                     }
                 }
+                Param::Staged { .. } => {}
                 Param::U8 | Param::U16 | Param::U32 | Param::F32 => {
                     let value = self.params[&(name, 0)].id;
                     put(self, index, value, (base % 4) * 8)?;
@@ -103,7 +104,16 @@ impl<'a> Emitter<'a> {
 
     pub(super) fn emit_param_space(&mut self, op: ParamOp<'a>) -> R<()> {
         match op {
+            ParamOp::Addr { dst, name } if self.staged_names.contains(name) => {
+                // The aggregate lives in memory: its "param-space address" is the real pointer.
+                let pointer = self.params[&(name, 0)].id;
+                let id = self.builder.bitcast(self.u64_type, None, pointer)?;
+                self.write(dst, Value { id, kind: Kind::B64 })
+            }
             ParamOp::Addr { dst, name } => {
+                if self.param_global_mode {
+                    return Err(Error::new("mixed staged and by-value parameter-space addressing"));
+                }
                 let base = *self
                     .param_bases
                     .get(name)
@@ -155,9 +165,74 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Loads one element from memory at the 64-bit address `addr` (staged aggregates).
+    fn load_param_memory(&mut self, ty: PTy, addr: Word) -> R<(Word, Kind)> {
+        Ok(match ty {
+            PTy::U8 | PTy::S8 => {
+                let pointer = self.builder.convert_u_to_ptr(self.global_byte_ptr, None, addr)?;
+                let byte = self.builder.load(self.u8_type, None, pointer, None, [])?;
+                let wide = if ty.signed() {
+                    self.builder.s_convert(self.u32_type, None, byte)?
+                } else {
+                    self.builder.u_convert(self.u32_type, None, byte)?
+                };
+                (wide, Kind::B32)
+            }
+            PTy::U16 | PTy::S16 => {
+                let pointer = self.builder.convert_u_to_ptr(self.global_half_ptr, None, addr)?;
+                let half = self.builder.load(self.u16_type, None, pointer, None, [])?;
+                let wide = if ty.signed() {
+                    self.builder.s_convert(self.u32_type, None, half)?
+                } else {
+                    self.builder.u_convert(self.u32_type, None, half)?
+                };
+                (wide, Kind::B32)
+            }
+            PTy::U32 | PTy::S32 => {
+                let pointer = self.builder.convert_u_to_ptr(self.global_word_ptr, None, addr)?;
+                (self.builder.load(self.u32_type, None, pointer, None, [])?, Kind::B32)
+            }
+            PTy::U64 => {
+                let pointer = self.builder.convert_u_to_ptr(self.global_qword_ptr, None, addr)?;
+                (self.builder.load(self.u64_type, None, pointer, None, [])?, Kind::B64)
+            }
+        })
+    }
+
     fn emit_param_load(&mut self, load: PLoad<'a>) -> R<()> {
         let u32t = self.u32_type;
         let step = load.ty.bytes();
+        if load.staged || (load.dynamic && self.param_global_mode) {
+            let base = if load.staged {
+                let pointer = self.params[&(load.base, 0)].id;
+                self.builder.bitcast(self.u64_type, None, pointer)?
+            } else {
+                self.shift_count64(load.base)?
+            };
+            let imm = self.builder.constant_bit64(self.u64_type, i64::from(load.off) as u64);
+            let first = self.builder.i_add(self.u64_type, None, base, imm)?;
+            for k in 0..usize::from(load.count) {
+                let delta = self.builder.constant_bit64(self.u64_type, u64::from(step) * k as u64);
+                let addr = self.builder.i_add(self.u64_type, None, first, delta)?;
+                let (id, kind) = self.load_param_memory(load.ty, addr)?;
+                let dst = load.dst[k];
+                let want_wide = self.declarations.get(dst) == Some(&super::super::Width::B64);
+                let (id, kind) = match (kind, want_wide) {
+                    (Kind::B32, true) => {
+                        let wide = if load.ty.signed() {
+                            self.builder.s_convert(self.u64_type, None, id)?
+                        } else {
+                            self.builder.u_convert(self.u64_type, None, id)?
+                        };
+                        (wide, Kind::B64)
+                    }
+                    (Kind::B64, false) => (self.builder.u_convert(u32t, None, id)?, Kind::B32),
+                    _ => (id, kind),
+                };
+                self.write(dst, Value { id, kind })?;
+            }
+            return Ok(());
+        }
         // Byte offset as a u32 id (dynamic) or a constant (static).
         let base_off = if load.dynamic {
             let value = self.read(load.base)?;

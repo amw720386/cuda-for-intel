@@ -98,3 +98,48 @@ $L_loop:
     interp::run(&module, &mut machine);
     assert_eq!(machine.read(interp::GLOBAL, 8), 15);
 }
+
+/// Aggregates above `STAGE_BYTES` arrive as a pointer to a staged copy.
+#[test]
+fn staged_aggregates_are_read_through_their_pointer() {
+    let module = lower(
+        r#"
+.version 7.8
+.target sm_37
+.address_size 64
+.visible .entry k(.param .u64 out, .param .align 8 .b8 s[2000], .param .u8 b)
+{
+    .reg .b16 %rs<2>;
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<12>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u64 %rd3, s;
+    add.s64 %rd4, %rd3, 8;
+    ld.param.u32 %r1, [%rd4+4];
+    ld.param.u8 %r2, [%rd3+1];
+    ld.param.u64 %rd5, [s+16];
+    ld.param.u32 %r3, [s+1996];
+    ld.param.s8 %r4, [b];
+    st.global.u32 [%rd2], %r1;
+    st.global.u32 [%rd2+4], %r2;
+    st.global.u64 [%rd2+8], %rd5;
+    st.global.u32 [%rd2+16], %r3;
+    st.global.u32 [%rd2+20], %r4;
+    ret;
+}
+"#,
+    );
+    let data = interp::GLOBAL + 0x4000;
+    let mut machine = interp::Machine { params: vec![interp::GLOBAL, data, 0xf0], ..Default::default() };
+    machine.write(data + 1, 1, 0x7e);
+    machine.write(data + 12, 4, 0xabcd_0123);
+    machine.write(data + 16, 8, 0x1122_3344_5566_7788);
+    machine.write(data + 1996, 4, 77);
+    interp::run(&module, &mut machine);
+    assert_eq!(machine.read(interp::GLOBAL, 4), 0xabcd_0123);
+    assert_eq!(machine.read(interp::GLOBAL + 4, 4), 0x7e);
+    assert_eq!(machine.read(interp::GLOBAL + 8, 8), 0x1122_3344_5566_7788);
+    assert_eq!(machine.read(interp::GLOBAL + 16, 4), 77);
+    assert_eq!(machine.read(interp::GLOBAL + 20, 4), 0xffff_fff0);
+}
