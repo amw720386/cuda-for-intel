@@ -156,6 +156,18 @@ pub(crate) fn layout_hash(params: &[Param]) -> u64 {
     h
 }
 
+/// Exact parameter match, except that `mul_mat_vec_q`'s `ids` slot may be typed `u64` by the
+/// translator when the instantiation never dereferences it (ncols_dst > 1): same 8 bytes.
+fn layout_matches(kernel: Kernel, params: &[Param], expected: &[Param]) -> bool {
+    if params == expected {
+        return true;
+    }
+    matches!(kernel, Kernel::Mmvq { ncols, .. } if ncols > 1)
+        && params.len() == expected.len()
+        && params.get(2) == Some(&Param::U64)
+        && params.iter().zip(expected).enumerate().all(|(i, (a, b))| i == 2 || a == b)
+}
+
 pub(crate) fn type_name(ty: u32) -> Option<&'static str> {
     Some(match ty {
         refs::Q4_0 => "q4_0",
@@ -202,7 +214,7 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
     if !switch.allows(family, ty) {
         return Decision::NotApplicable;
     }
-    if params != expected.as_slice() {
+    if !layout_matches(kernel, params, &expected) {
         return Decision::Mismatch(format!(
             "{name}: parameter layout {:016x} differs from expected {:016x}",
             layout_hash(params),

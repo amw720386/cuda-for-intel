@@ -245,7 +245,11 @@ fn translated_stock_mmvq_matches_native_on_the_interpreter() {
     ] {
         let entry = format!("_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{ncols}EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj");
         let Some((stock, params)) = translated("blob29.ptx", &entry) else { return };
-        assert_eq!(params, super::mmvq_layout(), "{entry}: registry layout must equal the real one");
+        let name = &entry;
+        assert!(
+            matches!(super::decide(name, &params, &super::Switch::parse("all")), super::Decision::Substitute(_)),
+            "{entry}: registry rejects the real layout {params:?}"
+        );
         let pr = problem(ty, ncols as usize, 6, 512, nch, ratio, nsamples, false, 77);
         let nw = pr.p.nwarps;
         let native = run_native(&pr, mmvq::Cfg { ty, ncols, nwarps: nw as u32 });
@@ -277,4 +281,24 @@ fn translated_stock_quantize_matches_native_on_the_interpreter() {
     let native_words = quantize::build(true);
     let mut sim = Sim { dev: Dev::default(), words: &native_words };
     assert_eq!(case.run(&mut sim).unwrap(), translated_out, "native quantize_q8_1 must equal the translated stock kernel");
+}
+
+/// Every `mul_mat_vec_q` instantiation for the supported types in the stock PTX must be accepted
+/// by the registry (catches parameter-layout variants such as an unused `ids` typed u64).
+#[test]
+fn registry_accepts_every_stock_mmvq_instantiation() {
+    let Some(dir) = std::env::var_os("CFI_STOCK_PTX_DIR") else { return };
+    let source = std::fs::read_to_string(std::path::Path::new(&dir).join("blob29.ptx")).unwrap();
+    let prepared = crate::ptx::prepare_source(&source).unwrap();
+    let mut accepted = 0;
+    for ty in [refs::Q4_0, refs::Q8_0, refs::Q4_K, refs::Q6_K] {
+        for ncols in 1..=8 {
+            let entry = format!("_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{ncols}EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj");
+            let t = crate::ptx::translate_entry(&prepared, &entry).unwrap_or_else(|e| panic!("{entry}: {e}"));
+            let d = super::decide(&entry, &t.kernels[0].params, &super::Switch::parse("all"));
+            assert!(matches!(d, super::Decision::Substitute(_)), "{entry}: {d:?} / {:?}", t.kernels[0].params);
+            accepted += 1;
+        }
+    }
+    assert_eq!(accepted, 32);
 }
