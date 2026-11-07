@@ -1441,6 +1441,8 @@ fn static_shared_bytes(line: &str) -> u64 {
         (Some(e), Some(n)) => e * n,
         (Some(e), None) => e,
         _ => 0,
+    }
+}
 
 /// Splits `ld.global[.nc].u16 %rs , [ %rd+off ] ;` into (op, destination, base, offset).
 fn parse_u16_load(line: &str) -> Option<(&str, &str, &str, i64)> {

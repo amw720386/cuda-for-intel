@@ -268,6 +268,8 @@ pub unsafe extern "system" fn cuModuleGetLoadingMode(mode: *mut c_int) -> CuResu
         unsafe { mode.write(2) };
         Success
     })
+}
+
 /// `CUDA_FOR_INTEL_LAZY=0` restores whole-library modules.
 fn lazy_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

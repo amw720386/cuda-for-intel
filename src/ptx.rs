@@ -938,6 +938,8 @@ pub(crate) fn skipped_entries() -> Vec<(String, String)> {
 #[allow(dead_code)]
 pub(crate) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), String>)>, Error> {
     probe::probe_module(prepared)
+}
+
 /// Merges nvcc's pairs of 16-bit loads into aligned 32-bit loads (see normalize);
 /// `CFI_OPT_LD16=0` turns it off. Measured +35% decode on Qwen2.5-0.5B Q8_0.
 pub(crate) fn load16_merge_enabled() -> bool {

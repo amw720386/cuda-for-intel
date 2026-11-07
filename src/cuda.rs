@@ -1358,6 +1358,13 @@ fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
 
 /// Translate one kernel of a lazy module and return its function handle.
 pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
+    // Translation settings (dp4a lowering, dynamic shared window) must be fixed before
+    // any source is normalised or any cache key is computed.
+    if let Some(context_key) = state.lazy_modules.get(&module).map(|l| l.context)
+        && let Some(context) = state.contexts.get_mut(&context_key)
+    {
+        probe_dot_product(&state.runtime, context);
+    }
     let lazy = state.lazy_modules.get(&module).ok_or(InvalidHandle)?;
     if let Some(&(_, function)) = lazy.children.get(name) {
         return Ok(function);
@@ -1366,6 +1373,7 @@ pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr
         return Err(NotFound);
     }
     let context_key = lazy.context;
+    let raw_len = lazy.raw.len();
     if trace::enabled() {
         trace::record(format_args!("lazy kernel {}", name.to_string_lossy()));
     }
@@ -1428,7 +1436,7 @@ pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr
     }
     let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
     context.check_live()?;
-    let child = install_translation(&state.runtime, context, &mut state.next_handle, translated)?;
+    let child = install_translation(&state.runtime, context, &mut state.next_handle, translated, raw_len, std::time::Duration::ZERO)?;
     let function = module_function(&state.runtime.api, context, &mut state.next_handle, child, name)?;
     state
         .lazy_modules
