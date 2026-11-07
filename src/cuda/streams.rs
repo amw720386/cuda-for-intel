@@ -22,6 +22,8 @@ mod batch_wake;
 pub(super) mod events;
 #[cfg(test)]
 mod fake_tests;
+#[cfg(test)]
+mod graph_tests;
 #[cfg(all(test, windows))]
 mod profiling;
 #[cfg(all(test, windows))]
@@ -288,6 +290,8 @@ pub(super) struct Streams {
     retired: Vec<Stream>,
     fences: Fences,
     events: HashMap<usize, Option<Recording>>,
+    /// Events recorded while their stream was capturing: event -> (capture, stream, op sequence).
+    pub(super) captured: HashMap<usize, (Capture, usize, u64)>,
     policy: Option<Policy>,
     wake: Arc<Wake>,
     worker: Option<JoinHandle<Result<(), CuResult>>>,
@@ -318,6 +322,7 @@ impl Streams {
             retired: Vec::new(),
             fences: Fences::default(),
             events: HashMap::new(),
+            captured: HashMap::new(),
             event_waiters: Arc::new(()),
             track_legacy: false,
             execution_error: None,
@@ -642,6 +647,7 @@ impl Streams {
             self.retired.pop();
         }
         self.events.clear();
+        self.captured.clear();
         self.fences.destroy(api).map_err(backend_error)
     }
 }
@@ -810,6 +816,9 @@ pub extern "system" fn cuStreamSynchronize(handle: Opaque) -> CuResult {
 pub extern "system" fn cuStreamQuery(handle: Opaque) -> CuResult {
     trace::call("cuStreamQuery", || {
         status(with_stream(handle, |api, streams, key| {
+            if let Some(capture) = streams.capture(key)? {
+                return Err(capture.invalidate());
+            }
             if key == 0 {
                 streams.wait_legacy(api, 0)
             } else {

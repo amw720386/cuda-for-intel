@@ -55,6 +55,12 @@ pub(crate) enum CuResult {
     NotSupported = 801,
     StreamCaptureUnsupported = 900,
     StreamCaptureInvalidated = 901,
+    StreamCaptureMerge = 902,
+    StreamCaptureUnmatched = 903,
+    StreamCaptureUnjoined = 904,
+    StreamCaptureIsolation = 905,
+    CapturedEvent = 907,
+    GraphExecUpdateFailure = 910,
     Unknown = 999,
 }
 
@@ -290,6 +296,7 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
             }
             let teardown = state.destroy_context(key)?;
             if !state.contexts.contains_key(&key) {
+                state.graphs.drop_context(key);
                 CURRENT.with_borrow_mut(|stack| {
                     if stack.last() == Some(&key) {
                         stack.pop();
@@ -650,38 +657,66 @@ unsafe fn copy_async(
         if host.is_null() || !contains_range(&context.allocations, device as usize, size) {
             return Err(InvalidValue);
         }
-        let device_ptr = std::ptr::with_exposed_provenance_mut(device as usize);
-        let (dst, src) = if to_device {
-            (device_ptr, host)
-        } else {
-            (host, device_ptr)
-        };
-        // NVIDIA Runtime allows async copies from pageable host memory (may
-        // synchronize). Our Level Zero path needs registered/pinned host for
-        // true async; fall back to a blocking copy for ordinary host pointers.
-        //
-        // Critical: wait for *this* stream before the fallback copy. Waiting only
-        // for legacy/blocking streams races with ggml's common pattern of
-        // non-blocking stream compute followed by cudaMemcpyAsync(DtoH) of
-        // logits / BatchedEx pointer tables into pageable host memory.
-        if contains_range(&context.host_allocations, host.addr(), size) {
-            unsafe {
-                context
-                    .streams
-                    .copy(&runtime.api, &context.backend, key, (dst, src), size)
-            }
-        } else {
+        if let Some(capture) = context.streams.capture(key)? {
+            // The host pointer is read (or written) at graph launch, as with a
+            // CUDA memcpy node.
+            let kind = if to_device {
+                graphs::CopyKind::HostToDevice
+            } else {
+                graphs::CopyKind::DeviceToHost
+            };
+            let (dst, src) = if to_device {
+                (device as usize, host.addr())
+            } else {
+                (host.addr(), device as usize)
+            };
+            return capture.push(key, graphs::Node::Copy(graphs::Copy { dst, src, size, kind }));
+        }
+        unsafe { copy_host_async(runtime, context, key, host, device, size, to_device) }
+    }))
+}
+
+/// Issue a validated host/device copy on a stream (also used by graph replay).
+unsafe fn copy_host_async(
+    runtime: &Runtime,
+    context: &mut CudaContext,
+    key: usize,
+    host: Opaque,
+    device: u64,
+    size: usize,
+    to_device: bool,
+) -> Result<(), CuResult> {
+    let device_ptr = std::ptr::with_exposed_provenance_mut(device as usize);
+    let (dst, src) = if to_device {
+        (device_ptr, host)
+    } else {
+        (host, device_ptr)
+    };
+    // NVIDIA Runtime allows async copies from pageable host memory (may
+    // synchronize). Our Level Zero path needs registered/pinned host for
+    // true async; fall back to a blocking copy for ordinary host pointers.
+    //
+    // Critical: wait for *this* stream before the fallback copy. Waiting only
+    // for legacy/blocking streams races with ggml's common pattern of
+    // non-blocking stream compute followed by cudaMemcpyAsync(DtoH) of
+    // logits / BatchedEx pointer tables into pageable host memory.
+    if contains_range(&context.host_allocations, host.addr(), size) {
+        unsafe {
             context
                 .streams
-                .wait_stream(&runtime.api, key, u64::MAX)?;
-            if context.streams.stream_is_blocking(key)? {
-                context.streams.wait_legacy(&runtime.api, u64::MAX)?;
-            }
-            unsafe { context.backend.copy(&runtime.api, dst, src, size) }
-                .inspect_err(|error| context.backend.health.observe(error))
-                .map_err(backend_error)
+                .copy(&runtime.api, &context.backend, key, (dst, src), size)
         }
-    }))
+    } else {
+        context
+            .streams
+            .wait_stream(&runtime.api, key, u64::MAX)?;
+        if context.streams.stream_is_blocking(key)? {
+            context.streams.wait_legacy(&runtime.api, u64::MAX)?;
+        }
+        unsafe { context.backend.copy(&runtime.api, dst, src, size) }
+            .inspect_err(|error| context.backend.health.observe(error))
+            .map_err(backend_error)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -790,6 +825,17 @@ pub unsafe extern "system" fn cuMemcpyDtoDAsync_v2(
             {
                 return Err(InvalidValue);
             }
+            if let Some(capture) = context.streams.capture(key)? {
+                return capture.push(
+                    key,
+                    graphs::Node::Copy(graphs::Copy {
+                        dst: dst_addr,
+                        src: src_addr,
+                        size,
+                        kind: graphs::CopyKind::DeviceToDevice,
+                    }),
+                );
+            }
             let dst_ptr = std::ptr::with_exposed_provenance_mut(dst_addr);
             let src_ptr = std::ptr::with_exposed_provenance(src_addr);
             unsafe {
@@ -822,6 +868,9 @@ fn memset_bytes(dst: u64, value: u8, size: usize, stream: Opaque) -> CuResult {
         let dst = dst as usize;
         if !contains_range(&context.allocations, dst, size) {
             return Err(InvalidValue);
+        }
+        if let Some(capture) = context.streams.capture(key)? {
+            return capture.push(key, graphs::Node::Fill(graphs::Fill { dst, value, size }));
         }
         context.streams.fill(
             &runtime.api,
@@ -1115,7 +1164,12 @@ pub unsafe extern "system" fn cuLaunchKernel(
             }
             if let Some(capture) = context.streams.capture(stream)? {
                 // The caller's argument storage may expire before graph launch.
-                capture.push(unsafe { graphs::Kernel::capture(function, (grid, block), &args) })?;
+                capture.push(
+                    stream,
+                    graphs::Node::Kernel(unsafe {
+                        graphs::Kernel::capture(function, (grid, block), &args)
+                    }),
+                )?;
                 return Ok(());
             }
             context.streams.launch(

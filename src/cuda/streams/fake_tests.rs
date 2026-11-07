@@ -18,19 +18,19 @@ const LOST: u32 = 0x70000001;
 const FAIL: u32 = 0x7fff_fffe;
 const IMAGE: &std::ffi::CStr =
     c".version 4.1 .target sm_52 .address_size 64 .entry k(.param .u64 .ptr .global dst) { ret; }";
-const BATCH: Option<Policy> = Some(Policy {
+pub(super) const BATCH: Option<Policy> = Some(Policy {
     cap: 32,
     delay: None,
     high_resolution: false,
     eager_after_idle: false,
 });
 
-struct Fixture {
+pub(super) struct Fixture {
     _serial: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let serial = TEST_RUNTIME
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -87,25 +87,25 @@ fn create_context(policy: Option<Policy>, device: i32, out: &mut Opaque) -> CuRe
     result
 }
 
-fn context(policy: Option<Policy>) -> Opaque {
+pub(super) fn context(policy: Option<Policy>) -> Opaque {
     let mut out = null_mut();
     assert_eq!(create_context(policy, 0, &mut out), Success);
     out
 }
 
-fn stream() -> Opaque {
+pub(super) fn stream() -> Opaque {
     let mut out = null_mut();
     assert_eq!(unsafe { cuStreamCreate(&mut out, 1) }, Success);
     out
 }
 
-fn event() -> Opaque {
+pub(super) fn event() -> Opaque {
     let mut out = null_mut();
     assert_eq!(unsafe { cuEventCreate(&mut out, 2) }, Success);
     out
 }
 
-fn module() -> Opaque {
+pub(super) fn module() -> Opaque {
     let mut out = null_mut();
     assert_eq!(
         unsafe { cuModuleLoadData(&mut out, IMAGE.as_ptr().cast()) },
@@ -114,7 +114,7 @@ fn module() -> Opaque {
     out
 }
 
-fn function(module: Opaque) -> Opaque {
+pub(super) fn function(module: Opaque) -> Opaque {
     let mut out = null_mut();
     assert_eq!(
         unsafe { cuModuleGetFunction(&mut out, module, c"k".as_ptr()) },
@@ -123,19 +123,19 @@ fn function(module: Opaque) -> Opaque {
     out
 }
 
-fn allocations() -> (u64, Opaque) {
+pub(super) fn allocations() -> (u64, Opaque) {
     let (mut device, mut host) = (0, null_mut());
     assert_eq!(unsafe { cuMemAlloc_v2(&mut device, 64) }, Success);
     assert_eq!(unsafe { cuMemHostAlloc(&mut host, 64, 0) }, Success);
     (device, host)
 }
 
-fn launch(function: Opaque, stream: Opaque, address: u64) -> CuResult {
+pub(super) fn launch(function: Opaque, stream: Opaque, address: u64) -> CuResult {
     let mut arg = std::ptr::from_ref(&address).cast_mut().cast();
     unsafe { cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, stream, &mut arg, null_mut()) }
 }
 
-fn assert_baseline() {
+pub(super) fn assert_baseline() {
     let stats = fake::snapshot();
     assert!(stats.live.is_empty(), "{stats:?}");
     assert_eq!(stats.pending, 0, "{stats:?}");

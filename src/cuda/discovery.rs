@@ -215,17 +215,35 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuStreamDestroy" => entry!(cuStreamDestroy_v2, 4000),
         b"cuStreamSynchronize" => entry!(cuStreamSynchronize, 2000, DRIVER_ABI + 1, true),
         b"cuStreamQuery" => entry!(cuStreamQuery, 2000, DRIVER_ABI + 1, true),
+        b"cuStreamBeginCapture" if version < 10010 => {
+            entry!(cuStreamBeginCapture, 10000, 10010, true)
+        }
         b"cuStreamBeginCapture" => entry!(cuStreamBeginCapture_v2, 10010, DRIVER_ABI + 1, true),
+        b"cuThreadExchangeStreamCaptureMode" => entry!(cuThreadExchangeStreamCaptureMode, 10010),
+        b"cuStreamGetCaptureInfo" if version >= 12030 => {
+            entry!(cuStreamGetCaptureInfo_v3, 12030, DRIVER_ABI + 1, true)
+        }
+        b"cuStreamGetCaptureInfo" if version >= 11030 => {
+            entry!(cuStreamGetCaptureInfo_v2, 11030, 12030, true)
+        }
+        b"cuStreamGetCaptureInfo" => entry!(cuStreamGetCaptureInfo, 10010, 11030, true),
         b"cuStreamEndCapture" => entry!(cuStreamEndCapture, 10000, DRIVER_ABI + 1, true),
         b"cuStreamIsCapturing" => entry!(cuStreamIsCapturing, 10000, DRIVER_ABI + 1, true),
         b"cuGraphDestroy" => entry!(cuGraphDestroy, 10000),
-        b"cuGraphInstantiate" | b"cuGraphInstantiateWithFlags" => {
-            entry!(cuGraphInstantiateWithFlags, 11040)
+        b"cuGraphInstantiate" if version >= 12000 => entry!(cuGraphInstantiateWithFlags, 12000),
+        b"cuGraphInstantiate" => entry!(cuGraphInstantiate_v1, 10000, 12000, false),
+        b"cuGraphInstantiateWithFlags" => entry!(cuGraphInstantiateWithFlags, 11040),
+        b"cuGraphInstantiateWithParams" => {
+            entry!(cuGraphInstantiateWithParams, 12000, DRIVER_ABI + 1, true)
         }
+        b"cuGraphExecUpdate" if version >= 12000 => entry!(cuGraphExecUpdate_v2, 12000),
+        b"cuGraphExecUpdate" => entry!(cuGraphExecUpdate, 10020, 12000, false),
+        b"cuGraphUpload" => entry!(cuGraphUpload, 11010, DRIVER_ABI + 1, true),
         b"cuGraphExecDestroy" => entry!(cuGraphExecDestroy, 10000),
         b"cuGraphLaunch" => entry!(cuGraphLaunch, 10000, DRIVER_ABI + 1, true),
         b"cuEventCreate" => entry!(cuEventCreate, 2000),
         b"cuEventRecord" => entry!(cuEventRecord, 2000, DRIVER_ABI + 1, true),
+        b"cuEventRecordWithFlags" => entry!(cuEventRecordWithFlags, 11010, DRIVER_ABI + 1, true),
         b"cuEventQuery" => entry!(cuEventQuery, 2000),
         b"cuEventSynchronize" => entry!(cuEventSynchronize, 2000),
         b"cuEventDestroy" => entry!(cuEventDestroy_v2, 4000),

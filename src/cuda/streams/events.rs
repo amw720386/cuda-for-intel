@@ -8,6 +8,48 @@ use CuResult::*;
 use std::sync::Arc;
 
 impl Streams {
+    /// Capture-aware part of a stream wait. `None` means the wait is an ordinary
+    /// stream-ordered wait, `Some` is the final outcome.
+    fn capture_wait(&mut self, key: usize, event: usize) -> Option<Result<(), CuResult>> {
+        let own = self.capture(key).ok().flatten().cloned();
+        let recorded = self.captured.get(&event).cloned();
+        match (own, recorded) {
+            (None, None) => None,
+            (Some(own), None) => {
+                // A capturing stream cannot depend on work outside the capture.
+                if matches!(self.events.get(&event), Some(None)) {
+                    Some(Ok(()))
+                } else {
+                    Some(Err(own.invalidate_as(StreamCaptureIsolation)))
+                }
+            }
+            (own, Some((capture, producer, sequence))) => {
+                if capture.is_invalidated() {
+                    return Some(Err(StreamCaptureInvalidated));
+                }
+                match own {
+                    Some(own) if !own.same(&capture) => {
+                        Some(Err(own.invalidate_as(StreamCaptureMerge)))
+                    }
+                    Some(_) => {
+                        capture.note_wait(producer, key, sequence);
+                        Some(Ok(()))
+                    }
+                    None => {
+                        // Fork: the waiting stream joins the capture.
+                        if key == 0 {
+                            return Some(Err(capture.invalidate()));
+                        }
+                        capture.join(key);
+                        *self.capture_slot(key).ok()? = Some(capture.clone());
+                        capture.note_wait(producer, key, sequence);
+                        Some(Ok(()))
+                    }
+                }
+            }
+        }
+    }
+
     fn event(&self, handle: Opaque) -> Result<&Option<Recording>, CuResult> {
         self.events.get(&handle.addr()).ok_or(InvalidHandle)
     }
@@ -66,6 +108,18 @@ pub extern "system" fn cuEventRecord(event: Opaque, stream: Opaque) -> CuResult 
             let streams = &mut context.streams;
             streams.event(event)?;
             let key = streams.launch_key(stream)?;
+            if let Some(capture) = streams.capture(key)?.cloned() {
+                // Captured events only mark a dependency; they create no node.
+                if capture.is_invalidated() {
+                    return Err(StreamCaptureInvalidated);
+                }
+                let sequence = capture.record_event(key);
+                streams
+                    .captured
+                    .insert(event.addr(), (capture, key, sequence));
+                return Ok(());
+            }
+            streams.captured.remove(&event.addr());
             // Publish only after append succeeds. Older consumers keep their own
             // reference to the previous recording, even after this handle changes.
             let completion = streams.event_marker(&runtime.api, &context.backend, key, None)?;
@@ -86,6 +140,9 @@ pub extern "system" fn cuEventQuery(event: Opaque) -> CuResult {
     trace::call("cuEventQuery", || {
         status(with_context(|runtime, context| {
             let streams = &context.streams;
+            if streams.captured.contains_key(&event.addr()) {
+                return Err(CapturedEvent);
+            }
             if let Some(recording) = streams.event(event)? {
                 if let Ok(producer) = streams.get(recording.producer) {
                     producer.check()?;
@@ -109,6 +166,9 @@ pub extern "system" fn cuEventSynchronize(event: Opaque) -> CuResult {
     trace::call("cuEventSynchronize", || {
         let snapshot = with_context(|runtime, context| {
             let streams = &mut context.streams;
+            if streams.captured.contains_key(&event.addr()) {
+                return Err(CapturedEvent);
+            }
             let Some(recording) = streams.event(event)? else {
                 return Ok(None);
             };
@@ -144,9 +204,20 @@ pub extern "system" fn cuEventDestroy_v2(event: Opaque) -> CuResult {
                 .events
                 .remove(&event.addr())
                 .ok_or(InvalidHandle)?;
+            context.streams.captured.remove(&event.addr());
             Ok(())
         }))
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuEventRecordWithFlags(event: Opaque, stream: Opaque, flags: u32) -> CuResult {
+    match flags {
+        0 => cuEventRecord(event, stream),
+        // External record nodes have no Level Zero equivalent here.
+        1 => NotSupported,
+        _ => InvalidValue,
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -158,6 +229,10 @@ pub extern "system" fn cuStreamWaitEvent(stream: Opaque, event: Opaque, flags: u
             }
             let streams = &mut context.streams;
             let key = streams.launch_key(stream)?;
+            streams.event(event)?;
+            if let Some(result) = streams.capture_wait(key, event.addr()) {
+                return result;
+            }
             if let Some(recording) = streams.event(event)? {
                 let producer = recording.producer;
                 let fence = Arc::clone(&recording.fence);
