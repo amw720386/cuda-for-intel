@@ -55,6 +55,7 @@ name = "cublas_shim"
 version = "0.1.0"
 dependencies = [
  "libloading",
+ "rspirv",
 ]
 
 [[package]]

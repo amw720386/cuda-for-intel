@@ -37,6 +37,8 @@ mod ptxgen;
 #[allow(dead_code)]
 mod ltplan;
 mod lt;
+#[allow(dead_code)]
+mod xmx;
 
 use libloading::Library;
 use plan::*;
