@@ -67,6 +67,14 @@ mod quantize_warp_ops;
 mod ctaid;
 #[path = "gpu/shr_s64.rs"]
 mod shr_s64;
+#[path = "gpu/hw_common.rs"]
+mod hw_common;
+#[path = "gpu/hw_mma.rs"]
+mod hw_mma;
+#[path = "gpu/hw_float.rs"]
+mod hw_float;
+#[path = "gpu/hw_warp.rs"]
+mod hw_warp;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
