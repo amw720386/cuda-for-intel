@@ -231,11 +231,17 @@ fn lazy_enabled() -> bool {
 /// kernel needs the whole-library path (module variables, or a translation the entry path
 /// cannot do), which then reports any real error itself.
 fn lazy_kernel_function(state: &mut State, library: usize, name: &CStr) -> Result<Option<usize>, CuResult> {
+    let context_key = current().ok_or(InvalidContext)?;
+    // Translation settings (dp4a lowering, dynamic shared window) must be fixed before any
+    // source is normalised.
+    probe_dot_product(
+        &state.runtime,
+        state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?,
+    );
     let image = state.libraries.images.get_mut(&library).ok_or(InvalidHandle)?;
     if image.unloading {
         return Err(InvalidHandle);
     }
-    let context_key = current().ok_or(InvalidContext)?;
     if let Some(&module) = state
         .contexts
         .get(&context_key)

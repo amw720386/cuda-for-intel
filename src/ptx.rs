@@ -861,6 +861,17 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
     }
 }
 
+static DYNAMIC_SHARED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(49152);
+
+/// Bytes reserved for a kernel's dynamic (`extern __shared__`) block, fixed at translation time.
+pub(crate) fn dynamic_shared_bytes() -> u32 {
+    DYNAMIC_SHARED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_dynamic_shared_bytes(bytes: u32) {
+    DYNAMIC_SHARED.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
 static DOT_PRODUCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether `dp4a` lowers to SPIR-V integer dot product (Xe DP4A) instead of scalar arithmetic.

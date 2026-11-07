@@ -237,3 +237,30 @@ pub(super) mod sampler {
     pub(in super::super) fn enter() {}
     pub(in super::super) fn leave() {}
 }
+
+pub(super) fn kernel_profile_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_PROFILE_KERNELS").as_deref() == Some(std::ffi::OsStr::new("1")))
+}
+
+pub(super) fn kernel_record(name: &str, nanos: u64, grid: [u32; 3], block: [u32; 3]) {
+    type Table = std::collections::HashMap<String, (u64, u64, [u32; 3], [u32; 3])>;
+    static TABLE: std::sync::Mutex<Option<(Table, std::time::Instant)>> = std::sync::Mutex::new(None);
+    let Ok(mut guard) = TABLE.lock() else { return };
+    let (table, last) = guard.get_or_insert_with(|| (Table::new(), std::time::Instant::now()));
+    let entry = table.entry(name.to_owned()).or_insert((0, 0, grid, block));
+    entry.0 += 1;
+    entry.1 += nanos;
+    entry.2 = grid;
+    entry.3 = block;
+    if last.elapsed().as_secs() >= 3 {
+        *last = std::time::Instant::now();
+        let mut rows: Vec<_> = table.iter().collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.1.1));
+        let mut text = String::from("KPROF-BEGIN");
+        for (name, (count, total, grid, block)) in rows.into_iter().take(40) {
+            text.push_str(&format!("\nKPROF {count} {} {grid:?} {block:?} {name}", total / 1000));
+        }
+        super::export_log_always(text);
+    }
+}

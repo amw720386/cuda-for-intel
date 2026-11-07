@@ -59,7 +59,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
                 if let Some(open) = entry_open.take() {
                     let mut decls = ctx.take_decls();
                     if let (true, Some((name, align))) = (uses_dynamic, &dynamic) {
-                        decls.push(format!(".shared .align {align} .b8 {name} [ 49152 ] ; /*dyn*/"));
+                        decls.push(format!(".shared .align {align} .b8 {name} [ {} ] ; /*dyn*/", super::dynamic_shared_bytes()));
                     }
                     uses_dynamic = false;
                     if !decls.is_empty() {

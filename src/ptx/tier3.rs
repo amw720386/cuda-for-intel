@@ -273,7 +273,7 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         }
         "mov" if matches!(inst.operand(1), "%dynamic_smem_size" | "%total_smem_size") && inst.operands.len() == 2 => {
             let bits = if inst.op.ends_with("64") { 64 } else { 32 };
-            Some(vec![render(&inst.guard, &format!("mov.b{bits}"), &[inst.operand(0).to_owned(), "49152".into()])])
+            Some(vec![render(&inst.guard, &format!("mov.b{bits}"), &[inst.operand(0).to_owned(), crate::ptx::dynamic_shared_bytes().to_string()])])
         }
         "bar" | "barrier" => barrier(ctx, inst),
         "stmatrix" => stmatrix(ctx, inst),

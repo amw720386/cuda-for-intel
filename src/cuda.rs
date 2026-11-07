@@ -988,6 +988,20 @@ fn probe_dot_product(runtime: &Runtime, context: &mut CudaContext) {
     if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    // Dynamic shared memory window: GGML's larger MMQ tiles launch with up to the opt-in limit
+    // the device reports (more than 48 KiB), so reserve what the device offers, up to
+    // CUDA_FOR_INTEL_DYN_SHARED (default 64 KiB). Kernels reserve the whole window per workgroup.
+    #[cfg(test)]
+    let fake = runtime.api.is_fake();
+    #[cfg(not(test))]
+    let fake = false;
+    if !fake {
+        let device_max = runtime.devices[context.device as usize].info.max_shared_local_memory;
+        let wanted = std::env::var("CUDA_FOR_INTEL_DYN_SHARED").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(65536);
+        let window = wanted.min(device_max).max(49152.min(device_max));
+        ptx::set_dynamic_shared_bytes(window);
+        export_log_always(format_args!("dynamic shared window {window} (device max {device_max})"));
+    }
     if std::env::var_os("CUDA_FOR_INTEL_DP4A").as_deref() == Some(std::ffi::OsStr::new("0")) {
         return;
     }
@@ -1114,7 +1128,7 @@ fn install_translation(
         .load_module(&runtime.api, &translated.words)
         .inspect_err(|error| {
             context.backend.health.observe(error);
-            export_log(format_args!(
+            export_log_always(format_args!(
                 "module build failed: kernels={:?} spirv_words={} error={error}",
                 entries.keys().collect::<Vec<_>>(),
                 translated.words.len()
@@ -1309,17 +1323,33 @@ pub unsafe extern "system" fn cuLaunchKernel(
             // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
             // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
             // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
-            if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
-                return Err(InvalidValue);
-            }
             let grid = [grid_x, grid_y, grid_z];
             let block = [block_x, block_y, block_z];
+            if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
+                export_log_always(format_args!(
+                    "cuLaunchKernel rejected {}: dynamic shared {shared_bytes} > translated {} grid={grid:?} block={block:?}",
+                    name.to_string_lossy(),
+                    entry.shared_bytes
+                ));
+                return Err(InvalidValue);
+            }
             validate_launch(
                 &runtime.devices[context.device as usize].info,
                 grid,
                 block,
                 entry.max_threads,
-            )?;
+            )
+            .inspect_err(|_| {
+                let info = &runtime.devices[context.device as usize].info;
+                export_log_always(format_args!(
+                    "cuLaunchKernel rejected {}: grid={grid:?} block={block:?} max_threads={:?} device max grid={:?} max block={:?} max workgroup={}",
+                    name.to_string_lossy(),
+                    entry.max_threads,
+                    info.max_grid_dimensions,
+                    info.max_workgroup_dimensions,
+                    info.max_workgroup_size
+                ));
+            })?;
             let args = unsafe {
                 launch_args::read(&entry.params, kernel_params, extra, |address| {
                     // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
@@ -1383,14 +1413,24 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 )?;
                 return Ok(());
             }
-            context.streams.launch(
+            let timed = trace::kernel_profile_enabled().then(std::time::Instant::now);
+            let launched = context.streams.launch(
                 &runtime.api,
                 &context.backend,
                 kernel,
                 stream,
                 (grid, block),
                 &args,
-            )
+            );
+            if let Some(started) = timed {
+                // CUDA_FOR_INTEL_PROFILE_KERNELS=1 serialises every launch so its wall time is
+                // GPU time plus a constant submission latency; use it to rank kernels only.
+                launched?;
+                context.streams.wait_stream(&runtime.api, stream, u64::MAX)?;
+                trace::kernel_record(&name.to_string_lossy(), started.elapsed().as_nanos() as u64, grid, block);
+                return Ok(());
+            }
+            launched
         }))
     })
 }
