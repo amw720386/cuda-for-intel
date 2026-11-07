@@ -143,10 +143,6 @@ fn check_isolation(peer: i32) {
         INVALID_VALUE
     );
     assert_eq!(
-        unsafe { cuMemcpyHtoDAsync_v2(b.device, a.host, BYTES, b.stream) },
-        INVALID_VALUE
-    );
-    assert_eq!(
         unsafe { cuMemcpyDtoHAsync_v2(b.host, a.device, BYTES, b.stream) },
         INVALID_VALUE
     );

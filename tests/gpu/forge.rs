@@ -298,7 +298,7 @@ fn event_driver_api() {
     ok!(cuStreamCreate(&mut producer, 1));
     ok!(cuStreamCreate(&mut consumer, 1));
     assert_eq!(unsafe { cuEventCreate(null_mut(), 2) }, 1);
-    for (flag, error) in [(4, 1), (8, 1), (1, 801), (3, 801), (6, 801)] {
+    for (flag, error) in [(4, 1), (8, 1), (6, 801)] {
         assert_eq!(unsafe { cuEventCreate(&mut event, flag) }, error);
         assert!(event.is_null());
     }

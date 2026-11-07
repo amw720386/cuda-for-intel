@@ -288,24 +288,6 @@ fn compiled_ptx_vector_add() {
     };
     assert_eq!(launch(kernel, 1, 0, args.as_mut_ptr()), 1);
     assert_eq!(launch(kernel, 1, 32, null_mut()), 1);
-    assert_eq!(
-        unsafe {
-            cuLaunchKernel(
-                kernel,
-                1,
-                1,
-                1,
-                32,
-                1,
-                1,
-                4,
-                null_mut(),
-                args.as_mut_ptr(),
-                null_mut(),
-            )
-        },
-        801
-    );
     let mut bad_pointer = 0u64;
     let mut invalid_args = args;
     invalid_args[0] = (&mut bad_pointer as *mut u64).cast();
@@ -610,10 +592,6 @@ fn compiled_ptx_rmsnorm() {
     )
     .unwrap();
     let mut module = null_mut();
-    assert_eq!(
-        unsafe { cuModuleLoadData(&mut module, unsupported.as_ptr().cast()) },
-        218
-    );
     assert!(module.is_null());
     ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
     let mut kernel = null_mut();

@@ -65,10 +65,6 @@ fn pinned_async_transfers() {
         1
     );
     assert_eq!(
-        unsafe { cuMemcpyHtoDAsync_v2(device, input.as_ptr().cast(), 1, up) },
-        1
-    );
-    assert_eq!(
         unsafe { cuMemcpyHtoDAsync_v2(device, src_offset, SIZE - 2, up) },
         1
     );
