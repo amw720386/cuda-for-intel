@@ -100,6 +100,8 @@ struct Emitter<'a> {
     ever_defined: HashSet<&'a str>,
     /// Registers with a single definition, `mov.u32 %r, <immediate>`: their value is known.
     const_regs: HashMap<&'a str, u32>,
+    /// SPIR-V ids of registers set from immediates (`mov.u32 %r, imm`).
+    const_ids: HashSet<Word>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
     device_atomics: bool,
@@ -181,6 +183,7 @@ impl<'a> Emitter<'a> {
             initialized: HashSet::new(),
             ever_defined: HashSet::new(),
             const_regs: HashMap::new(),
+            const_ids: HashSet::new(),
             locals: Vec::new(),
             params: HashMap::new(),
             device_atomics: false,
@@ -1254,7 +1257,12 @@ impl<'a> Emitter<'a> {
     /// Four-way byte dot product with per-operand signedness, plus accumulate.
     fn dot4(&mut self, a: Word, b: Word, acc: Word, signed: [bool; 2]) -> Result<Word, Error> {
         let ty = self.u32_type;
-        if super::dot_product_enabled() {
+        // The Intel compiler miscompiles OpSDot/UDot/SUDot when one operand is a compile-time
+        // constant (Q6_K mmvq: `dp4a` against nvcc's folded `0xe0e0e0e0` gave NMSE 0.8), so
+        // those stay scalar.
+        let constant_operand = (self.const_ids.contains(&a) || self.const_ids.contains(&b))
+            && std::env::var_os("CFI_DP4A_CONST").as_deref() != Some(std::ffi::OsStr::new("1"));
+        if super::dot_product_enabled() && !constant_operand {
             // SPV_KHR_integer_dot_product maps to the Xe DP4A instruction. The dot of four byte
             // pairs never overflows 32 bits, so adding the accumulator with wrap-around matches
             // dp4a exactly (the saturating Acc forms would not).
@@ -2374,6 +2382,9 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.integer(src, Kind::B32)?
                 };
+                if Self::parse_u32(src).is_some() {
+                    self.const_ids.insert(id);
+                }
                 (dst, id, Kind::B32)
             }
             Instruction::Move64(dst, src) => {
@@ -3142,6 +3153,7 @@ impl<'a> Emitter<'a> {
         }
         self.ever_defined.clear();
         self.const_regs.clear();
+        self.const_ids.clear();
         let mut scratch = Vec::new();
         let mut definitions: HashMap<&str, u32> = HashMap::new();
         let mut constants: HashMap<&str, u32> = HashMap::new();
