@@ -1327,7 +1327,6 @@ mod tests {
     #[test]
     fn rejects_unsupported_shared_memory_and_barriers() {
         for (old, new) in [
-            ("[16]", "[3]"),
             ("[scratch]", "[missing]"),
         ] {
             assert!(

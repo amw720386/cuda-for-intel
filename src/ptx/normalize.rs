@@ -24,6 +24,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
     let statements = split(tokens);
     let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
+    let mut entry_locals = tier3::entry_locals(&statements).into_iter();
     let mut ctx = Ctx::default();
     let mut out: Vec<String> = Vec::with_capacity(statements.len());
     // Index in `out` of the opening brace of the current entry, plus pending
@@ -60,6 +61,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
         }
         if is_entry_header(&stmt) {
             ctx.widths.clear();
+            tier3::begin_entry(&mut ctx.t3, entry_locals.next().unwrap_or_default());
             ctx.block_threads = block_threads(&stmt);
             let text = fix_entry_header(&stmt);
             out.push(text);
@@ -569,6 +571,11 @@ fn rewrite(ctx: &mut Ctx, stmt: &[String]) -> Vec<String> {
             return vec![format!(".target sm_{}", if digits.is_empty() { "80" } else { &digits })];
         }
         ".pragma" => return Vec::new(),
+        ".local" | ".shared" => {
+            if let Some(lines) = tier3::decl(ctx, stmt) {
+                return lines;
+            }
+        }
         ".reg" => {
             ctx.note_register_declaration(stmt);
             return vec![rewrite_reg(stmt)];

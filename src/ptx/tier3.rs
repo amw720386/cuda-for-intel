@@ -28,6 +28,14 @@ pub(super) struct State {
     named_barriers: bool,
     reductions: bool,
     labels: u32,
+    /// `.local` arrays of the current entry merged into one: (name, byte offset).
+    locals: Vec<(String, u32)>,
+    local_bytes: u32,
+    local_align: u32,
+    /// `.shared` arrays of the current entry.
+    shared: Vec<String>,
+    uses_lsym: bool,
+    uses_ssym: bool,
 }
 
 impl State {
@@ -54,6 +62,15 @@ impl State {
         }
         if self.mp > 0 {
             decls.push(format!(".reg .pred %__mp_<{}> ;", self.mp));
+        }
+        if self.local_bytes > 0 {
+            decls.push(format!(".local .align {} .b8 __t3_local [ {} ] ;", self.local_align, self.local_bytes));
+        }
+        if self.uses_lsym {
+            decls.push(".reg .b64 %__lsym ;".into());
+        }
+        if self.uses_ssym {
+            decls.push(".reg .b32 %__ssym ;".into());
         }
         if self.cc {
             decls.push(".reg .b32 %__cc ;".into());
@@ -168,6 +185,9 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             }
         }
         return Some(again(ctx, &copy));
+    }
+    if let Some(lines) = symbol_operands(ctx, inst) {
+        return Some(lines);
     }
     let family = inst.op.split('.').next().unwrap_or("");
     if matches!(family, "mma" | "wmma") {
@@ -881,4 +901,164 @@ fn reduction(ctx: &mut Ctx, inst: &Inst, parts: &[&str]) -> Option<Vec<String>> 
         _ => b.p(render(&inst.guard, "setp.eq.u32", &[dst.to_owned(), total, "0".into()])),
     }
     Some(b.finish())
+}
+
+// ---- local / shared declarations ------------------------------------------------
+
+/// `.local|.shared [.align N] .TYPE name[count] ;` -> (space, align, bytes, name)
+fn parse_decl(stmt: &[String]) -> Option<(String, u32, u32, String)> {
+    let space = stmt.first()?.clone();
+    if space != ".local" && space != ".shared" {
+        return None;
+    }
+    let mut i = 1;
+    let mut align = 0u32;
+    if stmt.get(i).is_some_and(|t| t == ".align") {
+        align = stmt.get(i + 1)?.parse().ok()?;
+        i += 2;
+    }
+    let elem: u32 = match stmt.get(i)?.as_str() {
+        ".b8" | ".u8" | ".s8" => 1,
+        ".b16" | ".u16" | ".s16" | ".f16" | ".bf16" => 2,
+        ".b32" | ".u32" | ".s32" | ".f32" | ".f16x2" => 4,
+        ".b64" | ".u64" | ".s64" | ".f64" => 8,
+        _ => return None,
+    };
+    let name = stmt.get(i + 1)?.clone();
+    let count: u32 = if stmt.get(i + 2).is_some_and(|t| t == "[") {
+        stmt.get(i + 3)?.parse().ok()?
+    } else {
+        1
+    };
+    Some((space, align.max(elem), count.checked_mul(elem)?, name))
+}
+
+/// Entry-level pre-pass: the `.local` arrays of every entry, in order, so uses
+/// can be rebased onto one merged array.
+pub(super) fn entry_locals(statements: &[super::Stmt]) -> Vec<Vec<(String, u32, u32)>> {
+    let mut out = Vec::new();
+    let mut current: Option<Vec<(String, u32, u32)>> = None;
+    let mut depth = 0i32;
+    for stmt in statements {
+        if super::is_entry_header(stmt) {
+            current = Some(Vec::new());
+            depth = 1;
+            continue;
+        }
+        match stmt.first().map(String::as_str) {
+            Some("{") => depth += 1,
+            Some("}") => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(c) = current.take() {
+                        out.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let (Some(c), Some((space, align, bytes, name))) = (current.as_mut(), parse_decl(stmt)) {
+            if space == ".local" {
+                c.push((name, align, bytes));
+            }
+        }
+    }
+    out
+}
+
+/// Starts an entry: lays the entry's `.local` arrays out in one merged array.
+pub(super) fn begin_entry(st: &mut State, locals: Vec<(String, u32, u32)>) {
+    st.locals.clear();
+    st.shared.clear();
+    st.local_bytes = 0;
+    let mut offset = 0u32;
+    let mut align = 4u32;
+    for (name, a, bytes) in locals {
+        offset = offset.next_multiple_of(a.max(1));
+        st.locals.push((name, offset));
+        offset += bytes;
+        align = align.max(a);
+    }
+    st.local_bytes = offset.next_multiple_of(4);
+    st.local_align = if align >= 16 { 16 } else if align >= 8 { 8 } else { 4 };
+}
+
+/// Rewrites `.local` / `.shared` declarations to the canonical byte-array form.
+pub(super) fn decl(ctx: &mut Ctx, stmt: &[String]) -> Option<Vec<String>> {
+    let (space, align, bytes, name) = parse_decl(stmt)?;
+    if space == ".local" {
+        // The merged array is emitted with the entry's other declarations.
+        let _ = (align, bytes, name);
+        return Some(Vec::new());
+    }
+    ctx.t3.shared.push(name.clone());
+    let align = if align >= 16 { 16 } else if align >= 8 { 8 } else { 4 };
+    Some(vec![format!(".shared .align {align} .b8 {name} [ {} ] ;", bytes.next_multiple_of(4))])
+}
+
+/// Splits `[sym+off]` / `[sym]` into (sym, extra offset text).
+fn bracket_symbol(operand: &str) -> Option<(String, i64)> {
+    let inner = operand.trim().strip_prefix('[')?.strip_suffix(']')?.replace(' ', "");
+    if inner.starts_with('%') {
+        return None;
+    }
+    let (base, off) = match inner.find(['+', '-']) {
+        Some(at) => (&inner[..at], inner[at..].replace('+', "").parse::<i64>().ok()?),
+        None => (inner.as_str(), 0),
+    };
+    Some((base.to_owned(), off))
+}
+
+/// Memory operands and moves that name a declared `.local`/`.shared` array are
+/// rewritten to the register form (`mov` of the symbol, then `[reg+offset]`).
+fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let family = inst.op.split('.').next()?;
+    if ctx.t3.locals.is_empty() && ctx.t3.shared.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    let mut operands = inst.operands.clone();
+    let mut changed = false;
+    if family == "mov" && inst.operands.len() == 2 {
+        let src = inst.operand(1).replace(' ', "");
+        let (base, off) = match src.find('+') {
+            Some(at) => (src[..at].to_owned(), src[at + 1..].parse::<i64>().ok()?),
+            None => (src.clone(), 0),
+        };
+        if let Some((_, o)) = ctx.t3.locals.iter().find(|(n, _)| *n == base) {
+            let o = i64::from(*o) + off;
+            let dst = inst.operand(0).to_owned();
+            lines.push(render(&inst.guard, "mov.u64", &[dst.clone(), "__t3_local".into()]));
+            if o != 0 {
+                lines.push(render(&inst.guard, "add.u64", &[dst.clone(), dst, o.to_string()]));
+            }
+            return Some(lines);
+        }
+        return None;
+    }
+    if !matches!(family, "ld" | "ldu" | "st" | "atom" | "red") {
+        return None;
+    }
+    for operand in &mut operands {
+        let Some((base, off)) = bracket_symbol(operand) else { continue };
+        if let Some((_, o)) = ctx.t3.locals.iter().find(|(n, _)| *n == base) {
+            ctx.t3.uses_lsym = true;
+            lines.push(format!("mov.u64 %__lsym , __t3_local ;"));
+            *operand = format!("[%__lsym+{}]", i64::from(*o) + off);
+            changed = true;
+        } else if ctx.t3.shared.iter().any(|n| *n == base)
+            && (off != 0 || inst.op.split('.').any(|p| matches!(p, "u64" | "s64" | "b64" | "f64")))
+        {
+            ctx.t3.uses_ssym = true;
+            lines.push(format!("mov.u32 %__ssym , {base} ;"));
+            *operand = format!("[%__ssym+{off}]");
+            changed = true;
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let copy = Inst { guard: inst.guard.clone(), op: inst.op.clone(), operands };
+    lines.extend(again(ctx, &copy));
+    Some(lines)
 }

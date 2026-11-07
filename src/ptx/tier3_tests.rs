@@ -225,3 +225,43 @@ fn bar_red_single_thread_semantics() {
     );
     assert_eq!(out, [1, 1, 0]);
 }
+
+#[test]
+fn several_local_arrays_and_symbol_offsets() {
+    let out = super::coverage_tests::kernel_with_shared(
+        "",
+        "",
+        r#"    mov.u32 %r1, 11;
+    mov.u32 %r2, 22;
+    st.local.u32 [la+4], %r1;
+    st.local.u32 [lb], %r2;
+    mov.u64 %rd1, lb;
+    ld.local.u32 %r3, [%rd1];
+    ld.local.u32 %r4, [la+4];
+    st.global.u32 [%rd15], %r3;
+    st.global.u32 [%rd15+4], %r4;"#,
+    )
+    .replace("    .reg .pred %p<8>;", "    .local .align 4 .b8 la[12];\n    .local .align 8 .b8 lb[6];\n    .reg .pred %p<8>;");
+    let module = lower(&out);
+    let mut machine = interp::Machine { params: vec![interp::GLOBAL, 0], ..Default::default() };
+    interp::run(&module, &mut machine);
+    assert_eq!([machine.read(interp::GLOBAL, 4), machine.read(interp::GLOBAL + 4, 4)], [22, 11]);
+}
+
+#[test]
+fn shared_symbols_with_offsets_and_64_bit_accesses() {
+    let source = super::coverage_tests::kernel_with_shared(
+        "",
+        ".shared .align 8 .b32 words[16];",
+        r#"    mov.u64 %rd1, 0x0000000500000007;
+    st.shared.u64 [words+8], %rd1;
+    ld.shared.u32 %r1, [words+8];
+    ld.shared.u32 %r2, [words+12];
+    st.global.u32 [%rd15], %r1;
+    st.global.u32 [%rd15+4], %r2;"#,
+    );
+    let module = lower(&source);
+    let mut machine = interp::Machine { params: vec![interp::GLOBAL, 0], ..Default::default() };
+    interp::run(&module, &mut machine);
+    assert_eq!([machine.read(interp::GLOBAL, 4), machine.read(interp::GLOBAL + 4, 4)], [7, 5]);
+}
