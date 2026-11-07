@@ -992,7 +992,15 @@ impl<'a> Parser<'a> {
                 | "ld.global.v4.u16"
                 | "ld.global.nc.v4.u16"
                 | "ld.global.v4.b16"
-                | "ld.global.nc.v4.b16"),
+                | "ld.global.nc.v4.b16"
+                | "ld.shared.v2.u16"
+                | "ld.shared.v2.b16"
+                | "ld.shared.v4.u16"
+                | "ld.shared.v4.b16"
+                | "ld.local.v2.u16"
+                | "ld.local.v2.b16"
+                | "ld.local.v4.u16"
+                | "ld.local.v4.b16"),
                 "{",
                 a,
                 ",",
@@ -1022,7 +1030,7 @@ impl<'a> Parser<'a> {
                     }
                 };
                 Instruction::LoadVecU16 {
-                    space: Space::Global,
+                    space: memory_space(op),
                     count,
                     dst: [a, b, c, d],
                     addr,
@@ -1237,7 +1245,8 @@ impl<'a> Parser<'a> {
                 src,
             ] => Instruction::Store64(memory_space(body[0]), addr, src),
             [
-                "st.global.v2.u16" | "st.global.v2.b16",
+                op @ ("st.global.v2.u16" | "st.global.v2.b16" | "st.shared.v2.u16"
+                | "st.shared.v2.b16" | "st.local.v2.u16" | "st.local.v2.b16"),
                 "[",
                 addr,
                 "]",
@@ -1247,9 +1256,10 @@ impl<'a> Parser<'a> {
                 ",",
                 b,
                 "}",
-            ] => Instruction::StoreVecU16(Space::Global, addr, [a, b]),
+            ] => Instruction::StoreVecU16(memory_space(op), addr, [a, b]),
             [
-                op @ ("st.global.v4.u16" | "st.global.v4.b16" | "st.global.v4.u8"),
+                op @ ("st.global.v4.u16" | "st.global.v4.b16" | "st.global.v4.u8"
+                | "st.shared.v4.u16" | "st.shared.v4.b16" | "st.local.v4.u16" | "st.local.v4.b16"),
                 "[",
                 addr,
                 "]",
@@ -1267,7 +1277,7 @@ impl<'a> Parser<'a> {
                 if *op == "st.global.v4.u8" {
                     Instruction::StoreVec4U8(addr, [a, b, c, d])
                 } else {
-                    Instruction::StoreVec4U16(Space::Global, addr, [a, b, c, d])
+                    Instruction::StoreVec4U16(memory_space(op), addr, [a, b, c, d])
                 }
             }
             [
