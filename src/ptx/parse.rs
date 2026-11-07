@@ -2114,7 +2114,8 @@ pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'
                 // Consume optional `.visible` then `.entry name … { … }`.
                 parser.eat(".visible");
                 if parser.eat(".entry") {
-                    let _ = parser.identifier();
+                    let skipped = parser.identifier().unwrap_or("?");
+                    super::probe::note_skip(skipped, &error);
                     skip_failed_entry(&mut parser)?;
                 } else {
                     return Err(error);

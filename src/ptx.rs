@@ -5,6 +5,7 @@ pub(crate) mod globals;
 mod inline;
 mod normalize;
 mod parse;
+mod probe;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
 mod cublas_ptxgen;
@@ -859,6 +860,21 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
             spirv::emit(survivors, vars.device)
         }
     }
+}
+
+pub(crate) fn prepare_module(source: &str) -> Result<String, Error> {
+    prepare(source)
+}
+
+#[allow(dead_code)]
+pub(crate) fn skipped_entries() -> Vec<(String, String)> {
+    probe::skipped()
+}
+
+/// Translate every parsed entry of a prepared module on its own and report per kernel.
+#[allow(dead_code)]
+pub(crate) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), String>)>, Error> {
+    probe::probe_module(prepared)
 }
 
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
