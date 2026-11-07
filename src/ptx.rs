@@ -883,6 +883,40 @@ mod tests {
     const GGML_MODERN: &str = include_str!("../examples/ggml_scale_clamp.ptx");
     const GGML_ADD: &str = include_str!("../examples/ggml_add_f32.ptx");
 
+    /// Bring-up aid: CFI_STOCK_GGML_DLL=<path> lists every stock kernel that fails to translate.
+    #[test]
+    #[ignore = "reads the stock ggml-cuda.dll named by CFI_STOCK_GGML_DLL"]
+    fn scan_stock_dll_translation() {
+        let Some(path) = std::env::var_os("CFI_STOCK_GGML_DLL") else {
+            return;
+        };
+        let data = std::fs::read(path).unwrap();
+        let magic = cfi_fatbin::FRAME_MAGIC.to_le_bytes();
+        let (mut at, mut blobs, mut entries, mut failed) = (0, 0, 0, 0);
+        let mut kinds = std::collections::BTreeMap::<String, Vec<String>>::new();
+        while let Some(pos) = data[at..].windows(4).position(|w| w == magic) {
+            let start = at + pos;
+            at = start + 4;
+            let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx(data[start..].as_ptr()) }) else {
+                continue;
+            };
+            let Ok(text) = String::from_utf8(ptx) else { continue };
+            let Ok(names) = entry_names(&text) else { continue };
+            blobs += 1;
+            for name in names {
+                entries += 1;
+                if let Err(error) = diagnose_entry(&text, name) {
+                    failed += 1;
+                    kinds.entry(error.to_string()).or_default().push(name.to_owned());
+                }
+            }
+        }
+        eprintln!("SCAN blobs={blobs} entries={entries} failed={failed}");
+        for (error, names) in &kinds {
+            eprintln!("SCAN_ERR x{} {error} e.g. {}", names.len(), &names[0][..names[0].len().min(90)]);
+        }
+    }
+
     /// Bring-up aid: CFI_PTX_FILE=<path> CFI_PTX_ENTRY=<mangled name> times each phase.
     #[test]
     #[ignore = "reads a PTX dump named by CFI_PTX_FILE"]
