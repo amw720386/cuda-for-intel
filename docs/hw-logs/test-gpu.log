@@ -1,10 +1,12 @@
-cargo : warning: irrefutable `if let` pattern
-At C:\Users\USER\cfi-work\gputest.ps1:9 char:3
-+   cargo test --locked -j 2 --no-fail-fast --test gpu -- --ignored --t ...
-+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (warning: irrefutable `if let` pattern:String) [], RemoteException
+cargo :    Compiling cfi-fatbin v0.1.0 (C:\Users\USER\cfi-work\integ\crates\fatbin)
+At C:\Users\USER\cfi-work\gputest.ps1:9 char:101
++ ... -cuda.dll"; cargo test --locked -j 2 --no-fail-fast --test gpu -- --i ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling cf...\crates\fatbin):String) [], RemoteException
     + FullyQualifiedErrorId : NativeCommandError
  
+   Compiling cuda-for-intel v0.1.0 (C:\Users\USER\cfi-work\integ)
+warning: irrefutable `if let` pattern
    --> src\cuda\streams\timing.rs:188:16
     |
 188 |             if let Page::Host(address) = page {
@@ -106,9 +108,7 @@ help: `cuEventCreate` is captured in macro and introduced a unused variable
    |
   ::: tests\gpu\graph_capture.rs:14:5
    |
-
-running 80 tests
-test asynchronous_stream_order_and_lifetimes ... 14 | /     symbols!(dll;
+14 | /     symbols!(dll;
 15 | |         cuInit(u32),
 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
 17 | |         cuCtxDestroy_v2(Handle),
@@ -294,15 +294,7 @@ help: `cuMemFree_v2` is captured in macro and introduced a unused variable
    | |_____- in this macro invocation
    = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more 
 info)
-ok
-test compiled_ptx_atomic_tickets ... ok
-test compiled_ptx_block_reduction ... ok
-test compiled_ptx_rmsnorm ... ok
-test compiled_ptx_vector_add ... ok
-test convert_unary::convert_unary_f32_half_roundtrip ... ok
-test ctaid::ctaid_yz_are_zero_for_1d_grid ... ok
-test device_memory_round_trip ... ok
-test discovery::resolved_primary_context_runs_multiple_module_entries ... warning: unused variable: `cuMemFree_v2`
+warning: unused variable: `cuMemFree_v2`
   --> tests\gpu.rs:94:17
    |
 94 |               let $name = unsafe {
@@ -409,9 +401,19 @@ help: `cuMemFree_v2` is captured in macro and introduced a unused variable
 info)
 warning: `cuda-for-intel` (test "gpu") generated 10 warnings (run `cargo fix --test "gpu" -p cuda-for-intel` to apply 
 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.23s
      Running tests\gpu.rs (target\debug\deps\gpu-ee6bfd31e76cd756.exe)
-ok
+
+running 79 tests
+test asynchronous_stream_order_and_lifetimes ... ok
+test compiled_ptx_atomic_tickets ... ok
+test compiled_ptx_block_reduction ... ok
+test compiled_ptx_rmsnorm ... ok
+test compiled_ptx_vector_add ... ok
+test convert_unary::convert_unary_f32_half_roundtrip ... ok
+test ctaid::ctaid_yz_are_zero_for_1d_grid ... ok
+test device_memory_round_trip ... ok
+test discovery::resolved_primary_context_runs_multiple_module_entries ... ok
 test event_timing::event_elapsed_time_tracks_device_work ... ok
 test forge::dependent_forge_chain ... ok
 test forge::event_driver_api ... ok
@@ -439,7 +441,6 @@ test hw_ggml::hw_ggml_bin_bcast_add_f32_broadcast ... ok
 test hw_ggml::hw_ggml_dequantize_block_q8_0_to_half ... ok
 test hw_ggml::hw_ggml_get_rows_float_batched ... ok
 test hw_ggml::hw_ggml_mul_mat_vec_q8_0_q8_1 ... ok
-test hw_ggml_stock::hw_stock_ggml_kernels_compile ... FAILED
 test hw_mma::hw_ldmatrix_all_counts_and_trans ... ok
 test hw_mma::hw_ldmatrix_generic_pointer_without_shared_qualifier ... ok
 test hw_mma::hw_mma_f16_f32_accumulate ... ok
@@ -448,7 +449,7 @@ test hw_round2::hw_atomics_32bit_all_ops_global_and_shared ... ok
 test hw_round2::hw_atomics_64bit_all_ops_global_and_shared ... ok
 test hw_round2::hw_exited_threads_do_not_deadlock_bar_sync ... ok
 test hw_round2::hw_level_zero_device_supports_subgroup_size_32 ... ok
-test hw_round2::hw_shared_alignment_32_64_128 ... FAILED
+test hw_round2::hw_shared_alignment_32_64_128 ... ok
 test hw_round2::hw_special_registers_have_sensible_values ... ok
 test hw_tier2::hw_approximate_math_error_bounds ... ok
 test hw_tier2::hw_atomics_64bit_and_f64_under_heavy_contention ... ok
@@ -484,28 +485,5 @@ test shr_s64::shr_s64_signed_div32 ... ok
 test soft_max_generic::soft_max_generic_ncols12_matches_cpu ... ok
 test store_u8::store_u8_and_v2_u16_roundtrip ... ok
 
-failures:
+test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 11.63s
 
----- hw_ggml_stock::hw_stock_ggml_kernels_compile stdout ----
-
-thread 'hw_ggml_stock::hw_stock_ggml_kernels_compile' (15132) panicked at tests\gpu\hw_ggml_stock.rs:42:52:
-CFI_STOCK_GGML_DLL: NotPresent
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
----- hw_round2::hw_shared_alignment_32_64_128 stdout ----
-
-thread 'hw_round2::hw_shared_alignment_32_64_128' (11988) panicked at tests\gpu\hw_round2.rs:107:5:
-assertion `left == right` failed: offsets [16, 272, 320, 0]
-  left: (16, 16, 0)
- right: (0, 0, 0)
-
-
-failures:
-    hw_ggml_stock::hw_stock_ggml_kernels_compile
-    hw_round2::hw_shared_alignment_32_64_128
-
-test result: FAILED. 78 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 8.83s
-
-error: test failed, to rerun pass `--test gpu`
-error: 1 target failed:
-    `--test gpu`
