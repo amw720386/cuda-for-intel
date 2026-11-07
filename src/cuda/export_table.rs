@@ -304,12 +304,14 @@ unsafe extern "system" fn hybrid_runtime_load_get_proc_address(
     }
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     super::export_log(format!("hybrid_runtime_load_get_proc_address name={name}"));
-    // ZLUDA allowlists NVIDIA hybrid DLL names. We serve the resolver from this
-    // driver DLL directly so stock CUDA 13 static cudart does not need
-    // nvcudart_hybrid64.dll on disk.
     if name != "nvcudart_hybrid64.dll" && name != "nvcudart_hybrid64a.dll" {
         return InvalidValue;
     }
+    // Serve the in-process ordinal-aware resolver. Loading NVIDIA's
+    // cudart64_13.dll / nvcudart_hybrid64.dll from here re-enters
+    // cuGetExportTable(HYBRID) during DllMain and deadlocks. A real driver
+    // hybrid DLL (when available beside nvcuda) can be wired later with a
+    // non-reentrant load protocol.
     unsafe {
         fn_ptr.write(__cudaGetProcAddress as *const c_void);
         token.write(HYBRID_RUNTIME_TOKEN);
