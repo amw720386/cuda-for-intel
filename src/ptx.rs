@@ -857,7 +857,7 @@ mod tests {
         eprintln!("rewrite: {:?}", t.elapsed());
         let entry = parse::parse_named(&rewritten, &name).unwrap();
         eprintln!("parse: {:?} blocks={}", t.elapsed(), entry.blocks.len());
-        let result = spirv::emit(vec![entry]);
+        let result = spirv::emit(vec![entry], Vec::new());
         eprintln!("emit: {:?} ok={:?}", t.elapsed(), result.as_ref().map(|t| t.words.len()).map_err(|e| e.to_string()));
     }
 
