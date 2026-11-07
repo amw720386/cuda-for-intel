@@ -804,6 +804,27 @@ pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
     spirv::emit(parse::parse(&rewritten)?)
 }
 
+/// Normalise a module once so single kernels can be translated lazily.
+pub(crate) fn prepare_module(source: &str) -> Result<String, Error> {
+    prepare(source)
+}
+
+/// Translate one `.entry` of an already prepared module. Kernels that the
+/// translator cannot handle elsewhere in the module do not matter.
+pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Translation, Error> {
+    let mut entry = parse::parse(prepared)?
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| Error::new("PTX entry is absent or unsupported"))?;
+    // Declare only the module data this kernel references: unrelated program-scope
+    // variables (assert strings, tables) bloat the module and are not free on hardware.
+    let body = format!("{:?}", entry.blocks);
+    entry
+        .globals
+        .retain(|data| body.contains(&format!("{:?}", data.name)));
+    spirv::emit(vec![entry])
+}
+
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
     let rewritten = prepare(source)?;
     spirv::emit(vec![parse::parse_named(&rewritten, name)?]).map(|_| ())

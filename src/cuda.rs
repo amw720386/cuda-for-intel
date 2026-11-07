@@ -92,6 +92,15 @@ struct CudaContext {
     local_storage: HashMap<usize, export_table::ContextStorage>,
 }
 
+/// A PTX module whose kernels are translated one at a time on first lookup.
+struct LazyModule {
+    context: usize,
+    prepared: String,
+    names: std::collections::HashSet<CString>,
+    /// kernel name -> (hidden child module, function handle)
+    children: HashMap<CString, (usize, usize)>,
+}
+
 struct CudaModule {
     backend: Module,
     entries: HashMap<CString, CudaEntry>,
@@ -117,6 +126,7 @@ struct State {
     primary: HashMap<c_int, primary::Primary>,
     libraries: library::Libraries,
     graphs: graphs::Graphs,
+    lazy_modules: HashMap<usize, LazyModule>,
 }
 
 static RUNTIME: Mutex<Option<State>> = Mutex::new(None);
@@ -288,6 +298,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),
                     graphs: graphs::Graphs::default(),
+                    lazy_modules: HashMap::new(),
                 });
                 Success
             }
@@ -599,6 +610,25 @@ fn contains_range(allocations: &BTreeMap<usize, usize>, address: usize, size: us
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuResult {
     trace::call("cuMemAlloc_v2", || {
+        let result = alloc_device(out, size);
+        if result == Success && std::env::var_os("CFI_NO_ALLOC_TOUCH").is_none() {
+            // A kernel that first touches a fresh Level Zero device allocation hangs
+            // the GPU (DEVICE_LOST) on Windows; a copy-engine fill makes it resident.
+            // PyTorch writes its outputs without initialising them, so zero-fill and
+            // wait before returning.
+            let address = unsafe { out.read() };
+            let touched = memset_bytes(address, 0, size, std::ptr::null_mut());
+            streams::drain_unlocked(None);
+            if touched != Success {
+                return touched;
+            }
+        }
+        result
+    })
+}
+
+fn alloc_device(out: *mut u64, size: usize) -> CuResult {
+    {
         status(with_context(|runtime, context| {
             if out.is_null() || size == 0 {
                 return Err(InvalidValue);
@@ -615,7 +645,7 @@ pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuRes
             unsafe { out.write(address as u64) };
             Ok(())
         }))
-    })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -960,6 +990,15 @@ fn load_ptx(
         export_log(format_args!("PTX reject: {error}"));
         InvalidPtx
     })?;
+    install_translation(runtime, context, next, translated)
+}
+
+fn install_translation(
+    runtime: &Runtime,
+    context: &mut CudaContext,
+    next: &mut usize,
+    translated: ptx::Translation,
+) -> Result<usize, CuResult> {
     let device = &runtime.devices[context.device as usize];
     let info = &device.info;
     if info.spirv_version < 0x10000 {
@@ -1039,11 +1078,98 @@ pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_v
         }
         return NoBinaryForGpu;
     };
-    status(with_context_handles(|runtime, context, next| {
-        let key = load_ptx(runtime, context, next, &ptx)?;
+    status(state(|state| {
+        let context_key = current().ok_or(InvalidContext)?;
+        state
+            .contexts
+            .get(&context_key)
+            .ok_or(ContextIsDestroyed)?
+            .check_live()?;
+        let source = std::str::from_utf8(&ptx).map_err(|_| InvalidImage)?;
+        let prepared = ptx::prepare_module(source).map_err(|error| {
+            diagnose_reject(source, &error);
+            InvalidPtx
+        })?;
+        let names = ptx::entry_names(&prepared)
+            .map_err(|_| InvalidPtx)?
+            .into_iter()
+            .filter_map(|name| CString::new(name).ok())
+            .collect();
+        let key = reserve_handle(&mut state.next_handle)?;
+        state.lazy_modules.insert(
+            key,
+            LazyModule {
+                context: context_key,
+                prepared,
+                names,
+                children: HashMap::new(),
+            },
+        );
         unsafe { out.write(std::ptr::without_provenance_mut(key)) };
         Ok(())
     }))
+}
+
+fn diagnose_reject(ptx: &str, error: &ptx::Error) {
+    if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        ptx.hash(&mut hasher);
+        let path = std::path::Path::new(&dir).join(format!("fail_{:016x}.ptx", hasher.finish()));
+        let _ = std::fs::write(path, ptx);
+    }
+    if trace::enabled() {
+        let preview: String = ptx.chars().take(120).collect();
+        trace::record(format_args!("PTX translation rejected: {error}; preview={preview:?}"));
+    }
+}
+
+/// Translate one kernel of a lazy module and return its function handle.
+fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
+    let lazy = state.lazy_modules.get(&module).ok_or(InvalidHandle)?;
+    if let Some(&(_, function)) = lazy.children.get(name) {
+        return Ok(function);
+    }
+    if !lazy.names.contains(name) {
+        return Err(NotFound);
+    }
+    let context_key = lazy.context;
+    if trace::enabled() {
+        trace::record(format_args!("lazy kernel {}", name.to_string_lossy()));
+    }
+    if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {
+        let path = std::path::Path::new(&dir).join(format!("module_{module:x}.ptx"));
+        if !path.exists() {
+            let _ = std::fs::write(path, &lazy.prepared);
+        }
+    }
+    let translated = ptx::translate_prepared_entry(&lazy.prepared, &name.to_string_lossy())
+        .map_err(|error| {
+            if trace::enabled() {
+                trace::record(format_args!(
+                    "kernel {} translation failed: {error}",
+                    name.to_string_lossy()
+                ));
+            }
+            export_log(format_args!("PTX reject {}: {error}", name.to_string_lossy()));
+            InvalidPtx
+        })?;
+    if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {
+        let bytes: Vec<u8> = translated.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let short: String = name.to_string_lossy().chars().take(80).collect();
+        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{short}.spv")), bytes);
+    }
+    let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
+    context.check_live()?;
+    let child = install_translation(&state.runtime, context, &mut state.next_handle, translated)?;
+    let function = module_function(&state.runtime.api, context, &mut state.next_handle, child, name)?;
+    state
+        .lazy_modules
+        .get_mut(&module)
+        .ok_or(InvalidHandle)?
+        .children
+        .insert(name.to_owned(), (child, function));
+    Ok(function)
 }
 
 #[unsafe(no_mangle)]
@@ -1069,6 +1195,18 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
 pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
     trace::call("cuModuleUnload", || {
         streams::drain_unlocked(None);
+        let lazy = state(|state| Ok(state.lazy_modules.remove(&module.addr()))).unwrap_or(None);
+        if let Some(lazy) = lazy {
+            return status(state(|state| {
+                if let Some(context) = state.contexts.get_mut(&lazy.context) {
+                    for (child, _) in lazy.children.values() {
+                        context.streams.wait_all(&state.runtime.api)?;
+                        context.unload(&state.runtime.api, *child)?;
+                    }
+                }
+                Ok(())
+            }));
+        }
         status(with_context(|runtime, context| {
             if !context.modules.contains_key(&module.addr())
                 || context.library_modules.values().any(|&key| key == module.addr())
@@ -1088,6 +1226,17 @@ pub unsafe extern "system" fn cuModuleGetFunction(
     name: *const c_char,
 ) -> CuResult {
     trace::call("cuModuleGetFunction", || {
+        if !out.is_null()
+            && !name.is_null()
+            && state(|state| Ok(state.lazy_modules.contains_key(&module.addr()))).unwrap_or(false)
+        {
+            let name = unsafe { CStr::from_ptr(name) };
+            return status(state(|state| {
+                let function = lazy_module_function(state, module.addr(), name)?;
+                unsafe { out.write(std::ptr::without_provenance_mut(function)) };
+                Ok(())
+            }));
+        }
         status(with_context_handles(|runtime, context, next| {
             if out.is_null() || name.is_null() {
                 return Err(InvalidValue);
@@ -1215,6 +1364,18 @@ pub unsafe extern "system" fn cuLaunchKernel(
                     return Err(error);
                 }
             };
+            if trace::enabled() {
+                let mut text = String::new();
+                for (arg, param) in args.iter().zip(&entry.params) {
+                    let size = param.size().min(16);
+                    let bytes = unsafe { std::slice::from_raw_parts(arg.value.cast::<u8>(), size) };
+                    text.push_str(&format!(" [{}]", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+                }
+                trace::record(format_args!(
+                    "launch {} grid={grid:?} block={block:?} shared={shared_bytes} args={text}",
+                    name.to_string_lossy().chars().take(60).collect::<String>()
+                ));
+            }
             // Optional launch dump for soft_max bring-up (CUDA_FOR_INTEL_DUMP_LAUNCH=1).
             if dump_launch_enabled()
                 && name.to_string_lossy().contains("soft_max")
