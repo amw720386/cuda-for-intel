@@ -861,6 +861,16 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
     }
 }
 
+/// Normalised source for [`translate_entry`]; computed once per library.
+pub(crate) fn prepare_source(source: &str) -> Result<String, Error> {
+    prepare(source)
+}
+
+/// Translates a single entry of a source returned by [`prepare_source`], without module variables.
+pub(crate) fn translate_entry(prepared: &str, name: &str) -> Result<Translation, Error> {
+    spirv::emit(vec![parse::parse_named(prepared, name)?], Vec::new())
+}
+
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
     let rewritten = prepare(source)?;
     spirv::emit(vec![parse::parse_named(&rewritten, name)?], Vec::new()).map(|_| ())

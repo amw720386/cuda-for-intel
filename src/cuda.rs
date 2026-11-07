@@ -89,6 +89,8 @@ struct CudaContext {
     host_registered: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
     library_modules: HashMap<usize, usize>,
+    /// Per-kernel modules of libraries, keyed by library and kernel name (lazy compilation).
+    entry_modules: HashMap<(usize, CString), usize>,
     /// Allocation-table entries that belong to a module variable, not to cuMemAlloc.
     module_globals: BTreeSet<usize>,
     functions: HashMap<usize, (usize, CString)>,
@@ -407,6 +409,7 @@ impl State {
                 host_registered: BTreeMap::new(),
                 modules: HashMap::new(),
                 library_modules: HashMap::new(),
+                entry_modules: HashMap::new(),
                 module_globals: BTreeSet::new(),
                 functions: HashMap::new(),
                 local_storage: HashMap::new(),
@@ -966,6 +969,7 @@ fn load_ptx(
     lenient: bool,
 ) -> Result<usize, CuResult> {
     let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
+    let started = std::time::Instant::now();
     let translate = if lenient { ptx::translate_lenient } else { ptx::translate };
     let translated = translate(ptx).map_err(|error| {
         if trace::enabled() {
@@ -985,6 +989,38 @@ fn load_ptx(
         export_log(format_args!("PTX reject: {error}"));
         InvalidPtx
     })?;
+    install_translation(runtime, context, next, translated, ptx.len(), started.elapsed())
+}
+
+/// Loads one kernel of an already normalised PTX library as its own Level Zero module, so only
+/// the kernels an application actually launches are compiled by the Intel compiler.
+fn load_ptx_entry(
+    runtime: &Runtime,
+    context: &mut CudaContext,
+    next: &mut usize,
+    prepared: &str,
+    name: &str,
+) -> Result<usize, CuResult> {
+    let started = std::time::Instant::now();
+    let translated = ptx::translate_entry(prepared, name).map_err(|error| {
+        export_log(format_args!("lazy entry translation fell back: {name}: {error}"));
+        InvalidPtx
+    })?;
+    // Module variables are per-module storage, so kernels that use them keep the shared module.
+    if !translated.globals.is_empty() {
+        return Err(InvalidPtx);
+    }
+    install_translation(runtime, context, next, translated, prepared.len(), started.elapsed())
+}
+
+fn install_translation(
+    runtime: &Runtime,
+    context: &mut CudaContext,
+    next: &mut usize,
+    translated: ptx::Translation,
+    ptx_len: usize,
+    translate_time: std::time::Duration,
+) -> Result<usize, CuResult> {
     let device = &runtime.devices[context.device as usize];
     let info = &device.info;
     if info.spirv_version < 0x10000 {
@@ -1014,11 +1050,20 @@ fn load_ptx(
         );
     }
     let key = reserve_handle(next)?;
+    let compile_started = std::time::Instant::now();
     let backend = context
         .backend
         .load_module(&runtime.api, &translated.words)
         .inspect_err(|error| context.backend.health.observe(error))
         .map_err(backend_error)?;
+    export_log(format_args!(
+        "module load: ptx_bytes={} kernels={} spirv_words={} translate_ms={} ze_ms={}",
+        ptx_len,
+        entries.len(),
+        translated.words.len(),
+        translate_time.as_millis(),
+        compile_started.elapsed().as_millis()
+    ));
     context.modules.insert(
         key,
         CudaModule {
@@ -1078,6 +1123,7 @@ pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
         status(with_context(|runtime, context| {
             if !context.modules.contains_key(&module.addr())
                 || context.library_modules.values().any(|&key| key == module.addr())
+                || context.entry_modules.values().any(|&key| key == module.addr())
             {
                 return Err(InvalidHandle);
             }
