@@ -47,6 +47,21 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         p.swap(4, 5);
         return Some(again(ctx, &inst.guard, &p.join("."), inst.operands.clone()));
     }
+    // `mov.u32 %r, shared_symbol+N`: symbol address, then the displacement.
+    if matches!(op, "mov.u32" | "mov.b32" | "mov.u64" | "mov.b64") && inst.operands.len() == 2 {
+        let src = inst.operand(1).replace(' ', "");
+        if let Some((name, off)) = src.split_once('+') {
+            if let Ok(off) = off.parse::<i64>() {
+                if ctx.t3.shared.iter().any(|n| *n == name) {
+                    let dst = inst.operand(0).to_owned();
+                    let mut l = again(ctx, &inst.guard, op, vec![dst.clone(), name.to_owned()]);
+                    let add = if op.ends_with("64") { "add.s64" } else { "add.u32" };
+                    l.push(render(&inst.guard, add, &[dst.clone(), dst, off.to_string()]));
+                    return Some(l);
+                }
+            }
+        }
+    }
     // `[%reg-N]` / `[%reg+-N]`: fold the negative displacement into an address register.
     if matches!(parts[0], "ld" | "st" | "atom" | "red") {
         for (i, operand) in inst.operands.iter().enumerate() {

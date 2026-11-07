@@ -36,7 +36,7 @@ pub(super) struct State {
     local_bytes: u32,
     local_align: u32,
     /// `.shared` arrays of the current entry.
-    shared: Vec<String>,
+    pub(super) shared: Vec<String>,
     uses_lsym: bool,
     uses_ssym: bool,
     /// Names of module-scope `.global` / `.const` data (kept across entries).

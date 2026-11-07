@@ -1483,7 +1483,7 @@ impl<'a> Parser<'a> {
         let mut labels = HashMap::new();
         let mut blocks = Vec::new();
         while !self.eat("}") {
-            if blocks.len() >= 2048 {
+            if blocks.len() >= 8192 {
                 return Err(Error::new("too many PTX blocks"));
             }
             while self.label() {

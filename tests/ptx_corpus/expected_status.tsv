@@ -378,6 +378,7 @@ handwritten/tex/tex_3d_v4_s32_s32.ptx	unsupported	strict-fail	unsupported PTX in
 handwritten/tex/tex_level_2d.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.level.2d.v4.f32.f32 { %f1 , %f2 , %f3 , %f4 } , [ %rd3 , { %f5 , %f6 } ] , %f7 ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
 handwritten/tex/tld4_r_2d.ptx	unsupported	strict-fail	unsupported PTX instruction: tld4.r.2d.v4.f32.f32 { %f1 , %f2 , %f3 , %f4 } , [ %rd3 , { %f5 , %f6 } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
 handwritten/tex/txq_width.ptx	unsupported	strict-fail	unsupported PTX instruction: txq.width.b32 %r1 , [ %rd3 ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
+handwritten/torch/bar_red_uniform_branch.ptx	pass	strict-pass	
 handwritten/torch/param_space_array.ptx	pass	strict-pass	
 handwritten/vote/activemask.ptx	pass	strict-pass	
 handwritten/vote/match_all_sync_b32.ptx	pass	strict-fail	
