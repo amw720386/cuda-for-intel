@@ -367,7 +367,21 @@ pub fn random_q8_1(rng: &mut Rng, pow2: bool, range: i32) -> Vec<u8> {
 
 /// Reference mat-vec dot of one weight row against one activation column of q8_1 blocks, in
 /// the decomposition `vecdotq.cuh` uses, evaluated in f64.
+#[derive(Clone, Copy)]
+pub struct DotOpts {
+    /// Q4_1/Q5_1 mmvq multiplies (d, m) by (d8, s8) as half2.
+    pub half_mul: bool,
+    /// Use d8 * sum(q8) instead of the stored (half rounded) block sum.
+    pub exact_sum: bool,
+}
+
+pub const MMVQ: DotOpts = DotOpts { half_mul: true, exact_sum: false };
+
 pub fn dot_ref(q: Q, row: &[u8], y: &[u8]) -> (f64, f64) {
+    dot_ref_opts(q, row, y, MMVQ)
+}
+
+pub fn dot_ref_opts(q: Q, row: &[u8], y: &[u8], opts: DotOpts) -> (f64, f64) {
     let mut total = 0.0f64;
     let mut abs = 0.0f64;
     let per = q.qk() / 32;
@@ -375,7 +389,12 @@ pub fn dot_ref(q: Q, row: &[u8], y: &[u8]) -> (f64, f64) {
         let elems = decode_block(q, wb);
         for g in 0..per {
             let yb = &y[(bi * per + g) * Q8_1_BYTES..][..Q8_1_BYTES];
-            let (d8, s8) = (half(yb, 0), half(yb, 2));
+            let d8 = half(yb, 0);
+            let s8 = if opts.exact_sum {
+                d8 * (0..32).map(|i| f64::from(yb[4 + i] as i8)).sum::<f64>()
+            } else {
+                half(yb, 2)
+            };
             let mut acc = 0.0f64;
             let mut macc = 0.0f64;
             for i in 0..32 {
@@ -389,7 +408,7 @@ pub fn dot_ref(q: Q, row: &[u8], y: &[u8]) -> (f64, f64) {
                     abs += (e.m * u * d8).abs();
                 }
             }
-            if matches!(q, Q::Q4_1 | Q::Q5_1) {
+            if opts.half_mul && matches!(q, Q::Q4_1 | Q::Q5_1) {
                 // vec_dot_q{4,5}_1_q8_1_impl multiply (d, m) by (d8, s8) as half2: both products
                 // are rounded to binary16 before use.
                 let (d4, m4) = (half(wb, 0) as f32, half(wb, 2) as f32);

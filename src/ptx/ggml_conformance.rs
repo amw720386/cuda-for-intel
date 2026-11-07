@@ -578,3 +578,15 @@ fn get_rows_float_matches_reference() {
         compare_dequant(&format!("k_get_rows_float{tag}"), &got, &want, true, dst_half);
     }
 }
+
+/// Hardware repro shape (m=512, n=4, k=2048) for Q6_K mmvq; slow, run explicitly.
+#[test]
+#[ignore = "slow: m=512 n=4 k=2048 Q6_K mmvq on both dp4a lowerings"]
+fn mmvq_q6_k_hardware_shape() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    for dot in [false, true] {
+        check_mmvq(Q::Q6K, 4, 512, 2048, 77, false, dot);
+    }
+}
