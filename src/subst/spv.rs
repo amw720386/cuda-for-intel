@@ -309,6 +309,13 @@ impl Kb {
         let t = self.t(Ty::Bool);
         self.b.u_greater_than(t, None, a, b).unwrap()
     }
+    pub(crate) fn ult64(&mut self, a: V, b: V) -> V {
+        let t = self.t(Ty::Bool);
+        self.b.u_less_than(t, None, a, b).unwrap()
+    }
+    pub(crate) fn cf_zero(&mut self) -> V {
+        self.cf(0.0)
+    }
     pub(crate) fn eq(&mut self, a: V, b: V) -> V {
         let t = self.t(Ty::Bool);
         self.b.i_equal(t, None, a, b).unwrap()

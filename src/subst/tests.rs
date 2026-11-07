@@ -1,5 +1,5 @@
 use super::interp::{self, ArgVal, Dev};
-use super::mmvq;
+use super::{mmvq, quantize};
 use super::refs::{self, Mmvq, Rng};
 
 struct Problem {
@@ -186,4 +186,46 @@ fn every_mmvq_variant_validates() {
         }
     }
     validate(&mmvq::build(mmvq::Cfg { ty: refs::Q8_0, ncols: 1, nwarps: 4 }, false));
+}
+
+#[test]
+fn quantize_q8_1_matches_reference() {
+    let (ne00, ne0, ne1, ne2, ne3) = (96usize, 128usize, 3usize, 2usize, 2usize);
+    let mut rng = Rng(42);
+    let total = ne00 * ne1 * ne2 * ne3;
+    let mut x: Vec<f32> = (0..total).map(|_| rng.unit() * 5.0).collect();
+    // exercise an all-zero block and a tiny-magnitude block
+    for v in x.iter_mut().take(32) {
+        *v = 0.0;
+    }
+    for v in x.iter_mut().skip(32).take(32) {
+        *v *= 1e-6;
+    }
+    let mut want = Vec::new();
+    for r in 0..ne1 * ne2 * ne3 {
+        let mut row = x[r * ne00..(r + 1) * ne00].to_vec();
+        row.resize(ne0, 0.0);
+        want.extend(refs::quantize_q8_1(&row));
+    }
+    let words = quantize::build(true);
+    validate(&words);
+    let mut dev = Dev::default();
+    let xa = dev.put(&x.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+    let ya = dev.alloc(want.len());
+    let fd = refs::fastdiv_values(ne2 as u32);
+    let args = [
+        ArgVal::Ptr(xa),
+        ArgVal::Ptr(ya),
+        ArgVal::U64(ne00 as u64),
+        ArgVal::U64(ne00 as u64),
+        ArgVal::U64((ne00 * ne1) as u64),
+        ArgVal::U64((ne00 * ne1 * ne2) as u64),
+        ArgVal::U64(ne0 as u64),
+        ArgVal::U32(ne1 as u32),
+        ArgVal::U32(fd[0]),
+        ArgVal::U32(fd[1]),
+        ArgVal::U32(fd[2]),
+    ];
+    interp::run(&mut dev, &words, &args, [ne0.div_ceil(256) as u32, ne1 as u32, (ne2 * ne3) as u32], [256, 1, 1]);
+    assert_eq!(dev.download(ya, want.len()), want);
 }
