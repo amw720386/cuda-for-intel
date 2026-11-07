@@ -1,0 +1,66 @@
+// Original repro modelled on ATen multi_tensor_apply: a large by-value struct
+// kernel parameter indexed with a computed address (ld.param.u8 [%rd+1536]).
+.version 7.8
+.target sm_37
+.address_size 64
+
+.visible .entry multi_tensor_like(
+	.param .align 8 .b8 multi_tensor_like_param_0[3144],
+	.param .u8 multi_tensor_like_param_1
+)
+{
+	.reg .pred 	%p<4>;
+	.reg .b16 	%rs<4>;
+	.reg .b32 	%r<12>;
+	.reg .b64 	%rd<24>;
+
+	mov.u64 	%rd21, multi_tensor_like_param_0;
+	ld.param.u8 	%rs1, [multi_tensor_like_param_1];
+	mov.u32 	%r2, %ctaid.x;
+	cvt.u64.u32 	%rd22, %r2;
+	add.s64 	%rd23, %rd21, %rd22;
+	mul.wide.u32 	%rd10, %r2, 4;
+	add.s64 	%rd11, %rd21, %rd10;
+	ld.param.u8 	%r3, [%rd23+1536];
+	ld.param.u32 	%r1, [%rd11+1856];
+	mul.wide.u32 	%rd12, %r3, 8;
+	add.s64 	%rd13, %rd21, %rd12;
+	ld.param.u64 	%rd1, [%rd13];
+	ld.param.u64 	%rd3, [%rd13+512];
+	cvta.to.global.u64 	%rd4, %rd1;
+	cvta.to.global.u64 	%rd5, %rd3;
+	mov.u32 	%r5, %tid.x;
+	mul.wide.u32 	%rd6, %r5, 4;
+	add.s64 	%rd7, %rd4, %rd6;
+	add.s64 	%rd8, %rd5, %rd6;
+	ld.global.u32 	%r6, [%rd7];
+	add.s32 	%r7, %r6, %r1;
+	st.global.u32 	[%rd8], %r7;
+	ret;
+}
+
+// CatArrayBatchedCopy-like: pointer table in param space, negative offsets, vector loads.
+.visible .entry cat_like(
+	.param .align 8 .b8 cat_like_param_0[1024],
+	.param .u32 cat_like_param_1
+)
+{
+	.reg .b32 	%r<12>;
+	.reg .b64 	%rd<24>;
+
+	mov.u64 	%rd9, cat_like_param_0;
+	ld.param.u32 	%r1, [cat_like_param_1];
+	mov.u32 	%r2, %ctaid.y;
+	mul.wide.u32 	%rd10, %r2, 16;
+	add.s64 	%rd11, %rd9, %rd10;
+	ld.param.u64 	%rd12, [%rd11];
+	ld.param.v2.u32 	{%r3, %r4}, [%rd11+88];
+	ld.param.u32 	%r9, [%rd11+-8];
+	ld.param.u32 	%r10, [%rd11+16];
+	add.s32 	%r11, %r3, %r4;
+	add.s32 	%r11, %r11, %r9;
+	add.s32 	%r11, %r11, %r10;
+	cvta.to.global.u64 	%rd13, %rd12;
+	st.global.u32 	[%rd13], %r11;
+	ret;
+}

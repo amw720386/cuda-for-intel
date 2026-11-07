@@ -37,6 +37,13 @@ mod ptxgen;
 #[allow(dead_code)]
 mod ltplan;
 mod lt;
+#[allow(dead_code)]
+mod xmx;
+#[allow(dead_code)]
+mod xmx_host;
+#[cfg(test)]
+mod xmx_interp;
+mod stubs;
 
 use libloading::Library;
 use plan::*;
@@ -99,6 +106,9 @@ struct Driver {
     cuStreamSynchronize: unsafe extern "system" fn(CUstream) -> CuResult,
     cuStreamIsCapturing: unsafe extern "system" fn(CUstream, *mut c_int) -> CuResult,
     cuMemcpyDtoH_v2: unsafe extern "system" fn(*mut c_void, u64, usize) -> CuResult,
+    cuMemcpyHtoD_v2: unsafe extern "system" fn(u64, *const c_void, usize) -> CuResult,
+    cuMemAlloc_v2: unsafe extern "system" fn(*mut u64, usize) -> CuResult,
+    cuMemFree_v2: unsafe extern "system" fn(u64) -> CuResult,
 }
 
 fn driver() -> Result<&'static Driver, c_int> {
@@ -132,6 +142,9 @@ fn load_driver() -> Result<Driver, c_int> {
             cuStreamSynchronize: sym!("cuStreamSynchronize"),
             cuStreamIsCapturing: sym!("cuStreamIsCapturing"),
             cuMemcpyDtoH_v2: sym!("cuMemcpyDtoH_v2"),
+            cuMemcpyHtoD_v2: sym!("cuMemcpyHtoD_v2"),
+            cuMemAlloc_v2: sym!("cuMemAlloc_v2"),
+            cuMemFree_v2: sym!("cuMemFree_v2"),
             _lib: lib,
         })
     }
@@ -643,6 +656,16 @@ pub(crate) unsafe fn run_gemm_ex(
         }
     }
 
+    // Native XMX (DPAS) fast path: CFI_XMX=1 (off by default until validated on hardware).
+    if let Some(status) = unsafe {
+        xmx_host::try_gemm(drv, h.stream, d, alpha_v, beta_v, batch, batching, opts, bias)
+    } {
+        if status != SUCCESS {
+            return status;
+        }
+        return finish(drv, h);
+    }
+
     let kernel = match kernel_for(drv, d, pointer_arrays, opts) {
         Ok(k) => k,
         Err(e) => return e,
@@ -766,6 +789,35 @@ unsafe fn gemm_common(
 // ---------------------------------------------------------------------------
 // GEMM entry points
 // ---------------------------------------------------------------------------
+
+/// Legacy mixed-precision entry (used by PyTorch below compute capability 5.0): GemmEx
+/// with a CUBLAS_COMPUTE_32F accumulator and the default algorithm.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasSgemmEx(
+    handle: *mut c_void,
+    transa: c_int,
+    transb: c_int,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: *const c_void,
+    a_type: c_int,
+    lda: c_int,
+    b: *const c_void,
+    b_type: c_int,
+    ldb: c_int,
+    beta: *const c_void,
+    c: *mut c_void,
+    c_type: c_int,
+    ldc: c_int,
+) -> c_int {
+    unsafe {
+        cublasGemmEx(
+            handle, transa, transb, m, n, k, alpha, a, a_type, lda, b, b_type, ldb, beta, c, c_type, ldc, 68, -1,
+        )
+    }
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cublasGemmEx(

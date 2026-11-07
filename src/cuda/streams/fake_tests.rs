@@ -47,6 +47,7 @@ impl Fixture {
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),
                     graphs: graphs::Graphs::default(),
+                    lazy_modules: HashMap::new(),
                 })
                 .is_none()
         );
@@ -151,6 +152,10 @@ pub(super) fn assert_baseline() {
 #[test]
 fn fake_cuda_library_loads_in_each_context_and_retires_handles() {
     use crate::cuda::library::*;
+    // The one-instruction test kernel is an empty body, which the runtime otherwise rejects
+    // as an architecture-guard stub.
+    // SAFETY: set before any other thread of this test reads it.
+    unsafe { std::env::set_var("CFI_ALLOW_EMPTY_KERNELS", "1") };
     use std::ptr::null;
 
     let _fixture = Fixture::new();
@@ -541,9 +546,10 @@ fn fake_fault_accepted_work_and_unconfirmed_cleanup() {
     assert_eq!(cuStreamSynchronize(s), Unknown);
     let before = fake::snapshot();
     assert_eq!(before.pending, 1);
-    // HtoD records a copy plus a destination ranges barrier, then the launch.
-    assert_eq!(before.ledger.submitted, 3);
-    assert_eq!(before.ledger.completed, 0);
+    // The allocation's zero-fill (one completed submission), then HtoD records a copy plus
+    // a destination ranges barrier, then the launch.
+    assert_eq!(before.ledger.submitted, 4);
+    assert_eq!(before.ledger.completed, 1);
     assert_eq!(cuMemFree_v2(device), Unknown);
     arm("zeCommandQueueSynchronize", 1);
     assert_eq!(cuCtxDestroy_v2(ctx), NotReady);

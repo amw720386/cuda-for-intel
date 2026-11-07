@@ -13,7 +13,7 @@ use super::normalize::Stmt;
 use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 12;
-const MAX_STATEMENTS: usize = 400_000;
+const MAX_STATEMENTS: usize = 12_000_000;
 
 struct Func {
     returns: Vec<String>,
@@ -404,8 +404,9 @@ fn special_call(
 }
 
 fn unsupported_in_callee(stmt: &Stmt) -> bool {
-    matches!(stmt.first().map(String::as_str), Some(".local" | ".shared" | ".global" | ".const"))
-        || stmt.iter().any(|t| t.starts_with("__local_depot"))
+    // `.local` frames (e.g. libdevice slow paths with a `__local_depot`) are supported: the
+    // inliner renames the depot per call site and hoists its declaration.
+    matches!(stmt.first().map(String::as_str), Some(".shared" | ".global" | ".const"))
 }
 
 const SPECIAL_PREFIXES: &[&str] = &[
@@ -461,13 +462,28 @@ fn inline_body(
 ) -> Result<Vec<Stmt>, Error> {
     let suffix = format!("__c{id}_");
     let end_label = format!("$L__inl_end{id}");
-    let labels: HashSet<String> = body
+    let mut labels: HashSet<String> = body
         .iter()
         .filter(|s| s.len() == 2 && s[1] == ":")
         .map(|s| s[0].clone())
         .collect();
+    // Callee `.local` arrays are renamed per call site and declared in the caller.
+    let mut hoisted: Vec<Stmt> = Vec::new();
+    for stmt in body {
+        if stmt.first().is_some_and(|t| t == ".local") {
+            if let Some(at) = stmt.iter().position(|t| t == "[") {
+                if let Some(name) = at.checked_sub(1).and_then(|i| stmt.get(i)) {
+                    labels.insert(name.clone());
+                }
+            }
+        }
+    }
     let mut out: Vec<Stmt> = vec![vec!["{".into()]];
     for stmt in body {
+        if stmt.first().is_some_and(|t| t == ".local") {
+            hoisted.push(stmt.iter().map(|t| rename_token(t, &suffix, &labels)).collect());
+            continue;
+        }
         let (guard, rest) = split_guard(stmt);
         let guard: Vec<String> = guard.iter().map(|t| rename_token(t, &suffix, &labels)).collect();
         let op = rest.first().map(String::as_str).unwrap_or("");
@@ -529,5 +545,9 @@ fn inline_body(
     }
     out.push(vec![end_label, ":".into()]);
     out.push(vec!["}".into()]);
-    Ok(out)
+    if hoisted.is_empty() {
+        return Ok(out);
+    }
+    hoisted.extend(out);
+    Ok(hoisted)
 }

@@ -44,6 +44,46 @@ pub unsafe fn extract_ptx(image: *const u8) -> Option<Vec<u8>> {
     extract_records(records)
 }
 
+/// One-line description of the records in a fatbin, for diagnostics.
+///
+/// # Safety
+/// Same contract as [`extract_ptx`].
+pub unsafe fn describe(image: *const u8) -> String {
+    if image.is_null() {
+        return "null".into();
+    }
+    let frame = match unsafe { image.cast::<u32>().read_unaligned() } {
+        WRAPPER_MAGIC => unsafe { image.add(8).cast::<*const u8>().read_unaligned() },
+        FRAME_MAGIC => image,
+        magic => return format!("magic {magic:#x}"),
+    };
+    if frame.is_null() {
+        return "null frame".into();
+    }
+    let header = unsafe { std::slice::from_raw_parts(frame, 16) };
+    let (Some(hs), Some(fs)) = (field::<2>(header, 6), field::<8>(header, 8)) else {
+        return "short".into();
+    };
+    let header_size = usize::from(u16::from_le_bytes(hs));
+    let file_size = (u64::from_le_bytes(fs) as usize).min(MAX_SIZE);
+    let mut records = unsafe { std::slice::from_raw_parts(frame.add(header_size), file_size) };
+    let mut out = format!("frame hdr={header_size} size={file_size}:");
+    while records.len() >= 64 {
+        let kind = u16::from_le_bytes(field(records, 0).unwrap());
+        let rev = u16::from_le_bytes(field(records, 2).unwrap());
+        let hdr = u32::from_le_bytes(field(records, 4).unwrap()) as usize;
+        let pay = u32::from_le_bytes(field(records, 8).unwrap()) as usize;
+        let arch = u32::from_le_bytes(field(records, 28).unwrap());
+        let flags = u64::from_le_bytes(field(records, 40).unwrap());
+        out += &format!(" [kind={kind} rev={rev:#x} hdr={hdr} pay={pay} arch={arch} flags={flags:#x}]");
+        match hdr.checked_add(pay).and_then(|e| records.get(e..)) {
+            Some(rest) if hdr >= 64 => records = rest,
+            _ => break,
+        }
+    }
+    out
+}
+
 fn field<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
     bytes.get(offset..offset + N)?.try_into().ok()
 }

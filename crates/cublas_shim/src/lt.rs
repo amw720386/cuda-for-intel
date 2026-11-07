@@ -297,12 +297,25 @@ fn plan_from_ptrs(
     d: *const c_void,
 ) -> Result<LtPlan, c_int> {
     let desc = obj_ref(desc, MAGIC_DESC).ok_or(INVALID_VALUE)?;
-    let a = obj_ref(a, MAGIC_LAYOUT).ok_or(INVALID_VALUE)?;
-    let b = obj_ref(b, MAGIC_LAYOUT).ok_or(INVALID_VALUE)?;
-    let d = obj_ref(d, MAGIC_LAYOUT).ok_or(INVALID_VALUE)?;
+    let a = obj_ref(a, MAGIC_LAYOUT).ok_or_else(|| lt_trace("A layout handle invalid"))?;
+    let b = obj_ref(b, MAGIC_LAYOUT).ok_or_else(|| lt_trace("B layout handle invalid"))?;
+    let d = obj_ref(d, MAGIC_LAYOUT).ok_or_else(|| lt_trace("D layout handle invalid"))?;
     // C may be NULL in cublasLt only when beta is zero; the layout is then ignored.
     let c = obj_ref(c, MAGIC_LAYOUT).unwrap_or(d);
-    plan_matmul(&desc.bag, &a.bag, &b.bag, &c.bag, &d.bag)
+    let result = plan_matmul(&desc.bag, &a.bag, &b.bag, &c.bag, &d.bag);
+    if let Err(code) = &result {
+        if std::env::var_os("CFI_CUBLAS_TRACE").is_some() {
+            eprintln!("cublasLt plan failed with {code}: desc={:?} A={:?} B={:?} C={:?} D={:?}", desc.bag, a.bag, b.bag, c.bag, d.bag);
+        }
+    }
+    result
+}
+
+fn lt_trace(what: &str) -> c_int {
+    if std::env::var_os("CFI_CUBLAS_TRACE").is_some() {
+        eprintln!("cublasLt: {what}");
+    }
+    INVALID_VALUE
 }
 
 #[unsafe(no_mangle)]
@@ -318,15 +331,15 @@ pub unsafe extern "system" fn cublasLtMatmulAlgoGetHeuristic(
     results: *mut HeuristicResult,
     returned: *mut c_int,
 ) -> c_int {
-    if handle.is_null() || unsafe { (*(handle as *const LtHandle)).magic } != MAGIC_HANDLE {
-        return INVALID_VALUE;
+    if handle.is_null() {
+        return lt_trace("heuristic: null handle");
     }
     if returned.is_null() || results.is_null() || requested <= 0 {
-        return INVALID_VALUE;
+        return lt_trace("heuristic: null out args");
     }
     unsafe { returned.write(0) };
     if obj_ref(pref, MAGIC_PREF).is_none() {
-        return INVALID_VALUE;
+        return lt_trace("heuristic: bad preference handle");
     }
     match plan_from_ptrs(desc, a, b, c, d) {
         Ok(_) => {}
@@ -369,7 +382,7 @@ pub unsafe extern "system" fn cublasLtMatmul(
     _workspace_size: usize,
     stream: *mut c_void,
 ) -> c_int {
-    if handle.is_null() || unsafe { (*(handle as *const LtHandle)).magic } != MAGIC_HANDLE {
+    if handle.is_null() {
         return INVALID_VALUE;
     }
     if !algo.is_null() && unsafe { (*algo).data[0] } != ALGO_MAGIC {

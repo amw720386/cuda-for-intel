@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct Libraries {
-    images: HashMap<usize, Library>,
+    pub(in crate::cuda) images: HashMap<usize, Library>,
     kernels: HashMap<usize, (usize, CString)>,
 }
 
@@ -14,12 +14,42 @@ impl Libraries {
     }
 }
 
-struct Library {
+pub(in crate::cuda) struct Library {
     ptx: Vec<u8>,
     /// Normalised PTX for per-kernel translation: `None` until needed, `Some(None)` if unusable.
     prepared: Option<Option<std::sync::Arc<String>>>,
     entries: HashMap<CString, Option<usize>>,
     unloading: bool,
+}
+
+/// Register the library as a lazy PTX module (keyed by the library handle).
+pub(super) fn ensure_lazy_library(state: &mut State, library: usize) -> Result<(), CuResult> {
+    if state.lazy_modules.contains_key(&library) {
+        return Ok(());
+    }
+    let image = state.libraries.images.get(&library).ok_or(InvalidHandle)?;
+    if image.unloading {
+        return Err(InvalidHandle);
+    }
+    let context_key = current().ok_or(InvalidContext)?;
+    state.contexts.get(&context_key).ok_or(ContextIsDestroyed)?.check_live()?;
+    let source = std::str::from_utf8(&image.ptx).map_err(|_| InvalidPtx)?;
+    let names = ptx::entry_names(source)
+        .map_err(|_| InvalidPtx)?
+        .into_iter()
+        .filter_map(|n| CString::new(n).ok())
+        .collect();
+    state.lazy_modules.insert(
+        library,
+        super::LazyModule {
+            context: context_key,
+            raw: source.to_owned(),
+            prepared: std::cell::OnceCell::new(),
+            names,
+            children: HashMap::new(),
+        },
+    );
+    Ok(())
 }
 
 pub(super) fn module_for_library(state: &mut State, library: usize) -> Result<(usize, usize), CuResult> {
@@ -82,9 +112,24 @@ pub unsafe extern "system" fn cuLibraryLoadData(
         let bytes = match unsafe { code.read() } {
             0xb1 | 0x50 => match unsafe { cfi_fatbin::extract_ptx(code) } {
                 Some(ptx) => ptx,
-                None => return InvalidImage,
+                // SASS-only image: nothing here can run on this device, which is
+                // what a real driver reports for a cubin built for another arch.
+                None => {
+                    if trace::enabled() {
+                        trace::record(format_args!(
+                            "library image has no PTX (fatbin): {}",
+                            unsafe { cfi_fatbin::describe(code) }
+                        ));
+                    }
+                    return NoBinaryForGpu;
+                }
             },
-            0x7f => return InvalidImage,
+            0x7f => {
+                if trace::enabled() {
+                    trace::record(format_args!("library image is a raw ELF cubin"));
+                }
+                return NoBinaryForGpu;
+            }
             _ => unsafe { CStr::from_ptr(code.cast()) }.to_bytes().to_vec(),
         };
         let Ok(source) = std::str::from_utf8(&bytes) else {
@@ -165,8 +210,9 @@ pub unsafe extern "system" fn cuLibraryGetModule(out: *mut Opaque, library: Opaq
             return InvalidValue;
         }
         status(state(|state| {
-            let (_, module) = module_for_library(state, library.addr())?;
-            unsafe { out.write(std::ptr::without_provenance_mut(module)) };
+            // Lazy module: kernels translate one at a time on cuModuleGetFunction.
+            ensure_lazy_library(state, library.addr())?;
+            unsafe { out.write(std::ptr::without_provenance_mut(library.addr())) };
             Ok(())
         }))
     })
@@ -195,20 +241,8 @@ pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize,
             name.to_string_lossy()
         ));
     }
-    if lazy_enabled()
-        && let Some(function) = lazy_kernel_function(state, library, &name)?
-    {
-        return Ok(function);
-    }
-    let result = module_for_library(state, library).and_then(|(context, module)| {
-        module_function(
-            &state.runtime.api,
-            state.contexts.get_mut(&context).ok_or(ContextIsDestroyed)?,
-            &mut state.next_handle,
-            module,
-            &name,
-        )
-    });
+    let result = ensure_lazy_library(state, library)
+        .and_then(|()| super::lazy_module_function(state, library, &name));
     if matches!(result, Err(NotFound | InvalidPtx)) {
         if trace::enabled()
             && let Ok(source) = std::str::from_utf8(&state.libraries.images[&library].ptx)
@@ -219,6 +253,21 @@ pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize,
         return Err(InvalidPtx);
     }
     result
+}
+
+/// Libraries are translated per kernel on first use, so report lazy loading.
+/// Without this entry cudart assumes eager loading and loads every registered
+/// fatbin (including SASS-only ones) at context creation.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuModuleGetLoadingMode(mode: *mut c_int) -> CuResult {
+    trace::call("cuModuleGetLoadingMode", || {
+        if mode.is_null() {
+            return InvalidValue;
+        }
+        // CU_MODULE_LAZY_LOADING
+        unsafe { mode.write(2) };
+        Success
+    })
 }
 
 /// `CUDA_FOR_INTEL_LAZY=0` restores whole-library modules.
@@ -300,6 +349,14 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
     trace::call("cuLibraryUnload", || {
         status(state(|state| {
             let key = library.addr();
+            if let Some(lazy) = state.lazy_modules.remove(&key) {
+                for ((ctx, _), (child, _)) in lazy.children.iter() {
+                    if let Some(context) = state.contexts.get_mut(ctx) {
+                        context.streams.wait_all(&state.runtime.api)?;
+                        context.unload(&state.runtime.api, *child)?;
+                    }
+                }
+            }
             let library = state.libraries.images.get_mut(&key).ok_or(InvalidHandle)?;
             library.unloading = true;
             for context in state.contexts.values_mut() {

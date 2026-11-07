@@ -4,7 +4,10 @@ mod flow;
 pub(crate) mod globals;
 mod inline;
 mod normalize;
+pub(crate) mod passthrough;
+mod param_space;
 mod parse;
+mod probe;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
 mod cublas_ptxgen;
@@ -36,8 +39,14 @@ pub(crate) enum Param {
     U64,
     GlobalPtr,
     /// `.param .align N .b8 name[bytes]` â€” `words` is `bytes/4`, `align` is 4/8/16.
-    Words { words: u16, align: u16 },
+    Words { words: u16, align: u16, trim: u8 },
+    /// A by-value aggregate too large for the native argument buffer. The kernel receives a
+    /// global pointer to a staged copy of the `bytes`-byte struct (the launch path copies it).
+    Staged { bytes: u16, align: u16 },
 }
+
+/// By-value aggregates above this size are staged in memory instead of passed word by word.
+pub(crate) const STAGE_BYTES: u16 = 1536;
 
 impl Param {
     pub(crate) fn alignment(self) -> usize {
@@ -46,6 +55,7 @@ impl Param {
             Self::U16 => 2,
             Self::U64 | Self::GlobalPtr => 8,
             Self::Words { align, .. } => usize::from(align),
+            Self::Staged { align, .. } => usize::from(align),
             Self::U32 | Self::F32 => 4,
         }
     }
@@ -56,7 +66,26 @@ impl Param {
             Self::U16 => 2,
             Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
+            Self::Words { words, trim, .. } => usize::from(words) * 4 - usize::from(trim),
+            Self::Staged { bytes, .. } => usize::from(bytes),
+        }
+    }
+
+    /// Size of the corresponding native kernel argument (a staged struct is one pointer).
+    pub(crate) fn abi_size(self) -> usize {
+        match self {
+            Self::Staged { .. } => 8,
             Self::Words { words, .. } => usize::from(words) * 4,
+            other => other.size(),
+        }
+    }
+
+    /// Native kernel arguments this parameter expands to before staging is applied.
+    pub(crate) fn host_words(self) -> usize {
+        match self {
+            Self::Words { words, .. } => usize::from(words),
+            Self::Staged { bytes, .. } => usize::from(bytes).div_ceil(4),
+            _ => 1,
         }
     }
 }
@@ -533,6 +562,8 @@ enum Instruction<'a> {
         membermask: &'a str,
     },
     Barrier,
+    /// Kernel-parameter space accessed through a computed address.
+    ParamSpace(param_space::ParamOp<'a>),
     /// Instructions parsed and lowered by `ext.rs` / `ext_emit.rs`. Unused
     /// sources are `"0"`, unused destinations are `""`.
     Ext {
@@ -700,6 +731,14 @@ impl<'a> Instruction<'a> {
                 out.extend(dst.iter().copied().filter(|d| !d.is_empty()));
                 src
             }
+            ParamSpace(param_space::ParamOp::Addr { dst, .. }) => {
+                out.push(*dst);
+                &[]
+            }
+            ParamSpace(param_space::ParamOp::Load(load)) => {
+                out.extend_from_slice(&load.dst[..usize::from(load.count)]);
+                std::slice::from_ref(&load.base)
+            }
             Store32(..)
             | Store8(..)
             | Store16(..)
@@ -848,6 +887,10 @@ pub(crate) fn translate_lenient(source: &str) -> Result<Translation, Error> {
 }
 
 fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
+    // Pre-built SPIR-V (the cuBLAS shim's XMX kernels) skips the PTX pipeline.
+    if let Some(result) = passthrough::parse(source) {
+        return result;
+    }
     let rewritten = prepare(source)?;
     let (entries, vars) = parse::parse_module(&rewritten)?;
     let first = if lenient && entries.len() > 1 {
@@ -871,6 +914,50 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
             spirv::emit(survivors, vars.device)
         }
     }
+}
+
+/// Translate one `.entry` of an already prepared module (lazy cudart 11.x modules).
+/// Kernels that fail elsewhere in the module do not matter.
+pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Translation, Error> {
+    let (entries, vars) = parse::parse_module(prepared)?;
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| Error::new("PTX entry is absent or unsupported"))?;
+    let body = format!("{:?}", entry.blocks);
+    let mut device = vars.device.clone();
+    device.retain(|data| body.contains(&format!("{:?}", data.name)));
+    spirv::emit(vec![entry], device)
+}
+
+thread_local! {
+    static LENIENT_UNDEFINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// nvcc output may read a declared register that no path writes (an `undef` operand of a
+/// conversion); the runtime translates such reads as zero. Per thread, so unit tests that
+/// run in parallel keep the strict rule.
+pub(crate) fn set_lenient_undefined(on: bool) {
+    LENIENT_UNDEFINED.with(|c| c.set(on));
+}
+
+pub(crate) fn lenient_undefined() -> bool {
+    LENIENT_UNDEFINED.with(|c| c.get())
+}
+
+pub(crate) fn prepare_module(source: &str) -> Result<String, Error> {
+    prepare(source)
+}
+
+#[allow(dead_code)]
+pub(crate) fn skipped_entries() -> Vec<(String, String)> {
+    probe::skipped()
+}
+
+/// Translate every parsed entry of a prepared module on its own and report per kernel.
+#[allow(dead_code)]
+pub(crate) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), String>)>, Error> {
+    probe::probe_module(prepared)
 }
 
 /// Merges nvcc's pairs of 16-bit loads into aligned 32-bit loads (see normalize);
@@ -943,6 +1030,8 @@ pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
 mod coverage_tests;
 #[cfg(test)]
 mod globals_tests;
+#[cfg(test)]
+mod param_space_tests;
 #[cfg(test)]
 mod tier2_tests;
 #[cfg(test)]
@@ -1103,7 +1192,8 @@ mod tests {
                     .any(|inst| inst.class.opcode == opcode)
             );
         }
-        assert!(translate(&GGML_ADD.replace("%rd10, 2;", "%rd10, 64;")).is_err());
+        // Counts of 64 or more clamp to zero (PTX semantics) instead of being rejected.
+        assert!(translate(&GGML_ADD.replace("%rd10, 2;", "%rd10, 64;")).is_ok());
         assert!(translate(&GGML_ADD.replace("%p3, %p1, %p2;", "%p3, %r4, %p2;")).is_err());
     }
 
@@ -1145,7 +1235,7 @@ mod tests {
             assert_eq!(kernel.params[..2], [Param::GlobalPtr; 2]);
             assert_eq!(
                 kernel.params[5..8],
-                [Param::Words { words: 3, align: 4 }; 3]
+                [Param::Words { words: 3, align: 4, trim: 0 }; 3]
             );
             assert_eq!(function.parameters.len(), 20);
         }
@@ -1183,7 +1273,7 @@ mod tests {
         assert_eq!(kernel.params.last(), Some(&Param::U8));
         assert!(
             kernel.params.iter().any(|param| {
-                matches!(param, Param::Words { words: 2, align: 4 })
+                matches!(param, Param::Words { words: 2, align: 4, .. })
             }),
             "expected rope_corr_dims .b8[8] aggregate"
         );
@@ -1711,11 +1801,12 @@ mod tests {
 	ret;
 }
 "#;
-        let err = translate(undefined).unwrap_err().to_string();
-        assert!(
-            err.contains("undefined PTX register %r1"),
-            "unexpected error: {err}"
-        );
+        // A register that is never written holds an undefined value (nvcc stores such
+        // operands for dead lanes of packed moves and vector stores). Reading it yields zero
+        // rather than failing the whole kernel; a never-written predicate is still rejected.
+        translate(undefined).expect("never-written data register reads as zero");
+        let undefined_predicate = undefined.replace("st.global.b32 [%rd0], %r1;", "@%p0 st.global.b32 [%rd0], 1;").replace(".reg .b32 %r<2>;", ".reg .pred %p<1>;");
+        assert!(translate(&undefined_predicate).is_err());
 
         // A branch whose one side can never reach a barrier is an early exit (threads run to
         // completion and count as arrived), so it is accepted; see flow::verify_barriers.

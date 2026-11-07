@@ -46,10 +46,14 @@ struct Parser<'a> {
     tokens: std::vec::IntoIter<&'a str>,
     /// Module-scope variables declared so far.
     vars: ModuleVars<'a>,
+    /// Parameter names of the entry being parsed (for `mov.u64 %rd, param`).
+    param_names: Vec<&'a str>,
+    /// Names of staged (pointer-passed) aggregate parameters.
+    staged_names: Vec<&'a str>,
 }
 
 /// Stock GGML MMQ kernels declare roughly 7000 registers.
-const MAX_PTX_REGISTERS: usize = 65536;
+const MAX_PTX_REGISTERS: usize = 400_000;
 
 impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&'a str> {
@@ -103,7 +107,16 @@ impl<'a> Parser<'a> {
                 return match (align, bytes) {
                     ("1", "1") => Ok((name, Param::U8)),
                     ("2", "2") => Ok((name, Param::U16)),
-                    _ => Err(Error::new("unsupported PTX parameter aggregate size")),
+                    _ => {
+                        // Odd-sized aggregates (`complex<Half>`, packed bool/short tuples).
+                        let align: u16 = align.parse().unwrap_or(1);
+                        let bytes: u16 = bytes
+                            .parse()
+                            .ok()
+                            .filter(|n| (1..=4096).contains(n))
+                            .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
+                        Ok((name, Param::Words { words: bytes.div_ceil(4), align, trim: (bytes.div_ceil(4) * 4 - bytes) as u8 }))
+                    }
                 };
             }
             ".align" => {
@@ -120,16 +133,18 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<u16>()
                     .ok()
-                    .filter(|n| {
-                        (4..=4096).contains(n) && n.is_multiple_of(4) && n.is_multiple_of(align)
-                    })
+                    .filter(|n| (1..=4096).contains(n) && n.is_multiple_of(align.min(4)))
                     .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
                 self.expect("]")?;
+                if bytes > crate::ptx::STAGE_BYTES {
+                    return Ok((name, Param::Staged { bytes, align }));
+                }
                 return Ok((
                     name,
                     Param::Words {
-                        words: bytes / 4,
+                        words: bytes.div_ceil(4),
                         align,
+                        trim: (bytes.div_ceil(4) * 4 - bytes) as u8,
                     },
                 ));
             }
@@ -235,6 +250,21 @@ impl<'a> Parser<'a> {
             }
             None => body,
         };
+        let setp_patched: Vec<&str>;
+        let body = match body.first().and_then(|op| canonical_setp(op)) {
+            Some(op) => {
+                setp_patched = std::iter::once(op).chain(body[1..].iter().copied()).collect();
+                &setp_patched[..]
+            }
+            None => body,
+        };
+        if let Some(inst) = super::param_space::parse(body, &self.param_names, &self.staged_names)? {
+            self.tokens.nth(end);
+            if braced {
+                self.expect("}")?;
+            }
+            return Ok(inst);
+        }
         if let Some(inst) = super::ext::parse(body)? {
             self.tokens.nth(end);
             if braced {
@@ -955,7 +985,11 @@ impl<'a> Parser<'a> {
                 } else {
                     Space::Global
                 };
-                Instruction::Load32(space, dst, addr)
+                if op.ends_with(".s32") {
+                    Instruction::LoadSigned { space, bits: 32, dst, addr }
+                } else {
+                    Instruction::Load32(space, dst, addr)
+                }
             }
             [
                 op @ ("ld.global.u64" | "ld.global.b64" | "ld.global.nc.u64" | "ld.global.nc.b64"
@@ -1449,7 +1483,7 @@ impl<'a> Parser<'a> {
         let mut labels = HashMap::new();
         let mut blocks = Vec::new();
         while !self.eat("}") {
-            if blocks.len() >= 2048 {
+            if blocks.len() >= 8192 {
                 return Err(Error::new("too many PTX blocks"));
             }
             while self.label() {
@@ -2101,6 +2135,8 @@ pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'
     let mut parser = Parser {
         tokens: tokens(source)?.into_iter(),
         vars: ModuleVars::default(),
+        param_names: Vec::new(),
+        staged_names: Vec::new(),
     };
     parser.expect(".version")?;
     // Stock CUDA 11 through 13 toolchains emit PTX ISA 7.0 through 9.x.
@@ -2146,7 +2182,8 @@ pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'
                 // Consume optional `.visible` then `.entry name … { … }`.
                 parser.eat(".visible");
                 if parser.eat(".entry") {
-                    let _ = parser.identifier();
+                    let skipped = parser.identifier().unwrap_or("?");
+                    super::probe::note_skip(skipped, &error);
                     skip_failed_entry(&mut parser)?;
                 } else {
                     return Err(error);
@@ -2165,6 +2202,23 @@ pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'
     Ok((entries, parser.vars))
 }
 
+/// `setp.eq.b64` and the unsigned `lo/ls/hi/hs` spellings map onto the canonical compares.
+fn canonical_setp(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "setp.eq.b64" => "setp.eq.u64",
+        "setp.ne.b64" => "setp.ne.u64",
+        "setp.lo.u64" => "setp.lt.u64",
+        "setp.ls.u64" => "setp.le.u64",
+        "setp.hi.u64" => "setp.gt.u64",
+        "setp.hs.u64" => "setp.ge.u64",
+        "setp.lo.u32" => "setp.lt.u32",
+        "setp.ls.u32" => "setp.le.u32",
+        "setp.hi.u32" => "setp.gt.u32",
+        "setp.hs.u32" => "setp.ge.u32",
+        _ => return None,
+    })
+}
+
 pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, Error> {
     let mut tokens = tokens(source)?;
     let start = tokens
@@ -2175,6 +2229,8 @@ pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, 
     let mut parser = Parser {
         tokens: tokens.into_iter(),
         vars: ModuleVars::default(),
+        param_names: Vec::new(),
+        staged_names: Vec::new(),
     };
     parse_entry(&mut parser)
 }
@@ -2212,6 +2268,12 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     parser.expect(".entry")?;
     let name = parser.identifier()?;
     let mut params = parser.params()?;
+    parser.param_names = params.iter().map(|&(name, _)| name).collect();
+    parser.staged_names = params
+        .iter()
+        .filter(|(_, param)| matches!(param, Param::Staged { .. }))
+        .map(|&(name, _)| name)
+        .collect();
     // Performance / occupancy hints may appear in any order before `{`.
     let mut max_threads = None;
     loop {

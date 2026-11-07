@@ -565,12 +565,15 @@ impl<'a> Emitter<'a> {
     }
 
     /// Reads a predicate operand, accepting `!%p`-free register names only.
-    fn predicate_operand(&mut self, operand: &str) -> R<Word> {
-        if operand == "1" {
-            return Ok(self.builder.constant_true(self.bool_type));
-        }
-        if operand == "0" {
-            return Ok(self.builder.constant_false(self.bool_type));
+    pub(super) fn predicate_operand(&mut self, operand: &str) -> R<Word> {
+        if !operand.starts_with('%') {
+            if let Some(value) = Self::parse_u64(operand) {
+                return Ok(if value != 0 {
+                    self.builder.constant_true(self.bool_type)
+                } else {
+                    self.builder.constant_false(self.bool_type)
+                });
+            }
         }
         self.read(operand)?.require(Kind::Predicate, operand)
     }

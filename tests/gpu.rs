@@ -93,6 +93,8 @@ mod hw_ggml_stock;
 mod hw_cublas_batched;
 #[path = "gpu/hw_launch_stress.rs"]
 mod hw_launch_stress;
+#[path = "gpu/hw_xmx_gemm.rs"]
+mod hw_xmx_gemm;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
