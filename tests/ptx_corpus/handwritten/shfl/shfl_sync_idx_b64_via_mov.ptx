@@ -20,7 +20,6 @@
 	mov.u32 %r5, 1;
 	mov.u32 %r31, 1;
 	mov.u64 %rd3, 1;
-	mov.u64 %rd4, 1;
 	mov.b64 {%r2,%r3}, %rd3;
 	shfl.sync.idx.b32 %r4, %r2, 0, 31, 0xffffffff;
 	shfl.sync.idx.b32 %r5, %r3, 0, 31, 0xffffffff;

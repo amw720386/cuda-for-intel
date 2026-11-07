@@ -526,6 +526,9 @@ pub(super) fn parse<'a>(body: &[&'a str]) -> Result<Option<Instruction<'a>>, Err
                 let s = need!(r(1));
                 return ext(ExtOp::UnpackB64, [lo, hi], [s, NONE, NONE, NONE]);
             }
+            if matches!(r(1), Some("%clock64" | "%globaltimer")) {
+                return ext(ExtOp::Clock(ClockKind::Clock64), [need!(r(0)), ""], [NONE; 4]);
+            }
             Ok(None)
         }
         ["mov", "b32" | "u32"] if ops.len() == 2 => {

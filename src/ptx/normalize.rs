@@ -11,14 +11,22 @@
 
 use super::{Error, inline, parse};
 
+#[path = "tier3.rs"]
+mod tier3;
+#[path = "tier3_mma.rs"]
+mod tier3_mma;
+
 pub(super) type Stmt = Vec<String>;
 
 /// Entry point: returns canonical PTX text.
 pub(super) fn run(source: &str) -> Result<String, Error> {
-    let tokens = merge_addresses(merge_double_colons(parse::tokens(source)?));
+    let source = tier3::strip_debug(source);
+    let tokens = merge_addresses(merge_double_colons(parse::tokens(&source)?));
     let statements = split(tokens);
+    tier3::check_unsupported(&statements)?;
     let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
+    let mut entry_locals = tier3::entry_locals(&statements).into_iter();
     let mut ctx = Ctx::default();
     let mut out: Vec<String> = Vec::with_capacity(statements.len());
     // Index in `out` of the opening brace of the current entry, plus pending
@@ -37,6 +45,17 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
         } else if stmt.first().is_some_and(|t| t == "}") {
             depth -= 1;
             if depth == 0 {
+                // Trailing labels (`func_end0:`) after the last `ret` form an empty block:
+                // drop the unreferenced ones, give a referenced one a `ret`.
+                while entry_open.is_some() && out.last().is_some_and(|l| l.ends_with(" :")) {
+                    let label = out.last().unwrap().trim_end_matches(" :").to_owned();
+                    let used = out[..out.len() - 1].iter().any(|l| !l.ends_with(" :") && l.split_whitespace().any(|t| t == label));
+                    if used {
+                        out.push("ret ;".into());
+                        break;
+                    }
+                    out.pop();
+                }
                 if let Some(open) = entry_open.take() {
                     let mut decls = ctx.take_decls();
                     if let (true, Some((name, align))) = (uses_dynamic, &dynamic) {
@@ -55,6 +74,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
         }
         if is_entry_header(&stmt) {
             ctx.widths.clear();
+            tier3::begin_entry(&mut ctx.t3, entry_locals.next().unwrap_or_default(), dynamic.as_ref().map(|(name, _)| name.as_str()));
             ctx.block_threads = block_threads(&stmt);
             let text = fix_entry_header(&stmt);
             out.push(text);
@@ -219,6 +239,10 @@ fn fix_entry_header(stmt: &[String]) -> String {
                 continue;
             }
         }
+        if token == ".noreturn" {
+            i += 1;
+            continue;
+        }
         out.push(token.to_owned());
         i += 1;
     }
@@ -373,6 +397,7 @@ struct Ctx {
     widths: Vec<(String, bool, u32)>,
     /// Number of wmma statements seen, used to give each its own 64-bit address register.
     wmma_seq: u32,
+    t3: tier3::State,
 }
 
 impl Ctx {
@@ -390,6 +415,7 @@ impl Ctx {
         self.t32 = 0;
         self.t64 = 0;
         self.tp = 0;
+        decls.extend(self.t3.take_decls());
         decls
     }
     /// Width in bits (32 or 64) of a declared register, if known.
@@ -562,6 +588,14 @@ fn rewrite(ctx: &mut Ctx, stmt: &[String]) -> Vec<String> {
             return vec![format!(".target sm_{}", if digits.is_empty() { "80" } else { &digits })];
         }
         ".pragma" => return Vec::new(),
+        ".local" | ".shared" => {
+            if let Some(lines) = tier3::decl(ctx, stmt) {
+                return lines;
+            }
+        }
+        ".global" | ".const" | ".visible" | ".weak" | ".extern" | ".common" => {
+            tier3::module_decl(ctx, stmt);
+        }
         ".reg" => {
             ctx.note_register_declaration(stmt);
             return vec![rewrite_reg(stmt)];
@@ -607,6 +641,9 @@ fn bit_type(part: &str) -> &str {
 }
 
 fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    if let Some(lines) = tier3::rewrite(ctx, inst) {
+        return Some(lines);
+    }
     let op = inst.op.as_str();
     let family = op.split('.').next().unwrap_or(op);
     match family {

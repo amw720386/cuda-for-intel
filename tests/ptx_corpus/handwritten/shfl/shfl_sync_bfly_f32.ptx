@@ -13,7 +13,6 @@
 	.reg .f32 %f<16>;
 	ld.param.u64 %rd1, [out];
 	cvta.to.global.u64 %rd2, %rd1;
-	mov.f32 %f1, 0f3F800000;
 	mov.u32 %r1, 1;
 	mov.u32 %r2, 1;
 	mov.u32 %r31, 1;
