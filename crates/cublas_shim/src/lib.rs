@@ -97,6 +97,7 @@ struct Driver {
         *mut *mut c_void,
     ) -> CuResult,
     cuStreamSynchronize: unsafe extern "system" fn(CUstream) -> CuResult,
+    cuStreamIsCapturing: unsafe extern "system" fn(CUstream, *mut c_int) -> CuResult,
     cuMemcpyDtoH_v2: unsafe extern "system" fn(*mut c_void, u64, usize) -> CuResult,
 }
 
@@ -129,6 +130,7 @@ fn load_driver() -> Result<Driver, c_int> {
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
             cuStreamSynchronize: sym!("cuStreamSynchronize"),
+            cuStreamIsCapturing: sym!("cuStreamIsCapturing"),
             cuMemcpyDtoH_v2: sym!("cuMemcpyDtoH_v2"),
             _lib: lib,
         })
@@ -486,6 +488,13 @@ pub(crate) enum Batching {
 }
 
 fn sync_stream(drv: &Driver, stream: CUstream) -> c_int {
+    // A stream that is being captured only records work; synchronising it would
+    // invalidate the capture (GGML reserves its CUDA graph this way). Same-stream
+    // ordering already covers the follow-up work.
+    let mut capturing: c_int = 0;
+    if unsafe { (drv.cuStreamIsCapturing)(stream, &mut capturing) } == SUCCESS && capturing != 0 {
+        return SUCCESS;
+    }
     let err = unsafe { (drv.cuStreamSynchronize)(stream) };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublas: stream sync failed err={err}");
