@@ -506,7 +506,7 @@ zluda/integer/mul24_lo_u32.ptx	pass	strict-fail
 zluda/integer/mul_hi.ptx	pass	strict-fail	
 zluda/integer/mul_lo.ptx	pass	strict-fail	
 zluda/integer/mul_wide.ptx	pass	strict-fail	
-zluda/integer/multiple_return.ptx	error	strict-fail	undefined PTX register %__c1_x on an incoming path
+zluda/integer/multiple_return.ptx	error	strict-fail	missing or mismatched PTX declaration for a
 zluda/integer/not.ptx	pass	strict-fail	
 zluda/integer/or.ptx	pass	strict-fail	
 zluda/integer/pred_not.ptx	pass	strict-fail	
@@ -528,7 +528,7 @@ zluda/integer/sub.ptx	pass	strict-fail
 zluda/integer/sub_extended.ptx	pass	strict-fail	
 zluda/integer/subc_cc_s32.ptx	pass	strict-fail	
 zluda/integer/xor.ptx	pass	strict-fail	
-zluda/ldmatrix/ldmatrix.ptx	error	strict-fail	expected B64 for %values_g_addr, got Address(Global)
+zluda/ldmatrix/ldmatrix.ptx	unsupported	strict-fail	unsupported integer operand values_s
 zluda/ldmatrix/ldmatrix_trans.ptx	unsupported	strict-fail	unsupported PTX register type .v2.b16
 zluda/memory/const.ptx	pass	strict-fail	
 zluda/memory/const_ident.ptx	error	strict-fail	undefined PTX register constparams on an incoming path
@@ -553,7 +553,7 @@ zluda/memory/reg_local.ptx	unsupported	strict-fail	unsupported PTX instruction: 
 zluda/memory/reg_multi.ptx	pass	strict-fail	
 zluda/memory/shared_ptr_32.ptx	pass	strict-fail	
 zluda/memory/shared_ptr_take_address.ptx	error	strict-fail	unknown PTX local symbol shared_mem
-zluda/memory/shared_unify_extern.ptx	error	strict-fail	undefined PTX register %__c1_temp1 on an incoming path
+zluda/memory/shared_unify_extern.ptx	error	strict-fail	missing or mismatched PTX declaration for out
 zluda/memory/shared_unify_local.ptx	unsupported	strict-fail	unsupported PTX instruction: call ( out ) , add , ( %__c1_temp2 )
 zluda/memory/shared_variable.ptx	pass	strict-fail	
 zluda/memory/spirv_build__global_extern_array.ptx	unsupported	strict-fail	PTX module contains no supported .entry kernels

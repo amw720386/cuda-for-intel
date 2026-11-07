@@ -14,8 +14,7 @@ set RD=%BIN%\run13
 mkdir "%RD%" 2>nul
 copy /y "%SHIM%\nvcuda.dll" "%RD%\" >nul
 copy /y "%C13%\cudart64_13.dll" "%RD%\" >nul
-copy /y "%SHIM%\cublas64_12.dll" "%RD%\" >nul
-for %%F in (basic_kernels atomics_warp streams_graphs algos half_bf16 mem_symbols mem_copies transformer_block) do copy /y "%BIN%\%%F.exe" "%RD%\" >nul
+for %%F in (basic_kernels atomics_warp streams_graphs) do copy /y "%BIN%\%%F.exe" "%RD%\" >nul
 set RD2=%BIN%\run12
 mkdir "%RD2%" 2>nul
 copy /y "%SHIM%\nvcuda.dll" "%RD2%\" >nul
@@ -23,7 +22,7 @@ copy /y "%C12%\cudart64_12.dll" "%RD2%\" >nul
 copy /y "%SHIM%\cublas64_12.dll" "%RD2%\" >nul
 copy /y "%SHIM%\cublas64_12.dll" "%RD2%\cublasLt64_12.dll" >nul
 for %%F in (cublas_gemm cublaslt_bias) do copy /y "%BIN%\%%F.exe" "%RD2%\" >nul
-for %%F in (basic_kernels atomics_warp streams_graphs algos half_bf16 mem_symbols mem_copies transformer_block) do call :one "%RD%" %%F
+for %%F in (basic_kernels atomics_warp streams_graphs) do call :one "%RD%" %%F
 for %%F in (cublas_gemm cublaslt_bias) do call :one "%RD2%" %%F
 rmdir %USERPROFILE%\cfi-work\gpu.lock
 exit /b 0

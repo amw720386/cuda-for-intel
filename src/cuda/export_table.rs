@@ -71,6 +71,10 @@ impl Tables {
     fn new() -> Self {
         let mut cudart = [std::ptr::null(); 13];
         cudart[0] = (13 * PTR_SIZE) as *const c_void;
+        // Slots 1, 6, 8: module load from a fatbin wrapper/frame (cudart 11.x).
+        cudart[1] = cubin_module_1 as *const c_void;
+        cudart[6] = cubin_module_6 as *const c_void;
+        cudart[8] = cubin_module_8 as *const c_void;
         // Slot 2: primary-context retain used by cudart device bring-up.
         // Point directly at the Driver API export — a thin wrapper can be
         // ICF-merged onto the same symbol and recurse forever.
@@ -214,6 +218,39 @@ unsafe extern "system" fn runtime_integrity_check(
         let _ = unix_seconds;
         NotSupported
     }
+}
+
+unsafe extern "system" fn cubin_module_1(out: *mut Opaque, wrapper: *const c_void) -> CuResult {
+    super::export_log(format_args!("cudart_interface get_module_from_cubin"));
+    trace::call("cudart.get_module_from_cubin", || unsafe {
+        load_module_from_fatbin(out, wrapper)
+    })
+}
+
+unsafe extern "system" fn cubin_module_6(
+    out: *mut Opaque,
+    wrapper: *const c_void,
+    _a3: *mut c_void,
+    _a4: *mut c_void,
+    _a5: u32,
+) -> CuResult {
+    super::export_log(format_args!("cudart_interface get_module_from_cubin_ext1"));
+    trace::call("cudart.get_module_from_cubin_ext1", || unsafe {
+        load_module_from_fatbin(out, wrapper)
+    })
+}
+
+unsafe extern "system" fn cubin_module_8(
+    header: *const c_void,
+    out: *mut Opaque,
+    _a3: *mut c_void,
+    _a4: *mut c_void,
+    _a5: u32,
+) -> CuResult {
+    super::export_log(format_args!("cudart_interface get_module_from_cubin_ext2"));
+    trace::call("cudart.get_module_from_cubin_ext2", || unsafe {
+        load_module_from_fatbin(out, header)
+    })
 }
 
 unsafe extern "system" fn cudart_interface_fn7(_arg: usize) {}

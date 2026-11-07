@@ -873,6 +873,20 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
     }
 }
 
+/// Translate one `.entry` of an already prepared module (lazy cudart 11.x modules).
+/// Kernels that fail elsewhere in the module do not matter.
+pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Translation, Error> {
+    let (entries, vars) = parse::parse_module(prepared)?;
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| Error::new("PTX entry is absent or unsupported"))?;
+    let body = format!("{:?}", entry.blocks);
+    let mut device = vars.device.clone();
+    device.retain(|data| body.contains(&format!("{:?}", data.name)));
+    spirv::emit(vec![entry], device)
+}
+
 pub(crate) fn prepare_module(source: &str) -> Result<String, Error> {
     prepare(source)
 }
@@ -1667,11 +1681,12 @@ mod tests {
 	ret;
 }
 "#;
-        let err = translate(undefined).unwrap_err().to_string();
-        assert!(
-            err.contains("undefined PTX register %r1"),
-            "unexpected error: {err}"
-        );
+        // A register that is never written holds an undefined value (nvcc stores such
+        // operands for dead lanes of packed moves and vector stores). Reading it yields zero
+        // rather than failing the whole kernel; a never-written predicate is still rejected.
+        translate(undefined).expect("never-written data register reads as zero");
+        let undefined_predicate = undefined.replace("st.global.b32 [%rd0], %r1;", "@%p0 st.global.b32 [%rd0], 1;").replace(".reg .b32 %r<2>;", ".reg .pred %p<1>;");
+        assert!(translate(&undefined_predicate).is_err());
 
         // A branch whose one side can never reach a barrier is an early exit (threads run to
         // completion and count as arrived), so it is accepted; see flow::verify_barriers.

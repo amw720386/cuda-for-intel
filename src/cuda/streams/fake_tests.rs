@@ -47,6 +47,7 @@ impl Fixture {
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),
                     graphs: graphs::Graphs::default(),
+                    lazy_modules: HashMap::new(),
                 })
                 .is_none()
         );
@@ -541,9 +542,10 @@ fn fake_fault_accepted_work_and_unconfirmed_cleanup() {
     assert_eq!(cuStreamSynchronize(s), Unknown);
     let before = fake::snapshot();
     assert_eq!(before.pending, 1);
-    // HtoD records a copy plus a destination ranges barrier, then the launch.
-    assert_eq!(before.ledger.submitted, 3);
-    assert_eq!(before.ledger.completed, 0);
+    // The allocation's zero-fill (one completed submission), then HtoD records a copy plus
+    // a destination ranges barrier, then the launch.
+    assert_eq!(before.ledger.submitted, 4);
+    assert_eq!(before.ledger.completed, 1);
     assert_eq!(cuMemFree_v2(device), Unknown);
     arm("zeCommandQueueSynchronize", 1);
     assert_eq!(cuCtxDestroy_v2(ctx), NotReady);

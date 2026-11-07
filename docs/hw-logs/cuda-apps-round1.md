@@ -27,15 +27,3 @@ Results (cudart 13.5 shared and static both): basic_kernels 5/5, atomics_warp 8/
 cublas_gemm 6/6, cublaslt_bias 2/2, streams_graphs 4/4 plus 2 SKIP (cudaGraphGetNodes and
 explicit graph node API not implemented by the shim). cuBLAS programs call cudaFree(0) before
 cublasCreate because the cuBLAS shim requires a current context.
-
-## Round 3 (integration-tier3 base): more programs
-
-Base: integration-tier3 (explicit graphs, Level Zero event timing). Re-added the runtime-digest
-selection by `version % 10` (tier3 had reverted it to exact 13000..13002, breaking cudart 12.6) and the
-register clamp operand for shfl.sync. New programs: algos (block/warp reduce, scans, bitonic sort,
-softmax, layernorm), half_bf16, mem_symbols (constant memory, __device__ globals, dynamic shared
-memory, cooperative groups), mem_copies (2D/3D memcpy, cudaMallocAsync/pools, pinned, multi-stream,
-timing, peer copy), transformer_block (cuBLAS projections + custom kernels, max abs err 2.4e-7 vs CPU).
-Translator/driver fixes found by them: sub-word by-value kernel params (`.param .align 2 .b8 x[2]`,
-__half args), fma.rm/rp/rz.f32 (expf), float immediates in selp, cuMemAllocPitch (cudaMallocPitch,
-cudaMalloc3D).
