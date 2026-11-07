@@ -861,6 +861,12 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
     }
 }
 
+/// `CFI_OPT_LD16=1` merges nvcc's pairs of 16-bit loads into aligned 32-bit loads (see normalize).
+pub(crate) fn load16_merge_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CFI_OPT_LD16").as_deref() == Some(std::ffi::OsStr::new("1")))
+}
+
 static DYNAMIC_SHARED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(49152);
 
 /// Bytes reserved for a kernel's dynamic (`extern __shared__`) block, fixed at translation time.
