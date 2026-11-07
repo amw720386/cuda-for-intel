@@ -118,6 +118,8 @@ struct Ctx<'a> {
     blocks: HashMap<u32, usize>,
     builtin_kind: HashMap<u32, usize>,
     shared_var: Option<u32>,
+    /// vector type id -> (element bits, element count)
+    vector_of: HashMap<u32, (u32, u32)>,
 }
 
 #[derive(PartialEq)]
@@ -130,8 +132,10 @@ enum Status {
 
 struct Inv {
     vals: HashMap<u32, Val>,
-    vecs: HashMap<u32, [u64; 3]>,
+    vecs: HashMap<u32, [u64; 4]>,
+    vec_types: HashMap<u32, u32>,
     block: usize,
+    dims: [u32; 3],
     ip: usize,
     status: Status,
     index: u64,
@@ -187,6 +191,7 @@ pub fn run(dev: &mut Dev, words: &[u32], args: &[ArgVal], grid: [u32; 3], block:
         blocks: HashMap::new(),
         builtin_kind: HashMap::new(),
         shared_var: None,
+        vector_of: HashMap::new(),
     };
     let mut pointees: HashMap<u32, u32> = HashMap::new();
     for inst in &module.types_global_values {
@@ -208,6 +213,7 @@ pub fn run(dev: &mut Dev, words: &[u32], args: &[ArgVal], grid: [u32; 3], block:
             }
             Op::TypeVector => {
                 ctx.widths.insert(r.unwrap(), 0);
+                ctx.vector_of.insert(r.unwrap(), (ctx.widths[&id(&inst.operands[0])], lit(&inst.operands[1])));
             }
             _ => {}
         }
@@ -259,6 +265,7 @@ pub fn run(dev: &mut Dev, words: &[u32], args: &[ArgVal], grid: [u32; 3], block:
             let which = match kinds[&v] {
                 rspirv::spirv::BuiltIn::WorkgroupId => 0,
                 rspirv::spirv::BuiltIn::LocalInvocationId => 1,
+                rspirv::spirv::BuiltIn::WorkgroupSize => 3,
                 _ => 2,
             };
             ctx.builtin_kind.insert(v, which);
@@ -304,7 +311,9 @@ pub fn run(dev: &mut Dev, words: &[u32], args: &[ArgVal], grid: [u32; 3], block:
                         Inv {
                             vals,
                             vecs: HashMap::new(),
+                            vec_types: HashMap::new(),
                             block: 0,
+                            dims: block,
                             ip: 0,
                             status: Status::Running,
                             index: u64::from(t),
@@ -351,7 +360,8 @@ pub fn run(dev: &mut Dev, words: &[u32], args: &[ArgVal], grid: [u32; 3], block:
                                 let Status::AtShuffle(inst_idx) = invs[i].status else { unreachable!() };
                                 let inst = ctx.module.functions[0].blocks[invs[i].block].instructions[inst_idx as usize].clone();
                                 let mask_v = invs[i].vals[&id(&inst.operands[2])].0 as usize;
-                                let src = (i % 32) ^ mask_v;
+                                let lane = i % 32;
+                                let src = if inst.class.opcode == Op::GroupNonUniformShuffle { mask_v % 32 } else { lane ^ mask_v };
                                 let src_idx = sg * 32 + src;
                                 let value = invs[src_idx].vals[&id(&inst.operands[1])];
                                 (i, value.0)
@@ -422,13 +432,24 @@ fn step(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, inst: &Instruction, shared_elem
         }
         Op::Return => return Flow::Return,
         Op::ControlBarrier => return Flow::Barrier,
-        Op::GroupNonUniformShuffleXor => {
+        Op::GroupNonUniformShuffleXor | Op::GroupNonUniformShuffle => {
             if let Some(r) = inv.shuffle_result.take() {
                 inv.vals.insert(inst.result_id.unwrap(), (r, w));
                 return Flow::Next;
             }
             inv.ip -= 1;
             return Flow::Shuffle;
+        }
+        Op::Load if ctx.vector_of.contains_key(&inst.result_type.unwrap()) && !matches!(get(inv, 0).0, a if a >= BUILTIN && a < BUILTIN + 8) => {
+            let addr = get(inv, 0).0;
+            let (ew, n) = ctx.vector_of[&inst.result_type.unwrap()];
+            let mut v = [0u64; 4];
+            for k in 0..n as usize {
+                v[k] = mem.read(addr + (k as u64) * u64::from(ew / 8), inv.index, (ew / 8) as usize);
+            }
+            inv.vecs.insert(inst.result_id.unwrap(), v);
+            inv.vec_types.insert(inst.result_id.unwrap(), inst.result_type.unwrap());
+            return Flow::Next;
         }
         Op::Load => {
             let addr = get(inv, 0).0;
@@ -437,18 +458,58 @@ fn step(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, inst: &Instruction, shared_elem
                 let v = match which {
                     0 => inv.wg.map(u64::from),
                     1 => inv.local.map(u64::from),
+                    3 => inv.dims.map(u64::from),
                     _ => inv.groups.map(u64::from),
                 };
-                inv.vecs.insert(inst.result_id.unwrap(), v);
+                inv.vecs.insert(inst.result_id.unwrap(), [v[0], v[1], v[2], 0]);
                 return Flow::Next;
             }
             let bytes = (w.max(8) / 8) as usize;
             mem.read(addr, inv.index, bytes)
         }
+        Op::Store if inv.vecs.contains_key(&id(&inst.operands[1])) => {
+            let addr = get(inv, 0).0;
+            let v = inv.vecs[&id(&inst.operands[1])];
+            let (ew, n) = ctx.vector_of[&inv.vec_types[&id(&inst.operands[1])]];
+            for k in 0..n as usize {
+                mem.write(addr + (k as u64) * u64::from(ew / 8), inv.index, (ew / 8) as usize, v[k]);
+            }
+            return Flow::Next;
+        }
         Op::Store => {
             let addr = get(inv, 0).0;
             let (v, vw) = get(inv, 1);
             mem.write(addr, inv.index, (vw.max(8) / 8) as usize, v);
+            return Flow::Next;
+        }
+        Op::CompositeConstruct => {
+            let mut v = [0u64; 4];
+            for (k, _) in inst.operands.iter().enumerate().take(4) {
+                v[k] = get(inv, k).0;
+            }
+            inv.vecs.insert(inst.result_id.unwrap(), v);
+            inv.vec_types.insert(inst.result_id.unwrap(), inst.result_type.unwrap());
+            return Flow::Next;
+        }
+        Op::Bitcast if inv.vecs.contains_key(&id(&inst.operands[0])) => {
+            // vector -> scalar: pack little-endian
+            let v = inv.vecs[&id(&inst.operands[0])];
+            let (ew, n) = ctx.vector_of[&inv.vec_types[&id(&inst.operands[0])]];
+            let mut out = 0u64;
+            for k in 0..n as usize {
+                out |= mask(ew, v[k]) << (ew as usize * k);
+            }
+            out
+        }
+        Op::Bitcast if ctx.vector_of.contains_key(&inst.result_type.unwrap()) => {
+            let (ew, n) = ctx.vector_of[&inst.result_type.unwrap()];
+            let x = get(inv, 0).0;
+            let mut v = [0u64; 4];
+            for k in 0..n as usize {
+                v[k] = mask(ew, x >> (ew as usize * k));
+            }
+            inv.vecs.insert(inst.result_id.unwrap(), v);
+            inv.vec_types.insert(inst.result_id.unwrap(), inst.result_type.unwrap());
             return Flow::Next;
         }
         Op::CompositeExtract => {
@@ -495,6 +556,29 @@ fn step(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, inst: &Instruction, shared_elem
         Op::ULessThanEqual => u64::from(get(inv, 0).0 <= get(inv, 1).0),
         Op::UGreaterThan => u64::from(get(inv, 0).0 > get(inv, 1).0),
         Op::UGreaterThanEqual => u64::from(get(inv, 0).0 >= get(inv, 1).0),
+        Op::SLessThan | Op::SLessThanEqual | Op::SGreaterThan | Op::SGreaterThanEqual => {
+            let sw = get(inv, 0).1;
+            let (a, b) = (sext(sw, get(inv, 0).0), sext(sw, get(inv, 1).0));
+            u64::from(match inst.class.opcode {
+                Op::SLessThan => a < b,
+                Op::SLessThanEqual => a <= b,
+                Op::SGreaterThan => a > b,
+                _ => a >= b,
+            })
+        }
+        Op::SDiv => mask(w, (sext(w, get(inv, 0).0) / sext(w, get(inv, 1).0)) as u64),
+        Op::SRem => mask(w, (sext(w, get(inv, 0).0) % sext(w, get(inv, 1).0)) as u64),
+        Op::SNegate => mask(w, (sext(w, get(inv, 0).0)).wrapping_neg() as u64),
+        Op::ConvertUToF => u64::from((get(inv, 0).0 as f32).to_bits()),
+        Op::ConvertFToU => {
+            let v = f32::from_bits(get(inv, 0).0 as u32).trunc();
+            mask(w, v as u64)
+        }
+        Op::PtrAccessChain | Op::InBoundsPtrAccessChain => {
+            let elem = u64::from(ctx.widths.get(&pointees[&inst.result_type.unwrap()]).copied().unwrap_or(8).max(8) / 8);
+            let (i, iw) = (get(inv, 1).0, get(inv, 1).1);
+            get(inv, 0).0.wrapping_add((sext(iw, i) as u64).wrapping_mul(elem))
+        }
         Op::FOrdGreaterThan => u64::from(f32::from_bits(get(inv, 0).0 as u32) > f32::from_bits(get(inv, 1).0 as u32)),
         Op::FOrdEqual => u64::from(f32::from_bits(get(inv, 0).0 as u32) == f32::from_bits(get(inv, 1).0 as u32)),
         Op::FOrdLessThan => u64::from(f32::from_bits(get(inv, 0).0 as u32) < f32::from_bits(get(inv, 1).0 as u32)),
@@ -545,7 +629,30 @@ fn step(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, inst: &Instruction, shared_elem
             } else if op == C::fma as u32 {
                 arg(0).mul_add(arg(1), arg(2))
             } else {
-                panic!("unsupported OpenCL.std instruction {op}")
+                // integer extended instructions
+                let a = |i: usize| get(inv, 2 + i).0;
+                let sw = get(inv, 2).1;
+                let r = if op == C::u_mul_hi as u32 {
+                    ((u128::from(a(0)) * u128::from(a(1))) >> w) as u64
+                } else if op == C::s_mul_hi as u32 {
+                    mask(w, ((i128::from(sext(sw, a(0))) * i128::from(sext(sw, a(1)))) >> w) as u64)
+                } else if op == C::u_min as u32 {
+                    a(0).min(a(1))
+                } else if op == C::u_max as u32 {
+                    a(0).max(a(1))
+                } else if op == C::s_min as u32 {
+                    mask(w, sext(sw, a(0)).min(sext(sw, a(1))) as u64)
+                } else if op == C::s_max as u32 {
+                    mask(w, sext(sw, a(0)).max(sext(sw, a(1))) as u64)
+                } else if op == C::s_abs as u32 {
+                    mask(w, sext(sw, a(0)).unsigned_abs())
+                } else if op == C::clz as u32 {
+                    u64::from((a(0) << (64 - w)).leading_zeros().min(w))
+                } else {
+                    panic!("unsupported OpenCL.std instruction {op}")
+                };
+                inv.vals.insert(inst.result_id.unwrap(), (r, w));
+                return Flow::Next;
             };
             u64::from(out.to_bits())
         }

@@ -218,3 +218,37 @@ fn geometry_mapping_rejects_unexpected_launches() {
     assert_eq!(wide.map_geometry([10, 1, 1], [32, 4, 1]), Some(([10, 1, 1], [32, 8, 1])));
 }
 
+
+/// Runs the stock ggml-cuda PTX entry (when `CFI_STOCK_PTX_DIR` points at the extracted blobs)
+/// through the PTX translator and the interpreter, and compares it with the native kernel.
+fn translated_words(blob_file: &str, entry: &str) -> Option<Vec<u32>> {
+    let dir = std::env::var_os("CFI_STOCK_PTX_DIR")?;
+    let source = std::fs::read_to_string(std::path::Path::new(&dir).join(blob_file)).ok()?;
+    let prepared = crate::ptx::prepare_source(&source).ok()?;
+    crate::ptx::set_dot_product(true);
+    let t = crate::ptx::translate_entry(&prepared, entry).unwrap_or_else(|e| panic!("{entry}: {e}"));
+    Some(t.words)
+}
+
+#[test]
+fn translated_stock_mmvq_matches_native_on_the_interpreter() {
+    for (ty, ncols, nch, ratio, nsamples) in [
+        (refs::Q8_0, 1u32, 1usize, 1u32, 1usize),
+        (refs::Q4_0, 2, 1, 1, 1),
+        (refs::Q4_K, 1, 1, 1, 1),
+        (refs::Q6_K, 1, 1, 1, 1),
+        (refs::Q8_0, 4, 2, 2, 2),
+    ] {
+        let entry = format!("_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{ncols}EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj");
+        let Some(stock) = translated_words("blob29.ptx", &entry) else { return };
+        let pr = problem(ty, ncols as usize, 6, 512, nch, ratio, nsamples, false, 77);
+        let nw = pr.p.nwarps;
+        let native = run_native(&pr, mmvq::Cfg { ty, ncols, nwarps: nw as u32 });
+        let mut sim = Sim { dev: Dev::default(), words: &stock };
+        let translated = pr.run(&mut sim, nw).unwrap();
+        let nmse = refs::nmse(&native, &translated);
+        let bad = native.iter().zip(&translated).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        println!("type {ty} ncols {ncols} ch {nch}/{ratio} samples {nsamples}: native vs translated stock PTX: nmse {nmse}, {bad} bitwise differences");
+        assert!(nmse < 1e-10);
+    }
+}
