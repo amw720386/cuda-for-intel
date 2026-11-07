@@ -258,12 +258,24 @@ pub(crate) fn export_log(message: impl std::fmt::Display) {
     if !export_log_enabled() {
         return;
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("cuda-for-intel-export.log")
-    {
-        use std::io::Write;
+    export_log_always(message);
+}
+
+/// Appends to the export log even when general logging is off (used by the profiler and the
+/// module-load timing summary). The file stays open: reopening it per line costs a few
+/// system calls each, which dominates hot paths when logging is enabled.
+pub(crate) fn export_log_always(message: impl std::fmt::Display) {
+    use std::io::Write;
+    static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+    let Ok(mut guard) = FILE.lock() else { return };
+    if guard.is_none() {
+        *guard = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("cuda-for-intel-export.log")
+            .ok();
+    }
+    if let Some(file) = guard.as_mut() {
         let _ = writeln!(file, "{message}");
     }
 }
