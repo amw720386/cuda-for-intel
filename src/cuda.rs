@@ -44,6 +44,7 @@ pub(crate) enum CuResult {
     NoDevice = 100,
     InvalidDevice = 101,
     InvalidImage = 200,
+    NoBinaryForGpu = 209,
     InvalidContext = 201,
     InvalidPtx = 218,
     PeerAccessUnsupported = 216,

@@ -294,6 +294,7 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuModuleUnload" => entry!(cuModuleUnload, 2000),
         b"cuLibraryLoadData" => entry!(cuLibraryLoadData, 12000),
         b"cuLibraryUnload" => entry!(cuLibraryUnload, 12000),
+        b"cuModuleGetLoadingMode" => entry!(cuModuleGetLoadingMode, 11070),
         b"cuLibraryGetKernel" => entry!(cuLibraryGetKernel, 12000),
         b"cuLibraryGetModule" => entry!(cuLibraryGetModule, 12000),
         b"cuKernelGetFunction" => entry!(cuKernelGetFunction, 12000),

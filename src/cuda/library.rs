@@ -79,9 +79,24 @@ pub unsafe extern "system" fn cuLibraryLoadData(
         let bytes = match unsafe { code.read() } {
             0xb1 | 0x50 => match unsafe { cfi_fatbin::extract_ptx(code) } {
                 Some(ptx) => ptx,
-                None => return InvalidImage,
+                // SASS-only image: nothing here can run on this device, which is
+                // what a real driver reports for a cubin built for another arch.
+                None => {
+                    if trace::enabled() {
+                        trace::record(format_args!(
+                            "library image has no PTX (fatbin): {}",
+                            unsafe { cfi_fatbin::describe(code) }
+                        ));
+                    }
+                    return NoBinaryForGpu;
+                }
             },
-            0x7f => return InvalidImage,
+            0x7f => {
+                if trace::enabled() {
+                    trace::record(format_args!("library image is a raw ELF cubin"));
+                }
+                return NoBinaryForGpu;
+            }
             _ => unsafe { CStr::from_ptr(code.cast()) }.to_bytes().to_vec(),
         };
         let Ok(source) = std::str::from_utf8(&bytes) else {
@@ -210,6 +225,21 @@ pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize,
         return Err(InvalidPtx);
     }
     result
+}
+
+/// Libraries are translated per kernel on first use, so report lazy loading.
+/// Without this entry cudart assumes eager loading and loads every registered
+/// fatbin (including SASS-only ones) at context creation.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuModuleGetLoadingMode(mode: *mut c_int) -> CuResult {
+    trace::call("cuModuleGetLoadingMode", || {
+        if mode.is_null() {
+            return InvalidValue;
+        }
+        // CU_MODULE_LAZY_LOADING
+        unsafe { mode.write(2) };
+        Success
+    })
 }
 
 #[unsafe(no_mangle)]
