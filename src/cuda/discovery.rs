@@ -332,6 +332,7 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuEventCreate" => entry!(cuEventCreate, 2000),
         b"cuEventRecord" => entry!(cuEventRecord, 2000, DRIVER_ABI + 1, true),
         b"cuEventRecordWithFlags" => entry!(cuEventRecordWithFlags, 11010, DRIVER_ABI + 1, true),
+        b"cuEventElapsedTime" => entry!(cuEventElapsedTime, 2000),
         b"cuEventQuery" => entry!(cuEventQuery, 2000),
         b"cuEventSynchronize" => entry!(cuEventSynchronize, 2000),
         b"cuEventDestroy" => entry!(cuEventDestroy_v2, 4000),

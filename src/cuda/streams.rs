@@ -53,6 +53,8 @@ struct Submission {
 struct Recording {
     producer: usize,
     fence: Arc<Fence>,
+    /// Host time of the record call; cuEventElapsedTime approximates device time with it.
+    at: Instant,
 }
 
 enum Completion {

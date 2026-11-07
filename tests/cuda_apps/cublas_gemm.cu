@@ -6,6 +6,7 @@
 static void ref_gemm(int m, int n, int k, const std::vector<float>& A, const std::vector<float>& B, std::vector<float>& C) { // col-major, no trans
   for (int j = 0; j < n; j++) for (int i = 0; i < m; i++) { float s = 0; for (int p = 0; p < k; p++) s += A[p * m + i] * B[j * k + p]; C[j * m + i] = s; } }
 int main() {
+  CK(cudaFree(0));  // initialize the runtime/primary context first
   cublasHandle_t h; CB(cublasCreate(&h));
   int m = 48, n = 40, k = 32; std::vector<float> A(m * k), B(k * n), C(m * n), R(m * n);
   for (int i = 0; i < m * k; i++) A[i] = ((i * 13) % 17) / 8.f - 1.f; for (int i = 0; i < k * n; i++) B[i] = ((i * 7) % 11) / 5.f - 1.f;

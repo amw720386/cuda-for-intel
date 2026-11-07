@@ -1516,24 +1516,27 @@ impl<'a> Emitter<'a> {
         src: [&str; 4],
     ) -> Result<(), Error> {
         let ty = self.u32_type;
-        let control = Self::parse_u32(src[2]).ok_or_else(|| {
-            Error::new("shfl.sync requires an immediate clamp/segment-mask operand")
-        })?;
+        // The packed clamp/segment-mask operand is an immediate or a register nvcc filled
+        // with a constant; compute it from the operand at run time (constants fold).
         if Self::parse_u32(src[3]).is_some_and(|mask| mask != u32::MAX) {
             return Err(Error::new("only full-warp shfl.sync membermask 0xffffffff is supported"));
         }
-        let (clamp, segment) = (control & 31, (control >> 8) & 31);
+        let control = self.integer(src[2], Kind::B32)?;
+        let c31 = self.u32_const(31);
+        let c8 = self.u32_const(8);
+        let clamp = self.builder.bitwise_and(ty, None, control, c31)?;
+        let shifted = self.builder.shift_right_logical(ty, None, control, c8)?;
+        let segment = self.builder.bitwise_and(ty, None, shifted, c31)?;
+        let keep = self.builder.bitwise_xor(ty, None, segment, c31)?;
         let value = self.read(src[0])?.require(Kind::B32, src[0])?;
         let delta = self.integer(src[1], Kind::B32)?;
         let lane = self.lane_id()?;
-        let segment_mask = self.u32_const(segment);
-        let min_lane = self.builder.bitwise_and(ty, None, lane, segment_mask)?;
+        let min_lane = self.builder.bitwise_and(ty, None, lane, segment)?;
         let (source, valid) = match mode {
             ShuffleMode::Idx | ShuffleMode::Down => {
-                let upper = self.u32_const(clamp & !segment & 31);
+                let upper = self.builder.bitwise_and(ty, None, clamp, keep)?;
                 let max_lane = self.builder.bitwise_or(ty, None, min_lane, upper)?;
                 let j = if mode == ShuffleMode::Idx {
-                    let keep = self.u32_const(!segment & 31);
                     let low = self.builder.bitwise_and(ty, None, delta, keep)?;
                     self.builder.bitwise_or(ty, None, low, min_lane)?
                 } else {
@@ -2208,6 +2211,26 @@ impl<'a> Emitter<'a> {
                     self.builder.bitwise_or(self.u32_type, None, lo, hi)?,
                     Kind::B32,
                 )
+            }
+            Instruction::MulWide16 {
+                signed,
+                dst,
+                src: [a, b],
+            } => {
+                let a = self.integer(a, Kind::B32)?;
+                let b = self.integer(b, Kind::B32)?;
+                let sixteen = self.u32_const(16);
+                let narrow = |this: &mut Self, v: Word| -> Result<Word, Error> {
+                    let hi = this.builder.shift_left_logical(this.u32_type, None, v, sixteen)?;
+                    Ok(if signed {
+                        this.builder.shift_right_arithmetic(this.u32_type, None, hi, sixteen)?
+                    } else {
+                        this.builder.shift_right_logical(this.u32_type, None, hi, sixteen)?
+                    })
+                };
+                let a = narrow(self, a)?;
+                let b = narrow(self, b)?;
+                (dst, self.builder.i_mul(self.u32_type, None, a, b)?, Kind::B32)
             }
             Instruction::MulWide32 {
                 signed,
