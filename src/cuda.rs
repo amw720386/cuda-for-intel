@@ -1165,7 +1165,10 @@ pub unsafe extern "system" fn cuLaunchKernel(
             )?;
             let args = unsafe {
                 launch_args::read(&entry.params, kernel_params, extra, |address| {
+                    // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
+                    // host USM and valid kernel arguments, like in CUDA's unified addressing.
                     contains_range(&context.allocations, address as usize, 1)
+                        || contains_range(&context.host_allocations, address as usize, 1)
                 })
             };
             let args = match args {
@@ -1304,23 +1307,36 @@ pub unsafe extern "system" fn cuDeviceTotalMem_v2(out: *mut usize, ordinal: c_in
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemGetInfo_v2(free: *mut usize, total: *mut usize) -> CuResult {
     trace::call("cuMemGetInfo_v2", || {
-        status(with_context(|runtime, context| {
+        status(state(|state| {
             if free.is_null() || total.is_null() {
                 return Err(InvalidValue);
             }
-            let info = runtime
+            let key = current().ok_or(InvalidContext)?;
+            let device = state.contexts.get(&key).ok_or(ContextIsDestroyed)?.device;
+            let info = state
+                .runtime
                 .devices
-                .get(context.device as usize)
+                .get(device as usize)
                 .ok_or(InvalidDevice)?;
             let total_mem = info.info.total_memory as usize;
-            // Conservative: report total as free until we track live allocations.
+            // Level Zero core exposes no free-memory counter (that needs Sysman), so
+            // report the capacity minus device bytes this driver has handed out.
+            let used = used_device_bytes(&state.contexts, device);
             unsafe {
-                free.write(total_mem);
+                free.write(total_mem.saturating_sub(used));
                 total.write(total_mem);
             }
             Ok(())
         }))
     })
+}
+
+fn used_device_bytes(contexts: &HashMap<usize, CudaContext>, device: c_int) -> usize {
+    contexts
+        .values()
+        .filter(|context| context.device == device)
+        .flat_map(|context| context.allocations.values())
+        .fold(0usize, |total, &size| total.saturating_add(size))
 }
 
 #[unsafe(no_mangle)]
@@ -1603,6 +1619,23 @@ mod tests {
         let mut out = -1;
         assert_eq!(unsafe { cuDeviceGetCount(&mut out) }, NotInitialized);
         assert_eq!(out, -1);
+    }
+
+    #[test]
+    fn host_pinned_kernel_pointer_args_are_valid() {
+        let device = BTreeMap::from([(0x1000usize, 0x100usize)]);
+        let host = BTreeMap::from([(0x9000usize, 0x40usize)]);
+        let valid = |address: usize| {
+            contains_range(&device, address, 1) || contains_range(&host, address, 1)
+        };
+        assert!(valid(0x1010) && valid(0x9020));
+        assert!(!valid(0x9040) && !valid(0x5000));
+    }
+
+    #[test]
+    fn device_reset_status_counts_as_device_lost() {
+        assert!(crate::level_zero::Error::Driver("zeCommandQueueSynchronize", 0x70000006).device_lost());
+        assert!(!crate::level_zero::Error::Driver("zeCommandQueueSynchronize", 0x70000002).device_lost());
     }
 
     #[test]

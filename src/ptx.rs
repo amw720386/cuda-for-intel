@@ -229,6 +229,8 @@ enum Alu64Op {
 #[derive(Clone, Copy, Debug)]
 enum FloatOp<'a> {
     Add([&'a str; 2]),
+    /// add/sub/mul with rz/rm/rp rounding, emulated with error terms.
+    Directed { kind: rounded::Arith, mode: rounded::Mode, src: [&'a str; 2] },
     Sub([&'a str; 2]),
     Mul([&'a str; 2]),
     MinMax { min: bool, src: [&'a str; 2] },
@@ -265,7 +267,7 @@ impl<'a> FloatOp<'a> {
             Self::Add(inputs) | Self::Sub(inputs) | Self::Mul(inputs)
             | Self::Div(inputs) | Self::CopySign(inputs) => inputs,
             Self::Fma(inputs) => inputs,
-            Self::MinMax { src, .. } => src,
+            Self::MinMax { src, .. } | Self::Directed { src, .. } => src,
             Self::FromUnsigned(inputs)
             | Self::FromSigned(inputs)
             | Self::FromHalf(inputs)
@@ -1476,7 +1478,6 @@ mod tests {
     #[test]
     fn rejects_unimplemented_fp32_rounding_and_approximation_modes() {
         for (original, unsupported) in [
-            ("mul.rn.f32", "mul.rz.f32"),
             ("fma.rn.f32", "fma.rz.f32"),
             ("fma.rn.f32", "fma.rn.sat.f32"),
             ("cvt.rn.f32.u32", "cvt.rz.f32.u32"),
@@ -1484,6 +1485,62 @@ mod tests {
             assert!(RMSNORM.contains(original));
             assert!(translate(&RMSNORM.replace(original, unsupported)).is_err());
         }
+    }
+
+    #[test]
+    fn emulates_directed_rounding_for_add_sub_mul() {
+        for (original, directed) in [
+            ("mul.rn.f32", "mul.rz.f32"),
+            ("mul.rn.f32", "mul.rm.f32"),
+            ("mul.rn.f32", "mul.rp.ftz.f32"),
+        ] {
+            assert!(RMSNORM.contains(original));
+            let translated = translate(&RMSNORM.replace(original, directed)).unwrap();
+            let module = rspirv::dr::load_words(&translated.words).unwrap();
+            // Directed multiply needs the exact-product error from an FMA.
+            assert!(
+                module
+                    .all_inst_iter()
+                    .any(|inst| inst.class.opcode == rspirv::spirv::Op::ExtInst)
+            );
+        }
+        let add = |op: &str| {
+            format!(
+                ".version 9.0\n.target sm_75\n.address_size 64\n\
+                 .entry k(.param .u64 out) {{ .reg .b32 %r<4>; .reg .b64 %rd<3>;\n\
+                 ld.param.u64 %rd1, [out]; cvta.to.global.u64 %rd2, %rd1;\n\
+                 mov.b32 %r1, 0f3f800000; mov.b32 %r2, 0f33800000;\n\
+                 {op} %r3, %r1, %r2; st.global.u32 [%rd2], %r3; ret; }}"
+            )
+        };
+        for op in ["add.rz.f32", "add.rm.f32", "add.rp.f32", "sub.rz.ftz.f32", "sub.rm.f32"] {
+            let t = translate(&add(op)).unwrap_or_else(|e| panic!("{op}: {e}"));
+            if let Some(dir) = std::env::var_os("DUMP_SPV") {
+                let bytes: Vec<u8> = t.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                std::fs::write(std::path::Path::new(&dir).join(format!("{op}.spv")), bytes).unwrap();
+            }
+        }
+        // fma with a directed mode is still rejected loudly.
+        assert!(translate(&add("fma.rz.f32")).is_err());
+    }
+
+    #[test]
+    fn global_u32_load_uses_aligned_word_loads() {
+        let source = ".version 9.0\n.target sm_75\n.address_size 64\n\
+            .entry k(.param .u64 p) { .reg .b32 %r<2>; .reg .b64 %rd<3>;\n\
+            ld.param.u64 %rd1, [p]; cvta.to.global.u64 %rd2, %rd1;\n\
+            ld.global.u32 %r1, [%rd2+4]; st.global.u32 [%rd2], %r1; ret; }";
+        let t = translate(source).unwrap();
+        if let Some(dir) = std::env::var_os("DUMP_SPV") {
+            let bytes: Vec<u8> = t.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            std::fs::write(std::path::Path::new(&dir).join("ld32.spv"), bytes).unwrap();
+        }
+        let module = rspirv::dr::load_words(&t.words).unwrap();
+        // No 16-bit loads: every load is a full aligned 32-bit word.
+        assert!(!module.all_inst_iter().any(|i| i.class.opcode == rspirv::spirv::Op::UConvert
+            && i.result_type.is_some_and(|ty| module.types_global_values.iter().any(
+                |t| t.result_id == Some(ty) && t.operands.first()
+                    == Some(&rspirv::dr::Operand::LiteralBit32(16))))));
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub(crate) fn log_enabled() -> bool {
 }
 
 use libloading::Library;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void, CStr};
 use std::sync::{Mutex, OnceLock};
 
@@ -457,6 +457,33 @@ pub unsafe extern "system" fn cudaGetDeviceProperties_v2(
     set_error(SUCCESS)
 }
 
+/// Device allocations made through this shim: base address -> size. Everything else
+/// (pageable or pinned host memory) is treated as host memory.
+fn device_ranges() -> &'static Mutex<BTreeMap<usize, usize>> {
+    static RANGES: OnceLock<Mutex<BTreeMap<usize, usize>>> = OnceLock::new();
+    RANGES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn is_device_pointer(ptr: usize) -> bool {
+    let Ok(ranges) = device_ranges().lock() else {
+        return false;
+    };
+    ranges
+        .range(..=ptr)
+        .next_back()
+        .is_some_and(|(&base, &size)| ptr - base < size)
+}
+
+/// Resolve cudaMemcpyDefault (4) into a concrete kind from where each side lives.
+fn infer_kind(dst_device: bool, src_device: bool) -> c_int {
+    match (dst_device, src_device) {
+        (false, false) => 0,
+        (true, false) => 1,
+        (false, true) => 2,
+        (true, true) => 3,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize) -> c_int {
     let Ok(drv) = driver() else {
@@ -477,6 +504,9 @@ pub unsafe extern "system" fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize)
     let err = unsafe { (drv.cuMemAlloc)(&mut ptr, size) };
     if err == SUCCESS && !dev_ptr.is_null() {
         unsafe { dev_ptr.write(ptr as *mut c_void) };
+        if let Ok(mut ranges) = device_ranges().lock() {
+            ranges.insert(ptr as usize, size.max(1));
+        }
     }
     set_error(err)
 }
@@ -489,7 +519,13 @@ pub unsafe extern "system" fn cudaFree(dev_ptr: *mut c_void) -> c_int {
     if dev_ptr.is_null() {
         return set_error(SUCCESS);
     }
-    set_error(unsafe { (drv.cuMemFree)(dev_ptr as u64) })
+    let err = unsafe { (drv.cuMemFree)(dev_ptr as u64) };
+    if err == SUCCESS {
+        if let Ok(mut ranges) = device_ranges().lock() {
+            ranges.remove(&(dev_ptr as usize));
+        }
+    }
+    set_error(err)
 }
 
 #[unsafe(no_mangle)]
@@ -552,8 +588,13 @@ pub unsafe extern "system" fn cudaMemcpyAsync(
         return set_error(err);
     }
     // cudaMemcpyKind: HostToHost=0, HtoD=1, DtoH=2, DtoD=3, Default=4
+    let kind = if kind == 4 {
+        infer_kind(is_device_pointer(dst as usize), is_device_pointer(src as usize))
+    } else {
+        kind
+    };
     let err = match kind {
-        1 | 4 => unsafe { (drv.cuMemcpyHtoDAsync)(dst as u64, src, count, stream) },
+        1 => unsafe { (drv.cuMemcpyHtoDAsync)(dst as u64, src, count, stream) },
         2 => unsafe { (drv.cuMemcpyDtoHAsync)(dst, src as u64, count, stream) },
         3 => unsafe { (drv.cuMemcpyDtoDAsync)(dst as u64, src as u64, count, stream) },
         0 => {
@@ -1365,4 +1406,22 @@ pub unsafe extern "system" fn __cudaRegisterVar(
 
 fn extract_ptx(fatbin: *mut c_void) -> Option<Vec<u8>> {
     unsafe { cfi_fatbin::extract_ptx(fatbin.cast()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_kind_follows_pointer_ownership() {
+        device_ranges().lock().unwrap().insert(0x1000, 0x100);
+        assert!(is_device_pointer(0x1000));
+        assert!(is_device_pointer(0x10ff));
+        assert!(!is_device_pointer(0x1100));
+        assert!(!is_device_pointer(0xfff));
+        assert_eq!(infer_kind(true, false), 1);
+        assert_eq!(infer_kind(false, true), 2);
+        assert_eq!(infer_kind(true, true), 3);
+        assert_eq!(infer_kind(false, false), 0);
+    }
 }

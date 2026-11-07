@@ -1046,13 +1046,17 @@ impl<'a> Parser<'a> {
                 }
             }
             [
-                "add.f32" | "add.rn.f32" | "add.ftz.f32" | "add.rz.ftz.f32" | "add.rz.f32",
+                "add.f32" | "add.rn.f32" | "add.ftz.f32" | "add.rn.ftz.f32",
                 dst,
                 ",",
                 a,
                 ",",
                 b,
             ] => Instruction::Float32(dst, FloatOp::Add([a, b])),
+            [op, dst, ",", a, ",", b] if directed_float(op).is_some() => {
+                let (kind, mode) = directed_float(op).unwrap();
+                Instruction::Float32(dst, FloatOp::Directed { kind, mode, src: [a, b] })
+            }
             ["abs.ftz.f32" | "abs.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Abs([src]))
             }
@@ -1092,7 +1096,7 @@ impl<'a> Parser<'a> {
             [op @ ("cvt.rn.f16.f32" | "cvt.rz.f16.f32"), dst, ",", src] => {
                 Instruction::CvtToHalf(dst, src, *op == "cvt.rz.f16.f32")
             }
-            ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32", dst, ",", a, ",", b] => {
+            ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32" | "sub.rn.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Sub([a, b]))
             }
             [
@@ -1109,7 +1113,7 @@ impl<'a> Parser<'a> {
                     src: [a, b],
                 },
             ),
-            ["mul.f32" | "mul.rn.f32" | "mul.ftz.f32", dst, ",", a, ",", b] => {
+            ["mul.f32" | "mul.rn.f32" | "mul.ftz.f32" | "mul.rn.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Mul([a, b]))
             }
             ["fma.rn.f32" | "fma.rn.ftz.f32", dst, ",", a, ",", b, ",", c] => {
@@ -1509,6 +1513,26 @@ fn rest_after_list_tokens<'a, 'b>(tokens: &'b [&'a str]) -> Option<(Vec<&'a str>
 
 /// Skip a module-level declaration (`.global` / `.const` / …) through its
 /// terminating `;`, including `{…}` initializers used by nvcc lookup tables.
+fn directed_float(op: &str) -> Option<(super::rounded::Arith, super::rounded::Mode)> {
+    use super::rounded::{Arith, Mode};
+    let rest = op.strip_suffix(".f32")?;
+    let rest = rest.strip_suffix(".ftz").unwrap_or(rest);
+    let (name, mode) = rest.split_once('.')?;
+    let kind = match name {
+        "add" => Arith::Add,
+        "sub" => Arith::Sub,
+        "mul" => Arith::Mul,
+        _ => return None,
+    };
+    let mode = match mode {
+        "rz" => Mode::Zero,
+        "rm" => Mode::Down,
+        "rp" => Mode::Up,
+        _ => return None,
+    };
+    Some((kind, mode))
+}
+
 fn skip_module_declaration(parser: &mut Parser<'_>) -> Result<(), Error> {
     let mut depth = 0i32;
     loop {

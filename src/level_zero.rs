@@ -64,7 +64,7 @@ impl Error {
     pub(crate) fn device_lost(&self) -> bool {
         matches!(
             self,
-            Self::Driver(_, 0x70000001) | Self::Build(0x70000001, _)
+            Self::Driver(_, 0x70000001 | 0x70000006) | Self::Build(0x70000001 | 0x70000006, _)
         )
     }
 }
