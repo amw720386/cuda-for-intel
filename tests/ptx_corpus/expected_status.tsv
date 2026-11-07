@@ -116,7 +116,7 @@ handwritten/bitmanip/brev_b64.ptx	pass	strict-pass
 handwritten/bitmanip/clz_b32.ptx	pass	strict-pass	
 handwritten/bitmanip/clz_b64.ptx	pass	strict-pass	
 handwritten/bitmanip/cnot_b32.ptx	pass	strict-pass	
-handwritten/bitmanip/cvta_const.ptx	error	strict-fail	expected Address(Global) for %rd3, got B64
+handwritten/bitmanip/cvta_const.ptx	pass	strict-pass	
 handwritten/bitmanip/cvta_shared.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/bitmanip/cvta_to_shared.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/bitmanip/div_u64.ptx	pass	strict-pass	
@@ -268,7 +268,7 @@ handwritten/ldmatrix/ldmatrix_x4_trans.ptx	pass	strict-pass
 handwritten/ldmatrix/stmatrix_x4.ptx	pass	strict-pass	
 handwritten/memory/applypriority_L2.ptx	pass	strict-pass	
 handwritten/memory/call_noreturn_stub.ptx	pass	strict-pass	
-handwritten/memory/const_array_init.ptx	error	strict-fail	expected Address(Global) for %rd3, got B64
+handwritten/memory/const_array_init.ptx	pass	strict-pass	
 handwritten/memory/createpolicy_fractional.ptx	pass	strict-pass	
 handwritten/memory/discard_global_L2.ptx	pass	strict-pass	
 handwritten/memory/func_call_internal.ptx	unsupported	strict-fail	unsupported integer operand a

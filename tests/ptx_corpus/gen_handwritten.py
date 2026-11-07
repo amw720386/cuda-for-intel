@@ -21,6 +21,12 @@ def probe(fam, name, lines, target="sm_80", version="8.0", pre="", entry=None):
     init = []
     used = set(re.findall(r"%(?:rd|fd|r|f|h|p)\d+", body)) | {"%r1", "%r31"}
     used -= {"%rd1", "%rd2"}
+    # A register whose first use is the destination of a mov/cvta needs no (type-conflicting) initialiser.
+    for r in list(used):
+        for line in body.split("\n"):
+            if re.search(re.escape(r) + r"(?!\d)", line):
+                if re.match(r"\s*(mov|cvta)[a-z0-9.]*\s+" + re.escape(r) + r"(?!\d)\s*,", line): used.discard(r)
+                break
     for r in sorted(used, key=lambda x: (re.sub(r"\d", "", x), int(re.sub(r"\D", "", x)))):
         if r.startswith("%rd"): init.append(f"mov.u64 {r}, 1;")
         elif r.startswith("%fd"): init.append(f"mov.f64 {r}, 0d3FF0000000000000;")
