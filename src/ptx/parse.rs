@@ -516,6 +516,10 @@ impl<'a> Parser<'a> {
             ["cvt.s32.s8", dst, ",", src] => {
                 Instruction::Integer32(IntegerOp::SignExtend8, dst, [src, src])
             }
+            // Zero-extend a 16-bit value; 16-bit registers already hold zero-extended B32.
+            ["cvt.u32.u16", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::ToU16, dst, [src, src])
+            }
             ["cvt.u16.u32", dst, ",", src] => {
                 Instruction::Integer32(IntegerOp::ToU16, dst, [src, src])
             }
