@@ -15,6 +15,8 @@ use gpu_device::ordinal as test_device;
 mod discovery;
 #[path = "gpu/forge.rs"]
 mod forge;
+#[path = "gpu/graph_capture.rs"]
+mod graph_capture;
 #[path = "gpu/ggml.rs"]
 mod ggml;
 #[path = "gpu/ggml_norm.rs"]
