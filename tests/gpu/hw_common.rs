@@ -183,3 +183,105 @@ pub fn prologue(entry: &str, buffers: usize, scalars: usize, extra: &str) -> Str
     }
     s
 }
+
+pub enum Arg {
+    /// Device pointer of `bufs[i]` (8 bytes).
+    Buf(usize),
+    /// Raw by-value bytes (scalars and struct params such as uint3).
+    Bytes(Vec<u8>),
+}
+
+pub fn u32_arg(v: u32) -> Arg {
+    Arg::Bytes(v.to_le_bytes().to_vec())
+}
+
+pub fn i64_arg(v: i64) -> Arg {
+    Arg::Bytes(v.to_le_bytes().to_vec())
+}
+
+/// ggml `init_fastdiv_values`: uint3 {mp, L, d}.
+pub fn fastdiv_arg(d: u32) -> Arg {
+    let mut l = 0u32;
+    while l < 32 && (1u64 << l) < d as u64 {
+        l += 1;
+    }
+    let mp = (((1u64 << 32) * ((1u64 << l) - d as u64)) / d as u64 + 1) as u32;
+    let mut b = Vec::new();
+    for v in [mp, l, d] {
+        b.extend(v.to_le_bytes());
+    }
+    Arg::Bytes(b)
+}
+
+/// Like `launch` with 3-D geometry, shared bytes and arbitrary by-value arguments.
+#[allow(non_snake_case)]
+pub fn launch_args(
+    ptx: &str,
+    entry: &str,
+    grid: [u32; 3],
+    block: [u32; 3],
+    shared: u32,
+    bufs: &mut [Vec<u8>],
+    args: &[Arg],
+) -> Result<(), String> {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemFree_v2(u64),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuCtxSynchronize(),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
+    let source = std::ffi::CString::new(ptx).unwrap();
+    let mut module = null_mut();
+    let status = unsafe { cuModuleLoadData(&mut module, source.as_ptr().cast()) };
+    if status != 0 {
+        unsafe { cuCtxDestroy_v2(context) };
+        return Err(format!("cuModuleLoadData = {status}"));
+    }
+    let name = std::ffi::CString::new(entry).unwrap();
+    let mut kernel = null_mut();
+    let status = unsafe { cuModuleGetFunction(&mut kernel, module, name.as_ptr()) };
+    if status != 0 {
+        unsafe { cuCtxDestroy_v2(context) };
+        return Err(format!("cuModuleGetFunction = {status}"));
+    }
+    let mut devices = Vec::new();
+    for buf in bufs.iter() {
+        let mut dev = 0u64;
+        ok!(cuMemAlloc_v2(&mut dev, buf.len().max(16)));
+        ok!(cuMemcpyHtoD_v2(dev, buf.as_ptr().cast(), buf.len()));
+        devices.push(dev);
+    }
+    let mut owned: Vec<Vec<u8>> = args
+        .iter()
+        .map(|a| match a {
+            Arg::Buf(i) => devices[*i].to_le_bytes().to_vec(),
+            Arg::Bytes(b) => b.clone(),
+        })
+        .collect();
+    let mut params: Vec<*mut c_void> = owned.iter_mut().map(|b| b.as_mut_ptr().cast()).collect();
+    let status = unsafe {
+        cuLaunchKernel(kernel, grid[0], grid[1], grid[2], block[0], block[1], block[2], shared, null_mut(), params.as_mut_ptr(), null_mut())
+    };
+    let sync = unsafe { cuCtxSynchronize() };
+    if status != 0 || sync != 0 {
+        unsafe { cuCtxDestroy_v2(context) };
+        return Err(format!("launch = {status}, sync = {sync}"));
+    }
+    for (buf, dev) in bufs.iter_mut().zip(&devices) {
+        ok!(cuMemcpyDtoH_v2(buf.as_mut_ptr().cast(), *dev, buf.len()));
+        ok!(cuMemFree_v2(*dev));
+    }
+    ok!(cuCtxDestroy_v2(context));
+    Ok(())
+}
