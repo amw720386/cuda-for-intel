@@ -13,7 +13,7 @@ use super::normalize::Stmt;
 use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 12;
-const MAX_STATEMENTS: usize = 4_000_000;
+const MAX_STATEMENTS: usize = 12_000_000;
 
 struct Func {
     returns: Vec<String>,
