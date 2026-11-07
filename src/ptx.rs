@@ -4,6 +4,7 @@ mod flow;
 pub(crate) mod globals;
 mod inline;
 mod normalize;
+pub(crate) mod passthrough;
 mod parse;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
@@ -848,6 +849,10 @@ pub(crate) fn translate_lenient(source: &str) -> Result<Translation, Error> {
 }
 
 fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
+    // Pre-built SPIR-V (the cuBLAS shim's XMX kernels) skips the PTX pipeline.
+    if let Some(result) = passthrough::parse(source) {
+        return result;
+    }
     let rewritten = prepare(source)?;
     let (entries, vars) = parse::parse_module(&rewritten)?;
     let first = if lenient && entries.len() > 1 {
