@@ -383,6 +383,166 @@ pub fn emulate_kernel(d: &GemmDesc, alpha: f32, beta: f32, a: &[u8], b: &[u8], c
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Triangular solve (cublasStrsmBatched)
+// ---------------------------------------------------------------------------
+
+pub const SIDE_LEFT: c_int = 0;
+pub const SIDE_RIGHT: c_int = 1;
+pub const FILL_LOWER: c_int = 0;
+pub const FILL_UPPER: c_int = 1;
+pub const DIAG_NON_UNIT: c_int = 0;
+pub const DIAG_UNIT: c_int = 1;
+
+/// Kernel-level description of a batched TRSM (see `ptxgen::generate_trsm`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrsmPlan {
+    pub len: u32,
+    pub nvec: u32,
+    pub a_rs: u32,
+    pub a_cs: u32,
+    pub b_vs: u32,
+    pub b_es: u32,
+    pub lower: bool,
+    pub unit: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn trsm_plan(
+    side: c_int,
+    uplo: c_int,
+    trans: c_int,
+    diag: c_int,
+    m: c_int,
+    n: c_int,
+    lda: c_int,
+    ldb: c_int,
+) -> Result<TrsmPlan, c_int> {
+    let right = match side {
+        SIDE_LEFT => false,
+        SIDE_RIGHT => true,
+        _ => return Err(INVALID_VALUE),
+    };
+    let lower_stored = match uplo {
+        FILL_LOWER => true,
+        FILL_UPPER => false,
+        _ => return Err(INVALID_VALUE),
+    };
+    let mut t = op_is_transposed(trans).ok_or(INVALID_VALUE)?;
+    let unit = match diag {
+        DIAG_NON_UNIT => false,
+        DIAG_UNIT => true,
+        _ => return Err(INVALID_VALUE),
+    };
+    if m < 0 || n < 0 {
+        return Err(INVALID_VALUE);
+    }
+    let order = if right { n } else { m };
+    if lda < order.max(1) || ldb < m.max(1) {
+        return Err(INVALID_VALUE);
+    }
+    // X op(A) = B  <=>  op(A)^T x = b per row of B.
+    if right {
+        t = !t;
+    }
+    let (a_rs, a_cs) = if t { (lda as u32, 1) } else { (1, lda as u32) };
+    let (b_vs, b_es) = if right { (1, ldb as u32) } else { (ldb as u32, 1) };
+    Ok(TrsmPlan {
+        len: order as u32,
+        nvec: if right { m } else { n } as u32,
+        a_rs,
+        a_cs,
+        b_vs,
+        b_es,
+        lower: lower_stored != t,
+        unit,
+    })
+}
+
+/// Emulates the TRSM kernel on one matrix pair (same order of operations).
+pub fn emulate_trsm(p: &TrsmPlan, alpha: f32, a: &[f32], b: &mut [f32]) {
+    for v in 0..p.nvec as usize {
+        let base = v * p.b_vs as usize;
+        for it in 0..p.len as usize {
+            let r = if p.lower { it } else { p.len as usize - 1 - it };
+            let ri = base + r * p.b_es as usize;
+            let mut acc = b[ri] * alpha;
+            for t in 0..it {
+                let c = if p.lower { t } else { p.len as usize - 1 - t };
+                let tv = a[r * p.a_rs as usize + c * p.a_cs as usize];
+                acc = (-tv).mul_add(b[base + c * p.b_es as usize], acc);
+            }
+            if !p.unit {
+                acc /= a[r * p.a_rs as usize + r * p.a_cs as usize];
+            }
+            b[ri] = acc;
+        }
+    }
+}
+
+/// Literal cuBLAS semantics (column-major, `op()` of the stored triangle,
+/// `side`) solved by dense forward/back substitution, independent of
+/// [`trsm_plan`]. Entries outside the stored triangle are ignored.
+#[allow(clippy::too_many_arguments)]
+pub fn reference_trsm(
+    side: c_int,
+    uplo: c_int,
+    trans: c_int,
+    diag: c_int,
+    m: usize,
+    n: usize,
+    lda: usize,
+    ldb: usize,
+    alpha: f32,
+    a: &[f32],
+    b: &mut [f32],
+) {
+    let order = if side == SIDE_LEFT { m } else { n };
+    // Dense op(A) with the unreferenced triangle zeroed.
+    let mut t = vec![0.0f32; order * order];
+    for r in 0..order {
+        for c in 0..order {
+            let (sr, sc) = if trans == OP_N { (r, c) } else { (c, r) };
+            let stored = if uplo == FILL_LOWER { sr >= sc } else { sr <= sc };
+            let mut v = if stored { a[sr + sc * lda] } else { 0.0 };
+            if diag == DIAG_UNIT && sr == sc {
+                v = 1.0;
+            }
+            t[r + c * order] = v;
+        }
+    }
+    let lower = (0..order).all(|r| (r + 1..order).all(|c| t[r + c * order] == 0.0));
+    let solve = |rhs: &mut Vec<f32>, tm: &dyn Fn(usize, usize) -> f32, lower: bool| {
+        let idx: Vec<usize> = if lower { (0..order).collect() } else { (0..order).rev().collect() };
+        for (pos, &r) in idx.iter().enumerate() {
+            let mut acc = rhs[r];
+            for &c in &idx[..pos] {
+                acc -= tm(r, c) * rhs[c];
+            }
+            rhs[r] = acc / tm(r, r);
+        }
+    };
+    if side == SIDE_LEFT {
+        for j in 0..n {
+            let mut x: Vec<f32> = (0..m).map(|i| alpha * b[i + j * ldb]).collect();
+            solve(&mut x, &|r, c| t[r + c * order], lower);
+            for i in 0..m {
+                b[i + j * ldb] = x[i];
+            }
+        }
+    } else {
+        // x^T op(A) = alpha b^T  =>  op(A)^T x = alpha b
+        for i in 0..m {
+            let mut x: Vec<f32> = (0..n).map(|j| alpha * b[i + j * ldb]).collect();
+            solve(&mut x, &|r, c| t[c + r * order], !lower);
+            for j in 0..n {
+                b[i + j * ldb] = x[j];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,5 +738,42 @@ mod tests {
     fn kernel_names() {
         assert_eq!(kernel_name(DType::F16, DType::F16, DType::F32, false), "cfi_gemm_f16f16f32s");
         assert_eq!(kernel_name(DType::Bf16, DType::Bf16, DType::Bf16, true), "cfi_gemm_bf16bf16bf16p");
+    }
+
+    #[test]
+    fn trsm_plan_matches_literal_semantics() {
+        let mut seed = 7u64;
+        for side in [SIDE_LEFT, SIDE_RIGHT] {
+            for uplo in [FILL_LOWER, FILL_UPPER] {
+                for trans in [OP_N, OP_T] {
+                    for diag in [DIAG_NON_UNIT, DIAG_UNIT] {
+                        let (m, n) = (5usize, 3usize);
+                        let order = if side == SIDE_LEFT { m } else { n };
+                        let (lda, ldb) = (order + 2, m + 1);
+                        let mut a: Vec<f32> = (0..lda * order).map(|_| lcg(&mut seed)).collect();
+                        for d in 0..order {
+                            a[d + d * lda] = 4.0 + (d as f32); // well conditioned
+                        }
+                        let b0: Vec<f32> = (0..ldb * n).map(|_| lcg(&mut seed)).collect();
+                        let mut want = b0.clone();
+                        reference_trsm(side, uplo, trans, diag, m, n, lda, ldb, 1.5, &a, &mut want);
+                        let p = trsm_plan(side, uplo, trans, diag, m as c_int, n as c_int, lda as c_int, ldb as c_int).unwrap();
+                        let mut got = b0.clone();
+                        emulate_trsm(&p, 1.5, &a, &mut got);
+                        for (g, w) in got.iter().zip(&want) {
+                            assert!((g - w).abs() <= 1e-4 * (1.0 + w.abs()), "{side}{uplo}{trans}{diag}: {g} vs {w}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trsm_plan_validation() {
+        assert_eq!(trsm_plan(2, 0, 0, 0, 2, 2, 2, 2), Err(INVALID_VALUE));
+        assert_eq!(trsm_plan(0, 0, 0, 0, 4, 2, 3, 4), Err(INVALID_VALUE)); // lda < m
+        assert_eq!(trsm_plan(1, 0, 0, 0, 4, 2, 2, 3), Err(INVALID_VALUE)); // ldb < m
+        assert_eq!(trsm_plan(1, 0, 0, 0, 4, 2, 2, 4).unwrap().nvec, 4);
     }
 }

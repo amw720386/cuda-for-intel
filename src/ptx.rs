@@ -951,6 +951,36 @@ mod tests {
     }
 
     #[test]
+    fn translates_generated_cublaslt_epilogue_and_trsm_kernels() {
+        use super::cublas_ptxgen as ptxgen;
+        use ptxgen::{Elem, Epilogue, Opts};
+        for epi in [
+            Epilogue::Relu,
+            Epilogue::Gelu,
+            Epilogue::Bias,
+            Epilogue::ReluBias,
+            Epilogue::GeluBias,
+        ] {
+            for (e, bias) in [(Elem::F32, Elem::F32), (Elem::F16, Elem::F16), (Elem::Bf16, Elem::F32)] {
+                let o = Opts { epilogue: epi, bias, acc16: false };
+                let source = ptxgen::generate_ex(e, e, e, false, &o);
+                let name = ptxgen::entry_name_ex(e, e, e, false, &o);
+                let translated =
+                    translate(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
+                assert_eq!(translated.kernels[0].name, name);
+                assert_eq!(translated.kernels[0].params.len(), o.param_count(), "{name}");
+            }
+        }
+        let o = Opts { acc16: true, ..Opts::default() };
+        let source = ptxgen::generate_ex(Elem::F16, Elem::F16, Elem::F16, false, &o);
+        translate(&source).unwrap_or_else(|error| panic!("acc16: {error}"));
+        let translated = translate(&ptxgen::generate_trsm())
+            .unwrap_or_else(|error| panic!("trsm: {error}"));
+        assert_eq!(translated.kernels[0].name, ptxgen::TRSM_ENTRY);
+        assert_eq!(translated.kernels[0].params.len(), 11);
+    }
+
+    #[test]
     fn translates_cublas_hgemm_tn_kernel() {
         let translated = translate(include_str!("../crates/cublas_shim/src/hgemm_tn.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));
