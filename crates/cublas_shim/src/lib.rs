@@ -309,7 +309,7 @@ pub unsafe extern "system" fn cublasCreate_v2(handle: *mut *mut c_void) -> c_int
         workspace: (0, 0),
     })) as *mut c_void;
     unsafe { handle.write(ptr) };
-    eprintln!("CUDA for Intel cublasCreate_v2 ok");
+    trace!("cublasCreate_v2 ok");
     SUCCESS
 }
 

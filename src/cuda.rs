@@ -109,6 +109,9 @@ struct State {
     runtime: Runtime,
     next_handle: usize,
     contexts: HashMap<usize, CudaContext>,
+    /// Explicit stream handle -> owning context key. Entries can go stale after a
+    /// stream or context is destroyed, so every hit is re-validated.
+    stream_owners: HashMap<usize, usize>,
     incomplete_contexts: Vec<Context>,
     primary: HashMap<c_int, primary::Primary>,
     libraries: library::Libraries,
@@ -161,6 +164,11 @@ fn backend_error(error: Error) -> CuResult {
         Error::Build(0x70000004 | 0x70000005, _) => InvalidPtx,
         _ => Unknown,
     }
+}
+
+fn dump_launch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_DUMP_LAUNCH").is_some())
 }
 
 fn diagnostic(error: &impl std::fmt::Display) {
@@ -218,7 +226,22 @@ fn device(ordinal: c_int, action: impl FnOnce(&DeviceInfo) -> CuResult) -> CuRes
     .unwrap_or_else(|error| error)
 }
 
+/// Bring-up log file. Opening it costs a syscall per call, and the Runtime shim
+/// retains the primary context on every launch, so it is opt-in
+/// (`CUDA_FOR_INTEL_LOG=1`, `CUDA_FOR_INTEL_TRACE=1` or `CUDA_FOR_INTEL_EXPORT_LOG=1`).
+fn export_log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        ["CUDA_FOR_INTEL_LOG", "CUDA_FOR_INTEL_TRACE", "CUDA_FOR_INTEL_EXPORT_LOG"]
+            .iter()
+            .any(|name| std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1")))
+    })
+}
+
 pub(crate) fn export_log(message: impl std::fmt::Display) {
+    if !export_log_enabled() {
+        return;
+    }
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -231,7 +254,7 @@ pub(crate) fn export_log(message: impl std::fmt::Display) {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
-    export_log(format!("cuInit flags={flags} enter"));
+    export_log(format_args!("cuInit flags={flags} enter"));
     let result = trace::call("cuInit", || {
         if flags != 0 {
             return InvalidValue;
@@ -255,6 +278,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
                     runtime: rt,
                     next_handle: 3, // CUDA reserves stream values 0, 1 and 2.
                     contexts: HashMap::new(),
+                    stream_owners: HashMap::new(),
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),
@@ -265,7 +289,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
             Err(error) => backend_error(error),
         }
     });
-    export_log(format!("cuInit flags={flags} -> {}", result as i32));
+    export_log(format_args!("cuInit flags={flags} -> {}", result as i32));
     result
 }
 
@@ -592,6 +616,9 @@ pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuRes
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
     trace::call("cuMemFree_v2", || {
+        if address != 0 {
+            streams::drain_unlocked(None);
+        }
         status(with_context(|runtime, context| {
             if address == 0 {
                 return Ok(());
@@ -637,6 +664,7 @@ pub unsafe extern "system" fn cuMemHostAlloc(
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFreeHost(host: Opaque) -> CuResult {
     trace::call("cuMemFreeHost", || {
+        streams::drain_unlocked(None);
         status(with_context(|runtime, context| {
             if !context.host_allocations.contains_key(&host.addr()) {
                 return Err(InvalidValue);
@@ -654,6 +682,17 @@ unsafe fn copy_async(
     stream: Opaque,
     to_device: bool,
 ) -> CuResult {
+    // Pageable fallback waits on the stream; do that wait without the lock.
+    if size != 0
+        && !host.is_null()
+        && let Ok(key) = streams::stream_key(stream)
+        && with_context(|_, context| {
+            Ok(!contains_range(&context.host_allocations, host.addr(), size))
+        })
+        .unwrap_or(false)
+    {
+        streams::drain_unlocked(Some(key));
+    }
     status(with_context(|runtime, context| {
         let key = context.streams.launch_key(stream)?;
         if size == 0 {
@@ -749,6 +788,9 @@ pub unsafe extern "system" fn cuMemcpyDtoHAsync_v2(
 }
 
 unsafe fn copy(host: Opaque, device: u64, size: usize, to_device: bool) -> CuResult {
+    if size != 0 {
+        streams::drain_unlocked(Some(0));
+    }
     status(with_context(|runtime, context| {
         if size == 0 {
             return Ok(());
@@ -789,6 +831,9 @@ pub unsafe extern "system" fn cuMemcpyDtoH_v2(dst: Opaque, src: u64, size: usize
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemcpyDtoD_v2(dst: u64, src: u64, size: usize) -> CuResult {
     trace::call("cuMemcpyDtoD_v2", || {
+        if size != 0 {
+            streams::drain_unlocked(Some(0));
+        }
         status(with_context(|runtime, context| {
             if size == 0 {
                 return Ok(());
@@ -900,7 +945,7 @@ fn load_ptx(
         }
         diagnostic(&error);
         // Always persist a short reject breadcrumb for fatbin bring-up.
-        export_log(format!("PTX reject: {error}"));
+        export_log(format_args!("PTX reject: {error}"));
         InvalidPtx
     })?;
     let device = &runtime.devices[context.device as usize];
@@ -990,6 +1035,7 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
 #[unsafe(no_mangle)]
 pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
     trace::call("cuModuleUnload", || {
+        streams::drain_unlocked(None);
         status(with_context(|runtime, context| {
             if !context.modules.contains_key(&module.addr())
                 || context.library_modules.values().any(|&key| key == module.addr())
@@ -1125,7 +1171,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let args = match args {
                 Ok(args) => args,
                 Err(error) => {
-                    export_log(format!(
+                    export_log(format_args!(
                         "cuLaunchKernel args rejected for {} ({} params)",
                         name.to_string_lossy(),
                         entry.params.len()
@@ -1134,7 +1180,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 }
             };
             // Optional launch dump for soft_max bring-up (CUDA_FOR_INTEL_DUMP_LAUNCH=1).
-            if std::env::var_os("CUDA_FOR_INTEL_DUMP_LAUNCH").is_some()
+            if dump_launch_enabled()
                 && name.to_string_lossy().contains("soft_max")
             {
                 let mut summary = format!(
@@ -1203,7 +1249,7 @@ pub unsafe extern "system" fn cuDeviceGetCount(count: *mut c_int) -> CuResult {
         })
         .unwrap_or_else(|error| error)
     });
-    export_log(format!("cuDeviceGetCount -> {}", result as i32));
+    export_log(format_args!("cuDeviceGetCount -> {}", result as i32));
     result
 }
 

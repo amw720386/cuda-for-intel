@@ -5,6 +5,23 @@
 //! points ggml imports by forwarding to our Driver API `nvcuda.dll`.
 #![allow(non_snake_case)]
 
+/// Verbose per-call diagnostics, enabled with `CFI_LOG=1` (read once).
+#[allow(unused_macros)]
+macro_rules! info_log {
+    ($($arg:tt)*) => {
+        if $crate::log_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+pub(crate) fn log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("CFI_LOG").is_some_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
 use libloading::Library;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void, CStr};
@@ -975,21 +992,25 @@ pub unsafe extern "system" fn cudaLaunchKernel(
         return set_error(err);
     }
     let key = func as usize;
-    if let Err(err) = resolve_function(drv, key) {
+    // Fast path: one lock acquisition when the kernel is already resolved.
+    let cached = runtime().lock().ok().and_then(|rt| rt.functions.get(&key).copied());
+    if cached.is_none()
+        && let Err(err) = resolve_function(drv, key)
+    {
         eprintln!(
             "CUDA for Intel cudaLaunchKernel: resolve failed err={err} host_fun={key:#x}"
         );
         return set_error(err);
     }
-    let function = match runtime().lock() {
+    let function = cached.or_else(|| match runtime().lock() {
         Ok(rt) => rt.functions.get(&key).copied(),
         Err(_) => None,
-    };
+    });
     let Some(function) = function else {
         eprintln!("CUDA for Intel cudaLaunchKernel: no device fn for host={key:#x}");
         return set_error(INVALID_VALUE);
     };
-    eprintln!(
+    info_log!(
         "CUDA for Intel cudaLaunchKernel: grid=({},{},{}) block=({},{},{}) shmem={shared_mem} stream={stream:?}",
         grid.x, grid.y, grid.z, block.x, block.y, block.z
     );
@@ -1105,7 +1126,7 @@ fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
         );
         return Err(INVALID_VALUE);
     };
-    eprintln!(
+    info_log!(
         "CUDA for Intel resolve: entry {} filtered {} -> {} bytes",
         String::from_utf8_lossy(&name),
         raw.len(),
