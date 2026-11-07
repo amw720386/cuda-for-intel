@@ -348,6 +348,58 @@ macro_rules! loader_api {
                 self._library.is_none()
             }
 
+            /// Declare that the kernel may dereference device/host/shared USM pointers it was not
+            /// given as arguments (pointer tables, linked structures), as ggml's batched GEMM does.
+            /// Without this the driver need not keep those allocations resident for the dispatch.
+            fn set_indirect_access(&self, kernel: Raw) {
+                if std::env::var_os("CUDA_FOR_INTEL_NO_INDIRECT").is_some() {
+                    return;
+                }
+                #[cfg(not(test))]
+                let library = Some(&self._library);
+                #[cfg(test)]
+                let library = self._library.as_ref();
+                let Some(library) = library else { return };
+                type SetIndirect = unsafe extern "system" fn(Raw, u32) -> Status;
+                if let Ok(set) = unsafe { library.get::<SetIndirect>(b"zeKernelSetIndirectAccess\0") } {
+                    // ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST | DEVICE | SHARED
+                    let _ = unsafe { set(kernel, 0b111) };
+                }
+            }
+
+            /// Print private/spill/SLM sizes of a kernel when `CUDA_FOR_INTEL_LOG` is set.
+            /// Uses a direct loader lookup so the fake backend needs no extra entry point.
+            fn log_kernel_properties(&self, kernel: Raw, name: &CStr) {
+                if !crate::cuda::export_log_enabled() {
+                    return;
+                }
+                #[cfg(not(test))]
+                let library = Some(&self._library);
+                #[cfg(test)]
+                let library = self._library.as_ref();
+                let Some(library) = library else { return };
+                type GetProps = unsafe extern "system" fn(Raw, *mut u8) -> Status;
+                let Ok(get) = (unsafe { library.get::<GetProps>(b"zeKernelGetProperties\0") }) else {
+                    return;
+                };
+                let mut buffer = [0u8; 256];
+                buffer[..4].copy_from_slice(&0x15u32.to_le_bytes()); // ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES
+                if unsafe { get(kernel, buffer.as_mut_ptr()) } != 0 {
+                    return;
+                }
+                let word = |i: usize| u32::from_le_bytes(buffer[16 + 4 * i..20 + 4 * i].try_into().unwrap());
+                eprintln!(
+                    "CUDA for Intel: kernel {} args={} subgroup={}..{} slm={} private={} spill={}",
+                    name.to_string_lossy(),
+                    word(0),
+                    word(5),
+                    word(6),
+                    word(8),
+                    word(9),
+                    word(10)
+                );
+            }
+
             #[cfg(all(test, windows))]
             fn library(&self) -> &Library {
                 self._library.as_ref().expect("hardware profiling requires the native loader")
@@ -566,6 +618,8 @@ impl Module {
         call("zeKernelCreate", || unsafe {
             (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
         })?;
+        api.set_indirect_access(kernel);
+        api.log_kernel_properties(kernel, name);
         let kernel = Handle(kernel);
         self.kernels.push(kernel);
         Ok(kernel)

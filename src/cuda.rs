@@ -245,7 +245,7 @@ fn device(ordinal: c_int, action: impl FnOnce(&DeviceInfo) -> CuResult) -> CuRes
 /// Bring-up log file. Opening it costs a syscall per call, and the Runtime shim
 /// retains the primary context on every launch, so it is opt-in
 /// (`CUDA_FOR_INTEL_LOG=1`, `CUDA_FOR_INTEL_TRACE=1` or `CUDA_FOR_INTEL_EXPORT_LOG=1`).
-fn export_log_enabled() -> bool {
+pub(crate) fn export_log_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         ["CUDA_FOR_INTEL_LOG", "CUDA_FOR_INTEL_TRACE", "CUDA_FOR_INTEL_EXPORT_LOG"]
@@ -1542,13 +1542,69 @@ pub unsafe extern "system" fn cuMemGetInfo_v2(free: *mut usize, total: *mut usiz
             // Level Zero core exposes no free-memory counter (that needs Sysman), so
             // report the capacity minus device bytes this driver has handed out.
             let used = used_device_bytes(&state.contexts, device);
+            let mut free_mem = total_mem.saturating_sub(used);
+            // An integrated GPU's memory is carved from system RAM, so the real headroom is
+            // bounded by what the OS still has available (keep a reserve for the host).
+            if info.info.device_flags & 1 != 0
+                && let Some(available) = system_available_bytes()
+            {
+                free_mem = free_mem.min(available.saturating_sub(SYSTEM_RESERVE_BYTES));
+            }
             unsafe {
-                free.write(total_mem.saturating_sub(used));
+                free.write(free_mem);
                 total.write(total_mem);
             }
             Ok(())
         }))
     })
+}
+
+/// RAM left untouched for the host when capping an integrated GPU's reported free memory.
+const SYSTEM_RESERVE_BYTES: usize = 2 << 30;
+
+/// Physical memory the OS can still hand out (GlobalMemoryStatusEx / MemAvailable).
+fn system_available_bytes() -> Option<usize> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct MemoryStatus {
+            length: u32,
+            load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page: u64,
+            avail_page: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended: u64,
+        }
+        unsafe extern "system" {
+            fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+        }
+        let mut status = MemoryStatus {
+            length: size_of::<MemoryStatus>() as u32,
+            load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page: 0,
+            avail_page: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended: 0,
+        };
+        (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.avail_phys as usize)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
+        let kib: usize = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kib << 10)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
 }
 
 fn used_device_bytes(contexts: &HashMap<usize, CudaContext>, device: c_int) -> usize {

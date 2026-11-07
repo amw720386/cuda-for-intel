@@ -73,6 +73,8 @@ struct Stream {
     blocking: bool,
     dirty: bool,
     generation: u64,
+    /// Work-groups appended since the stream last drained (see `inflight_limit`).
+    queued_groups: u64,
     pending: VecDeque<Submission>,
     append_error: Option<CuResult>,
     capture: Option<Capture>,
@@ -113,6 +115,7 @@ impl Stream {
             blocking,
             dirty: false,
             generation: 0,
+            queued_groups: 0,
             pending: VecDeque::new(),
             append_error: None,
             capture: None,
@@ -279,6 +282,7 @@ impl Stream {
     }
 
     fn complete(&mut self) {
+        self.queued_groups = 0;
         self.pending.clear();
         self.dirty = false;
     }
@@ -472,9 +476,22 @@ impl Streams {
         geometry: ([u32; 3], [u32; 3]),
         args: &[KernelArg],
     ) -> Result<(), CuResult> {
-        self.record_ordered(api, context, key, |list, signal, waits| {
+        // Level Zero rejects further appends with OUT_OF_DEVICE_MEMORY when too much large-grid
+        // work is queued and unfinished, so bound the outstanding work-groups per stream.
+        let groups: u64 = geometry.0.iter().map(|&g| u64::from(g)).product();
+        let limit = inflight_group_limit();
+        let queued = self.get(key)?.queued_groups;
+        if limit != 0 && queued != 0 && should_drain(queued, groups, limit) {
+            self.wait_stream(api, key, u64::MAX)?;
+        }
+        let result = self.record_ordered(api, context, key, |list, signal, waits| {
             list.launch(api, kernel, geometry, args, signal, waits)
-        })
+        });
+        if result.is_ok() {
+            let stream = self.get_mut(key)?;
+            stream.queued_groups = stream.queued_groups.saturating_add(groups);
+        }
+        result
     }
 
     pub(super) unsafe fn copy(
@@ -1019,5 +1036,39 @@ mod tests {
         .unwrap();
         assert_eq!(cuStreamDestroy_v2(idle), Success);
         assert_eq!(cuCtxDestroy_v2(context), Success);
+    }
+}
+
+/// Default cap on work-groups queued on one stream before waiting for it to drain.
+const DEFAULT_MAX_INFLIGHT_GROUPS: u64 = 65_536;
+
+/// `CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS`: 0 disables the window.
+fn inflight_group_limit() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_INFLIGHT_GROUPS)
+    })
+}
+
+fn should_drain(queued: u64, next: u64, limit: u64) -> bool {
+    queued.saturating_add(next) > limit
+}
+
+#[cfg(test)]
+mod inflight_window_tests {
+    use super::*;
+
+    #[test]
+    fn drains_only_when_outstanding_groups_would_exceed_the_limit() {
+        assert!(!should_drain(0, 14_336, 65_536));
+        assert!(!should_drain(14_336 * 3, 14_336, 65_536));
+        assert!(should_drain(14_336 * 4, 14_336, 65_536));
+        assert!(!should_drain(60_000, 1, 65_536));
+        assert!(should_drain(u64::MAX, 1, 65_536));
+        // many tiny launches still queue deeply
+        assert!(!should_drain(50_000, 1, 65_536));
     }
 }
