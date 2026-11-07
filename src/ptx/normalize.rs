@@ -402,6 +402,10 @@ struct Ctx {
     t32: u32,
     t64: u32,
     tp: u32,
+    /// Private 32-bit scratch registers of the cu128 rewrites (own namespace `%__tc_`).
+    tc: u32,
+    /// Extra scratch-register declarations requested by rewrites of the current entry.
+    extra_decls: std::collections::BTreeSet<String>,
     /// Declared register widths of the current entry: exact names and range prefixes.
     widths: Vec<(String, bool, u32)>,
     /// Number of wmma statements seen, used to give each its own 64-bit address register.
@@ -421,6 +425,11 @@ impl Ctx {
         if self.tp > 0 {
             decls.push(format!(".reg .pred %__tp_<{}> ;", self.tp));
         }
+        if self.tc > 0 {
+            decls.push(format!(".reg .b32 %__tc_<{}> ;", self.tc));
+        }
+        decls.extend(std::mem::take(&mut self.extra_decls));
+        self.tc = 0;
         self.t32 = 0;
         self.t64 = 0;
         self.tp = 0;
@@ -652,7 +661,13 @@ fn bit_type(part: &str) -> &str {
 #[path = "vec_small.rs"]
 mod vec_small;
 
+#[path = "rewrites_cu128.rs"]
+mod rewrites_cu128;
+
 fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    if let Some(lines) = rewrites_cu128::rewrite(ctx, inst) {
+        return Some(lines);
+    }
     if let Some(lines) = vec_small::rewrite(ctx, inst) {
         return Some(lines);
     }
