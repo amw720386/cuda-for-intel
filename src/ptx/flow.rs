@@ -132,6 +132,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
     // of an unknown load or a divergent region are assumed to be taken by all threads, as
     // PTX programmers do for `__syncthreads` under data-dependent but block-uniform control.
     let mut tid_derived: HashSet<&str> = HashSet::new();
+    let mut tid_defs: std::collections::HashMap<&str, (String, Vec<&str>)> = std::collections::HashMap::new();
     let mut local_derived: HashSet<&str> = HashSet::new();
     let mut checked_branches = vec![false; blocks.len()];
     loop {
@@ -160,6 +161,15 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                         && !inst.loads_local_space();
                     if thread_dependent || (inst.is_memory_load() && !uniform_load) {
                         varying.extend(defined.iter().copied());
+                    } else {
+                        // Lowering scratch registers (`%__x32_0`, `%__t64_1`, scoped `%__sc..`)
+                        // are rewritten by every lowered statement and never live across them;
+                        // a fresh uniform definition must not inherit an earlier statement's taint.
+                        for d in &defined {
+                            if d.starts_with("%__") {
+                                varying.remove(d);
+                            }
+                        }
                     }
                     let tid_dependent = !inst.is_memory_load()
                         && inputs.iter().any(|src| {
@@ -167,7 +177,18 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                             src.starts_with("%tid.x") || tid_derived.contains(src) || tid_derived.contains(b.as_str())
                         });
                     if tid_dependent {
+                        if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
+                            for d in &defined {
+                                tid_defs.entry(*d).or_insert_with(|| (format!("{inst:?}"), inputs.iter().copied().collect()));
+                            }
+                        }
                         tid_derived.extend(defined.iter().copied());
+                    } else {
+                        for d in &defined {
+                            if d.starts_with("%__") {
+                                tid_derived.remove(d);
+                            }
+                        }
                     }
                 }
             }
@@ -224,6 +245,18 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                 }
                 for inst in &blocks[next].instructions {
                     if inst.is_convergent() {
+                        if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
+                            eprintln!("convergent inst {inst:?} in block {next}");
+                            let mut work: Vec<&str> = vec![predicate];
+                            let mut seen_names = HashSet::new();
+                            while let Some(n) = work.pop() {
+                                if !seen_names.insert(n) { continue; }
+                                if let Some((text, ins)) = tid_defs.get(n) {
+                                    eprintln!("  {n} <- {text}");
+                                    work.extend(ins.iter().copied());
+                                }
+                            }
+                        }
                         return Err(Error::new(format!(
                             "barrier may execute divergently (branch on {predicate} in block {index})"
                         )));

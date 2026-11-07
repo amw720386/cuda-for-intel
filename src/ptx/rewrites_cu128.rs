@@ -2,7 +2,13 @@
 //! that the instruction-level translator does not take directly. All of them are
 //! expressed as other PTX instructions, in the normalisation pass.
 
-use super::{render, Ctx, Inst};
+use super::{render, rewrite_inst, Ctx, Inst};
+
+/// Lower an instruction produced by a rewrite through the whole rewrite pipeline again.
+fn again(ctx: &mut Ctx, guard: &str, op: &str, operands: Vec<String>) -> Vec<String> {
+    let inst = Inst { guard: guard.to_owned(), op: op.to_owned(), operands };
+    rewrite_inst(ctx, &inst).unwrap_or_else(|| vec![inst.render()])
+}
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static LABELS: AtomicU32 = AtomicU32::new(0);
@@ -13,38 +19,56 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     // mov.s32 / mov.s64 / mov.s16 are plain bit moves.
     if parts.len() == 2 && parts[0] == "mov" && matches!(parts[1], "s32" | "s64" | "s16") {
         let ty = format!("b{}", &parts[1][1..]);
-        return Some(vec![render(&inst.guard, &format!("mov.{ty}"), &inst.operands)]);
+        return Some(again(ctx, &inst.guard, &format!("mov.{ty}"), inst.operands.clone()));
     }
     // `X.approx.f32.ftz` -> `X.approx.ftz.f32`.
     if parts.len() >= 3 && parts[parts.len() - 1] == "ftz" && parts[parts.len() - 2] == "f32" && parts[0] != "cvt" {
         let mut p = parts.clone();
         p.swap(parts.len() - 1, parts.len() - 2);
-        return Some(vec![render(&inst.guard, &p.join("."), &inst.operands)]);
+        return Some(again(ctx, &inst.guard, &p.join("."), inst.operands.clone()));
     }
     // vote.ballot.sync.b32 d, p, mask -> vote.sync.ballot.b32
     if op == "vote.ballot.sync.b32" {
-        return Some(vec![render(&inst.guard, "vote.sync.ballot.b32", &inst.operands)]);
+        return Some(again(ctx, &inst.guard, "vote.sync.ballot.b32", inst.operands.clone()));
     }
     // Non-coherent signed loads: plain loads.
     if op == "ld.global.nc.s32" {
-        return Some(vec![render(&inst.guard, "ld.global.s32", &inst.operands)]);
+        return Some(again(ctx, &inst.guard, "ld.global.s32", inst.operands.clone()));
     }
     // ldmatrix.sync.aligned.x4.m8n8[.trans].shared.b16 -> ...m8n8.x4...
     if parts.len() >= 5 && parts[0] == "ldmatrix" && parts[3].starts_with('x') && parts[4] == "m8n8" {
         let mut p = parts.clone();
         p.swap(3, 4);
-        return Some(vec![render(&inst.guard, &p.join("."), &inst.operands)]);
+        return Some(again(ctx, &inst.guard, &p.join("."), inst.operands.clone()));
     }
     if parts.len() >= 6 && parts[0] == "ldmatrix" && parts[3].starts_with('x') && parts[4] == "trans" && parts[5] == "m8n8" {
         let mut p = parts.clone();
         p.swap(3, 5);
         p.swap(4, 5);
-        return Some(vec![render(&inst.guard, &p.join("."), &inst.operands)]);
+        return Some(again(ctx, &inst.guard, &p.join("."), inst.operands.clone()));
     }
-    // `[%rd+-64]` -> `[%rd-64]`
-    if matches!(parts[0], "ld" | "st") && inst.operands.iter().any(|o| o.contains("+-")) {
-        let operands: Vec<String> = inst.operands.iter().map(|o| o.replace("+-", "-")).collect();
-        return Some(vec![render(&inst.guard, op, &operands)]);
+    // `[%reg-N]` / `[%reg+-N]`: fold the negative displacement into an address register.
+    if matches!(parts[0], "ld" | "st" | "atom" | "red") {
+        for (i, operand) in inst.operands.iter().enumerate() {
+            let Some((base, off)) = address_parts(operand) else { continue };
+            if off >= 0 || !base.starts_with('%') || !operand.contains('-') {
+                continue;
+            }
+            let wide = ctx.width_of(&base) == Some(64);
+            let mut operands = inst.operands.clone();
+            let line = if wide {
+                ctx.need64(1);
+                operands[i] = "[ %__t64_0 ]".into();
+                render(&inst.guard, "add.s64", &["%__t64_0".to_owned(), base, off.to_string()])
+            } else {
+                ctx.tc = ctx.tc.max(2);
+                operands[i] = "[ %__tc_1 ]".into();
+                render(&inst.guard, "add.s32", &["%__tc_1".to_owned(), base, off.to_string()])
+            };
+            let mut out = vec![line];
+            out.extend(again(ctx, &inst.guard, op, operands));
+            return Some(out);
+        }
     }
     // cvt to an 8-bit type keeps the low byte.
     if parts.len() == 3 && parts[0] == "cvt" && matches!(parts[1], "s8" | "u8") && matches!(parts[2], "s32" | "u32") && inst.operands.len() == 2 {

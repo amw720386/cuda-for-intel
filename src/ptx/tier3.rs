@@ -976,6 +976,9 @@ fn reduction(ctx: &mut Ctx, inst: &Inst, parts: &[&str]) -> Option<Vec<String>> 
         None => (false, pred.to_owned()),
     };
     let (bit, junk, total, pz) = (b.t32(), b.t32(), b.t32(), b.tp());
+    // The leader flag gets its own register: the flow analysis tracks registers by name,
+    // and reusing `total` would taint the (block-uniform) reduction result with tid.x.
+    let leader = b.t32();
     // Leader zeroes the word between two barriers so back-to-back reductions cannot race.
     b.p("bar.sync 0 ;");
     for (reg, name) in [("%tid.x", "x"), ("%tid.y", "y"), ("%tid.z", "z")] {
@@ -984,13 +987,13 @@ fn reduction(ctx: &mut Ctx, inst: &Inst, parts: &[&str]) -> Option<Vec<String>> 
         let _ = name;
         b.p(format!("setp.eq.u32 {pz} , {t} , 0 ;"));
         if name == "x" {
-            b.p(format!("selp.b32 {total} , 1 , 0 , {pz} ;"));
+            b.p(format!("selp.b32 {leader} , 1 , 0 , {pz} ;"));
         } else {
             b.p(format!("selp.b32 {t} , 1 , 0 , {pz} ;"));
-            b.p(format!("and.b32 {total} , {total} , {t} ;"));
+            b.p(format!("and.b32 {leader} , {leader} , {t} ;"));
         }
     }
-    b.p(format!("setp.ne.u32 {pz} , {total} , 0 ;"));
+    b.p(format!("setp.ne.u32 {pz} , {leader} , 0 ;"));
     b.p(format!("@ {pz} st.shared.u32 {word} , %__bz ;"));
     b.p("bar.sync 0 ;");
     // and counts the false predicates; or and popc count the true ones.
