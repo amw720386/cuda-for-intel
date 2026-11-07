@@ -83,6 +83,8 @@ mod hw_ggml;
 mod hw_tier2;
 #[path = "gpu/hw_ggml_stock.rs"]
 mod hw_ggml_stock;
+#[path = "gpu/hw_cublas_batched.rs"]
+mod hw_cublas_batched;
 #[path = "gpu/module_globals.rs"]
 mod module_globals;
 #[path = "gpu/event_timing.rs"]
