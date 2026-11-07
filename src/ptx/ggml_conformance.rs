@@ -319,7 +319,7 @@ fn check_quantize_q8_1(ne00: usize, ne0: usize, ne1: usize, ne2: usize, ne3: usi
                 let c = g * 32 + i;
                 *v = if c < ne00 { x[row * ne00 + c] } else { 0.0 };
             }
-            let want = quantize_q8_1_group(&grp);
+            let want = quantize_q8_1_group(&grp, index().keys().any(|k| k.contains("fusion_args_device")));
             let off = (row * (ne0 / 32) + g) * Q8_1_BYTES;
             assert_eq!(&got[off..off + Q8_1_BYTES], &want[..], "quantize_q8_1 row {row} group {g} (ne00={ne00} ne0={ne0})");
         }
