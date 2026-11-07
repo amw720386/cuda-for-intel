@@ -697,6 +697,12 @@ impl<'a> Emitter<'a> {
                 let value = self.float_bits(source)?;
                 return rounded::sqrt(&mut self.builder, self.opencl, value);
             }
+            FloatOp::Directed { kind, mode, src: [a, b] } => {
+                let a = self.float_bits(a)?;
+                let b = self.float_bits(b)?;
+                self.fp32_fma = true;
+                return rounded::directed(&mut self.builder, self.opencl, kind, mode, a, b);
+            }
             FloatOp::Add([a, b]) | FloatOp::Sub([a, b]) | FloatOp::Mul([a, b]) => {
                 let a = self.float_value(a)?;
                 let b = self.float_value(b)?;
@@ -1588,45 +1594,51 @@ impl<'a> Emitter<'a> {
             }
             Instruction::Load32(space, dst, address) => {
                 let id = if space == Space::Global {
-                    // CUDA allows misaligned ld.global.u32 (e.g. q8_0 qs at +2 after half).
-                    // Assemble from two u16 loads so Intel Level Zero stays defined.
-                    let (base, offset) = match address.split_once('+') {
-                        Some((base, offset)) => (
-                            base,
-                            Self::parse_byte_offset(offset).ok_or_else(|| {
-                                Error::new(format!("unsupported PTX address offset {offset}"))
-                            })?,
-                        ),
-                        None => (address, 0i64),
+                    // PTX requires natural alignment, so the common case is one aligned
+                    // 32-bit load (no tearing against atomics or flag polling). ggml also
+                    // reads q8_0 words at +2 offsets, so tolerate misalignment by combining
+                    // the two aligned words that cover the access; for an aligned address
+                    // both loads hit the same word, so nothing out of bounds is touched.
+                    let bytes = self.addressed_byte_pointer(space, address)?;
+                    let addr = self.builder.convert_ptr_to_u(self.u64_type, None, bytes)?;
+                    let c = |s: &mut Self, v: u64| s.builder.constant_bit64(s.u64_type, v);
+                    let (c3, cnot3) = (c(self, 3), c(self, !3u64));
+                    let low_bits = self.builder.bitwise_and(self.u64_type, None, addr, c3)?;
+                    let lo_addr = self.builder.bitwise_and(self.u64_type, None, addr, cnot3)?;
+                    let up = self.builder.i_add(self.u64_type, None, addr, c3)?;
+                    let hi_addr = self.builder.bitwise_and(self.u64_type, None, up, cnot3)?;
+                    let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
+                        let p = s.builder.convert_u_to_ptr(s.global_word_ptr, None, a)?;
+                        Ok(s.builder.load(s.u32_type, None, p, None, [])?)
                     };
-                    let lo_addr = if offset == 0 {
-                        base.to_string()
-                    } else if offset > 0 {
-                        format!("{base}+{offset}")
-                    } else {
-                        format!("{base}+{offset}") // offset already includes '-'
-                    };
-                    let hi_addr = {
-                        let hi = offset + 2;
-                        if hi == 0 {
-                            base.to_string()
-                        } else if hi > 0 {
-                            format!("{base}+{hi}")
-                        } else {
-                            format!("{base}+{hi}")
-                        }
-                    };
-                    let lo_ptr = self.half_pointer(space, &lo_addr)?;
-                    let hi_ptr = self.half_pointer(space, &hi_addr)?;
-                    let lo16 = self.builder.load(self.u16_type, None, lo_ptr, None, [])?;
-                    let hi16 = self.builder.load(self.u16_type, None, hi_ptr, None, [])?;
-                    let lo = self.builder.u_convert(self.u32_type, None, lo16)?;
-                    let hi = self.builder.u_convert(self.u32_type, None, hi16)?;
-                    let shift = self.builder.constant_bit32(self.u32_type, 16);
-                    let hi = self
+                    let lo = word(self, lo_addr)?;
+                    let hi = word(self, hi_addr)?;
+                    let low_bits32 = self.builder.u_convert(self.u32_type, None, low_bits)?;
+                    let eight = self.builder.constant_bit32(self.u32_type, 3);
+                    let shift = self
                         .builder
-                        .shift_left_logical(self.u32_type, None, hi, shift)?;
-                    self.builder.bitwise_or(self.u32_type, None, lo, hi)?
+                        .shift_left_logical(self.u32_type, None, low_bits32, eight)?;
+                    let zero = self.builder.constant_bit32(self.u32_type, 0);
+                    let thirty_two = self.builder.constant_bit32(self.u32_type, 32);
+                    let inv = self.builder.i_sub(self.u32_type, None, thirty_two, shift)?;
+                    let from_lo = self
+                        .builder
+                        .shift_right_logical(self.u32_type, None, lo, shift)?;
+                    let c31 = self.builder.constant_bit32(self.u32_type, 31);
+                    let inv_masked = self.builder.bitwise_and(
+                        self.u32_type,
+                        None,
+                        inv,
+                        c31,
+                    )?;
+                    let from_hi = self
+                        .builder
+                        .shift_left_logical(self.u32_type, None, hi, inv_masked)?;
+                    let aligned = self.builder.i_equal(self.bool_type, None, shift, zero)?;
+                    let from_hi = self
+                        .builder
+                        .select(self.u32_type, None, aligned, zero, from_hi)?;
+                    self.builder.bitwise_or(self.u32_type, None, from_lo, from_hi)?
                 } else {
                     let pointer = self.word_pointer(space, address)?;
                     self.builder.load(self.u32_type, None, pointer, None, [])?

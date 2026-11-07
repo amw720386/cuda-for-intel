@@ -266,3 +266,132 @@ pub(super) fn div(builder: &mut Builder, opencl: Word, a: Word, b: Word) -> Resu
 pub(super) fn sqrt(builder: &mut Builder, opencl: Word, value: Word) -> Result<Word, Error> {
     Math::new(builder, opencl).sqrt(value)
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Mode {
+    Zero,
+    Down,
+    Up,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Arith {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl<'a> Math<'a> {
+    /// Directed-rounding add/sub/mul. SPIR-V cannot select a rounding mode for FAdd, so
+    /// compute the round-to-nearest result plus its exact error (two-sum / FMA) and step
+    /// one ulp when nearest landed on the wrong side. Assumes no flush-to-zero surprises.
+    fn directed(&mut self, kind: Arith, mode: Mode, a: Word, b: Word) -> Result<Word, Error> {
+        let f32t = self.b.type_float(32, None);
+        let b = if kind == Arith::Sub {
+            let sign = self.c(SIGN);
+            self.xor(b, sign)?
+        } else {
+            b
+        };
+        let fa = self.b.bitcast(f32t, None, a)?;
+        let fb = self.b.bitcast(f32t, None, b)?;
+        let (fs, fe) = if kind == Arith::Mul {
+            let p = self.b.f_mul(f32t, None, fa, fb)?;
+            let np = self.b.f_negate(f32t, None, p)?;
+            let e = self.b.ext_inst(
+                f32t,
+                None,
+                self.opencl,
+                OpenclStd100Op::fma as u32,
+                [fa, fb, np].map(Operand::IdRef),
+            )?;
+            (p, e)
+        } else {
+            let s = self.b.f_add(f32t, None, fa, fb)?;
+            let bb = self.b.f_sub(f32t, None, s, fa)?;
+            let t = self.b.f_sub(f32t, None, s, bb)?;
+            let ea = self.b.f_sub(f32t, None, fa, t)?;
+            let eb = self.b.f_sub(f32t, None, fb, bb)?;
+            (s, self.b.f_add(f32t, None, ea, eb)?)
+        };
+        let s = self.b.bitcast(self.u32, None, fs)?;
+        let zero_f = self.b.constant_bit32(f32t, 0);
+        let e_pos = self.b.f_ord_greater_than(self.boolean, None, fe, zero_f)?;
+        let e_neg = self.b.f_ord_less_than(self.boolean, None, fe, zero_f)?;
+        let (sign_c, one, zero) = (self.c(SIGN), self.c(1), self.c(0));
+        let s_sign = self.and(s, sign_c)?;
+        let s_neg = self.eq(s_sign, sign_c)?;
+        let s_mag = self.magnitude(s)?;
+        let s_zero = self.eq(s_mag, zero)?;
+        let inc = self.add(s, one)?;
+        let dec = self.sub(s, one)?;
+        let min_pos = one;
+        let min_neg = self.c(SIGN | 1);
+        let stepped = match mode {
+            Mode::Zero => {
+                // Move magnitude toward zero when the error has the opposite sign.
+                let need = self.b.select(self.boolean, None, s_neg, e_pos, e_neg)?;
+                let need_nz = self.both_not(need, s_zero)?;
+                self.select(need_nz, dec, s)?
+            }
+            Mode::Down => {
+                // Positive: decrement (+0 becomes -min). Negative: grow magnitude.
+                let pos_next = self.select(s_zero, min_neg, dec)?;
+                let next = self.select(s_neg, inc, pos_next)?;
+                self.select(e_neg, next, s)?
+            }
+            Mode::Up => {
+                let neg_next = self.select(s_zero, min_pos, dec)?;
+                let next = self.select(s_neg, neg_next, inc)?;
+                self.select(e_pos, next, s)?
+            }
+        };
+        // Finite operands that overflowed to infinity: toward-zero directions give max finite.
+        let inf = self.c(INFINITY);
+        let (a_mag, b_mag) = (self.magnitude(a)?, self.magnitude(b)?);
+        let a_fin = self.lt(a_mag, inf)?;
+        let b_fin = self.lt(b_mag, inf)?;
+        let s_inf = self.eq(s_mag, inf)?;
+        let fin = self.both(a_fin, b_fin)?;
+        let overflow = self.both(s_inf, fin)?;
+        let max_mag = self.c(INFINITY - 1);
+        let max_val = self.or(s_sign, max_mag)?;
+        let use_max = match mode {
+            Mode::Zero => overflow,
+            Mode::Down => self.both_not_neg(overflow, s_neg)?,
+            Mode::Up => self.both(overflow, s_neg)?,
+        };
+        let result = self.select(use_max, max_val, stepped)?;
+        // Exact cancellation of nonzero operands yields -0 when rounding down.
+        if mode == Mode::Down && kind != Arith::Mul {
+            let a_nz = self.lt(zero, a_mag)?;
+            let cancel = self.both(a_nz, s_zero)?;
+            let cancel = self.both(cancel, fin)?;
+            let pos_zero = self.eq(s, zero)?;
+            let cancel = self.both(cancel, pos_zero)?;
+            let neg_zero = self.c(SIGN);
+            return self.select(cancel, neg_zero, result);
+        }
+        Ok(result)
+    }
+
+    fn both_not(&mut self, a: Word, b: Word) -> Result<Word, Error> {
+        let nb = self.b.logical_not(self.boolean, None, b)?;
+        self.both(a, nb)
+    }
+
+    fn both_not_neg(&mut self, a: Word, b: Word) -> Result<Word, Error> {
+        self.both_not(a, b)
+    }
+}
+
+pub(super) fn directed(
+    builder: &mut Builder,
+    opencl: Word,
+    kind: Arith,
+    mode: Mode,
+    a: Word,
+    b: Word,
+) -> Result<Word, Error> {
+    Math::new(builder, opencl).directed(kind, mode, a, b)
+}
