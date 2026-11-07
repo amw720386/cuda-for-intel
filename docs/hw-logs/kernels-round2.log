@@ -1,0 +1,15 @@
+# Hardware validation round 2 (Arc B390): approximate math error vs f64 libm
+    "ex2.approx.f32: max 1.10 ulp, max abs err 6.860e-2 (2^-3.9), max rel err 1.069e-7",
+    "lg2.approx.f32: max 0.52 ulp, max abs err 9.651e-7 (2^-20.0), max rel err 5.933e-8",
+    "rcp.approx.f32: max 0.99 ulp, max abs err 8.630e-6 (2^-16.8), max rel err 1.172e-7",
+    "rsqrt.approx.f32: max 0.97 ulp, max abs err 6.841e-7 (2^-20.5), max rel err 9.995e-8",
+    "sin.approx.f32: max 69759.27 ulp, max abs err 1.343e-7 (2^-22.8), max rel err 7.546e-3",
+    "cos.approx.f32: max 47933.18 ulp, max abs err 1.868e-7 (2^-22.4), max rel err 5.682e-3",
+    "tanh.approx.f32: max 4.31 ulp, max abs err 1.284e-7 (2^-22.9), max rel err 3.953e-7",
+    "ex2.approx.f32 specials [0,-0,inf,-inf,nan] -> [1.0, 1.0, inf, 0.0, NaN]",
+    "rcp.approx.f32 specials [0,-0,inf,-inf,nan] -> [inf, -inf, 0.0, -0.0, NaN]",
+    "rsqrt.approx.f32 specials [0,-0,inf,-inf,nan] -> [inf, -inf, 0.0, NaN, NaN]",
+    "tanh.approx.f32 specials [0,-0,inf,-inf,nan] -> [0.0, -0.0, 1.0, -1.0, NaN]",
+
+Full gpu suite after merging ptx-tier2: see commit message; hw_ tests 37 passed.
+sin/cos ulp is large only near zero crossings; absolute error is below 2^-22.
