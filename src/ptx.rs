@@ -907,13 +907,28 @@ mod tests {
                 continue;
             };
             let Ok(text) = String::from_utf8(ptx) else { continue };
-            let Ok(names) = entry_names(&text) else { continue };
             blobs += 1;
-            for name in names {
+            // One parse per module; emit each entry on its own to attribute failures.
+            let prepared = match prepare(&text) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    kinds.entry(format!("prepare: {error}")).or_default().push(format!("blob{blobs}"));
+                    continue;
+                }
+            };
+            let (parsed, vars) = match parse::parse_module(&prepared) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    kinds.entry(format!("parse: {error}")).or_default().push(format!("blob{blobs}"));
+                    continue;
+                }
+            };
+            for entry in parsed {
                 entries += 1;
-                if let Err(error) = diagnose_entry(&text, name) {
+                let name = entry.name.to_owned();
+                if let Err(error) = spirv::emit(vec![entry], vars.device.clone()) {
                     failed += 1;
-                    kinds.entry(error.to_string()).or_default().push(name.to_owned());
+                    kinds.entry(error.to_string()).or_default().push(name);
                 }
             }
         }
