@@ -774,7 +774,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn word_pointer(&mut self, space: Space, address: &str) -> Result<Word, Error> {
-        if space == Space::Shared && !address.starts_with('%') {
+        if space == Space::Shared && !address.starts_with('%') && !address.contains('+') {
             return self.shared_base(address);
         }
         let bytes_ptr = self.addressed_byte_pointer(space, address)?;
