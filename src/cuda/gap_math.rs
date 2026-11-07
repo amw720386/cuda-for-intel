@@ -235,7 +235,12 @@ pub(crate) fn function_attribute(attr: i32, facts: FuncFacts) -> Option<i32> {
         1..=3 => 0,
         // The translator does not allocate registers; report a stable stand-in.
         4 => 32,
-        5 | 6 => PTX_AND_BINARY_VERSION,
+        // Binary/PTX version follow the reported compute capability: PyTorch asserts
+        // `binaryVersion >= kernel arch` for the CUTLASS attention variants.
+        5 | 6 => {
+            let (major, minor) = super::reported_cc();
+            (major * 10 + minor) as i32
+        }
         7 => 0,
         ATTR_MAX_DYNAMIC_SHARED => facts.max_dynamic_shared.min(i32::MAX as u32) as i32,
         ATTR_CARVEOUT => -1,
