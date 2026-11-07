@@ -99,6 +99,10 @@ pub struct Call {
 /// Pick the kernel variant for a call, or `None` when the call does not qualify
 /// (the caller then uses the tiled PTX kernels). `flags` is the probed operand
 /// spelling for the input type.
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
 pub fn qualify(c: &Call, mode: Mode, tile: (u32, u32), flags: Flags) -> Option<Cfg> {
     let d = &c.d;
     if mode == Mode::Off || d.a != d.b || d.scalar != ScalarKind::F32 || c.opts.acc16 {
@@ -112,8 +116,16 @@ pub fn qualify(c: &Call, mode: Mode, tile: (u32, u32), flags: Flags) -> Option<C
     if d.m == 0 || d.n == 0 || d.k == 0 {
         return None;
     }
-    if mode == Mode::Auto && !(d.m >= 16 && d.n >= 8 && d.k >= 16) {
-        return None;
+    if mode == Mode::Auto {
+        // Small or skinny problems are faster on the tiled PTX kernels: a 64-row Linear at
+        // hidden 1024 was 1.2x to 4x slower with XMX. Tunable: CFI_XMX_MIN_DIM (default 128,
+        // applied to min(m, n)) and CFI_XMX_MIN_WORK (default 2^24 multiply-adds per matrix).
+        let min_dim = env_u64("CFI_XMX_MIN_DIM", 128);
+        let min_work = env_u64("CFI_XMX_MIN_WORK", 1 << 24);
+        let work = d.m as u64 * d.n as u64 * d.k as u64;
+        if !(d.m >= 16 && d.n >= 8 && d.k >= 16) || (d.m.min(d.n) as u64) < min_dim || work < min_work {
+            return None;
+        }
     }
     let (ib, jb) = tile;
     if d.n.div_ceil(jb * xmx::DPAS_M) > MAX_GRID_Y {
@@ -496,7 +508,11 @@ mod tests {
         }
         let c = call(64, 64, 64, true, false, DType::F16, DType::F32);
         assert!(qualify(&c, Mode::Off, (2, 4), Flags::Packed).is_none());
-        assert!(qualify(&c, Mode::Auto, (2, 4), Flags::Packed).is_some());
+        // Small problems stay on the PTX kernels in Auto mode; Force qualifies them.
+        assert!(qualify(&c, Mode::Auto, (2, 4), Flags::Packed).is_none());
+        assert!(qualify(&c, Mode::Force, (2, 4), Flags::Packed).is_some());
+        let big = call(512, 512, 512, true, false, DType::F16, DType::F32);
+        assert!(qualify(&big, Mode::Auto, (2, 4), Flags::Packed).is_some());
         let f = call(64, 64, 64, true, false, DType::F32, DType::F32);
         assert!(qualify(&f, Mode::Force, (2, 4), Flags::Packed).is_none());
     }
@@ -513,17 +529,17 @@ mod tests {
     #[test]
     fn fast_load_variants_need_proven_alignment() {
         let mut c = call(64, 64, 64, true, true, DType::F16, DType::F32);
-        let cfg = qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap();
+        let cfg = qualify(&c, Mode::Force, (2, 4), Flags::Packed).unwrap();
         assert!(cfg.pair_a && cfg.vec_b);
         c.a = 0x1002; // not 4-byte aligned
         c.b = 0x2008; // not 16-byte aligned
-        let cfg = qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap();
+        let cfg = qualify(&c, Mode::Force, (2, 4), Flags::Packed).unwrap();
         assert!(!cfg.pair_a && !cfg.vec_b);
         let mut c = call(64, 60, 64, true, true, DType::F16, DType::F32);
         c.d.ldb = 64;
-        assert!(!qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap().vec_b); // n % 8 != 0
+        assert!(!qualify(&c, Mode::Force, (2, 4), Flags::Packed).unwrap().vec_b); // n % 8 != 0
         c.pointer_arrays = true;
-        let cfg = qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap();
+        let cfg = qualify(&c, Mode::Force, (2, 4), Flags::Packed).unwrap();
         assert!(cfg.ptrs && !cfg.pair_a && !cfg.vec_b);
     }
 
