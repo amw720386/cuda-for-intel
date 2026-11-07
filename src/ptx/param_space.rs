@@ -147,7 +147,7 @@ pub(super) fn parse<'a>(body: &[&'a str], names: &[&'a str]) -> Result<Option<In
     let dynamic = base.starts_with('%');
     if !dynamic {
         // Spellings the legacy table already lowers stay there.
-        let legacy = count == 1 && matches!(ty, "u32" | "b32" | "s32" | "f32" | "u64" | "b64" | "s8")
+        let legacy = count == 1 && matches!(ty, "u32" | "b32" | "s32" | "f32" | "u64" | "b64")
             || count > 1 && ty == "f32";
         if legacy || off < 0 {
             return Ok(None);
