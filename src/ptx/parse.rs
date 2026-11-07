@@ -1,5 +1,5 @@
 use super::{
-    Block, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
+    Alu3Op, Alu64Op, Block, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
     Width,
 };
 use std::collections::HashMap;
@@ -473,6 +473,94 @@ impl<'a> Parser<'a> {
             },
             ["not.pred", dst, ",", src] => Instruction::NotPred(dst, src),
             ["neg.s32", dst, ",", src] => Instruction::Integer32(IntegerOp::Sub, dst, ["0", src]),
+            [
+                op @ ("add.s32" | "add.u32" | "sub.u32" | "mul.lo.u32" | "shr.b32" | "xor.b32"
+                | "min.s32" | "max.s32" | "min.u32" | "max.u32" | "mul.hi.s32"
+                | "and.b16" | "or.b16" | "xor.b16" | "shr.u16"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => {
+                let op = match *op {
+                    "add.s32" | "add.u32" => IntegerOp::Add,
+                    "sub.u32" => IntegerOp::Sub,
+                    "mul.lo.u32" => IntegerOp::Mul,
+                    "xor.b32" | "xor.b16" => IntegerOp::Xor,
+                    "min.s32" => IntegerOp::MinSigned,
+                    "max.s32" => IntegerOp::MaxSigned,
+                    "min.u32" => IntegerOp::MinUnsigned,
+                    "max.u32" => IntegerOp::MaxUnsigned,
+                    "mul.hi.s32" => IntegerOp::MulHighSigned,
+                    "and.b16" => IntegerOp::And,
+                    "or.b16" => IntegerOp::Or,
+                    // 16-bit values are zero-extended in their slot, so a logical shift is exact.
+                    _ => IntegerOp::ShiftRightLogical,
+                };
+                Instruction::Integer32(op, dst, [a, b])
+            }
+            ["abs.s32", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::AbsSigned, dst, [src, src])
+            }
+            ["popc.b32", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::PopCount, dst, [src, src])
+            }
+            ["clz.b32", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::LeadingZeros, dst, [src, src])
+            }
+            ["cvt.s32.s16", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::SignExtend16, dst, [src, src])
+            }
+            ["cvt.u32.u16" | "cvt.u16.u16", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::ToU16, dst, [src, src])
+            }
+            ["cvt.u32.u8" | "cvt.u16.u8" | "cvt.u8.u32" | "cvt.u8.u8", dst, ",", src] => {
+                Instruction::Integer32(IntegerOp::ToU8, dst, [src, src])
+            }
+            [
+                op @ ("bfe.u32" | "bfe.s32"),
+                dst,
+                ",",
+                a,
+                ",",
+                pos,
+                ",",
+                len,
+            ] => Instruction::Alu3(
+                if *op == "bfe.u32" {
+                    Alu3Op::BfeUnsigned
+                } else {
+                    Alu3Op::BfeSigned
+                },
+                dst,
+                [a, pos, len, "0"],
+            ),
+            ["bfi.b32", dst, ",", f, ",", a, ",", pos, ",", len] => {
+                Instruction::Alu3(Alu3Op::Bfi, dst, [f, a, pos, len])
+            }
+            ["prmt.b32", dst, ",", a, ",", b, ",", selector] => {
+                Instruction::Alu3(Alu3Op::Prmt, dst, [a, b, selector, "0"])
+            }
+            ["lop3.b32", dst, ",", a, ",", b, ",", c, ",", lut] => {
+                Instruction::Alu3(Alu3Op::Lop3, dst, [a, b, c, lut])
+            }
+            ["xor.b64", dst, ",", a, ",", b] => Instruction::Alu64(Alu64Op::Xor, dst, [a, b, "0"]),
+            ["max.s64", dst, ",", a, ",", b] => {
+                Instruction::Alu64(Alu64Op::MaxSigned, dst, [a, b, "0"])
+            }
+            ["min.u64", dst, ",", a, ",", b] => {
+                Instruction::Alu64(Alu64Op::MinUnsigned, dst, [a, b, "0"])
+            }
+            ["max.u64", dst, ",", a, ",", b] => {
+                Instruction::Alu64(Alu64Op::MaxUnsigned, dst, [a, b, "0"])
+            }
+            ["neg.s64", dst, ",", a] => Instruction::Alu64(Alu64Op::Neg, dst, [a, "0", "0"]),
+            ["abs.s64", dst, ",", a] => Instruction::Alu64(Alu64Op::AbsSigned, dst, [a, "0", "0"]),
+            ["popc.b64", dst, ",", a] => Instruction::Alu64(Alu64Op::PopCount, dst, [a, "0", "0"]),
+            ["mad.lo.s64" | "mad.lo.u64", dst, ",", a, ",", b, ",", c] => {
+                Instruction::Alu64(Alu64Op::MadLo, dst, [a, b, c])
+            }
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
                 | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "div.u32"

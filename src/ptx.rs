@@ -121,6 +121,50 @@ enum IntegerOp {
     SignExtend8To16,
     /// Arithmetic shift of a 16-bit value (`shr.s16`).
     ShiftRightArithmetic16,
+    Xor,
+    MinSigned,
+    MaxSigned,
+    MinUnsigned,
+    MaxUnsigned,
+    MulHighSigned,
+    /// Sign-extend the low 16 bits (`cvt.s32.s16`).
+    SignExtend16,
+    /// Zero-extend / truncate to the low 8 bits (`cvt.u32.u8`, `cvt.u8.u32`).
+    ToU8,
+    /// `abs.s32` (second source ignored).
+    AbsSigned,
+    /// `popc.b32` (second source ignored).
+    PopCount,
+    /// `clz.b32` (second source ignored).
+    LeadingZeros,
+}
+
+/// Three/four-operand 32-bit bit-manipulation instructions.
+#[derive(Clone, Copy, Debug)]
+enum Alu3Op {
+    BfeUnsigned,
+    BfeSigned,
+    /// `bfi.b32 d, f, a, pos, len`.
+    Bfi,
+    /// Default-mode `prmt.b32 d, a, b, selector`.
+    Prmt,
+    /// `lop3.b32 d, a, b, c, immLut`.
+    Lop3,
+}
+
+/// 64-bit integer instructions without a dedicated variant.
+#[derive(Clone, Copy, Debug)]
+enum Alu64Op {
+    Xor,
+    MaxSigned,
+    MinUnsigned,
+    MaxUnsigned,
+    Neg,
+    AbsSigned,
+    /// `mad.lo.{s,u}64 d, a, b, c`.
+    MadLo,
+    /// `popc.b64` — the destination is a 32-bit register.
+    PopCount,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,6 +303,10 @@ enum Instruction<'a> {
     And64(&'a str, [&'a str; 2]),
     Or64(&'a str, [&'a str; 2]),
     MinS64(&'a str, [&'a str; 2]),
+    /// Three/four-source 32-bit bit manipulation; unused sources are `"0"`.
+    Alu3(Alu3Op, &'a str, [&'a str; 4]),
+    /// 64-bit integer op; unused sources are `"0"`.
+    Alu64(Alu64Op, &'a str, [&'a str; 3]),
     Rem64 {
         signed: bool,
         dst: &'a str,
@@ -353,7 +401,11 @@ impl<'a> Instruction<'a> {
                 out.extend_from_slice(&dst[..usize::from(*count)]);
                 &[]
             }
-            Mad32(dst, src) | Dp4a(dst, src) => {
+            Mad32(dst, src) | Dp4a(dst, src) | Alu64(_, dst, src) => {
+                out.push(*dst);
+                src
+            }
+            Alu3(_, dst, src) => {
                 out.push(*dst);
                 src
             }
