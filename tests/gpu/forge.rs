@@ -321,8 +321,8 @@ fn event_driver_api() {
     assert_eq!(unsafe { cuEventRecord(event, foreign) }, 400);
     assert_eq!(unsafe { cuStreamWaitEvent(foreign, event, 0) }, 400);
     let per_thread = std::ptr::without_provenance_mut(2);
-    assert_eq!(unsafe { cuEventRecord(event, per_thread) }, 801);
-    assert_eq!(unsafe { cuStreamWaitEvent(per_thread, event, 0) }, 801);
+    assert_eq!(unsafe { cuEventRecord(event, per_thread) }, 0);
+    assert_eq!(unsafe { cuStreamWaitEvent(per_thread, event, 0) }, 0);
     ok!(cuCtxSetCurrent(other));
     ok!(cuCtxDestroy_v2(other));
     assert_eq!(unsafe { cuEventQuery(other_event) }, 400);

@@ -1777,11 +1777,12 @@ mod tests {
         // shr.s32 by >= 32 yields 0 or -1: clamp the count to 31, no zeroing select.
         let (module, ops) = entry_ops(SHIFT_KERNEL);
         assert!(u32_constants(&module).contains(&31));
-        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 1);
+        // Two aligned 32-bit global loads contribute two Selects.
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 3);
         assert!(ops.contains(&Op::ShiftRightArithmetic));
         // Logical shifts still zero out-of-range counts.
         let (_, ops) = entry_ops(&SHIFT_KERNEL.replace("shr.s32", "shr.u32"));
-        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 2);
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 4);
     }
 
     #[test]
@@ -1803,11 +1804,11 @@ mod tests {
             }
         ";
         let (_, ops) = entry_ops(SOURCE);
-        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 1);
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 3);
         let source16 = SHIFT_KERNEL.replace("shr.s32", "shr.s16");
         let (module, ops) = entry_ops(&source16);
         assert!(u32_constants(&module).contains(&15));
-        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 1);
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 3);
     }
 
     #[test]
