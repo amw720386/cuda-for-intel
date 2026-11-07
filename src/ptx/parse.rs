@@ -207,7 +207,7 @@ impl<'a> Parser<'a> {
         let body = if braced { &slice[1..end] } else { &slice[..end] };
         let result = match body {
             [
-                "ld.param.b32" | "ld.param.u32" | "ld.param.f32",
+                op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32"),
                 dst,
                 ",",
                 "[",
@@ -224,7 +224,11 @@ impl<'a> Parser<'a> {
                 } else {
                     (*src, 0)
                 };
-                Instruction::Param(Width::B32, dst, name, offset)
+                if *op == "ld.param.s32" {
+                    Instruction::ParamS32(dst, name, offset)
+                } else {
+                    Instruction::Param(Width::B32, dst, name, offset)
+                }
             }
             ["ld.param.s8", dst, ",", "[", src, "]"] => Instruction::ParamS8(dst, src),
             ["ld.param.b64" | "ld.param.u64", dst, ",", "[", src, "]"] => {
@@ -497,6 +501,7 @@ impl<'a> Parser<'a> {
             }
             ["and.b64", dst, ",", a, ",", b] => Instruction::And64(dst, [a, b]),
             ["or.b64", dst, ",", a, ",", b] => Instruction::Or64(dst, [a, b]),
+            ["min.s64", dst, ",", a, ",", b] => Instruction::MinS64(dst, [a, b]),
             ["shr.u64", dst, ",", a, ",", b] => Instruction::ShiftRightLogical64(dst, [a, b]),
             ["rem.s64", dst, ",", a, ",", b] => Instruction::Rem64 {
                 signed: true,
@@ -802,7 +807,7 @@ impl<'a> Parser<'a> {
                 Instruction::Float32(dst, FloatOp::Ex2Approx([src]))
             }
             [
-                "st.global.u8" | "st.global.b8" | "st.shared.u8" | "st.shared.b8",
+                "st.global.u8" | "st.global.b8" | "st.shared.u8" | "st.shared.b8" | "st.u8",
                 "[",
                 addr,
                 "]",
@@ -817,13 +822,17 @@ impl<'a> Parser<'a> {
                 Instruction::Store8(space, addr, src)
             }
             [
-                "st.global.u16" | "st.global.b16",
+                "st.global.u16" | "st.global.b16" | "st.u16",
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
-            ] => Instruction::Store16(Space::Global, addr, src),
+            ] => {
+                // In this subset generic pointers are global. The emitter rejects
+                // explicitly typed local or shared addresses at this store.
+                Instruction::Store16(Space::Global, addr, src)
+            }
             [
                 "st.global.u64" | "st.global.b64",
                 "[",

@@ -191,15 +191,16 @@ pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize,
             name.to_string_lossy()
         ));
     }
-    let (context, module) = module_for_library(state, library)?;
-    let result = module_function(
-        &state.runtime.api,
-        state.contexts.get_mut(&context).ok_or(ContextIsDestroyed)?,
-        &mut state.next_handle,
-        module,
-        &name,
-    );
-    if result == Err(NotFound) {
+    let result = module_for_library(state, library).and_then(|(context, module)| {
+        module_function(
+            &state.runtime.api,
+            state.contexts.get_mut(&context).ok_or(ContextIsDestroyed)?,
+            &mut state.next_handle,
+            module,
+            &name,
+        )
+    });
+    if matches!(result, Err(NotFound | InvalidPtx)) {
         if trace::enabled()
             && let Ok(source) = std::str::from_utf8(&state.libraries.images[&library].ptx)
             && let Err(error) = ptx::diagnose_entry(source, &name.to_string_lossy())

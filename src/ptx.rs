@@ -183,6 +183,7 @@ enum Instruction<'a> {
     Param(Width, &'a str, &'a str, usize),
     /// `ld.param.s8` â€” load a byte parameter and sign-extend into a b16/b32 slot.
     ParamS8(&'a str, &'a str),
+    ParamS32(&'a str, &'a str, usize),
     /// `ld.param.v2.f32` / `ld.param.v4.f32` from an aggregate `.b8` parameter.
     ParamVec {
         count: u8,
@@ -257,6 +258,7 @@ enum Instruction<'a> {
     ShiftRightLogical64(&'a str, [&'a str; 2]),
     And64(&'a str, [&'a str; 2]),
     Or64(&'a str, [&'a str; 2]),
+    MinS64(&'a str, [&'a str; 2]),
     Rem64 {
         signed: bool,
         dst: &'a str,
@@ -339,6 +341,7 @@ impl<'a> Instruction<'a> {
         Some(match self {
             Param(_, dst, ..)
             | ParamS8(dst, _)
+            | ParamS32(dst, _, _)
             | SharedAddress(dst, _)
             | SharedSymbol32(dst, _)
             | LocalSymbol64(dst, _)
@@ -399,6 +402,7 @@ impl<'a> Instruction<'a> {
             | ShiftRightArithmetic64(dst, src)
             | And64(dst, src)
             | Or64(dst, src)
+            | MinS64(dst, src)
             | Rem64 { dst, src, .. }
             | Add64(dst, src)
             | Sub64(dst, src)
@@ -555,6 +559,27 @@ mod tests {
     const RMSNORM: &str = include_str!("../examples/rmsnorm.ptx");
     const GGML_MODERN: &str = include_str!("../examples/ggml_scale_clamp.ptx");
     const GGML_ADD: &str = include_str!("../examples/ggml_add_f32.ptx");
+
+    #[test]
+    fn sign_extends_s32_parameter_load_into_a_64_bit_register() {
+        let source = r#"
+            .version 9.0
+            .target sm_75
+            .address_size 64
+            .entry extend(.param .u64 out, .param .u32 value) {
+                .reg .b64 %rd<4>;
+                ld.param.u64 %rd1, [out];
+                cvta.to.global.u64 %rd2, %rd1;
+                ld.param.s32 %rd3, [value];
+                st.global.u64 [%rd2], %rd3;
+                ret;
+            }
+        "#;
+        let translated = translate(source).unwrap();
+        assert_eq!(translated.kernels[0].params, [Param::GlobalPtr, Param::U32]);
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        assert!(module.all_inst_iter().any(|inst| inst.class.opcode == Op::SConvert));
+    }
 
     #[test]
     fn lowers_ggml_grid_stride_instructions() {

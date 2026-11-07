@@ -950,6 +950,17 @@ impl<'a> Emitter<'a> {
                     (dst, value.id, value.kind)
                 }
             }
+            Instruction::ParamS32(dst, src, offset) => {
+                let value = self.params.get(&(src, offset)).copied().ok_or_else(|| {
+                    Error::new(format!("unknown PTX parameter word {src}+{offset}"))
+                })?;
+                let id = value.require(Kind::B32, src)?;
+                if self.declarations.get(dst) == Some(&Width::B64) {
+                    (dst, self.builder.s_convert(self.u64_type, None, id)?, Kind::B64)
+                } else {
+                    (dst, id, Kind::B32)
+                }
+            }
             Instruction::ParamS8(dst, src) => {
                 let value = self.params.get(&(src, 0)).copied().ok_or_else(|| {
                     Error::new(format!("unknown PTX parameter word {src}"))
@@ -1528,6 +1539,13 @@ impl<'a> Emitter<'a> {
                 let a = self.integer(a, Kind::B64)?;
                 let b = self.integer(b, Kind::B64)?;
                 let id = self.builder.bitwise_or(self.u64_type, None, a, b)?;
+                (dst, id, Kind::B64)
+            }
+            Instruction::MinS64(dst, [a, b]) => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
+                let less = self.builder.s_less_than(self.bool_type, None, a, b)?;
+                let id = self.builder.select(self.u64_type, None, less, a, b)?;
                 (dst, id, Kind::B64)
             }
             Instruction::Div64 {

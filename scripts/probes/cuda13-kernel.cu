@@ -11,7 +11,7 @@ static void check(cudaError_t result, const char *operation) {
     }
 }
 
-__global__ void write_value(int *output, int value) {
+__global__ void write_value(int *output, int value, long long left, long long right) {
     asm("neg.s32 %0, %1;" : "=r"(output[0]) : "r"(value));
     float signed_value;
     asm("copysign.f32 %0, %1, %2;" : "=f"(signed_value) : "f"(-0.0f), "f"(1.5f));
@@ -19,6 +19,12 @@ __global__ void write_value(int *output, int value) {
     constexpr unsigned a = 0x1a1, b = 0x2b2, c = 0x3c3, d = 0x4d4;
     asm volatile("st.global.v4.u8 [%0], {%1, %2, %3, %4};" ::
                  "l"(output + 2), "r"(a), "r"(b), "r"(c), "r"(d) : "memory");
+    asm volatile("st.u16 [%0], %1;" :: "l"(output + 3), "r"(0x15e6f) : "memory");
+    asm volatile("st.u8 [%0], %1;" :: "l"(reinterpret_cast<char *>(output + 3) + 3),
+                 "r"(0x1a5) : "memory");
+    long long minimum;
+    asm("min.s64 %0, %1, %2;" : "=l"(minimum) : "l"(left), "l"(right));
+    reinterpret_cast<long long *>(output + 4)[0] = minimum;
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -32,7 +38,7 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
     int *device = nullptr;
-    int result[3] = {};
+    int result[6] = {};
     constexpr int expected = 0x12345678;
     check(cudaSetDevice(0), "cudaSetDevice");
     check(cudaMalloc(reinterpret_cast<void **>(&device), sizeof(result)), "cudaMalloc");
@@ -46,7 +52,7 @@ int wmain(int argc, wchar_t **argv) {
     check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags");
     check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), "cudaStreamBeginCapture");
     int captured_value = -expected;
-    write_value<<<1, 1, 0, stream>>>(device, captured_value);
+    write_value<<<1, 1, 0, stream>>>(device, captured_value, 0x1234567800000000LL, -0x12345678aabbccddLL);
     check(cudaGetLastError(), "write_value capture");
     captured_value = 0;
     cudaGraph_t graph = nullptr;
@@ -69,6 +75,11 @@ int wmain(int argc, wchar_t **argv) {
     check(cudaDeviceReset(), "cudaDeviceReset");
     std::printf("Kernel results %08x %08x %08x\n", static_cast<unsigned>(result[0]),
                 static_cast<unsigned>(result[1]), static_cast<unsigned>(result[2]));
+    std::printf("Signed minimum words %08x %08x\n", static_cast<unsigned>(result[5]),
+                static_cast<unsigned>(result[4]));
     return result[0] == expected && static_cast<unsigned>(result[1]) == 0xbfc00000
-        && static_cast<unsigned>(result[2]) == 0xd4c3b2a1 ? 0 : 2;
+        && static_cast<unsigned>(result[2]) == 0xd4c3b2a1
+        && static_cast<unsigned>(result[3]) == 0xa57e5e6f
+        && static_cast<unsigned>(result[4]) == 0x55443323
+        && static_cast<unsigned>(result[5]) == 0xedcba987 ? 0 : 2;
 }
