@@ -75,6 +75,8 @@ mod hw_mma;
 mod hw_float;
 #[path = "gpu/hw_warp.rs"]
 mod hw_warp;
+#[path = "gpu/hw_round2.rs"]
+mod hw_round2;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
