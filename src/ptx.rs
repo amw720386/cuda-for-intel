@@ -861,6 +861,26 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
     }
 }
 
+static DOT_PRODUCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `dp4a` lowers to SPIR-V integer dot product (Xe DP4A) instead of scalar arithmetic.
+/// The runtime turns it on after the driver accepts a probe module; `CUDA_FOR_INTEL_DP4A=0` keeps it off.
+pub(crate) fn dot_product_enabled() -> bool {
+    DOT_PRODUCT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_dot_product(enabled: bool) {
+    DOT_PRODUCT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Smallest module that exercises every dot-product form, used to probe driver support.
+pub(crate) const DOT_PROBE_PTX: &str = ".version 7.0\n.target sm_75\n.address_size 64\n\
+.visible .entry cfi_dot_probe(.param .u64 out)\n{\n.reg .b32 %r<8>;\n.reg .b64 %rd<3>;\n\
+ld.param.u64 %rd1, [out];\ncvta.to.global.u64 %rd2, %rd1;\nld.global.u32 %r1, [%rd2];\n\
+dp4a.s32.s32 %r2, %r1, %r1, %r1;\ndp4a.u32.u32 %r3, %r1, %r2, %r2;\n\
+dp4a.s32.u32 %r4, %r1, %r3, %r3;\ndp4a.u32.s32 %r5, %r1, %r4, %r4;\n\
+st.global.u32 [%rd2], %r5;\nret;\n}\n";
+
 /// Normalised source for [`translate_entry`]; computed once per library.
 pub(crate) fn prepare_source(source: &str) -> Result<String, Error> {
     prepare(source)
