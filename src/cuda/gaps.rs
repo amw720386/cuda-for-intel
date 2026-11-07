@@ -93,6 +93,50 @@ pub extern "system" fn cuFuncSetAttribute(function: Opaque, attr: c_int, value: 
     })
 }
 
+/// CUDA 12 library-kernel attribute entry points resolve the kernel to its function in
+/// the current context and reuse the function attribute logic.
+fn kernel_to_function(kernel: Opaque) -> Result<Opaque, CuResult> {
+    let mut function: Opaque = std::ptr::null_mut();
+    match unsafe { super::library::cuKernelGetFunction(&mut function, kernel) } {
+        Success => Ok(function),
+        error => Err(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuKernelGetAttribute(
+    out: *mut c_int,
+    attr: c_int,
+    kernel: Opaque,
+    _device: c_int,
+) -> CuResult {
+    trace::call("cuKernelGetAttribute", || match kernel_to_function(kernel) {
+        Ok(function) => unsafe { cuFuncGetAttribute(out, attr, function) },
+        Err(error) => error,
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuKernelSetAttribute(
+    attr: c_int,
+    value: c_int,
+    kernel: Opaque,
+    _device: c_int,
+) -> CuResult {
+    trace::call("cuKernelSetAttribute", || match kernel_to_function(kernel) {
+        Ok(function) => cuFuncSetAttribute(function, attr, value),
+        Err(error) => error,
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuKernelSetCacheConfig(kernel: Opaque, config: c_int, _device: c_int) -> CuResult {
+    trace::call("cuKernelSetCacheConfig", || match kernel_to_function(kernel) {
+        Ok(function) => cuFuncSetCacheConfig(function, config),
+        Err(error) => error,
+    })
+}
+
 /// Cache preference is a hint; the backend has no configurable L1/shared split.
 #[unsafe(no_mangle)]
 pub extern "system" fn cuFuncSetCacheConfig(function: Opaque, config: c_int) -> CuResult {
@@ -814,6 +858,37 @@ unsafe fn copy_3d(copy: *const Memcpy3D, stream: Option<Opaque>) -> CuResult {
         Some(plan) => unsafe { run_plan(plan, dst, src, stream) },
         None => InvalidValue,
     }
+}
+
+/// Pitched allocation: rows are padded to 512 bytes (the alignment real drivers report for
+/// cudaMallocPitch), then a plain allocation of `pitch * height` bytes is made.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemAllocPitch_v2(
+    out: *mut u64,
+    pitch: *mut usize,
+    width: usize,
+    height: usize,
+    element_size: u32,
+) -> CuResult {
+    trace::call("cuMemAllocPitch_v2", || {
+        if out.is_null() || pitch.is_null() || width == 0 || height == 0 {
+            return InvalidValue;
+        }
+        if !matches!(element_size, 4 | 8 | 16) {
+            return InvalidValue;
+        }
+        let Some(row) = width.checked_add(511).map(|w| w & !511) else {
+            return InvalidValue;
+        };
+        let Some(total) = row.checked_mul(height) else {
+            return OutOfMemory;
+        };
+        let result = unsafe { cuMemAlloc_v2(out, total) };
+        if result == Success {
+            unsafe { pitch.write(row) };
+        }
+        result
+    })
 }
 
 #[unsafe(no_mangle)]

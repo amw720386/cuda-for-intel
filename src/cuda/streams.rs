@@ -24,6 +24,8 @@ pub(super) mod timing;
 #[cfg(test)]
 mod fake_tests;
 #[cfg(test)]
+mod graph_api_tests;
+#[cfg(test)]
 mod globals_tests;
 #[cfg(test)]
 mod graph_tests;

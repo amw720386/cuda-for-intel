@@ -1,5 +1,6 @@
 use super::export_table::cuGetExportTable;
 use super::gaps::*;
+use super::graph_api::*;
 use super::globals::*;
 use super::graphs::*;
 use super::library::*;
@@ -215,6 +216,7 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuCtxSynchronize" if version >= 13000 => entry!(cuCtxSynchronize_v2, 13000),
         b"cuCtxSynchronize" => entry!(cuCtxSynchronize, 2000, 13000, false),
         b"cuMemAlloc" => entry!(cuMemAlloc_v2, 3020),
+        b"cuMemAllocPitch" => entry!(cuMemAllocPitch_v2, 3020),
         b"cuMemFree" => entry!(cuMemFree_v2, 3020),
         b"cuMemHostAlloc" => entry!(cuMemHostAlloc, 2020),
         b"cuMemFreeHost" => entry!(cuMemFreeHost, 2000),
@@ -270,6 +272,9 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuFuncGetAttribute" => entry!(cuFuncGetAttribute, 2020),
         b"cuFuncSetAttribute" => entry!(cuFuncSetAttribute, 9000),
         b"cuFuncSetCacheConfig" => entry!(cuFuncSetCacheConfig, 3000),
+        b"cuKernelGetAttribute" => entry!(cuKernelGetAttribute, 12000),
+        b"cuKernelSetAttribute" => entry!(cuKernelSetAttribute, 12000),
+        b"cuKernelSetCacheConfig" => entry!(cuKernelSetCacheConfig, 12000),
         b"cuOccupancyMaxActiveBlocksPerMultiprocessor" => {
             entry!(cuOccupancyMaxActiveBlocksPerMultiprocessor, 6050)
         }
@@ -334,6 +339,80 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuGraphUpload" => entry!(cuGraphUpload, 11010, DRIVER_ABI + 1, true),
         b"cuGraphExecDestroy" => entry!(cuGraphExecDestroy, 10000),
         b"cuGraphLaunch" => entry!(cuGraphLaunch, 10000, DRIVER_ABI + 1, true),
+        b"cuGraphCreate" => entry!(cuGraphCreate, 10000),
+        b"cuGraphClone" => entry!(cuGraphClone, 10000),
+        b"cuGraphNodeFindInClone" => entry!(cuGraphNodeFindInClone, 10000),
+        b"cuGraphGetNodes" => entry!(cuGraphGetNodes, 10000),
+        b"cuGraphGetRootNodes" => entry!(cuGraphGetRootNodes, 10000),
+        b"cuGraphGetEdges" if version >= 12030 => entry!(cuGraphGetEdges_v2, 12030),
+        b"cuGraphGetEdges" => entry!(cuGraphGetEdges, 10000, 12030, false),
+        b"cuGraphNodeGetDependencies" if version >= 12030 => {
+            entry!(cuGraphNodeGetDependencies_v2, 12030)
+        }
+        b"cuGraphNodeGetDependencies" => entry!(cuGraphNodeGetDependencies, 10000, 12030, false),
+        b"cuGraphNodeGetDependentNodes" if version >= 12030 => {
+            entry!(cuGraphNodeGetDependentNodes_v2, 12030)
+        }
+        b"cuGraphNodeGetDependentNodes" => {
+            entry!(cuGraphNodeGetDependentNodes, 10000, 12030, false)
+        }
+        b"cuGraphAddDependencies" if version >= 12030 => entry!(cuGraphAddDependencies_v2, 12030),
+        b"cuGraphAddDependencies" => entry!(cuGraphAddDependencies, 10000, 12030, false),
+        b"cuGraphRemoveDependencies" if version >= 12030 => {
+            entry!(cuGraphRemoveDependencies_v2, 12030)
+        }
+        b"cuGraphRemoveDependencies" => entry!(cuGraphRemoveDependencies, 10000, 12030, false),
+        b"cuGraphDestroyNode" => entry!(cuGraphDestroyNode, 10000),
+        b"cuGraphNodeGetType" => entry!(cuGraphNodeGetType, 10000),
+        b"cuGraphDebugDotPrint" => entry!(cuGraphDebugDotPrint, 11030),
+        b"cuGraphAddEmptyNode" => entry!(cuGraphAddEmptyNode, 10000),
+        b"cuGraphAddKernelNode" if version >= 12000 => entry!(cuGraphAddKernelNode_v2, 12000),
+        b"cuGraphAddKernelNode" => entry!(cuGraphAddKernelNode, 10000, 12000, false),
+        b"cuGraphAddMemcpyNode" => entry!(cuGraphAddMemcpyNode, 10000),
+        b"cuGraphAddMemsetNode" => entry!(cuGraphAddMemsetNode, 10000),
+        b"cuGraphAddHostNode" => entry!(cuGraphAddHostNode, 10000),
+        b"cuGraphAddChildGraphNode" => entry!(cuGraphAddChildGraphNode, 10000),
+        b"cuGraphAddEventRecordNode" => entry!(cuGraphAddEventRecordNode, 11010),
+        b"cuGraphAddEventWaitNode" => entry!(cuGraphAddEventWaitNode, 11010),
+        b"cuGraphKernelNodeGetParams" if version >= 12000 => {
+            entry!(cuGraphKernelNodeGetParams_v2, 12000)
+        }
+        b"cuGraphKernelNodeGetParams" => entry!(cuGraphKernelNodeGetParams, 10000, 12000, false),
+        b"cuGraphKernelNodeSetParams" if version >= 12000 => {
+            entry!(cuGraphKernelNodeSetParams_v2, 12000)
+        }
+        b"cuGraphKernelNodeSetParams" => entry!(cuGraphKernelNodeSetParams, 10000, 12000, false),
+        b"cuGraphMemcpyNodeGetParams" => entry!(cuGraphMemcpyNodeGetParams, 10000),
+        b"cuGraphMemcpyNodeSetParams" => entry!(cuGraphMemcpyNodeSetParams, 10000),
+        b"cuGraphMemsetNodeGetParams" => entry!(cuGraphMemsetNodeGetParams, 10000),
+        b"cuGraphMemsetNodeSetParams" => entry!(cuGraphMemsetNodeSetParams, 10000),
+        b"cuGraphHostNodeGetParams" => entry!(cuGraphHostNodeGetParams, 10000),
+        b"cuGraphHostNodeSetParams" => entry!(cuGraphHostNodeSetParams, 10000),
+        b"cuGraphEventRecordNodeGetEvent" => entry!(cuGraphEventRecordNodeGetEvent, 11010),
+        b"cuGraphEventRecordNodeSetEvent" => entry!(cuGraphEventRecordNodeSetEvent, 11010),
+        b"cuGraphEventWaitNodeGetEvent" => entry!(cuGraphEventWaitNodeGetEvent, 11010),
+        b"cuGraphEventWaitNodeSetEvent" => entry!(cuGraphEventWaitNodeSetEvent, 11010),
+        b"cuGraphExecKernelNodeSetParams" if version >= 12000 => {
+            entry!(cuGraphExecKernelNodeSetParams_v2, 12000)
+        }
+        b"cuGraphExecKernelNodeSetParams" => {
+            entry!(cuGraphExecKernelNodeSetParams, 10010, 12000, false)
+        }
+        b"cuGraphExecMemcpyNodeSetParams" => entry!(cuGraphExecMemcpyNodeSetParams, 10020),
+        b"cuGraphExecMemsetNodeSetParams" => entry!(cuGraphExecMemsetNodeSetParams, 10020),
+        b"cuGraphExecHostNodeSetParams" => entry!(cuGraphExecHostNodeSetParams, 10020),
+        b"cuGraphExecEventRecordNodeSetEvent" => entry!(cuGraphExecEventRecordNodeSetEvent, 11010),
+        b"cuGraphExecEventWaitNodeSetEvent" => entry!(cuGraphExecEventWaitNodeSetEvent, 11010),
+        b"cuStreamBeginCaptureToGraph" => {
+            entry!(cuStreamBeginCaptureToGraph, 12030, DRIVER_ABI + 1, true)
+        }
+        b"cuStreamUpdateCaptureDependencies" if version >= 12030 => {
+            entry!(cuStreamUpdateCaptureDependencies_v2, 12030, DRIVER_ABI + 1, true)
+        }
+        b"cuStreamUpdateCaptureDependencies" => {
+            entry!(cuStreamUpdateCaptureDependencies, 11030, 12030, true)
+        }
+        b"cuLaunchHostFunc" => entry!(cuLaunchHostFunc, 10000, DRIVER_ABI + 1, true),
         b"cuEventCreate" => entry!(cuEventCreate, 2000),
         b"cuEventRecord" => entry!(cuEventRecord, 2000, DRIVER_ABI + 1, true),
         b"cuEventRecordWithFlags" => entry!(cuEventRecordWithFlags, 11010, DRIVER_ABI + 1, true),

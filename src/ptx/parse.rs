@@ -92,6 +92,20 @@ impl<'a> Parser<'a> {
     fn param(&mut self) -> Result<(&'a str, Param), Error> {
         self.expect(".param")?;
         let ty = match self.take()? {
+            ".align" if matches!(self.peek(), Some("1" | "2")) => {
+                // Sub-word by-value params (`__half`, `short`, `char`): `.align N .b8 x[N]`.
+                let align = self.take()?;
+                self.expect(".b8")?;
+                let name = self.identifier()?;
+                self.expect("[")?;
+                let bytes = self.take()?;
+                self.expect("]")?;
+                return match (align, bytes) {
+                    ("1", "1") => Ok((name, Param::U8)),
+                    ("2", "2") => Ok((name, Param::U16)),
+                    _ => Err(Error::new("unsupported PTX parameter aggregate size")),
+                };
+            }
             ".align" => {
                 let align = self
                     .take()?
@@ -120,6 +134,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             ".u8" | ".s8" => Param::U8,
+            ".u16" | ".s16" | ".b16" | ".f16" => Param::U16,
             ".u32" | ".b32" => Param::U32,
             ".f32" => Param::F32,
             ".u64" | ".b64" if self.eat(".ptr") => {
@@ -229,7 +244,7 @@ impl<'a> Parser<'a> {
         }
         let result = match body {
             [
-                op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32"),
+                op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32" | "ld.param.u16" | "ld.param.b16"),
                 dst,
                 ",",
                 "[",
@@ -985,6 +1000,28 @@ impl<'a> Parser<'a> {
                 "]",
             ] => Instruction::Load8(memory_space(op), dst, addr),
             [
+                op @ ("ld.global.v2.u8" | "ld.global.nc.v2.u8" | "ld.global.v2.b8" | "ld.global.nc.v2.b8"
+                | "ld.global.v4.u8" | "ld.global.nc.v4.u8" | "ld.global.v4.b8" | "ld.global.nc.v4.b8"),
+                "{",
+                a,
+                ",",
+                b,
+                rest @ ..,
+            ] => {
+                let count = if op.contains("v4") { 4u8 } else { 2 };
+                let (c, d, addr) = match (count, rest) {
+                    (4, [",", c, ",", d, "}", ",", "[", addr, "]"]) => (*c, *d, *addr),
+                    (2, ["}", ",", "[", addr, "]"]) => ("", "", *addr),
+                    _ => {
+                        return Err(Error::new(format!(
+                            "unsupported PTX instruction: {}",
+                            slice[..end].join(" ")
+                        )));
+                    }
+                };
+                Instruction::LoadVecU8 { space: Space::Global, count, dst: [a, b, c, d], addr }
+            }
+            [
                 op @ ("ld.global.v2.u16"
                 | "ld.global.nc.v2.u16"
                 | "ld.global.v2.b16"
@@ -992,7 +1029,15 @@ impl<'a> Parser<'a> {
                 | "ld.global.v4.u16"
                 | "ld.global.nc.v4.u16"
                 | "ld.global.v4.b16"
-                | "ld.global.nc.v4.b16"),
+                | "ld.global.nc.v4.b16"
+                | "ld.shared.v2.u16"
+                | "ld.shared.v2.b16"
+                | "ld.shared.v4.u16"
+                | "ld.shared.v4.b16"
+                | "ld.local.v2.u16"
+                | "ld.local.v2.b16"
+                | "ld.local.v4.u16"
+                | "ld.local.v4.b16"),
                 "{",
                 a,
                 ",",
@@ -1022,7 +1067,7 @@ impl<'a> Parser<'a> {
                     }
                 };
                 Instruction::LoadVecU16 {
-                    space: Space::Global,
+                    space: memory_space(op),
                     count,
                     dst: [a, b, c, d],
                     addr,
@@ -1093,6 +1138,27 @@ impl<'a> Parser<'a> {
                 ",",
                 b,
             ] => Instruction::Float32(dst, FloatOp::Add([a, b])),
+            [
+                op @ ("fma.rz.f32" | "fma.rz.ftz.f32" | "fma.rm.f32" | "fma.rm.ftz.f32" | "fma.rp.f32"
+                | "fma.rp.ftz.f32"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+                ",",
+                c,
+            ] => {
+                use super::rounded::Mode;
+                let mode = if op.starts_with("fma.rz") {
+                    Mode::Zero
+                } else if op.starts_with("fma.rm") {
+                    Mode::Down
+                } else {
+                    Mode::Up
+                };
+                Instruction::Float32(dst, FloatOp::FmaDirected { mode, src: [a, b, c] })
+            }
             [op, dst, ",", a, ",", b] if directed_float(op).is_some() => {
                 let (kind, mode) = directed_float(op).unwrap();
                 Instruction::Float32(dst, FloatOp::Directed { kind, mode, src: [a, b] })
@@ -1237,7 +1303,8 @@ impl<'a> Parser<'a> {
                 src,
             ] => Instruction::Store64(memory_space(body[0]), addr, src),
             [
-                "st.global.v2.u16" | "st.global.v2.b16",
+                op @ ("st.global.v2.u16" | "st.global.v2.b16" | "st.shared.v2.u16"
+                | "st.shared.v2.b16" | "st.local.v2.u16" | "st.local.v2.b16"),
                 "[",
                 addr,
                 "]",
@@ -1247,9 +1314,10 @@ impl<'a> Parser<'a> {
                 ",",
                 b,
                 "}",
-            ] => Instruction::StoreVecU16(Space::Global, addr, [a, b]),
+            ] => Instruction::StoreVecU16(memory_space(op), addr, [a, b]),
             [
-                op @ ("st.global.v4.u16" | "st.global.v4.b16" | "st.global.v4.u8"),
+                op @ ("st.global.v4.u16" | "st.global.v4.b16" | "st.global.v4.u8"
+                | "st.shared.v4.u16" | "st.shared.v4.b16" | "st.local.v4.u16" | "st.local.v4.b16"),
                 "[",
                 addr,
                 "]",
@@ -1267,7 +1335,7 @@ impl<'a> Parser<'a> {
                 if *op == "st.global.v4.u8" {
                     Instruction::StoreVec4U8(addr, [a, b, c, d])
                 } else {
-                    Instruction::StoreVec4U16(Space::Global, addr, [a, b, c, d])
+                    Instruction::StoreVec4U16(memory_space(op), addr, [a, b, c, d])
                 }
             }
             [

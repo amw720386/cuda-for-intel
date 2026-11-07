@@ -43,6 +43,8 @@ mod soft_max_generic;
 mod param_words;
 #[path = "gpu/ggml_dp4a.rs"]
 mod ggml_dp4a;
+#[path = "gpu/dp4a_all.rs"]
+mod dp4a_all;
 #[path = "gpu/ggml_quantize_q8_1.rs"]
 mod ggml_quantize_q8_1;
 #[path = "gpu/isolation.rs"]
@@ -75,6 +77,10 @@ mod hw_mma;
 mod hw_float;
 #[path = "gpu/hw_warp.rs"]
 mod hw_warp;
+#[path = "gpu/module_globals.rs"]
+mod module_globals;
+#[path = "gpu/event_timing.rs"]
+mod event_timing;
 #[path = "gpu/hw_round2.rs"]
 mod hw_round2;
 #[path = "gpu/hw_ggml.rs"]
@@ -87,10 +93,6 @@ mod hw_ggml_stock;
 mod hw_cublas_batched;
 #[path = "gpu/hw_launch_stress.rs"]
 mod hw_launch_stress;
-#[path = "gpu/module_globals.rs"]
-mod module_globals;
-#[path = "gpu/event_timing.rs"]
-mod event_timing;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

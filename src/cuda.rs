@@ -13,6 +13,7 @@ mod dxgi_luid;
 mod export_table;
 mod gap_math;
 mod gaps;
+mod graph_api;
 mod globals;
 mod graphs;
 #[cfg(windows)]
@@ -22,6 +23,14 @@ mod library;
 mod primary;
 mod streams;
 mod trace;
+
+pub(crate) fn profile_on() -> bool {
+    trace::profile_enabled()
+}
+
+pub(crate) fn profile_note(name: &'static str, nanos: u64) {
+    trace::profile_record(name, nanos);
+}
 mod vmm;
 use streams::Streams;
 
@@ -88,6 +97,8 @@ struct CudaContext {
     host_registered: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
     library_modules: HashMap<usize, usize>,
+    /// Per-kernel modules of libraries, keyed by library and kernel name (lazy compilation).
+    entry_modules: HashMap<(usize, CString), usize>,
     /// Allocation-table entries that belong to a module variable, not to cuMemAlloc.
     module_globals: BTreeSet<usize>,
     functions: HashMap<usize, (usize, CString)>,
@@ -247,12 +258,24 @@ pub(crate) fn export_log(message: impl std::fmt::Display) {
     if !export_log_enabled() {
         return;
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("cuda-for-intel-export.log")
-    {
-        use std::io::Write;
+    export_log_always(message);
+}
+
+/// Appends to the export log even when general logging is off (used by the profiler and the
+/// module-load timing summary). The file stays open: reopening it per line costs a few
+/// system calls each, which dominates hot paths when logging is enabled.
+pub(crate) fn export_log_always(message: impl std::fmt::Display) {
+    use std::io::Write;
+    static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+    let Ok(mut guard) = FILE.lock() else { return };
+    if guard.is_none() {
+        *guard = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("cuda-for-intel-export.log")
+            .ok();
+    }
+    if let Some(file) = guard.as_mut() {
         let _ = writeln!(file, "{message}");
     }
 }
@@ -406,6 +429,7 @@ impl State {
                 host_registered: BTreeMap::new(),
                 modules: HashMap::new(),
                 library_modules: HashMap::new(),
+                entry_modules: HashMap::new(),
                 module_globals: BTreeSet::new(),
                 functions: HashMap::new(),
                 local_storage: HashMap::new(),
@@ -511,6 +535,9 @@ fn context_key(handle: Opaque) -> Result<usize, CuResult> {
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize() -> CuResult {
     trace::call("cuCtxSynchronize", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         streams::synchronize_context(std::ptr::null_mut())
     })
 }
@@ -518,6 +545,9 @@ pub extern "system" fn cuCtxSynchronize() -> CuResult {
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize_v2(handle: Opaque) -> CuResult {
     trace::call("cuCtxSynchronize_v2", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         streams::synchronize_context(handle)
     })
 }
@@ -602,6 +632,9 @@ fn contains_range(allocations: &BTreeMap<usize, usize>, address: usize, size: us
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuResult {
     trace::call("cuMemAlloc_v2", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         status(with_context(|runtime, context| {
             if out.is_null() || size == 0 {
                 return Err(InvalidValue);
@@ -624,6 +657,9 @@ pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuRes
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
     trace::call("cuMemFree_v2", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         if address != 0 {
             streams::drain_unlocked(None);
         }
@@ -647,6 +683,9 @@ pub unsafe extern "system" fn cuMemHostAlloc(
     flags: c_uint,
 ) -> CuResult {
     trace::call("cuMemHostAlloc", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         status(with_context(|runtime, context| {
             if out.is_null() || size == 0 || flags & !7 != 0 {
                 return Err(InvalidValue);
@@ -672,6 +711,9 @@ pub unsafe extern "system" fn cuMemHostAlloc(
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFreeHost(host: Opaque) -> CuResult {
     trace::call("cuMemFreeHost", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         streams::drain_unlocked(None);
         status(with_context(|runtime, context| {
             if !context.host_allocations.contains_key(&host.addr()) {
@@ -939,14 +981,70 @@ fn memset_bytes(dst: u64, value: u8, size: usize, stream: Opaque) -> CuResult {
     }))
 }
 
+/// Decides once whether `dp4a` may use the SPIR-V integer dot product: the driver must build a
+/// probe module that uses it. `CUDA_FOR_INTEL_DP4A=0` forces the scalar lowering.
+fn probe_dot_product(runtime: &Runtime, context: &mut CudaContext) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    // Dynamic shared memory window: GGML's larger MMQ tiles launch with up to the opt-in limit
+    // the device reports (more than 48 KiB), so reserve what the device offers, up to
+    // CUDA_FOR_INTEL_DYN_SHARED (default 64 KiB). Kernels reserve the whole window per workgroup.
+    #[cfg(test)]
+    let fake = runtime.api.is_fake();
+    #[cfg(not(test))]
+    let fake = false;
+    if !fake {
+        let device_max = runtime.devices[context.device as usize].info.max_shared_local_memory;
+        let wanted = std::env::var("CUDA_FOR_INTEL_DYN_SHARED").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(65536);
+        let window = wanted.min(device_max).max(49152.min(device_max));
+        ptx::set_dynamic_shared_bytes(window);
+        export_log_always(format_args!("dynamic shared window {window} (device max {device_max})"));
+    }
+    // The native integer-dot-product lowering is opt-in (CUDA_FOR_INTEL_DP4A=1) until the
+    // Q6_K ncols_dst=4 mismatch is root-caused.
+    if std::env::var_os("CUDA_FOR_INTEL_DP4A").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    #[cfg(test)]
+    if runtime.api.is_fake() {
+        return;
+    }
+    ptx::set_dot_product(true);
+    let started = std::time::Instant::now();
+    let ok = match ptx::translate(ptx::DOT_PROBE_PTX) {
+        Ok(translated) => match context.backend.load_module(&runtime.api, &translated.words) {
+            Ok(mut module) => {
+                let _ = module.destroy(&runtime.api);
+                true
+            }
+            Err(error) => {
+                export_log(format_args!("dot product probe rejected by the driver: {error}"));
+                false
+            }
+        },
+        Err(error) => {
+            export_log(format_args!("dot product probe did not translate: {error}"));
+            false
+        }
+    };
+    ptx::set_dot_product(ok);
+    export_log(format_args!("dp4a lowering: integer dot product={ok} probe_ms={}", started.elapsed().as_millis()));
+}
+
 fn load_ptx(
     runtime: &Runtime,
     context: &mut CudaContext,
     next: &mut usize,
     image: &[u8],
+    lenient: bool,
 ) -> Result<usize, CuResult> {
+    probe_dot_product(runtime, context);
     let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
-    let translated = ptx::translate(ptx).map_err(|error| {
+    let started = std::time::Instant::now();
+    let translate = if lenient { ptx::translate_lenient } else { ptx::translate };
+    let translated = translate(ptx).map_err(|error| {
         if trace::enabled() {
             let preview: String = ptx.chars().take(120).collect();
             trace::record(format_args!("PTX translation rejected: {error}; preview={preview:?}"));
@@ -964,6 +1062,39 @@ fn load_ptx(
         export_log(format_args!("PTX reject: {error}"));
         InvalidPtx
     })?;
+    install_translation(runtime, context, next, translated, ptx.len(), started.elapsed())
+}
+
+/// Loads one kernel of an already normalised PTX library as its own Level Zero module, so only
+/// the kernels an application actually launches are compiled by the Intel compiler.
+fn load_ptx_entry(
+    runtime: &Runtime,
+    context: &mut CudaContext,
+    next: &mut usize,
+    prepared: &str,
+    name: &str,
+) -> Result<usize, CuResult> {
+    probe_dot_product(runtime, context);
+    let started = std::time::Instant::now();
+    let translated = ptx::translate_entry(prepared, name).map_err(|error| {
+        export_log(format_args!("lazy entry translation fell back: {name}: {error}"));
+        InvalidPtx
+    })?;
+    // Module variables are per-module storage, so kernels that use them keep the shared module.
+    if !translated.globals.is_empty() {
+        return Err(InvalidPtx);
+    }
+    install_translation(runtime, context, next, translated, prepared.len(), started.elapsed())
+}
+
+fn install_translation(
+    runtime: &Runtime,
+    context: &mut CudaContext,
+    next: &mut usize,
+    translated: ptx::Translation,
+    ptx_len: usize,
+    translate_time: std::time::Duration,
+) -> Result<usize, CuResult> {
     let device = &runtime.devices[context.device as usize];
     let info = &device.info;
     if info.spirv_version < 0x10000 {
@@ -993,11 +1124,34 @@ fn load_ptx(
         );
     }
     let key = reserve_handle(next)?;
+    let compile_started = std::time::Instant::now();
     let backend = context
         .backend
         .load_module(&runtime.api, &translated.words)
-        .inspect_err(|error| context.backend.health.observe(error))
+        .inspect_err(|error| {
+            context.backend.health.observe(error);
+            export_log_always(format_args!(
+                "module build failed: kernels={:?} spirv_words={} error={error}",
+                entries.keys().collect::<Vec<_>>(),
+                translated.words.len()
+            ));
+            // CFI_DUMP_PTX_DIR=<dir> also keeps the SPIR-V of every module the driver rejects.
+            if let Some(dir) = std::env::var_os("CFI_DUMP_PTX_DIR") {
+                let bytes: Vec<u8> = translated.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                let tag = entries.keys().next().map(|k| k.to_string_lossy().chars().take(60).collect::<String>()).unwrap_or_default();
+                let name = format!("build-fail-{}-{}.spv", tag.replace(|c: char| !c.is_ascii_alphanumeric(), "_"), translated.words.len());
+                let _ = std::fs::write(std::path::Path::new(&dir).join(name), bytes);
+            }
+        })
         .map_err(backend_error)?;
+    export_log(format_args!(
+        "module load: ptx_bytes={} kernels={} spirv_words={} translate_ms={} ze_ms={}",
+        ptx_len,
+        entries.len(),
+        translated.words.len(),
+        translate_time.as_millis(),
+        compile_started.elapsed().as_millis()
+    ));
     context.modules.insert(
         key,
         CudaModule {
@@ -1024,7 +1178,7 @@ pub unsafe extern "system" fn cuModuleLoad(out: *mut Opaque, path: *const c_char
                 std::io::ErrorKind::NotFound => FileNotFound,
                 _ => OperatingSystem,
             })?;
-            let key = load_ptx(runtime, context, next, &image)?;
+            let key = load_ptx(runtime, context, next, &image, false)?;
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))
@@ -1043,7 +1197,7 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
                 return Err(InvalidImage);
             }
             let image = unsafe { CStr::from_ptr(image.cast()) }.to_bytes();
-            let key = load_ptx(runtime, context, next, image)?;
+            let key = load_ptx(runtime, context, next, image, false)?;
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))
@@ -1057,6 +1211,7 @@ pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
         status(with_context(|runtime, context| {
             if !context.modules.contains_key(&module.addr())
                 || context.library_modules.values().any(|&key| key == module.addr())
+                || context.entry_modules.values().any(|&key| key == module.addr())
             {
                 return Err(InvalidHandle);
             }
@@ -1171,17 +1326,33 @@ pub unsafe extern "system" fn cuLaunchKernel(
             // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
             // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
             // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
-            if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
-                return Err(InvalidValue);
-            }
             let grid = [grid_x, grid_y, grid_z];
             let block = [block_x, block_y, block_z];
+            if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
+                export_log_always(format_args!(
+                    "cuLaunchKernel rejected {}: dynamic shared {shared_bytes} > translated {} grid={grid:?} block={block:?}",
+                    name.to_string_lossy(),
+                    entry.shared_bytes
+                ));
+                return Err(InvalidValue);
+            }
             validate_launch(
                 &runtime.devices[context.device as usize].info,
                 grid,
                 block,
                 entry.max_threads,
-            )?;
+            )
+            .inspect_err(|_| {
+                let info = &runtime.devices[context.device as usize].info;
+                export_log_always(format_args!(
+                    "cuLaunchKernel rejected {}: grid={grid:?} block={block:?} max_threads={:?} device max grid={:?} max block={:?} max workgroup={}",
+                    name.to_string_lossy(),
+                    entry.max_threads,
+                    info.max_grid_dimensions,
+                    info.max_workgroup_dimensions,
+                    info.max_workgroup_size
+                ));
+            })?;
             let args = unsafe {
                 launch_args::read(&entry.params, kernel_params, extra, |address| {
                     // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
@@ -1245,15 +1416,25 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 )?;
                 return Ok(());
             }
+            let timed = trace::kernel_profile_enabled().then(std::time::Instant::now);
             launched = name.to_string_lossy().into_owned();
-            context.streams.launch(
+            let launch_result = context.streams.launch(
                 &runtime.api,
                 &context.backend,
                 kernel,
                 stream,
                 (grid, block),
                 &args,
-            )
+            );
+            if let Some(started) = timed {
+                // CUDA_FOR_INTEL_PROFILE_KERNELS=1 serialises every launch so its wall time is
+                // GPU time plus a constant submission latency; use it to rank kernels only.
+                launch_result?;
+                context.streams.wait_stream(&runtime.api, stream, u64::MAX)?;
+                trace::kernel_record(&name.to_string_lossy(), started.elapsed().as_nanos() as u64, grid, block);
+                return Ok(());
+            }
+            launch_result
         }))
     });
     // Debug aid (CUDA_FOR_INTEL_SYNC_LAUNCH=1): wait after every launch so a device fault is

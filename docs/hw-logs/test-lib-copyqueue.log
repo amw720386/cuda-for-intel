@@ -1,0 +1,336 @@
+warning: variable does not need to be mutable
+   --> src\cuda\launch_args.rs:181:13
+    |
+181 |         let mut kernel_params = [
+    |             ----^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `live` is never read
+   --> src\cuda\launch_args.rs:195:9
+    |
+195 |         live = 99;
+    |         ^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\graph_api_tests.rs:410:16
+    |
+410 |     assert_eq!(unsafe { cuGraphDestroy(captured) }, Success);
+    |                ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\profiling.rs:24:20
+    |
+ 24 |         assert_eq!(unsafe { $name($($arg),*) }, crate::cuda::CuResult::Success, "{}", stringify!($name))
+    |                    ^^^^^^ unnecessary `unsafe` block
+...
+622 |         linked_ok!(cuStreamSynchronize(copy));
+    |         ------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `linked_ok` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\profiling.rs:24:20
+    |
+ 24 |         assert_eq!(unsafe { $name($($arg),*) }, crate::cuda::CuResult::Success, "{}", stringify!($name))
+    |                    ^^^^^^ unnecessary `unsafe` block
+...
+625 |         linked_ok!(cuStreamSynchronize(copy2));
+    |         -------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `linked_ok` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\profiling.rs:24:20
+    |
+ 24 |         assert_eq!(unsafe { $name($($arg),*) }, crate::cuda::CuResult::Success, "{}", stringify!($name))
+    |                    ^^^^^^ unnecessary `unsafe` block
+...
+632 |         linked_ok!(cuEventRecord(event, copy));
+    |         -------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `linked_ok` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\profiling.rs:24:20
+    |
+ 24 |         assert_eq!(unsafe { $name($($arg),*) }, crate::cuda::CuResult::Success, "{}", stringify!($name))
+    |                    ^^^^^^ unnecessary `unsafe` block
+...
+633 |         linked_ok!(cuStreamWaitEvent(compute, event, 0));
+    |         ------------------------------------------------ in this macro invocation
+    |
+    = note: this warning originates in the macro `linked_ok` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\profiling.rs:24:20
+    |
+ 24 |         assert_eq!(unsafe { $name($($arg),*) }, crate::cuda::CuResult::Success, "{}", stringify!($name))
+    |                    ^^^^^^ unnecessary `unsafe` block
+...
+636 |         linked_ok!(cuEventRecord(event2, compute));
+    |         ------------------------------------------ in this macro invocation
+    |
+    = note: this warning originates in the macro `linked_ok` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\profiling.rs:24:20
+    |
+ 24 |         assert_eq!(unsafe { $name($($arg),*) }, crate::cuda::CuResult::Success, "{}", stringify!($name))
+    |                    ^^^^^^ unnecessary `unsafe` block
+...
+637 |         linked_ok!(cuStreamWaitEvent(copy2, event2, 0));
+    |         ----------------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `linked_ok` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cuda\streams\profiling.rs:24:20
+    |
+ 24 |         assert_eq!(unsafe { $name($($arg),*) }, crate::cuda::CuResult::Success, "{}", stringify!($name))
+    |                    ^^^^^^ unnecessary `unsafe` block
+...
+639 |         linked_ok!(cuStreamSynchronize(copy2));
+    |         -------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `linked_ok` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unreachable pattern
+   --> src\ptx\parse.rs:861:13
+    |
+559 |             ["cvt.u32.u16" | "cvt.u16.u16", dst, ",", src] => {
+    |             ---------------------------------------------- matches all the relevant values
+...
+861 |             ["cvt.u32.u16", dst, ",", src] => {
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\ptx\spirv.rs:2539:25
+     |
+2539 |                     let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
+     |                         ----^^^^
+     |                         |
+     |                         help: remove this `mut`
+
+warning: unused variable: `n`
+   --> src\ptx\tier3_mma_tests.rs:195:13
+    |
+195 |     let (m, n) = if wide { (8, 8) } else { (m, n) };
+    |             ^ help: if this is intentional, prefix it with an underscore: `_n`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `PeerAccessAlreadyEnabled` is never constructed
+  --> src\cuda.rs:58:5
+   |
+41 | pub(crate) enum CuResult {
+   |                 -------- variant in this enum
+...
+58 |     PeerAccessAlreadyEnabled = 704,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `CuResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `rp` is never used
+  --> src\ptx\tier3_mma.rs:82:8
+   |
+70 | impl<'a> Gen<'a> {
+   | ---------------- method in this implementation
+...
+82 |     fn rp(&mut self) -> String {
+   |        ^^
+
+warning: function `constant` is never used
+   --> src\ptx\tier3_mma.rs:425:4
+    |
+425 | fn constant(g: &mut Gen, v: u32) -> String {
+    |    ^^^^^^^^
+
+warning: fields `global_half_ptr` and `global_qword_ptr` are never read
+  --> src\ptx\spirv.rs:76:5
+   |
+65 | struct Emitter<'a> {
+   |        ------- fields in this struct
+...
+76 |     global_half_ptr: Word,
+   |     ^^^^^^^^^^^^^^^
+77 |     global_word_ptr: Word,
+78 |     global_qword_ptr: Word,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: field `lane` is never read
+   --> src\ptx\coverage_tests.rs:140:13
+    |
+135 |     pub struct Machine {
+    |                ------- field in this struct
+...
+140 |         pub lane: u64,
+    |             ^^^^
+
+warning: `cuda-for-intel` (lib test) generated 18 warnings (run `cargo fix --lib -p cuda-for-intel --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src\lib.rs (target\debug\deps\nvcuda-71e2b0d6d3c22ad1.exe)
+
+running 1 test
+Forge 7x257 Blocking slots=1 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 7x257 Blocking slots=1 batches=32 HtoD input bracket: n=96 median=20.938 us p95=23.125 us p99=34.896 us
+Forge 7x257 Blocking slots=1 batches=32 HtoD residual bracket: n=96 median=20.781 us p95=24.375 us p99=95.885 us
+Forge 7x257 Blocking slots=1 batches=32 HtoD weights bracket: n=96 median=20.156 us p95=22.760 us p99=222.344 us
+Forge 7x257 Blocking slots=1 batches=32 RMSNorm bracket: n=96 median=15.781 us p95=18.281 us p99=62.240 us
+Forge 7x257 Blocking slots=1 batches=32 residual addition bracket: n=96 median=3.802 us p95=5.313 us p99=7.917 us
+Forge 7x257 Blocking slots=1 batches=32 reduction bracket: n=96 median=6.198 us p95=9.948 us p99=28.750 us
+Forge 7x257 Blocking slots=1 batches=32 DtoH bracket: n=96 median=20.469 us p95=25.885 us p99=31.146 us
+Forge 7x257 Blocking slots=1 batches=32 device span: n=3 median=4788.073 us p95=4831.875 us p99=4831.875 us
+Forge 7x257 SingleStream slots=1 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 7x257 SingleStream slots=1 batches=32 HtoD input bracket: n=96 median=9.479 us p95=12.083 us p99=35.156 us
+Forge 7x257 SingleStream slots=1 batches=32 HtoD residual bracket: n=96 median=8.021 us p95=9.792 us p99=19.844 us
+Forge 7x257 SingleStream slots=1 batches=32 HtoD weights bracket: n=96 median=7.240 us p95=9.219 us p99=10.885 us
+Forge 7x257 SingleStream slots=1 batches=32 RMSNorm bracket: n=96 median=12.396 us p95=14.375 us p99=18.333 us
+Forge 7x257 SingleStream slots=1 batches=32 residual addition bracket: n=96 median=3.802 us p95=4.167 us p99=11.250 us
+Forge 7x257 SingleStream slots=1 batches=32 reduction bracket: n=96 median=7.865 us p95=9.740 us p99=24.375 us
+Forge 7x257 SingleStream slots=1 batches=32 DtoH bracket: n=96 median=9.427 us p95=12.396 us p99=25.312 us
+Forge 7x257 SingleStream slots=1 batches=32 device span: n=3 median=2244.896 us p95=2269.427 us p99=2269.427 us
+Forge 7x257 EventLinked slots=1 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 7x257 EventLinked slots=1 batches=32 HtoD input bracket: n=96 median=5.938 us p95=7.240 us p99=12.604 us
+Forge 7x257 EventLinked slots=1 batches=32 HtoD residual bracket: n=96 median=6.042 us p95=6.563 us p99=9.219 us
+Forge 7x257 EventLinked slots=1 batches=32 HtoD weights bracket: n=96 median=5.260 us p95=5.417 us p99=9.948 us
+Forge 7x257 EventLinked slots=1 batches=32 RMSNorm bracket: n=96 median=11.667 us p95=15.521 us p99=29.896 us
+Forge 7x257 EventLinked slots=1 batches=32 residual addition bracket: n=96 median=3.750 us p95=4.896 us p99=8.229 us
+Forge 7x257 EventLinked slots=1 batches=32 reduction bracket: n=96 median=7.240 us p95=9.063 us p99=9.844 us
+Forge 7x257 EventLinked slots=1 batches=32 DtoH bracket: n=96 median=4.948 us p95=5.260 us p99=14.427 us
+Forge 7x257 EventLinked slots=1 batches=32 device span: n=3 median=2600.990 us p95=3369.219 us p99=3369.219 us
+Forge 7x257 EventLinked slots=2 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 7x257 EventLinked slots=2 batches=32 HtoD input bracket: n=96 median=6.094 us p95=9.687 us p99=326.927 us
+Forge 7x257 EventLinked slots=2 batches=32 HtoD residual bracket: n=96 median=6.094 us p95=6.719 us p99=8.594 us
+Forge 7x257 EventLinked slots=2 batches=32 HtoD weights bracket: n=96 median=5.260 us p95=5.625 us p99=8.385 us
+Forge 7x257 EventLinked slots=2 batches=32 RMSNorm bracket: n=96 median=11.198 us p95=15.521 us p99=35.312 us
+Forge 7x257 EventLinked slots=2 batches=32 residual addition bracket: n=96 median=3.698 us p95=5.313 us p99=11.719 us
+Forge 7x257 EventLinked slots=2 batches=32 reduction bracket: n=96 median=7.135 us p95=10.833 us p99=20.833 us
+Forge 7x257 EventLinked slots=2 batches=32 DtoH bracket: n=96 median=4.948 us p95=6.354 us p99=25.365 us
+Forge 7x257 EventLinked slots=2 batches=32 device span: n=3 median=2655.573 us p95=3133.177 us p99=3133.177 us
+Pinned Forge 7x257: 12x32 chains, bytes/batch=15448, max abs=5.538694619e-6
+Forge 64x1024 Blocking slots=1 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 64x1024 Blocking slots=1 batches=32 HtoD input bracket: n=96 median=26.875 us p95=28.177 us p99=40.781 us
+Forge 64x1024 Blocking slots=1 batches=32 HtoD residual bracket: n=96 median=26.562 us p95=29.844 us p99=37.969 us
+Forge 64x1024 Blocking slots=1 batches=32 HtoD weights bracket: n=96 median=18.125 us p95=19.271 us p99=21.250 us
+Forge 64x1024 Blocking slots=1 batches=32 RMSNorm bracket: n=96 median=20.365 us p95=21.094 us p99=49.531 us
+Forge 64x1024 Blocking slots=1 batches=32 residual addition bracket: n=96 median=9.427 us p95=10.000 us p99=14.844 us
+Forge 64x1024 Blocking slots=1 batches=32 reduction bracket: n=96 median=6.146 us p95=6.615 us p99=7.188 us
+Forge 64x1024 Blocking slots=1 batches=32 DtoH bracket: n=96 median=20.260 us p95=23.646 us p99=26.510 us
+Forge 64x1024 Blocking slots=1 batches=32 device span: n=3 median=5235.260 us p95=5305.156 us p99=5305.156 us
+Forge 64x1024 SingleStream slots=1 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 64x1024 SingleStream slots=1 batches=32 HtoD input bracket: n=96 median=13.437 us p95=13.854 us p99=21.510 us
+Forge 64x1024 SingleStream slots=1 batches=32 HtoD residual bracket: n=96 median=13.437 us p95=13.750 us p99=13.802 us
+Forge 64x1024 SingleStream slots=1 batches=32 HtoD weights bracket: n=96 median=5.365 us p95=5.781 us p99=8.333 us
+Forge 64x1024 SingleStream slots=1 batches=32 RMSNorm bracket: n=96 median=14.583 us p95=15.052 us p99=15.208 us
+Forge 64x1024 SingleStream slots=1 batches=32 residual addition bracket: n=96 median=9.323 us p95=9.740 us p99=9.896 us
+Forge 64x1024 SingleStream slots=1 batches=32 reduction bracket: n=96 median=6.042 us p95=6.406 us p99=6.719 us
+Forge 64x1024 SingleStream slots=1 batches=32 DtoH bracket: n=96 median=14.375 us p95=15.000 us p99=17.552 us
+Forge 64x1024 SingleStream slots=1 batches=32 device span: n=3 median=2799.688 us p95=2805.990 us p99=2805.990 us
+Forge 64x1024 EventLinked slots=1 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 64x1024 EventLinked slots=1 batches=32 HtoD input bracket: n=96 median=10.417 us p95=11.250 us p99=20.000 us
+Forge 64x1024 EventLinked slots=1 batches=32 HtoD residual bracket: n=96 median=10.312 us p95=10.833 us p99=16.094 us
+Forge 64x1024 EventLinked slots=1 batches=32 HtoD weights bracket: n=96 median=4.948 us p95=5.469 us p99=6.823 us
+Forge 64x1024 EventLinked slots=1 batches=32 RMSNorm bracket: n=96 median=14.375 us p95=14.844 us p99=18.385 us
+Forge 64x1024 EventLinked slots=1 batches=32 residual addition bracket: n=96 median=9.427 us p95=9.896 us p99=21.042 us
+Forge 64x1024 EventLinked slots=1 batches=32 reduction bracket: n=96 median=5.990 us p95=6.250 us p99=6.354 us
+Forge 64x1024 EventLinked slots=1 batches=32 DtoH bracket: n=96 median=5.521 us p95=5.833 us p99=6.198 us
+Forge 64x1024 EventLinked slots=1 batches=32 device span: n=3 median=3140.781 us p95=3182.448 us p99=3182.448 us
+Forge 64x1024 EventLinked slots=2 batches=32: bracket overlaps=0, samples with overlaps=0/3
+Forge 64x1024 EventLinked slots=2 batches=32 HtoD input bracket: n=96 median=9.375 us p95=9.792 us p99=12.240 us
+Forge 64x1024 EventLinked slots=2 batches=32 HtoD residual bracket: n=96 median=9.427 us p95=9.740 us p99=10.625 us
+Forge 64x1024 EventLinked slots=2 batches=32 HtoD weights bracket: n=96 median=4.948 us p95=5.104 us p99=5.313 us
+Forge 64x1024 EventLinked slots=2 batches=32 RMSNorm bracket: n=96 median=14.427 us p95=14.844 us p99=18.333 us
+Forge 64x1024 EventLinked slots=2 batches=32 residual addition bracket: n=96 median=9.375 us p95=9.635 us p99=10.625 us
+Forge 64x1024 EventLinked slots=2 batches=32 reduction bracket: n=96 median=6.042 us p95=6.250 us p99=6.354 us
+Forge 64x1024 EventLinked slots=2 batches=32 DtoH bracket: n=96 median=5.573 us p95=5.885 us p99=5.938 us
+Forge 64x1024 EventLinked slots=2 batches=32 device span: n=3 median=3074.427 us p95=3080.260 us p99=3080.260 us
+Pinned Forge 64x1024: 12x32 chains, bytes/batch=528640, max abs=1.735811577e-5
+Forge 7x257 Blocking slots=1 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 7x257 Blocking slots=1 batches=32: first mapped timestamp rejection: operation 0 interval 319802060102347..319802060105472 falls outside the host clock anchors 320014185758200..320014188990800
+Forge 7x257 Blocking slots=1 batches=32 HtoD input event duration: n=96 median=1.979 us p95=2.083 us p99=3.125 us
+Forge 7x257 Blocking slots=1 batches=32 HtoD residual event duration: n=96 median=1.979 us p95=2.083 us p99=2.083 us
+Forge 7x257 Blocking slots=1 batches=32 HtoD weights event duration: n=96 median=1.979 us p95=2.083 us p99=2.083 us
+Forge 7x257 Blocking slots=1 batches=32 RMSNorm event duration: n=96 median=7.604 us p95=7.708 us p99=9.896 us
+Forge 7x257 Blocking slots=1 batches=32 residual addition event duration: n=96 median=1.667 us p95=1.771 us p99=3.750 us
+Forge 7x257 Blocking slots=1 batches=32 reduction event duration: n=96 median=2.187 us p95=2.292 us p99=5.938 us
+Forge 7x257 Blocking slots=1 batches=32 DtoH event duration: n=96 median=1.979 us p95=2.083 us p99=2.083 us
+Forge 7x257 SingleStream slots=1 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 7x257 SingleStream slots=1 batches=32: first mapped timestamp rejection: operation 0 interval 319802070818805..319802070820992 falls outside the host clock anchors 320014196504200..320014198192800
+Forge 7x257 SingleStream slots=1 batches=32 HtoD input event duration: n=96 median=2.292 us p95=2.396 us p99=2.396 us
+Forge 7x257 SingleStream slots=1 batches=32 HtoD residual event duration: n=96 median=2.396 us p95=2.396 us p99=2.500 us
+Forge 7x257 SingleStream slots=1 batches=32 HtoD weights event duration: n=96 median=2.292 us p95=2.292 us p99=2.396 us
+Forge 7x257 SingleStream slots=1 batches=32 RMSNorm event duration: n=96 median=7.604 us p95=7.708 us p99=7.708 us
+Forge 7x257 SingleStream slots=1 batches=32 residual addition event duration: n=96 median=1.667 us p95=1.771 us p99=2.187 us
+Forge 7x257 SingleStream slots=1 batches=32 reduction event duration: n=96 median=2.187 us p95=2.187 us p99=2.396 us
+Forge 7x257 SingleStream slots=1 batches=32 DtoH event duration: n=96 median=2.292 us p95=2.604 us p99=2.604 us
+Forge 7x257 EventLinked slots=1 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 7x257 EventLinked slots=1 batches=32: first mapped timestamp rejection: operation 0 interval 319802077182764..319802077187347 falls outside the host clock anchors 320014202706800..320014205113100
+Forge 7x257 EventLinked slots=1 batches=32 HtoD input event duration: n=96 median=2.552 us p95=2.917 us p99=4.583 us
+Forge 7x257 EventLinked slots=1 batches=32 HtoD residual event duration: n=96 median=2.552 us p95=3.125 us p99=3.229 us
+Forge 7x257 EventLinked slots=1 batches=32 HtoD weights event duration: n=96 median=1.823 us p95=2.031 us p99=2.760 us
+Forge 7x257 EventLinked slots=1 batches=32 RMSNorm event duration: n=96 median=7.604 us p95=7.708 us p99=10.000 us
+Forge 7x257 EventLinked slots=1 batches=32 residual addition event duration: n=96 median=1.667 us p95=1.771 us p99=2.083 us
+Forge 7x257 EventLinked slots=1 batches=32 reduction event duration: n=96 median=2.187 us p95=2.187 us p99=3.542 us
+Forge 7x257 EventLinked slots=1 batches=32 DtoH event duration: n=96 median=1.615 us p95=1.823 us p99=2.760 us
+Forge 7x257 EventLinked slots=2 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 7x257 EventLinked slots=2 batches=32: first mapped timestamp rejection: operation 0 interval 319802085701514..319802085703389 falls outside the host clock anchors 320014211391200..320014213331300
+Forge 7x257 EventLinked slots=2 batches=32 HtoD input event duration: n=96 median=2.448 us p95=3.073 us p99=3.333 us
+Forge 7x257 EventLinked slots=2 batches=32 HtoD residual event duration: n=96 median=2.604 us p95=3.177 us p99=3.281 us
+Forge 7x257 EventLinked slots=2 batches=32 HtoD weights event duration: n=96 median=1.823 us p95=1.979 us p99=2.083 us
+Forge 7x257 EventLinked slots=2 batches=32 RMSNorm event duration: n=96 median=7.500 us p95=7.708 us p99=7.813 us
+Forge 7x257 EventLinked slots=2 batches=32 residual addition event duration: n=96 median=1.667 us p95=1.771 us p99=1.875 us
+Forge 7x257 EventLinked slots=2 batches=32 reduction event duration: n=96 median=2.187 us p95=2.187 us p99=2.292 us
+Forge 7x257 EventLinked slots=2 batches=32 DtoH event duration: n=96 median=1.615 us p95=1.823 us p99=1.875 us
+Pinned Forge 7x257: 12x32 chains, bytes/batch=15448, max abs=5.538694619e-6
+Forge 64x1024 Blocking slots=1 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 64x1024 Blocking slots=1 batches=32: first mapped timestamp rejection: operation 0 interval 319802190864118..319802190867347 falls outside the host clock anchors 320014316506600..320014321277700
+Forge 64x1024 Blocking slots=1 batches=32 HtoD input event duration: n=96 median=1.979 us p95=2.083 us p99=3.229 us
+Forge 64x1024 Blocking slots=1 batches=32 HtoD residual event duration: n=96 median=1.979 us p95=2.083 us p99=2.083 us
+Forge 64x1024 Blocking slots=1 batches=32 HtoD weights event duration: n=96 median=1.979 us p95=2.083 us p99=2.083 us
+Forge 64x1024 Blocking slots=1 batches=32 RMSNorm event duration: n=96 median=12.604 us p95=12.812 us p99=15.000 us
+Forge 64x1024 Blocking slots=1 batches=32 residual addition event duration: n=96 median=7.396 us p95=7.604 us p99=8.750 us
+Forge 64x1024 Blocking slots=1 batches=32 reduction event duration: n=96 median=4.167 us p95=4.167 us p99=4.896 us
+Forge 64x1024 Blocking slots=1 batches=32 DtoH event duration: n=96 median=1.979 us p95=2.083 us p99=2.083 us
+Forge 64x1024 SingleStream slots=1 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 64x1024 SingleStream slots=1 batches=32: first mapped timestamp rejection: operation 0 interval 319802206787034..319802206792867 falls outside the host clock anchors 320014332449800..320014335133700
+Forge 64x1024 SingleStream slots=1 batches=32 HtoD input event duration: n=96 median=5.833 us p95=5.938 us p99=5.938 us
+Forge 64x1024 SingleStream slots=1 batches=32 HtoD residual event duration: n=96 median=5.729 us p95=5.833 us p99=5.833 us
+Forge 64x1024 SingleStream slots=1 batches=32 HtoD weights event duration: n=96 median=2.083 us p95=2.187 us p99=2.187 us
+Forge 64x1024 SingleStream slots=1 batches=32 RMSNorm event duration: n=96 median=12.500 us p95=12.708 us p99=13.854 us
+Forge 64x1024 SingleStream slots=1 batches=32 residual addition event duration: n=96 median=7.292 us p95=7.500 us p99=7.604 us
+Forge 64x1024 SingleStream slots=1 batches=32 reduction event duration: n=96 median=4.062 us p95=4.167 us p99=4.375 us
+Forge 64x1024 SingleStream slots=1 batches=32 DtoH event duration: n=96 median=9.687 us p95=9.896 us p99=9.896 us
+Forge 64x1024 EventLinked slots=1 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 64x1024 EventLinked slots=1 batches=32: first mapped timestamp rejection: operation 0 interval 319802216264534..319802216271721 falls outside the host clock anchors 320014341842200..320014344108300
+Forge 64x1024 EventLinked slots=1 batches=32 HtoD input event duration: n=96 median=5.156 us p95=5.677 us p99=7.188 us
+Forge 64x1024 EventLinked slots=1 batches=32 HtoD residual event duration: n=96 median=5.156 us p95=5.677 us p99=6.458 us
+Forge 64x1024 EventLinked slots=1 batches=32 HtoD weights event duration: n=96 median=1.146 us p95=1.302 us p99=1.927 us
+Forge 64x1024 EventLinked slots=1 batches=32 RMSNorm event duration: n=96 median=10.625 us p95=10.833 us p99=13.229 us
+Forge 64x1024 EventLinked slots=1 batches=32 residual addition event duration: n=96 median=4.479 us p95=4.583 us p99=6.875 us
+Forge 64x1024 EventLinked slots=1 batches=32 reduction event duration: n=96 median=3.750 us p95=3.854 us p99=3.958 us
+Forge 64x1024 EventLinked slots=1 batches=32 DtoH event duration: n=96 median=1.563 us p95=1.771 us p99=2.083 us
+Forge 64x1024 EventLinked slots=2 batches=32: mapped event overlaps=0, valid samples=0, rejected=3
+Forge 64x1024 EventLinked slots=2 batches=32: first mapped timestamp rejection: operation 0 interval 319802224506774..319802224511878 falls outside the host clock anchors 320014350196300..320014352319400
+Forge 64x1024 EventLinked slots=2 batches=32 HtoD input event duration: n=96 median=5.052 us p95=5.313 us p99=5.417 us
+Forge 64x1024 EventLinked slots=2 batches=32 HtoD residual event duration: n=96 median=5.052 us p95=5.417 us p99=5.469 us
+Forge 64x1024 EventLinked slots=2 batches=32 HtoD weights event duration: n=96 median=1.198 us p95=1.302 us p99=1.406 us
+Forge 64x1024 EventLinked slots=2 batches=32 RMSNorm event duration: n=96 median=10.625 us p95=10.729 us p99=11.979 us
+Forge 64x1024 EventLinked slots=2 batches=32 residual addition event duration: n=96 median=4.375 us p95=4.479 us p99=5.833 us
+Forge 64x1024 EventLinked slots=2 batches=32 reduction event duration: n=96 median=3.646 us p95=3.750 us p99=3.750 us
+Forge 64x1024 EventLinked slots=2 batches=32 DtoH event duration: n=96 median=1.563 us p95=1.719 us p99=1.771 us
+Pinned Forge 64x1024: 12x32 chains, bytes/batch=528640, max abs=1.735811577e-5
+test cuda::streams::profiling::gated_forge_copy_queue_timestamps ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 245 filtered out; finished in 0.50s
+

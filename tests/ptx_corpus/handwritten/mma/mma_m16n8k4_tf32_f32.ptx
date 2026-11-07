@@ -23,12 +23,9 @@
 	mov.f32 %f8, 0f3F800000;
 	mov.u32 %r1, 1;
 	mov.u32 %r2, 1;
-	mov.u32 %r3, 1;
-	mov.u32 %r4, 1;
 	mov.u32 %r5, 1;
-	mov.u32 %r6, 1;
 	mov.u32 %r31, 1;
-	mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 {%f5,%f6,%f7,%f8}, {%r1,%r2,%r3,%r4}, {%r5,%r6}, {%f1,%f2,%f3,%f4};
+	mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 {%f5,%f6,%f7,%f8}, {%r1,%r2}, {%r5}, {%f1,%f2,%f3,%f4};
 	st.global.u32 [%rd2], %r1;
 	ret;
 }

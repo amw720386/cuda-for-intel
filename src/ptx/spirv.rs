@@ -98,6 +98,8 @@ struct Emitter<'a> {
     initialized: HashSet<&'a str>,
     /// Registers assigned somewhere in the entry; others read as zero (undefined in PTX).
     ever_defined: HashSet<&'a str>,
+    /// Registers with a single definition, `mov.u32 %r, <immediate>`: their value is known.
+    const_regs: HashMap<&'a str, u32>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
     device_atomics: bool,
@@ -178,6 +180,7 @@ impl<'a> Emitter<'a> {
             registers: HashMap::new(),
             initialized: HashSet::new(),
             ever_defined: HashSet::new(),
+            const_regs: HashMap::new(),
             locals: Vec::new(),
             params: HashMap::new(),
             device_atomics: false,
@@ -190,6 +193,7 @@ impl<'a> Emitter<'a> {
     fn param_type(&self, param: Param) -> Word {
         match param {
             Param::U8 => self.u8_type,
+            Param::U16 => self.u16_type,
             Param::U32 | Param::Words { .. } => self.u32_type,
             Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
@@ -233,8 +237,26 @@ impl<'a> Emitter<'a> {
                 "missing or mismatched PTX declaration for {dst}"
             )));
         }
+        let mut value = value;
         let slot = if let Some(slot) = self.registers.get(dst).copied() {
-            slot.require(value.kind, dst)?
+            // PTX registers are untyped 64-bit values: nvcc reuses one `%rd` for a raw
+            // integer and for a pointer. Coerce between the slot's kind and the new value.
+            if slot.kind != value.kind {
+                let wide = |kind: Kind| matches!(kind, Kind::B64 | Kind::Address(_));
+                if !(wide(slot.kind) && wide(value.kind)) {
+                    slot.require(value.kind, dst)?;
+                }
+                let mut id = value.id;
+                if let Kind::Address(_) = value.kind {
+                    id = self.builder.convert_ptr_to_u(self.u64_type, None, id)?;
+                }
+                if let Kind::Address(_) = slot.kind {
+                    let pointer_type = self.value_type(slot.kind);
+                    id = self.builder.convert_u_to_ptr(pointer_type, None, id)?;
+                }
+                value = Value { id, kind: slot.kind };
+            }
+            slot.id
         } else {
             let pointer = self.builder.type_pointer(
                 None,
@@ -281,6 +303,11 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Value of an immediate or of a register whose only definition is `mov.u32 %r, imm`.
+    fn known_u32(&self, operand: &str) -> Option<u32> {
+        Self::parse_u32(operand).or_else(|| self.const_regs.get(operand).copied())
+    }
+
     fn parse_u64(operand: &str) -> Option<u64> {
         if let Some(hex) = operand
             .strip_prefix("0x")
@@ -319,9 +346,26 @@ impl<'a> Emitter<'a> {
             if kind == Kind::B64 && matches!(value.kind, Kind::Address(_)) {
                 return Ok(self.builder.bitcast(self.u64_type, None, value.id)?);
             }
+            // A raw 64-bit integer reused where a pointer is expected (and pointer to pointer).
+            if let Kind::Address(_) = kind
+                && matches!(value.kind, Kind::B64 | Kind::Address(_))
+            {
+                let integer = if value.kind == Kind::B64 {
+                    value.id
+                } else {
+                    self.builder.convert_ptr_to_u(self.u64_type, None, value.id)?
+                };
+                let pointer_type = self.value_type(kind);
+                return Ok(self.builder.convert_u_to_ptr(pointer_type, None, integer)?);
+            }
             return Ok(value.require(kind, operand)?);
         }
         match kind {
+            Kind::B32 if operand.len() == 10 && (operand.starts_with("0f") || operand.starts_with("0F")) => {
+                u32::from_str_radix(&operand[2..], 16)
+                    .ok()
+                    .map(|n| self.builder.constant_bit32(self.u32_type, n))
+            }
             Kind::B32 => Self::parse_u32(operand)
                 .map(|n| self.builder.constant_bit32(self.u32_type, n)),
             Kind::B64 => Self::parse_u64(operand)
@@ -748,6 +792,13 @@ impl<'a> Emitter<'a> {
             FloatOp::Sqrt([source]) => {
                 let value = self.float_bits(source)?;
                 return rounded::sqrt(&mut self.builder, self.opencl, value);
+            }
+            FloatOp::FmaDirected { mode, src: [a, b, c] } => {
+                let a = self.float_bits(a)?;
+                let b = self.float_bits(b)?;
+                let c = self.float_bits(c)?;
+                self.fp32_fma = true;
+                return rounded::fma_directed(&mut self.builder, self.opencl, mode, a, b, c);
             }
             FloatOp::Directed { kind, mode, src: [a, b] } => {
                 let a = self.float_bits(a)?;
@@ -1203,6 +1254,21 @@ impl<'a> Emitter<'a> {
     /// Four-way byte dot product with per-operand signedness, plus accumulate.
     fn dot4(&mut self, a: Word, b: Word, acc: Word, signed: [bool; 2]) -> Result<Word, Error> {
         let ty = self.u32_type;
+        if super::dot_product_enabled() {
+            // SPV_KHR_integer_dot_product maps to the Xe DP4A instruction. The dot of four byte
+            // pairs never overflows 32 bits, so adding the accumulator with wrap-around matches
+            // dp4a exactly (the saturating Acc forms would not).
+            self.declare("dot_product", Some(Capability::DotProduct), Some("SPV_KHR_integer_dot_product"));
+            self.declare("dot_product_packed", Some(Capability::DotProductInput4x8BitPacked), None);
+            let format = Some(rspirv::spirv::PackedVectorFormat::PackedVectorFormat4x8Bit);
+            let dot = match signed {
+                [true, true] => self.builder.s_dot(ty, None, a, b, format)?,
+                [false, false] => self.builder.u_dot(ty, None, a, b, format)?,
+                [true, false] => self.builder.su_dot(ty, None, a, b, format)?,
+                [false, true] => self.builder.su_dot(ty, None, b, a, format)?,
+            };
+            return Ok(self.builder.i_add(ty, None, acc, dot)?);
+        }
         let c24 = self.u32_const(24);
         let ff = self.u32_const(0xff);
         let mut acc = acc;
@@ -1612,24 +1678,27 @@ impl<'a> Emitter<'a> {
         src: [&str; 4],
     ) -> Result<(), Error> {
         let ty = self.u32_type;
-        let control = Self::parse_u32(src[2]).ok_or_else(|| {
-            Error::new("shfl.sync requires an immediate clamp/segment-mask operand")
-        })?;
+        // The packed clamp/segment-mask operand is an immediate or a register nvcc filled
+        // with a constant; compute it from the operand at run time (constants fold).
         if Self::parse_u32(src[3]).is_some_and(|mask| mask != u32::MAX) {
             return Err(Error::new("only full-warp shfl.sync membermask 0xffffffff is supported"));
         }
-        let (clamp, segment) = (control & 31, (control >> 8) & 31);
+        let control = self.integer(src[2], Kind::B32)?;
+        let c31 = self.u32_const(31);
+        let c8 = self.u32_const(8);
+        let clamp = self.builder.bitwise_and(ty, None, control, c31)?;
+        let shifted = self.builder.shift_right_logical(ty, None, control, c8)?;
+        let segment = self.builder.bitwise_and(ty, None, shifted, c31)?;
+        let keep = self.builder.bitwise_xor(ty, None, segment, c31)?;
         let value = self.read(src[0])?.require(Kind::B32, src[0])?;
         let delta = self.integer(src[1], Kind::B32)?;
         let lane = self.lane_id()?;
-        let segment_mask = self.u32_const(segment);
-        let min_lane = self.builder.bitwise_and(ty, None, lane, segment_mask)?;
+        let min_lane = self.builder.bitwise_and(ty, None, lane, segment)?;
         let (source, valid) = match mode {
             ShuffleMode::Idx | ShuffleMode::Down => {
-                let upper = self.u32_const(clamp & !segment & 31);
+                let upper = self.builder.bitwise_and(ty, None, clamp, keep)?;
                 let max_lane = self.builder.bitwise_or(ty, None, min_lane, upper)?;
                 let j = if mode == ShuffleMode::Idx {
-                    let keep = self.u32_const(!segment & 31);
                     let low = self.builder.bitwise_and(ty, None, delta, keep)?;
                     self.builder.bitwise_or(ty, None, low, min_lane)?
                 } else {
@@ -1723,7 +1792,12 @@ impl<'a> Emitter<'a> {
                     let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
                     self.builder.s_convert(ty, None, value)?
                 };
-                (dst, loaded, Kind::B32)
+                if self.declarations.get(dst) == Some(&Width::B64) {
+                    let wide = self.builder.s_convert(self.u64_type, None, loaded)?;
+                    (dst, wide, Kind::B64)
+                } else {
+                    (dst, loaded, Kind::B32)
+                }
             }
             Instruction::CvtaShared(dst, src) => {
                 let value = self.read(src)?;
@@ -1970,29 +2044,10 @@ impl<'a> Emitter<'a> {
                 )
             }
             Instruction::Dp4a(dst, [a, b, c]) => {
-                // Soft-emulate CUDA dp4a.s32.s32: four signed i8×i8 products + accumulate.
                 let a = self.integer(a, Kind::B32)?;
                 let b = self.integer(b, Kind::B32)?;
-                let mut acc = self.integer(c, Kind::B32)?;
-                let ty = self.u32_type;
-                let shift24 = self.builder.constant_bit32(ty, 24);
-                for lane in 0..4u32 {
-                    let shift = self.builder.constant_bit32(ty, lane * 8);
-                    let a_byte = self.builder.shift_right_logical(ty, None, a, shift)?;
-                    let b_byte = self.builder.shift_right_logical(ty, None, b, shift)?;
-                    let a_sext = {
-                        let raised = self.builder.shift_left_logical(ty, None, a_byte, shift24)?;
-                        self.builder
-                            .shift_right_arithmetic(ty, None, raised, shift24)?
-                    };
-                    let b_sext = {
-                        let raised = self.builder.shift_left_logical(ty, None, b_byte, shift24)?;
-                        self.builder
-                            .shift_right_arithmetic(ty, None, raised, shift24)?
-                    };
-                    let prod = self.builder.i_mul(ty, None, a_sext, b_sext)?;
-                    acc = self.builder.i_add(ty, None, acc, prod)?;
-                }
+                let c = self.integer(c, Kind::B32)?;
+                let acc = self.dot4(a, b, c, [true, true])?;
                 (dst, acc, Kind::B32)
             }
             Instruction::Compare {
@@ -2572,7 +2627,13 @@ impl<'a> Emitter<'a> {
                     let pointer = self.word_pointer(space, address)?;
                     self.builder.load(self.u32_type, None, pointer, None, [])?
                 };
-                (dst, id, Kind::B32)
+                // `ld.global.s32 %rd, [..]` widens into a 64-bit register (sign-extending).
+                if self.declarations.get(dst) == Some(&Width::B64) {
+                    let wide = self.builder.s_convert(self.u64_type, None, id)?;
+                    (dst, wide, Kind::B64)
+                } else {
+                    (dst, id, Kind::B32)
+                }
             }
             Instruction::Load16(space, dst, address) => {
                 let pointer = self.half_pointer(space, address)?;
@@ -2587,6 +2648,31 @@ impl<'a> Emitter<'a> {
                 let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
                 (dst, bits32, Kind::B32)
+            }
+            Instruction::LoadVecU8 {
+                space,
+                count,
+                dst,
+                addr,
+            } => {
+                let (base, base_off) = match addr.split_once('+') {
+                    Some((base, offset)) => (
+                        base,
+                        Self::parse_byte_offset(offset).ok_or_else(|| {
+                            Error::new(format!("unsupported PTX address offset {offset}"))
+                        })?,
+                    ),
+                    None => (addr, 0i64),
+                };
+                for index in 0..usize::from(count) {
+                    let off = base_off + index as i64;
+                    let lane_addr = if off == 0 { base.to_string() } else { format!("{base}+{off}") };
+                    let bytes = self.addressed_byte_pointer(space, &lane_addr)?;
+                    let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
+                    let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
+                    self.write(dst[index], Value { id: bits32, kind: Kind::B32 })?;
+                }
+                return Ok(());
             }
             Instruction::LoadVecU16 {
                 space,
@@ -3056,6 +3142,10 @@ impl<'a> Emitter<'a> {
                     id = self.builder.u_convert(self.u32_type, None, id)?;
                     Kind::B32
                 }
+                Param::U16 => {
+                    id = self.builder.u_convert(self.u32_type, None, id)?;
+                    Kind::B32
+                }
                 Param::U32 => Kind::B32,
                 Param::F32 => {
                     id = self.builder.bitcast(self.u32_type, None, id)?;
@@ -3068,12 +3158,28 @@ impl<'a> Emitter<'a> {
             self.params.insert((name, 0), Value { id, kind });
         }
         self.ever_defined.clear();
+        self.const_regs.clear();
         let mut scratch = Vec::new();
+        let mut definitions: HashMap<&str, u32> = HashMap::new();
+        let mut constants: HashMap<&str, u32> = HashMap::new();
         for block in &entry.blocks {
             for inst in &block.instructions {
                 if inst.collect_definitions(&mut scratch).is_some() {
                     self.ever_defined.extend(scratch.iter().copied());
+                    for name in scratch.iter() {
+                        *definitions.entry(*name).or_default() += 1;
+                    }
                 }
+                if let Instruction::Move32(dst, src) = inst
+                    && let Some(value) = Self::parse_u32(src)
+                {
+                    constants.insert(*dst, value);
+                }
+            }
+        }
+        for (name, value) in constants {
+            if definitions.get(name) == Some(&1) {
+                self.const_regs.insert(name, value);
             }
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();

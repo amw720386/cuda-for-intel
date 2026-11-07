@@ -5,7 +5,9 @@ use super::{
 use std::ptr::null_mut;
 use std::sync::Arc;
 
-pub(crate) struct CommandList(pub(super) Handle);
+/// The flag marks lists on a copy-only queue group: the copy engine cannot
+/// execute the ranges barrier, so a completion signal attached to it never fires.
+pub(crate) struct CommandList(pub(super) Handle, pub(super) bool);
 
 pub(crate) struct KernelArg {
     pub(crate) value: *const std::ffi::c_void,
@@ -30,16 +32,22 @@ impl Api {
 
 impl Context {
     pub(crate) fn create_stream(&self, api: &Api) -> Result<CommandList, Error> {
-        self.create_stream_at(api, self.ordinal, 1 << 1) // ZE_COMMAND_QUEUE_FLAG_IN_ORDER
+        self.create_stream_at(api, self.ordinal, 1 << 1, false) // ZE_COMMAND_QUEUE_FLAG_IN_ORDER
     }
 
     #[cfg(all(test, windows))]
     pub(crate) fn create_copy_stream(&self, api: &Api, ordinal: u32) -> Result<CommandList, Error> {
         // Request the selected queue explicitly and preserve in-order execution.
-        self.create_stream_at(api, ordinal, (1 << 1) | 1)
+        self.create_stream_at(api, ordinal, (1 << 1) | 1, true)
     }
 
-    fn create_stream_at(&self, api: &Api, ordinal: u32, flags: u32) -> Result<CommandList, Error> {
+    fn create_stream_at(
+        &self,
+        api: &Api,
+        ordinal: u32,
+        flags: u32,
+        copy_only: bool,
+    ) -> Result<CommandList, Error> {
         let desc = QueueDesc {
             header: Header::new(0xe),
             ordinal,
@@ -52,7 +60,7 @@ impl Context {
         call("zeCommandListCreateImmediate (asynchronous)", || unsafe {
             (api.zeCommandListCreateImmediate)(self.handle.0, self.device.0, &desc, &mut list)
         })?;
-        Ok(CommandList(Handle(list)))
+        Ok(CommandList(Handle(list), copy_only))
     }
 }
 
@@ -77,6 +85,22 @@ impl CommandList {
         let mut events = WaitEvents::new(waits)?;
         // Keep waits on the copy; move any completion signal onto the following
         // ranges barrier so host-scope fences observe destination coherence.
+        let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+        #[cfg(all(test, windows))]
+        let signal = super::profiling::operation_signal(signal);
+        if self.1 {
+            return call("zeCommandListAppendMemoryCopy", || unsafe {
+                (api.zeCommandListAppendMemoryCopy)(
+                    self.0.0,
+                    dst,
+                    src,
+                    size,
+                    signal,
+                    events.count,
+                    events.ptr(),
+                )
+            });
+        }
         call("zeCommandListAppendMemoryCopy", || unsafe {
             (api.zeCommandListAppendMemoryCopy)(
                 self.0.0,
@@ -88,17 +112,6 @@ impl CommandList {
                 events.ptr(),
             )
         })?;
-        let signal = {
-            let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
-            #[cfg(all(test, windows))]
-            {
-                super::profiling::operation_signal(signal)
-            }
-            #[cfg(not(all(test, windows)))]
-            {
-                signal
-            }
-        };
         let range = dst.cast_const();
         call("zeCommandListAppendMemoryRangesBarrier", || unsafe {
             (api.zeCommandListAppendMemoryRangesBarrier)(

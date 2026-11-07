@@ -20,7 +20,9 @@
 //! (f16/bf16 inputs with f16/bf16/f32 output, compute 32F or 16F),
 //! `cublasGemmStridedBatchedEx` (contiguous batches, attention) and
 //! `cublasGemmBatchedEx` (broadcast batches via device pointer tables),
-//! `cublasStrsmBatched` (solve_tri only). cublasLt is not used by ggml-cuda.
+//! `cublasStrsmBatched` (solve_tri; a GPU kernel). cublasLt is not used by ggml-cuda but the
+//! `lt` module exports the cublasLt surface PyTorch's `nn.Linear` needs; build this
+//! crate's DLL and also install it under the name `cublasLt64_12` (see docs/cublaslt-abi-todo.md).
 //!
 //! Stream ordering: kernels are enqueued on the handle's stream. By default the
 //! shim then synchronizes that stream (the behaviour verified so far); set
@@ -32,6 +34,9 @@
 mod plan;
 #[allow(dead_code)]
 mod ptxgen;
+#[allow(dead_code)]
+mod ltplan;
+mod lt;
 
 use libloading::Library;
 use plan::*;
@@ -92,6 +97,7 @@ struct Driver {
         *mut *mut c_void,
     ) -> CuResult,
     cuStreamSynchronize: unsafe extern "system" fn(CUstream) -> CuResult,
+    cuStreamIsCapturing: unsafe extern "system" fn(CUstream, *mut c_int) -> CuResult,
     cuMemcpyDtoH_v2: unsafe extern "system" fn(*mut c_void, u64, usize) -> CuResult,
 }
 
@@ -124,6 +130,7 @@ fn load_driver() -> Result<Driver, c_int> {
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
             cuStreamSynchronize: sym!("cuStreamSynchronize"),
+            cuStreamIsCapturing: sym!("cuStreamIsCapturing"),
             cuMemcpyDtoH_v2: sym!("cuMemcpyDtoH_v2"),
             _lib: lib,
         })
@@ -156,17 +163,22 @@ fn current_context(drv: &Driver) -> Result<CUcontext, c_int> {
     Ok(ctx)
 }
 
-fn kernel_for(drv: &Driver, d: &GemmDesc, pointer_arrays: bool) -> Result<Kernel, c_int> {
+fn kernel_for(
+    drv: &Driver,
+    d: &GemmDesc,
+    pointer_arrays: bool,
+    opts: &ptxgen::Opts,
+) -> Result<Kernel, c_int> {
     static CACHE: OnceLock<Mutex<HashMap<(usize, String), Kernel>>> = OnceLock::new();
     let ctx = current_context(drv)?;
-    let name = d.kernel_name(pointer_arrays);
+    let name = ptxgen::entry_name_ex(elem(d.a), elem(d.b), elem(d.c), pointer_arrays, opts);
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
     if let Some(k) = cache.get(&(ctx as usize, name.clone())) {
         return Ok(*k);
     }
     let ptx = format!(
         "{}\0",
-        ptxgen::generate(elem(d.a), elem(d.b), elem(d.c), pointer_arrays)
+        ptxgen::generate_ex(elem(d.a), elem(d.b), elem(d.c), pointer_arrays, opts)
     );
     let mut module: CUmodule = std::ptr::null_mut();
     let err = unsafe { (drv.cuModuleLoadData)(&mut module, ptx.as_ptr().cast()) };
@@ -277,7 +289,7 @@ pub mod onemkl {
 // Handle
 // ---------------------------------------------------------------------------
 
-struct Handle {
+pub(crate) struct Handle {
     stream: CUstream,
     math_mode: c_int,
     pointer_mode: c_int,
@@ -468,7 +480,7 @@ pub unsafe extern "system" fn cublasGetStatusName(status: c_int) -> *const c_cha
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-enum Batching {
+pub(crate) enum Batching {
     /// Base pointers plus per-matrix element strides (batch == 1 for plain GEMM).
     Strided { a: u64, b: u64, c: u64, sa: i64, sb: i64, sc: i64 },
     /// Device-resident tables of `batch` pointers each.
@@ -476,6 +488,13 @@ enum Batching {
 }
 
 fn sync_stream(drv: &Driver, stream: CUstream) -> c_int {
+    // A stream that is being captured only records work; synchronising it would
+    // invalidate the capture (GGML reserves its CUDA graph this way). Same-stream
+    // ordering already covers the follow-up work.
+    let mut capturing: c_int = 0;
+    if unsafe { (drv.cuStreamIsCapturing)(stream, &mut capturing) } == SUCCESS && capturing != 0 {
+        return SUCCESS;
+    }
     let err = unsafe { (drv.cuStreamSynchronize)(stream) };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublas: stream sync failed err={err}");
@@ -532,6 +551,28 @@ unsafe fn run_gemm(
     batch: c_int,
     batching: Batching,
 ) -> c_int {
+    // `CUBLAS_COMPUTE_16F` accumulates in half precision: honour it by rounding
+    // the accumulator to f16 in the kernel instead of silently using f32.
+    let opts = ptxgen::Opts { acc16: d.scalar == ScalarKind::F16, ..Default::default() };
+    unsafe { run_gemm_ex(h, d, alpha, beta, batch, batching, &opts, 0) }
+}
+
+/// [`run_gemm`] with kernel options (fused epilogue, f16 accumulation) and the
+/// device pointer of the bias vector (required iff `opts.epilogue.has_bias()`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn run_gemm_ex(
+    h: &mut Handle,
+    d: &GemmDesc,
+    alpha: *const c_void,
+    beta: *const c_void,
+    batch: c_int,
+    batching: Batching,
+    opts: &ptxgen::Opts,
+    bias: u64,
+) -> c_int {
+    if opts.epilogue.has_bias() && bias == 0 {
+        return INVALID_VALUE;
+    }
     if batch < 0 {
         return INVALID_VALUE;
     }
@@ -566,7 +607,8 @@ unsafe fn run_gemm(
     );
 
     // Optional vendor backend first.
-    if let Some(hook) = onemkl::hook() {
+    let plain = *opts == ptxgen::Opts::default();
+    if let Some(hook) = onemkl::hook().filter(|_| plain) {
         let (a, b, c, sa, sb, sc) = match batching {
             Batching::Strided { a, b, c, sa, sb, sc } => (a, b, c, sa, sb, sc),
             Batching::Pointers { a, b, c } => (a, b, c, 0, 0, 0),
@@ -601,7 +643,7 @@ unsafe fn run_gemm(
         }
     }
 
-    let kernel = match kernel_for(drv, d, pointer_arrays) {
+    let kernel = match kernel_for(drv, d, pointer_arrays, opts) {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -628,7 +670,8 @@ unsafe fn run_gemm(
         let (mut m, mut n, mut k) = (d.m, d.n, d.k);
         let (mut a_si, mut a_sl, mut b_sl, mut b_sj, mut ldc) =
             (s.a_si, s.a_sl, s.b_sl, s.b_sj, d.ldc);
-        let mut args: [*mut c_void; 16] = [
+        let mut bias_k = bias;
+        let mut args: Vec<*mut c_void> = vec![
             (&mut a_ptr as *mut u64).cast(),
             (&mut b_ptr as *mut u64).cast(),
             (&mut c_ptr as *mut u64).cast(),
@@ -646,6 +689,9 @@ unsafe fn run_gemm(
             (&mut sb as *mut u64).cast(),
             (&mut sc as *mut u64).cast(),
         ];
+        if opts.epilogue.has_bias() {
+            args.push((&mut bias_k as *mut u64).cast());
+        }
         let err = unsafe {
             (drv.cuLaunchKernel)(
                 kernel.0,
@@ -1050,25 +1096,121 @@ pub unsafe extern "system" fn cublasSgemmStridedBatched(
     }
 }
 
-/// Only used by ggml's `solve_tri`, outside the Qwen path. Not implemented.
+fn trsm_kernel(drv: &Driver) -> Result<Kernel, c_int> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, Kernel>>> = OnceLock::new();
+    let ctx = current_context(drv)?;
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    if let Some(k) = cache.get(&(ctx as usize)) {
+        return Ok(*k);
+    }
+    let ptx = format!("{}\0", ptxgen::generate_trsm());
+    let mut module: CUmodule = std::ptr::null_mut();
+    if unsafe { (drv.cuModuleLoadData)(&mut module, ptx.as_ptr().cast()) } != SUCCESS {
+        eprintln!("CUDA for Intel cublas: ModuleLoadData strsm failed");
+        return Err(INTERNAL_ERROR);
+    }
+    let cname = std::ffi::CString::new(ptxgen::TRSM_ENTRY).unwrap();
+    let mut func: CUfunction = std::ptr::null_mut();
+    if unsafe { (drv.cuModuleGetFunction)(&mut func, module, cname.as_ptr()) } != SUCCESS
+        || func.is_null()
+    {
+        eprintln!("CUDA for Intel cublas: GetFunction strsm failed");
+        return Err(INTERNAL_ERROR);
+    }
+    let k = Kernel(func);
+    cache.insert(ctx as usize, k);
+    Ok(k)
+}
+
+/// Batched triangular solve (ggml `solve_tri`): `op(A) X = alpha B` or
+/// `X op(A) = alpha B`, B overwritten, A/B given as device pointer arrays.
+/// One GPU thread per right-hand-side vector, f32 arithmetic.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cublasStrsmBatched(
-    _handle: *mut c_void,
-    _side: c_int,
-    _uplo: c_int,
-    _trans: c_int,
-    _diag: c_int,
-    _m: c_int,
-    _n: c_int,
-    _alpha: *const c_float,
-    _a: *const *const c_float,
-    _lda: c_int,
-    _b: *const *mut c_float,
-    _ldb: c_int,
-    _batch: c_int,
+    handle: *mut c_void,
+    side: c_int,
+    uplo: c_int,
+    trans: c_int,
+    diag: c_int,
+    m: c_int,
+    n: c_int,
+    alpha: *const c_float,
+    a: *const *const c_float,
+    lda: c_int,
+    b: *const *mut c_float,
+    ldb: c_int,
+    batch: c_int,
 ) -> c_int {
-    eprintln!("CUDA for Intel cublasStrsmBatched not implemented");
-    NOT_SUPPORTED
+    let h = match handle_mut(handle) {
+        Ok(h) => h,
+        Err(_) => return NOT_INITIALIZED,
+    };
+    let plan = match trsm_plan(side, uplo, trans, diag, m, n, lda, ldb) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if batch < 0 || alpha.is_null() {
+        return INVALID_VALUE;
+    }
+    if m == 0 || n == 0 || batch == 0 {
+        return SUCCESS;
+    }
+    if a.is_null() || b.is_null() {
+        return INVALID_VALUE;
+    }
+    let Ok(drv) = driver() else {
+        return NOT_INITIALIZED;
+    };
+    let alpha_v = match unsafe { read_scalar(drv, h, alpha.cast(), ScalarKind::F32) } {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let kernel = match trsm_kernel(drv) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    trace!("strsm {plan:?} alpha={alpha_v} batch={batch}");
+    for (start, count) in batch_chunks(batch as u32) {
+        let off = start as u64 * 8;
+        let (mut at, mut bt) = (a as u64 + off, b as u64 + off);
+        let mut alpha_k = alpha_v;
+        let (mut len, mut nvec, mut a_rs, mut a_cs, mut b_vs, mut b_es) =
+            (plan.len, plan.nvec, plan.a_rs, plan.a_cs, plan.b_vs, plan.b_es);
+        let (mut lower, mut unit) = (plan.lower as u32, plan.unit as u32);
+        let mut args: [*mut c_void; 11] = [
+            (&mut at as *mut u64).cast(),
+            (&mut bt as *mut u64).cast(),
+            (&mut alpha_k as *mut f32).cast(),
+            (&mut len as *mut u32).cast(),
+            (&mut nvec as *mut u32).cast(),
+            (&mut a_rs as *mut u32).cast(),
+            (&mut a_cs as *mut u32).cast(),
+            (&mut b_vs as *mut u32).cast(),
+            (&mut b_es as *mut u32).cast(),
+            (&mut lower as *mut u32).cast(),
+            (&mut unit as *mut u32).cast(),
+        ];
+        let err = unsafe {
+            (drv.cuLaunchKernel)(
+                kernel.0,
+                nvec.div_ceil(64),
+                count,
+                1,
+                64,
+                1,
+                1,
+                0,
+                h.stream,
+                args.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if err != SUCCESS {
+            eprintln!("CUDA for Intel cublas: strsm launch failed err={err}");
+            return EXECUTION_FAILED;
+        }
+    }
+    finish(drv, h)
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1326,211 @@ mod tests {
         gpu_tests::run_all();
     }
 
+    /// GPU: cublasLt matmul (Linear shapes, all epilogues/dtypes, row-major D, batch)
+    /// and cublasStrsmBatched against the CPU references.
+    #[test]
+    #[ignore = "requires nvcuda with an Intel GPU and a current CUDA context"]
+    fn gpu_cublaslt_and_strsm_match_cpu_reference() {
+        gpu_lt_tests::run_all();
+    }
+
+    mod gpu_lt_tests {
+        use super::*;
+        use crate::lt::*;
+        use crate::ltplan::*;
+
+        type MemAlloc = unsafe extern "system" fn(*mut u64, usize) -> c_int;
+        type MemcpyHtoD = unsafe extern "system" fn(u64, *const c_void, usize) -> c_int;
+        type MemcpyDtoH = unsafe extern "system" fn(*mut c_void, u64, usize) -> c_int;
+        type CtxCreate = unsafe extern "system" fn(*mut CUcontext, u32, c_int) -> c_int;
+        type Init = unsafe extern "system" fn(u32) -> c_int;
+
+        fn fill(dtype: DType, elems: usize, seed: &mut u64) -> Vec<u8> {
+            let mut bytes = vec![0u8; elems * dtype.size()];
+            for i in 0..elems {
+                *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let v = (((*seed >> 33) % 2001) as f32 - 1000.0) / 500.0;
+                encode(dtype, &mut bytes, i, v);
+            }
+            bytes
+        }
+
+        pub fn run_all() {
+            let drv = driver().expect("driver");
+            let lib = &drv._lib;
+            unsafe {
+                let init: libloading::Symbol<Init> = lib.get(b"cuInit\0").unwrap();
+                let create: libloading::Symbol<CtxCreate> = lib.get(b"cuCtxCreate_v2\0").unwrap();
+                let alloc: libloading::Symbol<MemAlloc> = lib.get(b"cuMemAlloc_v2\0").unwrap();
+                let htod: libloading::Symbol<MemcpyHtoD> = lib.get(b"cuMemcpyHtoD_v2\0").unwrap();
+                let dtoh: libloading::Symbol<MemcpyDtoH> = lib.get(b"cuMemcpyDtoH_v2\0").unwrap();
+                assert_eq!(init(0), 0);
+                let mut ctx = null_mut();
+                assert_eq!(create(&mut ctx, 0, 0), 0);
+                let up = |host: &[u8]| -> u64 {
+                    let mut p = 0u64;
+                    assert_eq!(alloc(&mut p, host.len().max(4)), 0);
+                    assert_eq!(htod(p, host.as_ptr().cast(), host.len()), 0);
+                    p
+                };
+                let mut lt: *mut c_void = null_mut();
+                assert_eq!(cublasLtCreate(&mut lt), SUCCESS);
+                let mut seed = 5u64;
+                let code = |d: DType| match d {
+                    DType::F32 => CUDA_R_32F,
+                    DType::F16 => CUDA_R_16F,
+                    DType::Bf16 => CUDA_R_16BF,
+                };
+                for &(dt, compute) in &[
+                    (DType::F32, COMPUTE_32F),
+                    (DType::F16, COMPUTE_32F),
+                    (DType::Bf16, COMPUTE_32F),
+                    (DType::F16, COMPUTE_16F),
+                ] {
+                    for epi in [EPI_DEFAULT, EPI_BIAS, EPI_RELU_BIAS, EPI_GELU_BIAS] {
+                        for &(batch, row_d) in &[(1i32, false), (3, false), (1, true)] {
+                            if row_d && epi != EPI_DEFAULT {
+                                continue;
+                            }
+                            // Linear: out = W(out x in) x^T ; Lt call m=out, n=rows, k=in, transa=T.
+                            let (m, n, k) = (37u64, 19u64, 45u64);
+                            let scale = if compute == COMPUTE_16F { CUDA_R_16F } else { CUDA_R_32F };
+                            let mut desc = new_desc(compute, scale);
+                            desc.set(D_TRANSA, &1i32.to_le_bytes());
+                            desc.set(D_EPILOGUE, &(epi as i32).to_le_bytes());
+                            let mk = |r: u64, c: u64, row: bool| {
+                                let ld = if row { c } else { r };
+                                let mut l = new_layout(code(dt), r, c, ld as i64);
+                                if row {
+                                    l.set(L_ORDER, &1i32.to_le_bytes());
+                                }
+                                if batch > 1 {
+                                    l.set(L_BATCH_COUNT, &batch.to_le_bytes());
+                                    l.set(L_STRIDED_BATCH_OFFSET, &((r * c) as i64).to_le_bytes());
+                                }
+                                l
+                            };
+                            let (la, lb, ld_) = (mk(k, m, false), mk(k, n, false), mk(m, n, row_d));
+                            let lc = ld_.clone();
+                            let a = fill(dt, (k * m) as usize * batch as usize, &mut seed);
+                            let b = fill(dt, (k * n) as usize * batch as usize, &mut seed);
+                            let bias = fill(dt, m as usize, &mut seed);
+                            let c0 = fill(dt, (m * n) as usize * batch as usize, &mut seed);
+                            let mut want = c0.clone();
+                            let has_bias = epi & 4 != 0;
+                            reference_matmul(&desc, &la, &lb, &lc, &ld_, 1.0, 0.0, &a, &b, &c0, &mut want, has_bias.then_some((&bias[..], dt)));
+                            // Device objects through the C ABI.
+                            let (mut pd, mut pa, mut pb, mut pc): (*mut c_void, *mut c_void, *mut c_void, *mut c_void) =
+                                (null_mut(), null_mut(), null_mut(), null_mut());
+                            assert_eq!(cublasLtMatmulDescCreate(&mut pd, compute, scale), SUCCESS);
+                            let one: c_int = 1;
+                            let e = epi as c_int;
+                            assert_eq!(cublasLtMatmulDescSetAttribute(pd, D_TRANSA, &one as *const _ as _, 4), SUCCESS);
+                            assert_eq!(cublasLtMatmulDescSetAttribute(pd, D_EPILOGUE, &e as *const _ as _, 4), SUCCESS);
+                            let (dev_a, dev_b, dev_d, dev_bias) = (up(&a), up(&b), up(&c0), up(&bias));
+                            if has_bias {
+                                let bp = dev_bias;
+                                assert_eq!(cublasLtMatmulDescSetAttribute(pd, D_BIAS_POINTER, &bp as *const _ as _, 8), SUCCESS);
+                            }
+                            for (out, l) in [(&mut pa, &la), (&mut pb, &lb), (&mut pc, &ld_)] {
+                                assert_eq!(cublasLtMatrixLayoutCreate(out, code(dt), l.u64_of(L_ROWS), l.u64_of(L_COLS), l.i64_of(L_LD)), SUCCESS);
+                                let ord = l.i32_of(L_ORDER);
+                                assert_eq!(cublasLtMatrixLayoutSetAttribute(*out, L_ORDER, &ord as *const _ as _, 4), SUCCESS);
+                                let bc = l.i32_of(L_BATCH_COUNT);
+                                assert_eq!(cublasLtMatrixLayoutSetAttribute(*out, L_BATCH_COUNT, &bc as *const _ as _, 4), SUCCESS);
+                                let bo = l.i64_of(L_STRIDED_BATCH_OFFSET);
+                                assert_eq!(cublasLtMatrixLayoutSetAttribute(*out, L_STRIDED_BATCH_OFFSET, &bo as *const _ as _, 8), SUCCESS);
+                            }
+                            let mut pref = null_mut();
+                            assert_eq!(cublasLtMatmulPreferenceCreate(&mut pref), SUCCESS);
+                            let mut res = std::mem::zeroed::<HeuristicResult>();
+                            let mut cnt = 0;
+                            assert_eq!(cublasLtMatmulAlgoGetHeuristic(lt, pd, pa, pb, pc, pc, pref, 1, &mut res, &mut cnt), SUCCESS);
+                            assert_eq!(cnt, 1);
+                            let (alpha32, beta32) = (1.0f32, 0.0f32);
+                            let (alpha16, beta16) = (f32_to_f16_bits(1.0), 0u16);
+                            let (al, be): (*const c_void, *const c_void) = if compute == COMPUTE_16F {
+                                (&alpha16 as *const u16 as _, &beta16 as *const u16 as _)
+                            } else {
+                                (&alpha32 as *const f32 as _, &beta32 as *const f32 as _)
+                            };
+                            let st = cublasLtMatmul(lt, pd, al, dev_a as _, pa, dev_b as _, pb, be, dev_d as _, pc, dev_d as _, pc, &res.algo, null_mut(), 0, null_mut());
+                            assert_eq!(st, SUCCESS, "dt={dt:?} epi={epi} batch={batch} rowD={row_d}");
+                            let mut got = vec![0u8; c0.len()];
+                            assert_eq!(dtoh(got.as_mut_ptr().cast(), dev_d, got.len()), 0);
+                            for i in 0..want.len() / dt.size() {
+                                let (g, w) = (decode(dt, &got, i), decode(dt, &want, i));
+                                let tol = if compute == COMPUTE_16F { 5e-2 } else { 1e-2 } * (1.0 + w.abs());
+                                assert!((g - w).abs() <= tol, "elem {i}: got {g} want {w} dt={dt:?} epi={epi} batch={batch} rowD={row_d}");
+                            }
+                            assert_eq!(cublasLtMatmulPreferenceDestroy(pref), SUCCESS);
+                            for p in [pa, pb, pc] {
+                                assert_eq!(cublasLtMatrixLayoutDestroy(p), SUCCESS);
+                            }
+                            assert_eq!(cublasLtMatmulDescDestroy(pd), SUCCESS);
+                        }
+                    }
+                }
+                assert_eq!(cublasLtDestroy(lt), SUCCESS);
+
+                // ---- cublasStrsmBatched vs reference_trsm ----
+                let mut handle = null_mut();
+                assert_eq!(cublasCreate_v2(&mut handle), SUCCESS);
+                for side in [SIDE_LEFT, SIDE_RIGHT] {
+                    for uplo in [FILL_LOWER, FILL_UPPER] {
+                        for trans in [OP_N, OP_T] {
+                            for diag in [DIAG_NON_UNIT, DIAG_UNIT] {
+                                let (m, n, batch) = (9usize, 6usize, 3usize);
+                                let order = if side == SIDE_LEFT { m } else { n };
+                                let (lda, ldb) = (order + 1, m + 2);
+                                let mut af: Vec<Vec<f32>> = Vec::new();
+                                let mut bf: Vec<Vec<f32>> = Vec::new();
+                                let mut want: Vec<Vec<f32>> = Vec::new();
+                                let (mut ap, mut bp) = (Vec::new(), Vec::new());
+                                for _ in 0..batch {
+                                    let ab = fill(DType::F32, lda * order, &mut seed);
+                                    let mut a: Vec<f32> = (0..lda * order).map(|i| decode(DType::F32, &ab, i) * 0.25).collect();
+                                    for d in 0..order {
+                                        a[d + d * lda] = 2.0 + 0.1 * d as f32;
+                                    }
+                                    let bb = fill(DType::F32, ldb * n, &mut seed);
+                                    let b: Vec<f32> = (0..ldb * n).map(|i| decode(DType::F32, &bb, i)).collect();
+                                    let mut w = b.clone();
+                                    reference_trsm(side, uplo, trans, diag, m, n, lda, ldb, 0.5, &a, &mut w);
+                                    let bytes = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+                                    ap.push(up(&bytes(&a)));
+                                    bp.push(up(&bytes(&b)));
+                                    af.push(a);
+                                    bf.push(b);
+                                    want.push(w);
+                                }
+                                let tab = |v: &[u64]| up(&v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+                                let (ta, tb) = (tab(&ap), tab(&bp));
+                                let alpha = 0.5f32;
+                                let st = cublasStrsmBatched(
+                                    handle, side, uplo, trans, diag, m as c_int, n as c_int, &alpha, ta as _, lda as c_int, tb as _, ldb as c_int, batch as c_int,
+                                );
+                                assert_eq!(st, SUCCESS);
+                                for z in 0..batch {
+                                    let mut got = vec![0u8; ldb * n * 4];
+                                    assert_eq!(dtoh(got.as_mut_ptr().cast(), bp[z], got.len()), 0);
+                                    for j in 0..n {
+                                        for i in 0..m {
+                                            let g = decode(DType::F32, &got, i + j * ldb);
+                                            let w = want[z][i + j * ldb];
+                                            assert!((g - w).abs() <= 2e-3 * (1.0 + w.abs()), "trsm side={side} uplo={uplo} trans={trans} diag={diag} z={z} ({i},{j}): {g} vs {w}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                assert_eq!(cublasDestroy_v2(handle), SUCCESS);
+            }
+        }
+    }
+
     mod gpu_tests {
         use super::*;
 
@@ -1266,6 +1613,25 @@ mod tests {
                                     (alpha, beta)
                                 };
                                 reference_gemm(&d, alpha_r, beta_r, &a, &b, &mut want);
+                                if compute == COMPUTE_16F {
+                                    // Honest half-precision accumulation (rounded after every step).
+                                    let r = ltplan::round_f16;
+                                    let s = d.strides();
+                                    want = c0.clone();
+                                    for j in 0..n as usize {
+                                        for i in 0..m as usize {
+                                            let mut acc = 0.0f32;
+                                            for l in 0..k as usize {
+                                                let av = decode(d.a, &a, i * s.a_si as usize + l * s.a_sl as usize);
+                                                let bv = decode(d.b, &b, l * s.b_sl as usize + j * s.b_sj as usize);
+                                                acc = r(acc + av * bv);
+                                            }
+                                            let ci = i + j * ldc as usize;
+                                            let v = r(r(acc * alpha_r) + beta_r * decode(d.c, &c0, ci));
+                                            encode(d.c, &mut want, ci, v);
+                                        }
+                                    }
+                                }
                                 for idx in 0..(ldc * n) as usize {
                                     let (g, w) = (decode(d.c, &got, idx), decode(d.c, &want, idx));
                                     // Padding rows must be untouched; others within f32 reassociation error.

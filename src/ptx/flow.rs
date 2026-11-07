@@ -178,6 +178,26 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             if exit_only(taken) || exit_only(other) {
                 continue;
             }
+            // Generalised early exit: if no barrier is reachable from one side, the threads
+            // taking it only run to completion and exit, which the hardware barrier counts
+            // as arrived (GGML's `if (col >= ncols) { ...no barrier...; return; }`).
+            let reaches_barrier = |start: usize| {
+                let mut seen = vec![false; blocks.len()];
+                let mut stack = vec![start];
+                while let Some(next) = stack.pop() {
+                    if std::mem::replace(&mut seen[next], true) {
+                        continue;
+                    }
+                    if blocks[next].instructions.iter().any(|inst| inst.is_convergent()) {
+                        return true;
+                    }
+                    stack.extend(blocks[next].end.successors());
+                }
+                false
+            };
+            if !reaches_barrier(taken) || !reaches_barrier(other) {
+                continue;
+            }
             checked_branches[index] = true;
             let mut seen = vec![false; blocks.len()];
             let mut stack = vec![taken, other];
