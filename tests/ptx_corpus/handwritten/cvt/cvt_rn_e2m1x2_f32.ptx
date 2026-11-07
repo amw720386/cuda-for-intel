@@ -1,0 +1,24 @@
+.version 8.6
+.target sm_100a
+.address_size 64
+
+.visible .entry cvt_rn_e2m1x2_f32(
+	.param .u64 out
+)
+{
+	.reg .pred %p<8>;
+	.reg .b16 %h<8>;
+	.reg .b32 %r<32>;
+	.reg .b64 %rd<16>;
+	.reg .f32 %f<16>;
+	ld.param.u64 %rd1, [out];
+	cvta.to.global.u64 %rd2, %rd1;
+	mov.f32 %f1, 0f3F800000;
+	mov.f32 %f2, 0f3F800000;
+	ld.global.u16 %h1, [%rd2];
+	mov.u32 %r1, 1;
+	mov.u32 %r31, 1;
+	cvt.rn.satfinite.e2m1x2.f32 %h1, %f1, %f2;
+	st.global.u32 [%rd2], %r1;
+	ret;
+}
