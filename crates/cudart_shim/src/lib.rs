@@ -51,6 +51,8 @@ struct Driver {
     cuMemcpyDtoDAsync:
         unsafe extern "system" fn(CUdeviceptr, CUdeviceptr, usize, CUstream) -> CuResult,
     cuMemcpyDtoD: unsafe extern "system" fn(CUdeviceptr, CUdeviceptr, usize) -> CuResult,
+    cuMemsetD8: unsafe extern "system" fn(CUdeviceptr, u8, usize) -> CuResult,
+    cuMemsetD8Async: unsafe extern "system" fn(CUdeviceptr, u8, usize, CUstream) -> CuResult,
     cuModuleLoadData: unsafe extern "system" fn(*mut CUmodule, *const c_void) -> CuResult,
     cuModuleGetFunction:
         unsafe extern "system" fn(*mut CUfunction, CUmodule, *const c_char) -> CuResult,
@@ -122,6 +124,8 @@ fn load_driver() -> Result<Driver, c_int> {
             cuMemcpyDtoHAsync: sym!("cuMemcpyDtoHAsync_v2"),
             cuMemcpyDtoDAsync: sym!("cuMemcpyDtoDAsync_v2"),
             cuMemcpyDtoD: sym!("cuMemcpyDtoD_v2"),
+            cuMemsetD8: sym!("cuMemsetD8_v2"),
+            cuMemsetD8Async: sym!("cuMemsetD8Async"),
             cuModuleLoadData: sym!("cuModuleLoadData"),
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
@@ -144,6 +148,8 @@ fn load_driver() -> Result<Driver, c_int> {
 struct Runtime {
     device: c_int,
     last_error: c_int,
+    /// Device ordinal -> primary context handle. Retained once per device.
+    contexts: HashMap<c_int, usize>,
     /// hostFun pointer → device function handle address
     functions: HashMap<usize, usize>,
     /// fatbin handle → loaded module handle address
@@ -169,11 +175,31 @@ fn set_error(code: c_int) -> c_int {
 
 fn ensure_context(drv: &Driver) -> c_int {
     let device = runtime().lock().map(|rt| rt.device).unwrap_or(0);
-    let mut ctx = std::ptr::null_mut();
-    let err = unsafe { (drv.cuDevicePrimaryCtxRetain)(&mut ctx, device) };
-    if err != SUCCESS {
-        return err;
-    }
+    // Retain each primary context once: every retain needs a matching release, and
+    // this runs on nearly every Runtime call.
+    let cached = runtime()
+        .lock()
+        .ok()
+        .and_then(|rt| rt.contexts.get(&device).copied());
+    let ctx = match cached {
+        Some(ctx) => ctx as CUcontext,
+        None => {
+            let mut ctx = std::ptr::null_mut();
+            let err = unsafe { (drv.cuDevicePrimaryCtxRetain)(&mut ctx, device) };
+            if err != SUCCESS {
+                return err;
+            }
+            if let Ok(mut rt) = runtime().lock() {
+                if let Some(&existing) = rt.contexts.get(&device) {
+                    // A racing thread retained first; keep one reference per device.
+                    ctx = existing as CUcontext;
+                } else {
+                    rt.contexts.insert(device, ctx as usize);
+                }
+            }
+            ctx
+        }
+    };
     unsafe { (drv.cuCtxSetCurrent)(ctx) }
 }
 
@@ -423,6 +449,13 @@ pub unsafe extern "system" fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize)
     if err != SUCCESS {
         return set_error(err);
     }
+    if size == 0 {
+        // cudaMalloc(0) succeeds and returns a null pointer.
+        if !dev_ptr.is_null() {
+            unsafe { dev_ptr.write(std::ptr::null_mut()) };
+        }
+        return set_error(SUCCESS);
+    }
     let mut ptr = 0u64;
     let err = unsafe { (drv.cuMemAlloc)(&mut ptr, size) };
     if err == SUCCESS && !dev_ptr.is_null() {
@@ -452,6 +485,13 @@ pub unsafe extern "system" fn cudaHostAlloc(ptr: *mut *mut c_void, size: usize, 
     let Ok(drv) = driver() else {
         return set_error(NOT_INITIALIZED);
     };
+    if ptr.is_null() {
+        return set_error(INVALID_VALUE);
+    }
+    if size == 0 {
+        unsafe { ptr.write(std::ptr::null_mut()) };
+        return set_error(SUCCESS);
+    }
     let err = ensure_context(drv);
     if err != SUCCESS {
         return set_error(err);
@@ -545,11 +585,9 @@ pub unsafe extern "system" fn cudaMemcpyPeerAsync(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaMemset(dev_ptr: *mut c_void, value: c_int, count: usize) -> c_int {
-    // Host-side fill via DtoH/HtoD is expensive; allocate staging.
     if count == 0 {
         return set_error(SUCCESS);
     }
-    let mut host = vec![value as u8; count];
     let Ok(drv) = driver() else {
         return set_error(NOT_INITIALIZED);
     };
@@ -557,7 +595,7 @@ pub unsafe extern "system" fn cudaMemset(dev_ptr: *mut c_void, value: c_int, cou
     if err != SUCCESS {
         return set_error(err);
     }
-    set_error(unsafe { (drv.cuMemcpyHtoD)(dev_ptr as u64, host.as_ptr().cast(), count) })
+    set_error(unsafe { (drv.cuMemsetD8)(dev_ptr as u64, value as u8, count) })
 }
 
 #[unsafe(no_mangle)]
@@ -567,8 +605,18 @@ pub unsafe extern "system" fn cudaMemsetAsync(
     count: usize,
     stream: CUstream,
 ) -> c_int {
-    let _ = stream;
-    unsafe { cudaMemset(dev_ptr, value, count) }
+    if count == 0 {
+        return set_error(SUCCESS);
+    }
+    let Ok(drv) = driver() else {
+        return set_error(NOT_INITIALIZED);
+    };
+    let err = ensure_context(drv);
+    if err != SUCCESS {
+        return set_error(err);
+    }
+    // Fill on the caller's stream so it stays ordered after earlier work there.
+    set_error(unsafe { (drv.cuMemsetD8Async)(dev_ptr as u64, value as u8, count, stream) })
 }
 
 #[unsafe(no_mangle)]
