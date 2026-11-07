@@ -47,3 +47,21 @@ fp16 matmul/copy variants (cvt.u16.u64, cvt.s64.s16, setp.eq.b64), register-coun
 shifts (only immediate left shifts below 64), divergent bar.sync in softmax_block.
 Reproduce per-kernel status with the harness: dump modules via CFI_PTX_DUMP_DIR and run
 `ptx-corpus-harness --probe module_N.ptx`.
+
+## Round 3 (torch 2.2.2+cu118 with the integration-torch translator fixes, and conda-forge torch 2.13 cuda128)
+
+cu118, Arc B390, all equal to CPU: embedding, index_select, torch.cat, fp16 cast
+roundtrip, autocast fp16 matmul, bmm, conv2d backward, default (foreach) SGD and Adam,
+TransformerEncoderLayer forward and all 12 gradients, fp16 transformer forward,
+rand/randn/dropout (ATen Philox, no curand shim needed), Events, Streams,
+pinned non_blocking copies, memory_stats.
+
+Caveat: scaled_dot_product_attention default picks fmha_cutlassF_*_sm75, whose
+compute_37 PTX is an arch-guard stub (empty body), giving wrong attention output.
+Use torch.backends.cuda.enable_mem_efficient_sdp(False) (and flash off).
+
+cuda128 (conda-forge torch 2.13.0, PTX sm_120, ISA 8.7, cudart 12.8): is_available,
+torch.zeros and x+y run. cudart 12.8 loads through cuLibrary*; library kernels are
+now translated lazily per entry (translating the whole module on first use did not
+finish in two minutes). Shutdown logs cuLibraryUnload 999 (zeKernelDestroy after
+Level Zero teardown), harmless.
