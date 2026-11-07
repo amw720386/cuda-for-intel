@@ -5,6 +5,7 @@ use super::graphs::*;
 use super::library::*;
 use super::primary::*;
 use super::streams::events::*;
+use super::streams::timing::*;
 use super::streams::{cuStreamCreate, cuStreamDestroy_v2, cuStreamQuery, cuStreamSynchronize};
 use super::vmm::*;
 use super::*;
@@ -336,6 +337,8 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuEventCreate" => entry!(cuEventCreate, 2000),
         b"cuEventRecord" => entry!(cuEventRecord, 2000, DRIVER_ABI + 1, true),
         b"cuEventRecordWithFlags" => entry!(cuEventRecordWithFlags, 11010, DRIVER_ABI + 1, true),
+        b"cuEventElapsedTime" if version >= 12080 => entry!(cuEventElapsedTime_v2, 12080),
+        b"cuEventElapsedTime" => entry!(cuEventElapsedTime, 2000),
         b"cuEventQuery" => entry!(cuEventQuery, 2000),
         b"cuEventSynchronize" => entry!(cuEventSynchronize, 2000),
         b"cuEventDestroy" => entry!(cuEventDestroy_v2, 4000),

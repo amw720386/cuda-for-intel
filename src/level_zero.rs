@@ -335,6 +335,12 @@ macro_rules! loader_api {
                 }
             }
 
+            /// True for the in-process fake backend used by unit tests.
+            #[cfg(test)]
+            pub(crate) fn is_fake(&self) -> bool {
+                self._library.is_none()
+            }
+
             #[cfg(all(test, windows))]
             fn library(&self) -> &Library {
                 self._library.as_ref().expect("hardware profiling requires the native loader")

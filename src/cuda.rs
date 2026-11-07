@@ -533,6 +533,7 @@ impl CudaContext {
 
     fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
         self.streams.drain_for_teardown(api)?;
+        self.streams.release_timestamps(api, &self.backend)?;
         self.streams.destroy(api)?;
         while let Some(&key) = self.modules.keys().next() {
             self.unload(api, key)?;
