@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
+mod current_stack;
 mod discovery;
 #[cfg(windows)]
 mod dxgi_luid;
@@ -168,7 +169,7 @@ fn status(result: Result<(), CuResult>) -> CuResult {
 }
 
 fn current() -> Option<usize> {
-    CURRENT.with(|stack| stack.borrow().last().copied())
+    CURRENT.with(|stack| current_stack::top(&stack.borrow()))
 }
 
 fn with_context<T>(
@@ -415,13 +416,7 @@ pub extern "system" fn cuCtxSetCurrent(handle: Opaque) -> CuResult {
                     .ok_or(InvalidContext)?
                     .check_live()?;
             }
-            CURRENT.with(|stack| {
-                let mut stack = stack.borrow_mut();
-                stack.pop();
-                if key != 0 {
-                    stack.push(key);
-                }
-            });
+            CURRENT.with(|stack| current_stack::replace_top(&mut stack.borrow_mut(), key));
             Ok(())
         }))
     })
