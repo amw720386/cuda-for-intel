@@ -1,0 +1,67 @@
+//! Computed-address kernel-parameter space, run on the SPIR-V interpreter.
+use super::coverage_tests::{interp, lower};
+
+const MODULE: &str = r#"
+.version 7.8
+.target sm_37
+.address_size 64
+.visible .entry k(.param .u64 out, .param .align 8 .b8 s[32], .param .u8 b)
+{
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<24>;
+    .reg .b64 %rd<24>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u64 %rd3, s;
+    add.s64 %rd4, %rd3, 4;
+    ld.param.u8 %r1, [%rd4+1];
+    ld.param.s8 %r2, [%rd3+8];
+    ld.param.u16 %r3, [%rd3+10];
+    ld.param.s16 %r4, [%rd3+8];
+    ld.param.u64 %rd5, [%rd3+16];
+    ld.param.v2.u32 {%r5, %r6}, [%rd3+12];
+    add.s64 %rd6, %rd3, 20;
+    ld.param.u32 %r7, [%rd6+-8];
+    mov.u64 %rd7, b;
+    ld.param.u8 %rs1, [%rd7];
+    cvt.u32.u16 %r8, %rs1;
+    ld.param.u8 %rs2, [b];
+    cvt.u32.u16 %r9, %rs2;
+    ld.param.v4.u32 {%r10, %r11, %r12, %r13}, [%rd3];
+    st.global.u32 [%rd2], %r1;
+    st.global.u32 [%rd2+4], %r2;
+    st.global.u32 [%rd2+8], %r3;
+    st.global.u32 [%rd2+12], %r4;
+    st.global.u64 [%rd2+16], %rd5;
+    st.global.u32 [%rd2+24], %r5;
+    st.global.u32 [%rd2+28], %r6;
+    st.global.u32 [%rd2+32], %r7;
+    st.global.u32 [%rd2+36], %r8;
+    st.global.u32 [%rd2+40], %r9;
+    st.global.u32 [%rd2+44], %r10;
+    st.global.u32 [%rd2+48], %r13;
+    ret;
+}
+"#;
+
+#[test]
+fn computed_param_addresses_read_the_argument_buffer() {
+    let module = lower(MODULE);
+    let words = [0x0403_0201u32, 0x0807_0605, 0xfedc_ba98, 0x7654_3210, 0x5566_7788, 0x1122_3344, 0xdead_beef, 0x0bad_f00d];
+    let mut params = vec![interp::GLOBAL];
+    params.extend(words.iter().map(|&w| u64::from(w)));
+    params.push(0xab);
+    let mut machine = interp::Machine { params, ..Default::default() };
+    interp::run(&module, &mut machine);
+    let word = |i: u64| machine.read(interp::GLOBAL + 4 * i, 4) as u32;
+    assert_eq!(word(0), 0x06); // byte 5 of the struct
+    assert_eq!(word(1), 0xffff_ff98);
+    assert_eq!(word(2), 0xfedc);
+    assert_eq!(word(3), 0xffff_ba98);
+    assert_eq!((word(4), word(5)), (0x5566_7788, 0x1122_3344));
+    assert_eq!((word(6), word(7)), (0x7654_3210, 0x5566_7788));
+    assert_eq!(word(8), 0x7654_3210); // [s+20-8] = word 3
+    assert_eq!(word(9), 0xab);
+    assert_eq!(word(10), 0xab);
+    assert_eq!((word(11), word(12)), (0x0403_0201, 0x7654_3210));
+}

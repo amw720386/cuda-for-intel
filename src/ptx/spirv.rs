@@ -61,6 +61,8 @@ impl Value {
 mod ext_emit;
 #[path = "ext_float.rs"]
 mod ext_float;
+#[path = "param_space_emit.rs"]
+mod param_space_emit;
 
 struct Emitter<'a> {
     builder: Builder,
@@ -98,6 +100,9 @@ struct Emitter<'a> {
     initialized: HashSet<&'a str>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
+    /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
+    param_array: Option<Word>,
+    param_bases: HashMap<&'a str, u32>,
     device_atomics: bool,
     fp32: bool,
     fp32_fma: bool,
@@ -177,6 +182,8 @@ impl<'a> Emitter<'a> {
             initialized: HashSet::new(),
             locals: Vec::new(),
             params: HashMap::new(),
+            param_array: None,
+            param_bases: HashMap::new(),
             device_atomics: false,
             fp32: false,
             fp32_fma: false,
@@ -1697,6 +1704,10 @@ impl<'a> Emitter<'a> {
                 self.emit_ext(op, dst, src)?;
                 return Ok(());
             }
+            Instruction::ParamSpace(op) => {
+                self.emit_param_space(op)?;
+                return Ok(());
+            }
             Instruction::Fence => {
                 let ty = self.u32_type;
                 let scope = self.builder.constant_bit32(ty, Scope::Device as u32);
@@ -2986,6 +2997,12 @@ impl<'a> Emitter<'a> {
                 .variable(pointer, None, StorageClass::Workgroup, None);
             self.shared_array = Some(variable);
         }
+        self.param_array = None;
+        if entry.blocks.iter().flat_map(|block| &block.instructions).any(
+            |inst| matches!(inst, Instruction::ParamSpace(op) if op.is_dynamic()),
+        ) {
+            self.declare_param_array(&entry.params);
+        }
         // CUDA `.local` depot: Function-scope private array (spliced into block 0).
         self.local = entry.local.map(|(name, bytes)| {
             let words = bytes.div_ceil(4).max(1);
@@ -3068,6 +3085,9 @@ impl<'a> Emitter<'a> {
                 Param::Words { .. } => unreachable!(),
             };
             self.params.insert((name, 0), Value { id, kind });
+        }
+        if self.param_array.is_some() {
+            self.setup_param_array(&entry.params)?;
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
         self.builder.branch(labels[0])?;

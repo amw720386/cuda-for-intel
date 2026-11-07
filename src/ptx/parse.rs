@@ -46,6 +46,8 @@ struct Parser<'a> {
     tokens: std::vec::IntoIter<&'a str>,
     /// Module-scope variables declared so far.
     vars: ModuleVars<'a>,
+    /// Parameter names of the entry being parsed (for `mov.u64 %rd, param`).
+    param_names: Vec<&'a str>,
 }
 
 /// Stock GGML MMQ kernels declare roughly 7000 registers.
@@ -235,6 +237,13 @@ impl<'a> Parser<'a> {
             }
             None => body,
         };
+        if let Some(inst) = super::param_space::parse(body, &self.param_names)? {
+            self.tokens.nth(end);
+            if braced {
+                self.expect("}")?;
+            }
+            return Ok(inst);
+        }
         if let Some(inst) = super::ext::parse(body)? {
             self.tokens.nth(end);
             if braced {
@@ -2069,6 +2078,7 @@ pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'
     let mut parser = Parser {
         tokens: tokens(source)?.into_iter(),
         vars: ModuleVars::default(),
+        param_names: Vec::new(),
     };
     parser.expect(".version")?;
     // Stock CUDA 11 through 13 toolchains emit PTX ISA 7.0 through 9.x.
@@ -2144,6 +2154,7 @@ pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, 
     let mut parser = Parser {
         tokens: tokens.into_iter(),
         vars: ModuleVars::default(),
+        param_names: Vec::new(),
     };
     parse_entry(&mut parser)
 }
@@ -2181,6 +2192,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     parser.expect(".entry")?;
     let name = parser.identifier()?;
     let mut params = parser.params()?;
+    parser.param_names = params.iter().map(|&(name, _)| name).collect();
     // Performance / occupancy hints may appear in any order before `{`.
     let mut max_threads = None;
     loop {

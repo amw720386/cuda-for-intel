@@ -4,6 +4,7 @@ mod flow;
 pub(crate) mod globals;
 mod inline;
 mod normalize;
+mod param_space;
 mod parse;
 mod probe;
 #[cfg(test)]
@@ -527,6 +528,8 @@ enum Instruction<'a> {
         membermask: &'a str,
     },
     Barrier,
+    /// Kernel-parameter space accessed through a computed address.
+    ParamSpace(param_space::ParamOp<'a>),
     /// Instructions parsed and lowered by `ext.rs` / `ext_emit.rs`. Unused
     /// sources are `"0"`, unused destinations are `""`.
     Ext {
@@ -690,6 +693,14 @@ impl<'a> Instruction<'a> {
             Ext { dst, src, .. } => {
                 out.extend(dst.iter().copied().filter(|d| !d.is_empty()));
                 src
+            }
+            ParamSpace(param_space::ParamOp::Addr { dst, .. }) => {
+                out.push(*dst);
+                &[]
+            }
+            ParamSpace(param_space::ParamOp::Load(load)) => {
+                out.extend_from_slice(&load.dst[..usize::from(load.count)]);
+                std::slice::from_ref(&load.base)
             }
             Store32(..)
             | Store8(..)
@@ -886,6 +897,8 @@ pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
 mod coverage_tests;
 #[cfg(test)]
 mod globals_tests;
+#[cfg(test)]
+mod param_space_tests;
 #[cfg(test)]
 mod tier2_tests;
 #[cfg(test)]
