@@ -1,6 +1,9 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod flow;
 mod parse;
+#[cfg(test)]
+#[path = "../crates/cublas_shim/src/ptxgen.rs"]
+mod cublas_ptxgen;
 
 pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
     let tokens = parse::tokens(source)?;
@@ -707,6 +710,19 @@ mod tests {
                 .any(|param| matches!(param, Param::Words { align: 8, .. })),
             "expected soft_max_params .align 8 aggregate"
         );
+    }
+
+    #[test]
+    fn translates_generated_cublas_gemm_variants() {
+        use super::cublas_ptxgen as ptxgen;
+        for (a, b, c, pointer_arrays) in ptxgen::all_variants() {
+            let source = ptxgen::generate(a, b, c, pointer_arrays);
+            let name = ptxgen::entry_name(a, b, c, pointer_arrays);
+            let translated = translate(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(translated.kernels[0].name, name);
+            assert_eq!(translated.kernels[0].shared_bytes, 2048, "{name}");
+            assert_eq!(translated.kernels[0].params.len(), 16, "{name}");
+        }
     }
 
     #[test]
