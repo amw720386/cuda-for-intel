@@ -612,7 +612,7 @@ fn bit_type(part: &str) -> &str {
 }
 
 fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
-    if let Some(lines) = tier3::rewrite(&mut ctx.t3, inst) {
+    if let Some(lines) = tier3::rewrite(ctx, inst) {
         return Some(lines);
     }
     let op = inst.op.as_str();

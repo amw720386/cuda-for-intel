@@ -7,7 +7,7 @@
 //! `Ctx`, `Inst` and `render` directly. `rewrite` is consulted first; `None`
 //! means "not mine" and the legacy rewrites continue.
 
-use super::{Inst, render};
+use super::{Ctx, Inst, render};
 
 /// Per-entry state owned by this module (embedded in `Ctx`).
 #[derive(Default)]
@@ -98,9 +98,46 @@ fn is_imm(text: &str) -> bool {
     t.starts_with(|c: char| c.is_ascii_digit()) || t.starts_with('-') || t.starts_with("0x")
 }
 
-pub(super) fn rewrite(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+/// Runs the rest of the rewrite pipeline on `inst` (used after renaming).
+fn again(ctx: &mut Ctx, inst: &Inst) -> Vec<String> {
+    super::rewrite_inst(ctx, inst).unwrap_or_else(|| vec![inst.render()])
+}
+
+fn with_op(inst: &Inst, op: String) -> Inst {
+    Inst { guard: inst.guard.clone(), op, operands: inst.operands.clone() }
+}
+
+pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    if inst.operands.iter().any(|o| o == "WARP_SZ" || o == "%WARP_SZ") {
+        let mut copy = with_op(inst, inst.op.clone());
+        for o in &mut copy.operands {
+            if o == "WARP_SZ" || o == "%WARP_SZ" {
+                *o = "32".into();
+            }
+        }
+        return Some(again(ctx, &copy));
+    }
+    let st = &mut ctx.t3;
     let family = inst.op.split('.').next().unwrap_or("");
     match family {
+        "ld" | "ldu" if inst.op.split('.').any(|p| p == "const") => {
+            // Constant-bank loads read ordinary device memory.
+            let parts: Vec<&str> = inst.op.split('.').filter(|p| *p != "const").collect();
+            let mut op = parts.join(".");
+            op = op.replacen("ld.", "ld.global.", 1);
+            let copy = with_op(inst, op);
+            Some(again(ctx, &copy))
+        }
+        "cvta" if inst.op.split('.').any(|p| p == "const") && inst.operands.len() == 2 => {
+            Some(vec![render(&inst.guard, "mov.b64", &inst.operands)])
+        }
+        "mov" if matches!(inst.operand(1), "%dynamic_smem_size" | "%total_smem_size") && inst.operands.len() == 2 => {
+            let bits = if inst.op.ends_with("64") { 64 } else { 32 };
+            Some(vec![render(&inst.guard, &format!("mov.b{bits}"), &[inst.operand(0).to_owned(), "49152".into()])])
+        }
+        "shfl" => shfl_masks(ctx, inst),
+        "vote" => vote_masks(ctx, inst),
+        "cvt" => cvt_misc(ctx, inst),
         "add" | "sub" | "addc" | "subc" | "madc" | "mad" => carry(st, inst),
         "vadd" | "vsub" | "vabsdiff" | "vmin" | "vmax" | "vset" | "vshl" | "vshr" | "vmad" | "vavrg" => {
             video_scalar(st, inst)
@@ -111,6 +148,103 @@ pub(super) fn rewrite(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
         "selp" => selp_literal(st, inst),
         _ => None,
     }
+}
+
+// ---- warp collectives with partial masks ---------------------------------
+
+fn full_mask(text: &str) -> bool {
+    matches!(super::immediate(text), Some(0xffff_ffff))
+}
+
+/// A partial `membermask` names the threads that execute the instruction; SPIR-V
+/// subgroup operations act on the active invocations, which are exactly those,
+/// so an immediate partial mask is replaced by the full mask. Out-of-range
+/// bfly segments need the register-control form.
+fn shfl_masks(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    if parts.get(1) != Some(&"sync") || inst.operands.len() != 5 {
+        return None;
+    }
+    let mask = inst.operand(4);
+    let control = inst.operand(3);
+    let partial = super::immediate(mask).is_some() && !full_mask(mask);
+    let bfly_segment = parts.get(2) == Some(&"bfly") && super::immediate(control).is_some_and(|c| c != 0x1f);
+    if !partial && !bfly_segment {
+        return None;
+    }
+    let mut copy = with_op(inst, inst.op.clone());
+    if partial {
+        copy.operands[4] = "0xffffffff".into();
+    }
+    let mut lines = Vec::new();
+    if bfly_segment {
+        let st = &mut ctx.t3;
+        st.x32 = st.x32.max(1);
+        lines.push(format!("mov.b32 %__x32_0 , {control} ;"));
+        copy.operands[3] = "%__x32_0".into();
+    }
+    lines.extend(again(ctx, &copy));
+    Some(lines)
+}
+
+/// `vote.sync.ballot` returns only the bits of the named threads.
+fn vote_masks(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    if parts.get(1) != Some(&"sync") || parts.get(2) != Some(&"ballot") || inst.operands.len() != 3 {
+        return None;
+    }
+    let mask = inst.operand(2);
+    if full_mask(mask) {
+        return None;
+    }
+    let dst = inst.operand(0).to_owned();
+    let mut copy = with_op(inst, inst.op.clone());
+    copy.guard = String::new();
+    copy.operands[2] = "0xffffffff".into();
+    let mut lines = again(ctx, &copy);
+    lines.push(render(&inst.guard, "and.b32", &[dst.clone(), dst, mask.to_owned()]));
+    Some(lines)
+}
+
+/// `cvt.pack.sat` and same-width integer reinterpretations.
+fn cvt_misc(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    if parts.get(1) == Some(&"pack") && parts.get(2) == Some(&"sat") && parts.len() == 6 && inst.operands.len() == 4 {
+        // cvt.pack.sat.{u8,s8,u16,s16}.{s32}.b32 d, a, b, c: d = (c << 2w) | (sat(a) << w) | sat(b)
+        let (w, lo, hi): (u32, i64, i64) = match parts[3] {
+            "u8" => (8, 0, 255),
+            "s8" => (8, -128, 127),
+            "u16" => (16, 0, 65535),
+            "s16" => (16, -32768, 32767),
+            _ => return None,
+        };
+        if parts[4] != "s32" || parts[5] != "b32" {
+            return None;
+        }
+        let mut b = B::new(&mut ctx.t3);
+        let dst = inst.operand(0);
+        let (a, bb, c) = (inst.operand(1), inst.operand(2), inst.operand(3));
+        let (sa, sb) = (b.t32(), b.t32());
+        for (src, out) in [(a, &sa), (bb, &sb)] {
+            let t = b.t32();
+            b.p(format!("max.s32 {t} , {src} , {lo} ;"));
+            b.p(format!("min.s32 {out} , {t} , {hi} ;"));
+        }
+        let acc = b.t32();
+        if w == 8 {
+            b.p(format!("shl.b32 {acc} , {c} , 16 ;"));
+        } else {
+            b.p(format!("mov.b32 {acc} , 0 ;"));
+        }
+        b.p(format!("bfi.b32 {acc} , {sb} , {acc} , 0 , {w} ;"));
+        b.p(format!("bfi.b32 {acc} , {sa} , {acc} , {w} , {w} ;"));
+        b.p(render(&inst.guard, "mov.b32", &[dst.to_owned(), acc]));
+        return Some(b.finish());
+    }
+    if parts.len() == 3 && matches!(parts[1], "s32" | "u32") && matches!(parts[2], "s32" | "u32") && inst.operands.len() == 2 {
+        return Some(vec![render(&inst.guard, "mov.b32", &inst.operands)]);
+    }
+    None
 }
 
 // ---- carry chains -------------------------------------------------------

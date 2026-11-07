@@ -116,7 +116,7 @@ handwritten/bitmanip/brev_b64.ptx	pass	strict-pass
 handwritten/bitmanip/clz_b32.ptx	pass	strict-pass	
 handwritten/bitmanip/clz_b64.ptx	pass	strict-pass	
 handwritten/bitmanip/cnot_b32.ptx	pass	strict-pass	
-handwritten/bitmanip/cvta_const.ptx	unsupported	strict-fail	unsupported PTX instruction: cvta.const.u64 %rd3 , %rd2
+handwritten/bitmanip/cvta_const.ptx	error	strict-fail	expected Address(Global) for %rd3, got B64
 handwritten/bitmanip/cvta_shared.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/bitmanip/cvta_to_shared.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/bitmanip/div_u64.ptx	pass	strict-pass	
@@ -187,7 +187,7 @@ handwritten/cp_async/st_async_b32.ptx	error	strict-fail	invalid PTX identifier s
 handwritten/cvt/cvt_f32_bf16.ptx	pass	strict-pass	
 handwritten/cvt/cvt_f32_f16.ptx	pass	strict-pass	
 handwritten/cvt/cvt_f64_f32.ptx	pass	strict-pass	
-handwritten/cvt/cvt_pack_sat_u8_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.pack.sat.u8.s32.b32 %r1 , %r2 , %r3 , %r4
+handwritten/cvt/cvt_pack_sat_u8_s32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_rmi_f32_f32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_rn_bf16_f32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_rn_bf16x2_f32.ptx	pass	strict-pass	
@@ -268,12 +268,12 @@ handwritten/ldmatrix/ldmatrix_x4_trans.ptx	error	strict-fail	expected a shared a
 handwritten/ldmatrix/stmatrix_x4.ptx	unsupported	strict-fail	unsupported PTX instruction: stmatrix.sync.aligned.m8n8.x4.shared.b16 [ %rd2 ] , { %r1 , %r2 , %r3 , %r4 }
 handwritten/memory/applypriority_L2.ptx	pass	strict-pass	
 handwritten/memory/call_noreturn_stub.ptx	pass	strict-pass	
-handwritten/memory/const_array_init.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.u32 %r1 , [ %rd3 ]
+handwritten/memory/const_array_init.ptx	error	strict-fail	unknown PTX local symbol ctbl
 handwritten/memory/createpolicy_fractional.ptx	pass	strict-pass	
 handwritten/memory/discard_global_L2.ptx	pass	strict-pass	
 handwritten/memory/func_call_internal.ptx	unsupported	strict-fail	unsupported integer operand a
 handwritten/memory/global_array_init.ptx	error	strict-fail	undefined PTX register tbl on an incoming path
-handwritten/memory/ld_const_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.u32 %r1 , [ %rd2 ]
+handwritten/memory/ld_const_u32.ptx	pass	strict-pass	
 handwritten/memory/ld_global_L1_no_allocate.ptx	pass	strict-pass	
 handwritten/memory/ld_global_L2_128B.ptx	pass	strict-pass	
 handwritten/memory/ld_global_cs.ptx	pass	strict-pass	
@@ -353,7 +353,7 @@ handwritten/sreg/sreg_cluster_nctaid_x.ptx	pass	strict-pass
 handwritten/sreg/sreg_ctaid_x.ptx	pass	strict-pass	
 handwritten/sreg/sreg_ctaid_y.ptx	pass	strict-pass	
 handwritten/sreg/sreg_ctaid_z.ptx	pass	strict-pass	
-handwritten/sreg/sreg_dynamic_smem_size.ptx	error	strict-fail	undefined PTX register %dynamic_smem_size on an incoming path
+handwritten/sreg/sreg_dynamic_smem_size.ptx	pass	strict-pass	
 handwritten/sreg/sreg_envreg0.ptx	pass	strict-pass	
 handwritten/sreg/sreg_globaltimer.ptx	error	strict-fail	undefined PTX register %globaltimer on an incoming path
 handwritten/sreg/sreg_gridid.ptx	pass	strict-pass	
@@ -367,7 +367,7 @@ handwritten/sreg/sreg_pm0.ptx	pass	strict-pass
 handwritten/sreg/sreg_smid.ptx	pass	strict-pass	
 handwritten/sreg/sreg_tid_x.ptx	pass	strict-pass	
 handwritten/sreg/sreg_tid_y.ptx	pass	strict-pass	
-handwritten/sreg/sreg_total_smem_size.ptx	error	strict-fail	undefined PTX register %total_smem_size on an incoming path
+handwritten/sreg/sreg_total_smem_size.ptx	pass	strict-pass	
 handwritten/sreg/sreg_warpid.ptx	pass	strict-pass	
 handwritten/tex/suld_b_1d_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: suld.b.1d.b32.trap %r1 , [ %rd3 , { %r2 } ]
 handwritten/tex/sured_b_1d_add_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: sured.b.add.1d.u32.trap [ %rd3 , { %r1 } ] , %r2
@@ -436,12 +436,12 @@ zluda/control/ntid.ptx	pass	strict-fail
 zluda/control/test__operands.ptx	error	strict-fail	invalid PTX parameter offset
 zluda/control/tid.ptx	pass	strict-fail	
 zluda/control/trap.ptx	pass	strict-fail	
-zluda/control/warp_sz.ptx	unsupported	strict-fail	unsupported integer operand WARP_SZ
+zluda/control/warp_sz.ptx	pass	strict-fail	
 zluda/cp_async/cp_async.ptx	error	strict-fail	expected .align, got .b32
 zluda/cp_async/createpolicy.ptx	pass	strict-fail	
 zluda/cvt/cvt_f16x2_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_f64_f32.ptx	pass	strict-fail	
-zluda/cvt/cvt_pack.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.pack.sat.u8.s32.b32 %result1 , %src1 , %src2 , %src3
+zluda/cvt/cvt_pack.ptx	pass	strict-fail	
 zluda/cvt/cvt_relu_f16x2_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_rn_bf16x2_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_rn_f16x2_e4m3x2.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.e4m3x2 %result , %in
@@ -454,7 +454,7 @@ zluda/cvt/cvt_rzi.ptx	pass	strict-fail
 zluda/cvt/cvt_s16_s8.ptx	pass	strict-fail	
 zluda/cvt/cvt_s32_f32.ptx	pass	strict-fail	
 zluda/cvt/cvt_s64_s32.ptx	pass	strict-fail	
-zluda/cvt/cvt_sat_s_u.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.s32.u32 %temp3 , %temp2
+zluda/cvt/cvt_sat_s_u.ptx	pass	strict-fail	
 zluda/cvt/cvt_u64_f16.ptx	pass	strict-fail	
 zluda/cvt/cvta.ptx	error	strict-fail	expected Address(Global) for %in_addr, got B64
 zluda/cvt/uint_to_fp_bf16.ptx	pass	strict-fail	
@@ -529,8 +529,8 @@ zluda/integer/subc_cc_s32.ptx	unsupported	strict-fail	unsupported integer operan
 zluda/integer/xor.ptx	pass	strict-fail	
 zluda/ldmatrix/ldmatrix.ptx	error	strict-fail	undefined PTX register %tid.x on an incoming path
 zluda/ldmatrix/ldmatrix_trans.ptx	unsupported	strict-fail	unsupported PTX register type .v2.b16
-zluda/memory/const.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.b16 %temp1 , [ constparams ]
-zluda/memory/const_ident.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.u64 %constparams_0 , [ constparams+0 ]
+zluda/memory/const.ptx	error	strict-fail	undefined PTX register constparams on an incoming path
+zluda/memory/const_ident.ptx	error	strict-fail	unknown PTX local symbol x
 zluda/memory/constant_f32.ptx	pass	strict-fail	
 zluda/memory/constant_negative.ptx	pass	strict-fail	
 zluda/memory/extern_func.ptx	unsupported	strict-fail	unsupported PTX instruction: call.uni ( retval0 ) , foobar , ( param0 )
@@ -582,7 +582,7 @@ zluda/shfl/shfl_sync_down_b32_pred.ptx	pass	strict-fail
 zluda/shfl/shfl_sync_down_dynamic_delta_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_idx_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_idx_dynamic_delta_b32_pred.ptx	pass	strict-fail	
-zluda/shfl/shfl_sync_mode_b32.ptx	error	strict-fail	only full-warp shfl.sync.bfly.b32 clamp 0x1f is supported
+zluda/shfl/shfl_sync_mode_b32.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_up_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_up_dynamic_delta_b32_pred.ptx	pass	strict-fail	
 zluda/tex/test_ptx__tex_read_1d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ tex , { %fx } ]

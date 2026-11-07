@@ -131,3 +131,56 @@ fn setp_pairs_and_literal_selp() {
     );
     assert_eq!(eval("", &body, 6), [1, 0, 1, 0, 3, 9]);
 }
+
+#[test]
+fn partial_masks_const_loads_and_pack() {
+    let body = format!(
+        r#"    mov.u32 %r1, 300;
+    mov.u32 %r2, 0xffffff9c;
+    cvt.pack.sat.u8.s32.b32 %r3, %r1, %r2, 0xab;
+    cvt.pack.sat.s16.s32.b32 %r4, %r1, %r2, 0;
+    cvt.s32.u32 %r5, %r1;
+    setp.eq.u32 %p1, %r1, %r1;
+    mov.u32 %r6, WARP_SZ;
+{}"#,
+        stores(&["%r3", "%r4", "%r5", "%r6"])
+    );
+    let out = eval("", &body, 4);
+    assert_eq!(out[0], (0xab << 16) | (255 << 8));
+    assert_eq!(out[1], (300 << 16) | (0xffff_ff9cu32 as i32).clamp(-32768, 32767) as u32 & 0xffff);
+    assert_eq!(out[2], 300);
+    assert_eq!(out[3], 32);
+}
+
+#[test]
+fn partial_mask_collectives_translate_and_validate() {
+    lower(&kernel(
+        "",
+        r#"    mov.u32 %r1, 300;
+    setp.eq.u32 %p1, %r1, %r1;
+    vote.sync.ballot.b32 %r6, %p1, 0x0000000f;
+    vote.sync.any.pred %p2, %p1, 0x0000ffff;
+    shfl.sync.bfly.b32 %r7, %r1, 1, 0x1c1f, 0x0000ffff;
+    shfl.sync.up.b32 %r8, %r1, 1, 0x0, 0x00ff00ff;
+    shfl.sync.idx.b32 %r9, %r1, 0, 0x1f, 0x00ff00ff;
+    st.global.u32 [%rd15], %r7;
+    st.global.u32 [%rd15+4], %r8;
+    st.global.u32 [%rd15+8], %r9;
+    st.global.u32 [%rd15+12], %r6;"#,
+    ));
+}
+
+#[test]
+fn constant_space_is_ordinary_memory() {
+    let out = eval(
+        "",
+        r#"    mov.u32 %r1, 41;
+    st.global.u32 [%rd15], %r1;
+    cvta.const.u64 %rd1, %rd15;
+    ld.const.u32 %r2, [%rd1];
+    add.u32 %r3, %r2, 1;
+    st.global.u32 [%rd15+4], %r3;"#,
+        2,
+    );
+    assert_eq!(out, [41, 42]);
+}
