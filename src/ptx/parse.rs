@@ -48,6 +48,8 @@ struct Parser<'a> {
     vars: ModuleVars<'a>,
     /// Parameter names of the entry being parsed (for `mov.u64 %rd, param`).
     param_names: Vec<&'a str>,
+    /// Names of staged (pointer-passed) aggregate parameters.
+    staged_names: Vec<&'a str>,
 }
 
 /// Stock GGML MMQ kernels declare roughly 7000 registers.
@@ -134,6 +136,9 @@ impl<'a> Parser<'a> {
                     .filter(|n| (1..=4096).contains(n) && n.is_multiple_of(align.min(4)))
                     .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
                 self.expect("]")?;
+                if bytes > crate::ptx::STAGE_BYTES {
+                    return Ok((name, Param::Staged { bytes, align }));
+                }
                 return Ok((
                     name,
                     Param::Words {
@@ -253,7 +258,7 @@ impl<'a> Parser<'a> {
             }
             None => body,
         };
-        if let Some(inst) = super::param_space::parse(body, &self.param_names)? {
+        if let Some(inst) = super::param_space::parse(body, &self.param_names, &self.staged_names)? {
             self.tokens.nth(end);
             if braced {
                 self.expect("}")?;
@@ -2109,6 +2114,7 @@ pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'
         tokens: tokens(source)?.into_iter(),
         vars: ModuleVars::default(),
         param_names: Vec::new(),
+        staged_names: Vec::new(),
     };
     parser.expect(".version")?;
     // Stock CUDA 11 through 13 toolchains emit PTX ISA 7.0 through 9.x.
@@ -2202,6 +2208,7 @@ pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, 
         tokens: tokens.into_iter(),
         vars: ModuleVars::default(),
         param_names: Vec::new(),
+        staged_names: Vec::new(),
     };
     parse_entry(&mut parser)
 }
@@ -2240,6 +2247,11 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     let name = parser.identifier()?;
     let mut params = parser.params()?;
     parser.param_names = params.iter().map(|&(name, _)| name).collect();
+    parser.staged_names = params
+        .iter()
+        .filter(|(_, param)| matches!(param, Param::Staged { .. }))
+        .map(|&(name, _)| name)
+        .collect();
     // Performance / occupancy hints may appear in any order before `{`.
     let mut max_threads = None;
     loop {

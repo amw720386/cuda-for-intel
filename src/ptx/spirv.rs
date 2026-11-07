@@ -104,6 +104,9 @@ struct Emitter<'a> {
     params: HashMap<(&'a str, usize), Value>,
     /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
     param_array: Option<Word>,
+    /// Kernel has staged (pointer-passed) aggregates: computed param addresses are real pointers.
+    param_global_mode: bool,
+    staged_names: HashSet<&'a str>,
     /// Registers that merge integers into pointers (`mov.u64 %rd, 0` then `add` of a
     /// global address): discovered by retrying a failed lowering, keyed per entry.
     address_hints: HashMap<(String, String), Space>,
@@ -194,6 +197,8 @@ impl<'a> Emitter<'a> {
             locals: Vec::new(),
             params: HashMap::new(),
             param_array: None,
+            param_global_mode: false,
+            staged_names: HashSet::new(),
             address_hints: HashMap::new(),
             current_entry: String::new(),
             undef_slots: HashMap::new(),
@@ -213,7 +218,7 @@ impl<'a> Emitter<'a> {
             Param::U32 | Param::Words { .. } => self.u32_type,
             Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
-            Param::GlobalPtr => self.global_byte_ptr,
+            Param::GlobalPtr | Param::Staged { .. } => self.global_byte_ptr,
         }
     }
 
@@ -3182,7 +3187,14 @@ impl<'a> Emitter<'a> {
             self.shared_array = Some(variable);
         }
         self.param_array = None;
-        if entry.blocks.iter().flat_map(|block| &block.instructions).any(
+        self.staged_names = entry
+            .params
+            .iter()
+            .filter(|(_, param)| matches!(param, Param::Staged { .. }))
+            .map(|&(name, _)| name)
+            .collect();
+        self.param_global_mode = !self.staged_names.is_empty();
+        if !self.param_global_mode && entry.blocks.iter().flat_map(|block| &block.instructions).any(
             |inst| matches!(inst, Instruction::ParamSpace(op) if op.is_dynamic()),
         ) {
             self.declare_param_array(&entry.params);
@@ -3265,7 +3277,7 @@ impl<'a> Emitter<'a> {
                     Kind::B32
                 }
                 Param::U64 => Kind::B64,
-                Param::GlobalPtr => Kind::Address(Space::Global),
+                Param::GlobalPtr | Param::Staged { .. } => Kind::Address(Space::Global),
                 Param::Words { .. } => unreachable!(),
             };
             self.params.insert((name, 0), Value { id, kind });

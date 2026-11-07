@@ -86,6 +86,9 @@ struct CudaContext {
     teardown_error: Option<CuResult>,
     allocations: BTreeMap<usize, usize>,
     host_allocations: BTreeMap<usize, usize>,
+    /// Host-visible slots that carry staged by-value structs to kernels (see `Param::Staged`).
+    staging: Vec<usize>,
+    staging_next: usize,
     /// Application memory registered with cuMemHostRegister (bookkeeping only).
     host_registered: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
@@ -420,6 +423,8 @@ impl State {
                 teardown_error: None,
                 allocations: BTreeMap::new(),
                 host_allocations: BTreeMap::new(),
+                staging: Vec::new(),
+                staging_next: 0,
                 host_registered: BTreeMap::new(),
                 modules: HashMap::new(),
                 library_modules: HashMap::new(),
@@ -570,12 +575,41 @@ impl CudaContext {
         self.backend.destroy(api).map_err(backend_error)
     }
 
+    /// Copies `data` into the next staging slot and returns its address. A slot is reused only
+    /// after a full wrap of the ring, which first waits for every stream.
+    fn stage_bytes(&mut self, api: &Api, data: &[u8]) -> Result<u64, CuResult> {
+        const SLOT: usize = 4096;
+        const SLOTS: usize = 32;
+        if data.len() > SLOT {
+            return Err(NotSupported);
+        }
+        if self.staging_next == SLOTS {
+            self.streams.wait_all(api)?;
+            self.staging_next = 0;
+        }
+        if self.staging.len() <= self.staging_next {
+            let base = self
+                .backend
+                .alloc_host(api, SLOT)
+                .inspect_err(|error| self.backend.health.observe(error))
+                .map_err(backend_error)?;
+            self.host_allocations.insert(base, SLOT);
+            self.staging.push(base);
+        }
+        let base = self.staging[self.staging_next];
+        self.staging_next += 1;
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), std::ptr::with_exposed_provenance_mut::<u8>(base), data.len()) };
+        Ok(base as u64)
+    }
+
     fn free_host(&mut self, api: &Api, base: usize) -> Result<(), CuResult> {
         self.backend
             .free(api, base)
             .inspect_err(|error| self.backend.health.observe(error))
             .map_err(backend_error)?;
         self.host_allocations.remove(&base);
+        self.staging.retain(|&slot| slot != base);
+        self.staging_next = self.staging_next.min(self.staging.len());
         Ok(())
     }
 
@@ -1044,7 +1078,7 @@ fn install_translation(
     let globals = globals::from_translation(&translated.globals)?;
     let mut entries = HashMap::with_capacity(translated.kernels.len());
     for kernel in translated.kernels {
-        let argument_bytes = launch_args::size(&kernel.params);
+        let argument_bytes = launch_args::abi_size(&kernel.params);
         if (kernel.fp32 && !info.supports_fp32())
             || (kernel.fp32_fma && !info.fp32_fma)
             || (kernel.device_atomics && !info.device_memory_atomics)
@@ -1367,13 +1401,17 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 .functions
                 .get(&function)
                 .ok_or(InvalidHandle)?;
+            let (module_key, name) = (module_key.clone(), name.clone());
+            let (module_key, name) = (&module_key, &name);
             let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
             let entry = module.entries.get(name).ok_or(InvalidHandle)?;
             let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
+            let params = entry.params.clone();
+            let (entry_shared, entry_threads) = (entry.shared_bytes, entry.max_threads);
             // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
             // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
             // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
-            if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
+            if entry_shared != 0 && shared_bytes > entry_shared {
                 return Err(InvalidValue);
             }
             let grid = [grid_x, grid_y, grid_z];
@@ -1382,10 +1420,11 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 &runtime.devices[context.device as usize].info,
                 grid,
                 block,
-                entry.max_threads,
+                entry_threads,
             )?;
+            let mut staged_pointers: Vec<Box<u64>> = Vec::new();
             let args = unsafe {
-                launch_args::read(&entry.params, kernel_params, extra, |address| {
+                launch_args::read(&params, kernel_params, extra, |address| {
                     // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
                     // host USM and valid kernel arguments, like in CUDA's unified addressing.
                     contains_range(&context.allocations, address as usize, 1)
@@ -1393,19 +1432,29 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 })
             };
             let args = match args {
+                Ok(args) if params.iter().any(|p| matches!(p, crate::ptx::Param::Staged { .. })) => {
+                    if context.streams.capture(stream)?.is_some() {
+                        return Err(NotSupported);
+                    }
+                    let (collapsed, keep) = launch_args::collapse_staged(&params, args, |data| {
+                        context.stage_bytes(&runtime.api, data)
+                    })?;
+                    staged_pointers = keep;
+                    collapsed
+                }
                 Ok(args) => args,
                 Err(error) => {
                     export_log(format_args!(
                         "cuLaunchKernel args rejected for {} ({} params)",
                         name.to_string_lossy(),
-                        entry.params.len()
+                        params.len()
                     ));
                     return Err(error);
                 }
             };
             if trace::enabled() {
                 let mut text = String::new();
-                for (arg, param) in args.iter().zip(&entry.params) {
+                for (arg, param) in args.iter().zip(&params) {
                     let size = param.size().min(16);
                     let bytes = unsafe { std::slice::from_raw_parts(arg.value.cast::<u8>(), size) };
                     text.push_str(&format!(" [{}]", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()));
