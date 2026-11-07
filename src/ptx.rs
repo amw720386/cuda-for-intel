@@ -768,13 +768,13 @@ impl Terminator<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Block<'a> {
     instructions: Vec<Instruction<'a>>,
     end: Terminator<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Entry<'a> {
     name: &'a str,
     params: Vec<(&'a str, Param)>,
@@ -822,7 +822,27 @@ fn prepare(source: &str) -> Result<String, Error> {
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
     let rewritten = prepare(source)?;
     let (entries, vars) = parse::parse_module(&rewritten)?;
-    spirv::emit(entries, vars.device)
+    let first = if entries.len() > 1 {
+        spirv::emit(entries.clone(), vars.device.clone())
+    } else {
+        return spirv::emit(entries, vars.device);
+    };
+    match first {
+        Ok(translation) => Ok(translation),
+        Err(error) => {
+            // One unsupported kernel must not block the rest of a library (stock GGML
+            // ships every quantisation variant in one module). Keep the entries that
+            // translate; a lookup of a dropped kernel reports the translation failure.
+            let survivors: Vec<_> = entries
+                .into_iter()
+                .filter(|entry| spirv::emit(vec![entry.clone()], vars.device.clone()).is_ok())
+                .collect();
+            if survivors.is_empty() {
+                return Err(error);
+            }
+            spirv::emit(survivors, vars.device)
+        }
+    }
 }
 
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
