@@ -153,6 +153,36 @@ enum Alu3Op {
 }
 
 /// 64-bit integer instructions without a dedicated variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MmaShape {
+    /// `m8n8k16` signed/unsigned 8-bit inputs, 32-bit integer accumulators (sm_75).
+    M8N8K16I8,
+    M16N8K16I8,
+    M16N8K32I8,
+    /// `m16n8k8` / `m16n8k16` half inputs with f32 accumulators.
+    M16N8K8F16,
+    M16N8K16F16,
+}
+
+impl MmaShape {
+    /// Number of C/D registers per thread.
+    fn accumulators(self) -> usize {
+        if self == Self::M8N8K16I8 { 2 } else { 4 }
+    }
+
+    /// Number of 32-bit K groups: 4 bytes or 2 halves per register.
+    fn groups(self) -> usize {
+        match self {
+            Self::M8N8K16I8 | Self::M16N8K16I8 | Self::M16N8K8F16 => 4,
+            Self::M16N8K32I8 | Self::M16N8K16F16 => 8,
+        }
+    }
+
+    fn is_integer(self) -> bool {
+        matches!(self, Self::M8N8K16I8 | Self::M16N8K16I8 | Self::M16N8K32I8)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Alu64Op {
     Xor,
@@ -307,6 +337,23 @@ enum Instruction<'a> {
     Alu3(Alu3Op, &'a str, [&'a str; 4]),
     /// 64-bit integer op; unused sources are `"0"`.
     Alu64(Alu64Op, &'a str, [&'a str; 3]),
+    /// `mov.u32 %r, %laneid`.
+    LaneId(&'a str),
+    /// `mma.sync.aligned` emulated with subgroup shuffles. Sources are
+    /// `a[0..4]`, `b[4..6]`, `c[6..10]`; unused entries are `"0"`.
+    Mma {
+        shape: MmaShape,
+        signed: [bool; 2],
+        dst: [&'a str; 4],
+        src: [&'a str; 10],
+    },
+    /// `ldmatrix.sync.aligned.m8n8.xN[.trans].shared.b16`.
+    LdMatrix {
+        count: u8,
+        trans: bool,
+        dst: [&'a str; 4],
+        addr: &'a str,
+    },
     Rem64 {
         signed: bool,
         dst: &'a str,
@@ -408,6 +455,20 @@ impl<'a> Instruction<'a> {
             Alu3(_, dst, src) => {
                 out.push(*dst);
                 src
+            }
+            LaneId(dst) => {
+                out.push(*dst);
+                &[]
+            }
+            Mma { shape, dst, src, .. } => {
+                out.extend_from_slice(&dst[..shape.accumulators()]);
+                src
+            }
+            LdMatrix {
+                count, dst, addr, ..
+            } => {
+                out.extend_from_slice(&dst[..usize::from(*count)]);
+                std::slice::from_ref(addr)
             }
             Load32(_, dst, addr)
             | Load64(_, dst, addr)

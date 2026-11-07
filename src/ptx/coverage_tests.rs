@@ -8,6 +8,10 @@ use rspirv::spirv::{ExecutionMode, Op};
 /// Wraps `body` in a kernel with one global output pointer (`%rdo`, already
 /// converted to a global address) and the given extra register declarations.
 pub(super) fn kernel(regs: &str, body: &str) -> String {
+    kernel_with_shared(regs, "", body)
+}
+
+pub(super) fn kernel_with_shared(regs: &str, shared: &str, body: &str) -> String {
     format!(
         r#".version 9.0
 .target sm_75
@@ -15,10 +19,11 @@ pub(super) fn kernel(regs: &str, body: &str) -> String {
 .visible .entry probe(.param .u64 out_param, .param .u32 n_param)
 {{
     .reg .pred %p<8>;
-    .reg .b32 %r<32>;
+    .reg .b32 %r<64>;
     .reg .b64 %rd<16>;
     .reg .f32 %f<16>;
     {regs}
+    {shared}
     ld.param.u64 %rd0, [out_param];
     cvta.to.global.u64 %rdo, %rd0;
     ld.param.u32 %r0, [n_param];
@@ -168,7 +173,13 @@ pub(super) mod interp {
     }
 
     pub fn run(module: &Module, machine: &mut Machine) {
-        let mut widths: HashMap<u32, u32> = HashMap::new(); // type id -> bits
+        run_lanes(module, machine, 1);
+    }
+
+    /// Runs `lanes` invocations of one subgroup in lockstep (uniform control
+    /// flow only). Invocation `l` has `tid.x == l` and a workgroup of `lanes`.
+    pub fn run_lanes(module: &Module, machine: &mut Machine, lanes: usize) {
+        let mut widths: HashMap<u32, u32> = HashMap::new();
         let mut pointees: HashMap<u32, u32> = HashMap::new();
         for inst in &module.types_global_values {
             match inst.class.opcode {
@@ -184,10 +195,16 @@ pub(super) mod interp {
                     widths.insert(inst.result_id.unwrap(), 64);
                     pointees.insert(inst.result_id.unwrap(), id(&inst.operands[1]));
                 }
+                Op::TypeVector => {
+                    let element = widths[&id(&inst.operands[0])];
+                    widths.insert(inst.result_id.unwrap(), element * lit(&inst.operands[1]));
+                }
                 _ => {}
             }
         }
-        let mut values: HashMap<u32, u64> = HashMap::new();
+        let mut shared: HashMap<u32, u64> = HashMap::new();
+        let mut constants: HashMap<u32, u64> = HashMap::new();
+        let mut builtin_vars: Vec<u32> = Vec::new();
         let mut next_shared = SHARED;
         for inst in &module.types_global_values {
             match inst.class.opcode {
@@ -198,51 +215,81 @@ pub(super) mod interp {
                         Operand::LiteralBit64(v) => v,
                         _ => unreachable!(),
                     };
-                    values.insert(inst.result_id.unwrap(), mask(w, v));
+                    constants.insert(inst.result_id.unwrap(), mask(w, v));
                     VBITS.with(|m| m.borrow_mut().insert(inst.result_id.unwrap(), w));
                 }
                 Op::ConstantTrue => {
-                    values.insert(inst.result_id.unwrap(), 1);
+                    constants.insert(inst.result_id.unwrap(), 1);
                 }
                 Op::ConstantFalse => {
-                    values.insert(inst.result_id.unwrap(), 0);
+                    constants.insert(inst.result_id.unwrap(), 0);
                 }
-                Op::Variable => {
-                    if let Some(Operand::StorageClass(StorageClass::Workgroup)) =
-                        inst.operands.first()
-                    {
-                        values.insert(inst.result_id.unwrap(), next_shared);
+                Op::Variable => match inst.operands.first() {
+                    Some(Operand::StorageClass(StorageClass::Workgroup)) => {
+                        shared.insert(inst.result_id.unwrap(), next_shared);
                         next_shared += 0x10000;
                     }
-                }
+                    Some(Operand::StorageClass(StorageClass::Input)) => {
+                        builtin_vars.push(inst.result_id.unwrap());
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
-        let function = &module.functions[0];
-        for (index, param) in function.parameters.iter().enumerate() {
-            values.insert(param.result_id.unwrap(), machine.params[index]);
-            let pw = widths[&param.result_type.unwrap()];
-            VBITS.with(|m| m.borrow_mut().insert(param.result_id.unwrap(), pw));
+        // Built-in decorations: order of BUILTINS is ctaid, ntid, tid, nctaid, but
+        // look the kind up from the decoration to stay independent of it.
+        let mut kind_of: HashMap<u32, rspirv::spirv::BuiltIn> = HashMap::new();
+        for inst in &module.annotations {
+            if inst.class.opcode == Op::Decorate
+                && let [Operand::IdRef(target), Operand::Decoration(rspirv::spirv::Decoration::BuiltIn), Operand::BuiltIn(kind)] =
+                    inst.operands[..]
+            {
+                kind_of.insert(target, kind);
+            }
         }
-        // Blocks by label.
+        let function = &module.functions[0];
         let blocks: HashMap<u32, usize> = function
             .blocks
             .iter()
             .enumerate()
             .map(|(i, b)| (b.label.as_ref().unwrap().result_id.unwrap(), i))
             .collect();
-        let mut next_slot = 0xF000_0000u64;
-        for block in &function.blocks {
-            for inst in &block.instructions {
-                if inst.class.opcode == Op::Variable {
-                    values.insert(inst.result_id.unwrap(), next_slot);
-                    VBITS.with(|m| m.borrow_mut().insert(inst.result_id.unwrap(), 64));
-                    next_slot += 0x1_0000;
+        let mut states: Vec<HashMap<u32, u64>> = Vec::new();
+        for lane in 0..lanes as u64 {
+            let mut values = constants.clone();
+            values.extend(shared.iter().map(|(k, v)| (*k, *v)));
+            for (index, param) in function.parameters.iter().enumerate() {
+                values.insert(param.result_id.unwrap(), machine.params[index]);
+                let pw = widths[&param.result_type.unwrap()];
+                VBITS.with(|m| m.borrow_mut().insert(param.result_id.unwrap(), pw));
+            }
+            for (index, var) in builtin_vars.iter().enumerate() {
+                let address = 0xE000_0000 + (lane << 20) + index as u64 * 0x100;
+                let components = match kind_of.get(var) {
+                    Some(rspirv::spirv::BuiltIn::LocalInvocationId) => [lane, 0, 0],
+                    Some(rspirv::spirv::BuiltIn::WorkgroupSize) => [lanes as u64, 1, 1],
+                    Some(rspirv::spirv::BuiltIn::NumWorkgroups) => [1, 1, 1],
+                    _ => [0, 0, 0],
+                };
+                for (i, c) in components.iter().enumerate() {
+                    machine.write(address + 8 * i as u64, 8, *c);
+                }
+                values.insert(*var, address);
+            }
+            let mut slot = 0xF000_0000u64 + (lane << 28);
+            for block in &function.blocks {
+                for inst in &block.instructions {
+                    if inst.class.opcode == Op::Variable {
+                        values.insert(inst.result_id.unwrap(), slot);
+                        VBITS.with(|m| m.borrow_mut().insert(inst.result_id.unwrap(), 64));
+                        slot += 0x1_0000;
+                    }
                 }
             }
+            states.push(values);
         }
         let mut current = 0usize;
-        let mut previous = 0u32;
         let mut steps = 0;
         'blocks: loop {
             let block = &function.blocks[current];
@@ -250,11 +297,35 @@ pub(super) mod interp {
             for inst in &block.instructions {
                 steps += 1;
                 assert!(steps < 200_000, "interpreter step limit");
-                if let Some(done) = step(inst, &mut values, &widths, &pointees, machine, &blocks, previous, label, &mut current) {
+                if inst.class.opcode == Op::GroupNonUniformShuffle {
+                    let results: Vec<u64> = (0..lanes)
+                        .map(|l| {
+                            let source = *states[l].get(&id(&inst.operands[2])).unwrap() as usize;
+                            *states[source].get(&id(&inst.operands[1])).unwrap()
+                        })
+                        .collect();
+                    for (l, r) in results.into_iter().enumerate() {
+                        states[l].insert(inst.result_id.unwrap(), r);
+                    }
+                    VBITS.with(|m| m.borrow_mut().insert(inst.result_id.unwrap(), 32));
+                    continue;
+                }
+                let mut outcome = None;
+                let mut next = current;
+                for values in states.iter_mut() {
+                    let mut target = current;
+                    let r = step(inst, values, &widths, &pointees, machine, &blocks, 0, label, &mut target);
+                    if r.is_some() {
+                        assert!(outcome.is_none() || next == target, "divergent control flow");
+                        outcome = r;
+                        next = target;
+                    }
+                }
+                if let Some(done) = outcome {
                     if done {
                         break 'blocks;
                     }
-                    previous = label;
+                    current = next;
                     continue 'blocks;
                 }
             }
@@ -287,7 +358,12 @@ pub(super) mod interp {
             Op::Variable => return None,
             Op::Load => {
                 let addr = get(values, 0);
-                machine.read(addr, w.max(8) / 8)
+                if w > 64 {
+                    // Vector built-ins stay in memory; the value is their address.
+                    addr
+                } else {
+                    machine.read(addr, w.max(8) / 8)
+                }
             }
             Op::Store => {
                 let addr = get(values, 0);
@@ -297,7 +373,7 @@ pub(super) mod interp {
                 machine.write(addr, bytes, value);
                 return None;
             }
-            Op::SelectionMerge | Op::LoopMerge | Op::Nop | Op::Line | Op::NoLine => return None,
+            Op::ControlBarrier | Op::MemoryBarrier | Op::SelectionMerge | Op::LoopMerge | Op::Nop | Op::Line | Op::NoLine => return None,
             Op::Branch => {
                 *current = blocks[&id(&inst.operands[0])];
                 return Some(false);
@@ -364,6 +440,24 @@ pub(super) mod interp {
                     _ => a >= b,
                 })
             }
+            Op::CompositeExtract => {
+                let index = lit(&inst.operands[1]) as u64;
+                machine.read(get(values, 0) + 8 * index, 8)
+            }
+            Op::FConvert => {
+                let sw = value_width(inst, values, widths);
+                assert_eq!((sw, w), (16, 32), "only half -> f32 is modelled");
+                let h = get(values, 0) as u32;
+                let (sign, exp, man) = (h >> 15, (h >> 10) & 0x1f, h & 0x3ff);
+                let magnitude = match exp {
+                    0 => man as f32 * 2f32.powi(-24),
+                    0x1f => f32::INFINITY,
+                    _ => (1.0 + man as f32 / 1024.0) * 2f32.powi(exp as i32 - 15),
+                };
+                u64::from((if sign == 1 { -magnitude } else { magnitude }).to_bits())
+            }
+            Op::FMul => u64::from((f32::from_bits(get(values, 0) as u32) * f32::from_bits(get(values, 1) as u32)).to_bits()),
+            Op::FAdd => u64::from((f32::from_bits(get(values, 0) as u32) + f32::from_bits(get(values, 1) as u32)).to_bits()),
             Op::AccessChain | Op::InBoundsAccessChain => get(values, 0),
             Op::PtrAccessChain | Op::InBoundsPtrAccessChain => {
                 // Element size is the pointee size of the base pointer's type.
@@ -535,4 +629,188 @@ fn bit_field_extract_insert_permute_and_lop3() {
             a ^ b ^ c,
         ]
     );
+}
+
+/// Output buffer base used by lockstep tests; the input buffer sits 64 KiB above.
+const OUT: u64 = interp::GLOBAL;
+const IN: u64 = interp::GLOBAL + 0x10000;
+
+/// Runs a 32-lane kernel after letting `init` fill the input buffer.
+fn eval_warp(regs: &str, shared: &str, body: &str, init: impl FnOnce(&mut interp::Machine)) -> interp::Machine {
+    let module = lower(&kernel_with_shared(regs, shared, body));
+    let mut machine = interp::Machine {
+        params: vec![OUT, 0],
+        ..Default::default()
+    };
+    init(&mut machine);
+    interp::run_lanes(&module, &mut machine, 32);
+    machine
+}
+
+fn f16_bits(value: f32) -> u16 {
+    // Exact for the small integers used in tests.
+    if value == 0.0 {
+        return 0;
+    }
+    let bits = value.abs().to_bits();
+    let exponent = ((bits >> 23) as i32 - 127 + 15) as u16;
+    let mantissa = ((bits >> 13) & 0x3ff) as u16;
+    (u16::from(value < 0.0) << 15) | (exponent << 10) | mantissa
+}
+
+/// Integer MMA reference: layouts follow the PTX ISA fragment tables.
+fn check_int8_mma(shape: &str, m: usize, k: usize, a_signed: bool, b_signed: bool) {
+    let n = 8;
+    let regs_a = (m / 8) * (k / 16);
+    let regs_b = k / 16;
+    let regs_c = m * n / 32;
+    let a_at = |r: usize, c: usize| -> i32 {
+        let v = ((r * 7 + c * 3 + 1) % 23) as i32 - if a_signed { 11 } else { 0 };
+        if a_signed { v } else { v & 0xff }
+    };
+    let b_at = |r: usize, c: usize| -> i32 {
+        let v = ((r * 5 + c * 11 + 2) % 29) as i32 - if b_signed { 14 } else { 0 };
+        if b_signed { v } else { v & 0xff }
+    };
+    let c_at = |r: usize, c: usize| -> i32 { (r * 100 + c) as i32 - 300 };
+    let byte = |v: i32| (v as u32) & 0xff;
+    // Per-lane input words: a regs, b regs, c regs.
+    let stride = 16;
+    let a_name = if a_signed { "s8" } else { "u8" };
+    let b_name = if b_signed { "s8" } else { "u8" };
+    let list = |prefix: &str, base: usize, count: usize| {
+        (0..count).map(|i| format!("%r{}", base + i)).collect::<Vec<_>>().join(", ") + prefix
+    };
+    let loads: String = (0..regs_a + regs_b + regs_c)
+        .map(|i| format!("    ld.global.u32 %r{}, [%rd14+{}];\n", 10 + i, 4 * i))
+        .collect();
+    let stores: String = (0..regs_c)
+        .map(|i| format!("    st.global.u32 [%rd13+{}], %r{};\n", 4 * i, 20 + i))
+        .collect();
+    let body = format!(
+        "    mov.u32 %r1, %laneid;\n    mul.wide.u32 %rd12, %r1, {bytes};\n    add.s64 %rd14, %rd15, 65536;\n    add.s64 %rd14, %rd14, %rd12;\n    mul.wide.u32 %rd11, %r1, {out_bytes};\n    add.s64 %rd13, %rd15, %rd11;\n{loads}    mma.sync.aligned.{shape}.row.col.s32.{a_name}.{b_name}.s32 {{{d}}}, {{{a}}}, {{{b}}}, {{{c}}};\n{stores}",
+        bytes = stride * 4,
+        out_bytes = regs_c * 4,
+        d = list("", 20, regs_c),
+        a = list("", 10, regs_a),
+        b = list("", 10 + regs_a, regs_b),
+        c = list("", 10 + regs_a + regs_b, regs_c),
+    );
+    let machine = eval_warp("", "", &body, |machine| {
+        for lane in 0..32usize {
+            let (row, quad) = (lane / 4, lane % 4);
+            let mut words = Vec::new();
+            for reg in 0..regs_a {
+                let (half, high) = (reg % 2, reg / 2);
+                let mut word = 0u32;
+                for i in 0..4 {
+                    word |= byte(a_at(row + 8 * half, quad * 4 + i + 16 * high)) << (8 * i);
+                }
+                words.push(word);
+            }
+            for reg in 0..regs_b {
+                let mut word = 0u32;
+                for i in 0..4 {
+                    word |= byte(b_at(quad * 4 + i + 16 * reg, row)) << (8 * i);
+                }
+                words.push(word);
+            }
+            for reg in 0..regs_c {
+                words.push(c_at(row + 8 * (reg / 2), quad * 2 + reg % 2) as u32);
+            }
+            for (i, w) in words.iter().enumerate() {
+                machine.write(IN + (lane * stride * 4 + i * 4) as u64, 4, u64::from(*w));
+            }
+        }
+    });
+    for lane in 0..32usize {
+        let (row, quad) = (lane / 4, lane % 4);
+        for reg in 0..regs_c {
+            let (r, c) = (row + 8 * (reg / 2), quad * 2 + reg % 2);
+            let expected: i32 =
+                c_at(r, c) + (0..k).map(|x| a_at(r, x) * b_at(x, c)).sum::<i32>();
+            let got = machine.read(OUT + (lane * regs_c * 4 + reg * 4) as u64, 4) as u32 as i32;
+            assert_eq!(got, expected, "{shape} lane {lane} reg {reg}");
+        }
+    }
+}
+
+#[test]
+fn mma_m8n8k16_s8_matches_reference() {
+    check_int8_mma("m8n8k16", 8, 16, true, true);
+}
+
+#[test]
+fn mma_m16n8k16_s8_matches_reference() {
+    check_int8_mma("m16n8k16", 16, 16, true, true);
+}
+
+#[test]
+fn mma_m16n8k32_mixed_signedness_matches_reference() {
+    check_int8_mma("m16n8k32", 16, 32, true, true);
+    check_int8_mma("m16n8k32", 16, 32, false, true);
+    check_int8_mma("m16n8k32", 16, 32, true, false);
+}
+
+fn check_f16_mma(shape: &str, k: usize) {
+    let (m, n) = (16usize, 8usize);
+    let regs_a = 2 * (k / 8);
+    let regs_b = k / 8;
+    let a_at = |r: usize, c: usize| ((r + 2 * c) % 7) as f32 - 3.0;
+    let b_at = |r: usize, c: usize| ((3 * r + c) % 5) as f32 - 2.0;
+    let c_at = |r: usize, c: usize| (r * 8 + c) as f32 * 0.5;
+    let pack = |lo: f32, hi: f32| u32::from(f16_bits(lo)) | (u32::from(f16_bits(hi)) << 16);
+    let loads: String = (0..regs_a + regs_b + 4)
+        .map(|i| format!("    ld.global.u32 %r{}, [%rd14+{}];\n", 10 + i, 4 * i))
+        .collect();
+    let list = |base: usize, count: usize| {
+        (0..count).map(|i| format!("%r{}", base + i)).collect::<Vec<_>>().join(", ")
+    };
+    let stores: String = (0..4)
+        .map(|i| format!("    st.global.u32 [%rd13+{}], %r{};\n", 4 * i, 30 + i))
+        .collect();
+    let body = format!(
+        "    mov.u32 %r1, %laneid;\n    mul.wide.u32 %rd12, %r1, 64;\n    add.s64 %rd14, %rd15, 65536;\n    add.s64 %rd14, %rd14, %rd12;\n    mul.wide.u32 %rd11, %r1, 16;\n    add.s64 %rd13, %rd15, %rd11;\n{loads}    mma.sync.aligned.{shape}.row.col.f32.f16.f16.f32 {{{d}}}, {{{a}}}, {{{b}}}, {{{c}}};\n{stores}",
+        d = list(30, 4),
+        a = list(10, regs_a),
+        b = list(10 + regs_a, regs_b),
+        c = list(10 + regs_a + regs_b, 4),
+    );
+    let machine = eval_warp("", "", &body, |machine| {
+        for lane in 0..32usize {
+            let (row, quad) = (lane / 4, lane % 4);
+            let mut words = Vec::new();
+            for reg in 0..regs_a {
+                let (half, high) = (reg % 2, reg / 2);
+                let (r, c) = (row + 8 * half, quad * 2 + 8 * high);
+                words.push(pack(a_at(r, c), a_at(r, c + 1)));
+            }
+            for reg in 0..regs_b {
+                let (r, c) = (quad * 2 + 8 * reg, row);
+                words.push(pack(b_at(r, c), b_at(r + 1, c)));
+            }
+            for reg in 0..4 {
+                words.push(c_at(row + 8 * (reg / 2), quad * 2 + reg % 2).to_bits());
+            }
+            for (i, w) in words.iter().enumerate() {
+                machine.write(IN + (lane * 64 + i * 4) as u64, 4, u64::from(*w));
+            }
+        }
+    });
+    let _ = (m, n);
+    for lane in 0..32usize {
+        let (row, quad) = (lane / 4, lane % 4);
+        for reg in 0..4 {
+            let (r, c) = (row + 8 * (reg / 2), quad * 2 + reg % 2);
+            let expected = c_at(r, c) + (0..k).map(|x| a_at(r, x) * b_at(x, c)).sum::<f32>();
+            let got = f32::from_bits(machine.read(OUT + (lane * 16 + reg * 4) as u64, 4) as u32);
+            assert_eq!(got, expected, "{shape} lane {lane} reg {reg}");
+        }
+    }
+}
+
+#[test]
+fn mma_f16_shapes_match_reference() {
+    check_f16_mma("m16n8k8", 8);
+    check_f16_mma("m16n8k16", 16);
 }

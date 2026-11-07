@@ -1,5 +1,5 @@
 use super::{
-    Alu3Op, Alu64Op, Block, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
+    Alu3Op, Alu64Op, Block, MmaShape, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
     Width,
 };
 use std::collections::HashMap;
@@ -335,6 +335,7 @@ impl<'a> Parser<'a> {
                 ",",
                 value,
             ] => Instruction::AtomicAdd32(dst, address, value),
+            ["mov.u32", dst, ",", "%laneid"] => Instruction::LaneId(dst),
             ["mov.u32", dst, ",", src] => {
                 if src.contains('.') {
                     Instruction::Builtin(dst, src)
@@ -474,7 +475,7 @@ impl<'a> Parser<'a> {
             ["not.pred", dst, ",", src] => Instruction::NotPred(dst, src),
             ["neg.s32", dst, ",", src] => Instruction::Integer32(IntegerOp::Sub, dst, ["0", src]),
             [
-                op @ ("add.s32" | "add.u32" | "sub.u32" | "mul.lo.u32" | "shr.b32" | "xor.b32"
+                op @ ("add.u32" | "sub.u32" | "mul.lo.u32" | "shr.b32" | "xor.b32"
                 | "min.s32" | "max.s32" | "min.u32" | "max.u32" | "mul.hi.s32"
                 | "and.b16" | "or.b16" | "xor.b16" | "shr.u16"),
                 dst,
@@ -484,7 +485,7 @@ impl<'a> Parser<'a> {
                 b,
             ] => {
                 let op = match *op {
-                    "add.s32" | "add.u32" => IntegerOp::Add,
+                    "add.u32" => IntegerOp::Add,
                     "sub.u32" => IntegerOp::Sub,
                     "mul.lo.u32" => IntegerOp::Mul,
                     "xor.b32" | "xor.b16" => IntegerOp::Xor,
@@ -544,6 +545,87 @@ impl<'a> Parser<'a> {
             }
             ["lop3.b32", dst, ",", a, ",", b, ",", c, ",", lut] => {
                 Instruction::Alu3(Alu3Op::Lop3, dst, [a, b, c, lut])
+            }
+            [op, rest @ ..] if op.starts_with("mma.sync.aligned.") => {
+                let unsupported = || {
+                    Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
+                };
+                let parts: Vec<&str> = op.split('.').collect();
+                // mma . sync . aligned . SHAPE . row . col . D . A . B . C
+                let [_, _, _, shape, "row", "col", dty, aty, bty, cty] = parts[..] else {
+                    return Err(unsupported());
+                };
+                let (shape, signed) = match (shape, dty, aty, bty, cty) {
+                    ("m8n8k16" | "m16n8k16" | "m16n8k32", "s32", "s8" | "u8", "s8" | "u8", "s32") => (
+                        match shape {
+                            "m8n8k16" => MmaShape::M8N8K16I8,
+                            "m16n8k16" => MmaShape::M16N8K16I8,
+                            _ => MmaShape::M16N8K32I8,
+                        },
+                        [aty == "s8", bty == "s8"],
+                    ),
+                    ("m16n8k8" | "m16n8k16", "f32", "f16", "f16", "f32") => (
+                        if shape == "m16n8k8" {
+                            MmaShape::M16N8K8F16
+                        } else {
+                            MmaShape::M16N8K16F16
+                        },
+                        [true, true],
+                    ),
+                    _ => return Err(unsupported()),
+                };
+                let lists = brace_lists(rest).ok_or_else(unsupported)?;
+                let [d, a, b, c] = &lists[..] else {
+                    return Err(unsupported());
+                };
+                let nc = shape.accumulators();
+                let na = (shape.groups() / 4) * (nc / 2);
+                let nb = shape.groups() / 4;
+                if d.len() != nc || c.len() != nc || a.len() != na || b.len() != nb {
+                    return Err(unsupported());
+                }
+                let mut dst = [""; 4];
+                dst[..nc].copy_from_slice(d);
+                let mut src = ["0"; 10];
+                src[..na].copy_from_slice(a);
+                src[4..4 + nb].copy_from_slice(b);
+                src[6..6 + nc].copy_from_slice(c);
+                Instruction::Mma {
+                    shape,
+                    signed,
+                    dst,
+                    src,
+                }
+            }
+            [op, rest @ ..] if op.starts_with("ldmatrix.sync.aligned.m8n8.") => {
+                let unsupported = || {
+                    Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
+                };
+                let parts: Vec<&str> = op.split('.').collect();
+                let (count, trans) = match parts[4..] {
+                    ["x1", "shared", "b16"] => (1u8, false),
+                    ["x2", "shared", "b16"] => (2, false),
+                    ["x4", "shared", "b16"] => (4, false),
+                    ["x1", "trans", "shared", "b16"] => (1, true),
+                    ["x2", "trans", "shared", "b16"] => (2, true),
+                    ["x4", "trans", "shared", "b16"] => (4, true),
+                    _ => return Err(unsupported()),
+                };
+                let (regs, after) = rest_after_list_tokens(rest).ok_or_else(unsupported)?;
+                let [",", "[", addr, "]"] = after else {
+                    return Err(unsupported());
+                };
+                if regs.len() != usize::from(count) {
+                    return Err(unsupported());
+                }
+                let mut dst = [""; 4];
+                dst[..regs.len()].copy_from_slice(&regs);
+                Instruction::LdMatrix {
+                    count,
+                    trans,
+                    dst,
+                    addr,
+                }
             }
             ["xor.b64", dst, ",", a, ",", b] => Instruction::Alu64(Alu64Op::Xor, dst, [a, b, "0"]),
             ["max.s64", dst, ",", a, ",", b] => {
@@ -1173,6 +1255,28 @@ impl<'a> Parser<'a> {
             })
             .collect()
     }
+}
+
+/// Parses `{ a , b } , { c } ...` into register lists.
+fn brace_lists<'a>(mut tokens: &[&'a str]) -> Option<Vec<Vec<&'a str>>> {
+    let mut lists = Vec::new();
+    while !tokens.is_empty() {
+        let (regs, rest) = rest_after_list_tokens(tokens)?;
+        lists.push(regs);
+        tokens = match rest {
+            [",", rest @ ..] => rest,
+            [] => &[],
+            _ => return None,
+        };
+    }
+    Some(lists)
+}
+
+fn rest_after_list_tokens<'a, 'b>(tokens: &'b [&'a str]) -> Option<(Vec<&'a str>, &'b [&'a str])> {
+    let ["{", rest @ ..] = tokens else { return None };
+    let close = rest.iter().position(|&t| t == "}")?;
+    let regs: Vec<&str> = rest[..close].iter().copied().filter(|&t| t != ",").collect();
+    Some((regs, &rest[close + 1..]))
 }
 
 /// Skip a module-level declaration (`.global` / `.const` / …) through its

@@ -1,7 +1,7 @@
 use super::flow::Flow;
 use super::rounded;
 use super::{
-    Alu3Op, Alu64Op, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
+    Alu3Op, Alu64Op, Comparison, MmaShape, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
     Terminator, Translation, Width,
 };
 use rspirv::binary::Assemble;
@@ -1083,8 +1083,292 @@ impl<'a> Emitter<'a> {
         Ok((id, Kind::B64))
     }
 
+    fn subgroup_shuffle(&mut self, value: Word, lane: Word) -> Result<Word, Error> {
+        let scope = self
+            .builder
+            .constant_bit32(self.u32_type, Scope::Subgroup as u32);
+        Ok(self.builder.group_non_uniform_shuffle(
+            self.u32_type,
+            None,
+            scope,
+            value,
+            lane,
+        )?)
+    }
+
+    /// CUDA lane id: the linear thread index modulo 32 (subgroups are 32 wide).
+    fn lane_id(&mut self) -> Result<Word, Error> {
+        let ty = self.u32_type;
+        let tid: Vec<Word> = ["x", "y", "z"]
+            .iter()
+            .map(|axis| self.builtin(&format!("%tid.{axis}")))
+            .collect::<Result<_, _>>()?;
+        let ntid: Vec<Word> = ["x", "y"]
+            .iter()
+            .map(|axis| self.builtin(&format!("%ntid.{axis}")))
+            .collect::<Result<_, _>>()?;
+        let inner = self.builder.i_mul(ty, None, tid[2], ntid[1])?;
+        let inner = self.builder.i_add(ty, None, inner, tid[1])?;
+        let linear = self.builder.i_mul(ty, None, inner, ntid[0])?;
+        let linear = self.builder.i_add(ty, None, linear, tid[0])?;
+        let mask = self.builder.constant_bit32(ty, 31);
+        Ok(self.builder.bitwise_and(ty, None, linear, mask)?)
+    }
+
+    fn u32_const(&mut self, value: u32) -> Word {
+        self.builder.constant_bit32(self.u32_type, value)
+    }
+
+    /// Four-way byte dot product with per-operand signedness, plus accumulate.
+    fn dot4(&mut self, a: Word, b: Word, acc: Word, signed: [bool; 2]) -> Result<Word, Error> {
+        let ty = self.u32_type;
+        let c24 = self.u32_const(24);
+        let ff = self.u32_const(0xff);
+        let mut acc = acc;
+        for lane in 0..4u32 {
+            let shift = self.u32_const(lane * 8);
+            let mut bytes = [0; 2];
+            for (slot, (word, signed)) in [(a, signed[0]), (b, signed[1])].into_iter().enumerate() {
+                let moved = self.builder.shift_right_logical(ty, None, word, shift)?;
+                bytes[slot] = if signed {
+                    let raised = self.builder.shift_left_logical(ty, None, moved, c24)?;
+                    self.builder.shift_right_arithmetic(ty, None, raised, c24)?
+                } else {
+                    self.builder.bitwise_and(ty, None, moved, ff)?
+                };
+            }
+            let product = self.builder.i_mul(ty, None, bytes[0], bytes[1])?;
+            acc = self.builder.i_add(ty, None, acc, product)?;
+        }
+        Ok(acc)
+    }
+
+    /// Two IEEE halves packed in a word, as f32 products summed onto `acc`.
+    fn half2_dot(&mut self, a: Word, b: Word, acc: Word) -> Result<Word, Error> {
+        self.fp32 = true;
+        let mut acc = acc;
+        for half in 0..2u32 {
+            let shift = self.u32_const(half * 16);
+            let mut values = [0; 2];
+            for (slot, word) in [a, b].into_iter().enumerate() {
+                let moved = self.builder.shift_right_logical(self.u32_type, None, word, shift)?;
+                let bits = self.builder.u_convert(self.u16_type, None, moved)?;
+                let half = self.builder.bitcast(self.f16_type, None, bits)?;
+                values[slot] = self.builder.f_convert(self.f32_type, None, half)?;
+            }
+            let product = self.builder.f_mul(self.f32_type, None, values[0], values[1])?;
+            acc = self.builder.f_add(self.f32_type, None, acc, product)?;
+        }
+        Ok(acc)
+    }
+
+    fn emit_mma(
+        &mut self,
+        shape: MmaShape,
+        signed: [bool; 2],
+        dst: [&'a str; 4],
+        src: [&'a str; 10],
+    ) -> Result<(), Error> {
+        let ty = self.u32_type;
+        let accumulators = shape.accumulators();
+        let groups = shape.groups();
+        let halves = accumulators / 2;
+        let mut a = Vec::new();
+        for name in &src[..halves * (groups / 4)] {
+            a.push(self.integer(name, Kind::B32)?);
+        }
+        let mut b = Vec::new();
+        for name in &src[4..4 + groups / 4] {
+            b.push(self.integer(name, Kind::B32)?);
+        }
+        let mut c = Vec::new();
+        for name in &src[6..6 + accumulators] {
+            c.push(self.integer(name, Kind::B32)?);
+        }
+        let lane = self.lane_id()?;
+        let two = self.u32_const(2);
+        let three = self.u32_const(3);
+        let four = self.u32_const(4);
+        let row = self.builder.shift_right_logical(ty, None, lane, two)?;
+        let quad = self.builder.bitwise_and(ty, None, lane, three)?;
+        let row4 = self.builder.i_mul(ty, None, row, four)?;
+        let one_bit = self.u32_const(1);
+        let col_base = self.builder.shift_left_logical(ty, None, quad, one_bit)?;
+        // A words are shared by both accumulator columns of a row half; B words by both rows.
+        let mut a_words = HashMap::new();
+        let mut b_words = HashMap::new();
+        let mut results = Vec::new();
+        for (j, &start) in c.iter().enumerate() {
+            let (half, parity) = (j / 2, j % 2);
+            let column = if parity == 0 {
+                col_base
+            } else {
+                let one = self.u32_const(1);
+                self.builder.i_add(ty, None, col_base, one)?
+            };
+            let column4 = self.builder.i_mul(ty, None, column, four)?;
+            let mut acc = start;
+            if !shape.is_integer() {
+                acc = self.builder.bitcast(self.f32_type, None, acc)?;
+            }
+            for group in 0..groups {
+                let low = self.u32_const((group % 4) as u32);
+                let a_word = match a_words.get(&(half, group)) {
+                    Some(&word) => word,
+                    None => {
+                        let source = self.builder.i_add(ty, None, row4, low)?;
+                        let word = self.subgroup_shuffle(a[half + 2 * (group / 4)], source)?;
+                        a_words.insert((half, group), word);
+                        word
+                    }
+                };
+                let b_word = match b_words.get(&(parity, group)) {
+                    Some(&word) => word,
+                    None => {
+                        let source = self.builder.i_add(ty, None, column4, low)?;
+                        let word = self.subgroup_shuffle(b[group / 4], source)?;
+                        b_words.insert((parity, group), word);
+                        word
+                    }
+                };
+                acc = if shape.is_integer() {
+                    self.dot4(a_word, b_word, acc, signed)?
+                } else {
+                    self.half2_dot(a_word, b_word, acc)?
+                };
+            }
+            if !shape.is_integer() {
+                acc = self.builder.bitcast(ty, None, acc)?;
+            }
+            results.push(acc);
+        }
+        for (name, id) in dst.iter().zip(results) {
+            self.write(name, Value { id, kind: Kind::B32 })?;
+        }
+        Ok(())
+    }
+
+    /// 32-bit byte offset into the shared window for a shared address operand.
+    fn shared_offset32(&mut self, operand: &str) -> Result<Word, Error> {
+        let (base, offset) = match operand.split_once('+') {
+            Some((base, offset)) => (
+                base,
+                Self::parse_byte_offset(offset)
+                    .ok_or_else(|| Error::new(format!("unsupported PTX address offset {offset}")))?,
+            ),
+            None => (operand, 0),
+        };
+        let value = self.read(base)?;
+        let ty = self.u32_type;
+        let id = match value.kind {
+            Kind::B32 => value.id,
+            Kind::B64 => self.builder.u_convert(ty, None, value.id)?,
+            Kind::Address(Space::Shared) => {
+                let window = self.shared_window_bytes()?;
+                let pointer = self.builder.convert_ptr_to_u(self.u64_type, None, value.id)?;
+                let origin = self.builder.convert_ptr_to_u(self.u64_type, None, window)?;
+                let delta = self.builder.i_sub(self.u64_type, None, pointer, origin)?;
+                self.builder.u_convert(ty, None, delta)?
+            }
+            other => {
+                return Err(Error::new(format!(
+                    "expected a shared address for {base}, got {other:?}"
+                )));
+            }
+        };
+        if offset == 0 {
+            return Ok(id);
+        }
+        let delta = self.u32_const(offset as u32);
+        Ok(self.builder.i_add(ty, None, id, delta)?)
+    }
+
+    fn shared_pointer_at(&mut self, offset: Word) -> Result<Word, Error> {
+        let window = self.shared_window_bytes()?;
+        let wide = self.builder.u_convert(self.u64_type, None, offset)?;
+        Ok(self
+            .builder
+            .ptr_access_chain(self.shared_byte_ptr, None, window, wide, [])?)
+    }
+
+    fn emit_ldmatrix(
+        &mut self,
+        count: u8,
+        trans: bool,
+        dst: [&'a str; 4],
+        addr: &str,
+    ) -> Result<(), Error> {
+        let ty = self.u32_type;
+        let offset = self.shared_offset32(addr)?;
+        let lane = self.lane_id()?;
+        let two = self.u32_const(2);
+        let three = self.u32_const(3);
+        let row = self.builder.shift_right_logical(ty, None, lane, two)?;
+        let quad = self.builder.bitwise_and(ty, None, lane, three)?;
+        let half_ptr = self.builder.type_pointer(None, StorageClass::Workgroup, self.u16_type);
+        let word_ptr = self.shared_word_ptr;
+        let mut words = Vec::new();
+        for matrix in 0..u32::from(count) {
+            let base_lane = self.u32_const(8 * matrix);
+            let word = if !trans {
+                // Lane j of the matrix supplies the address of row j.
+                let source = self.builder.i_add(ty, None, base_lane, row)?;
+                let row_offset = self.subgroup_shuffle(offset, source)?;
+                let four = self.u32_const(4);
+                let into = self.builder.i_mul(ty, None, quad, four)?;
+                let at = self.builder.i_add(ty, None, row_offset, into)?;
+                let bytes = self.shared_pointer_at(at)?;
+                let pointer = self.builder.bitcast(word_ptr, None, bytes)?;
+                self.builder.load(ty, None, pointer, None, [])?
+            } else {
+                // The thread owns elements [2q][row] and [2q+1][row] of the matrix.
+                let one = self.u32_const(1);
+                let first = self.builder.shift_left_logical(ty, None, quad, one)?;
+                let first = self.builder.i_add(ty, None, base_lane, first)?;
+                let second = self.builder.i_add(ty, None, first, one)?;
+                let into = self.builder.shift_left_logical(ty, None, row, one)?;
+                let mut halves = [0; 2];
+                for (slot, source) in [first, second].into_iter().enumerate() {
+                    let row_offset = self.subgroup_shuffle(offset, source)?;
+                    let at = self.builder.i_add(ty, None, row_offset, into)?;
+                    let bytes = self.shared_pointer_at(at)?;
+                    let pointer = self.builder.bitcast(half_ptr, None, bytes)?;
+                    let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
+                    halves[slot] = self.builder.u_convert(ty, None, value)?;
+                }
+                let sixteen = self.u32_const(16);
+                let high = self.builder.shift_left_logical(ty, None, halves[1], sixteen)?;
+                self.builder.bitwise_or(ty, None, halves[0], high)?
+            };
+            words.push(word);
+        }
+        for (name, id) in dst.iter().zip(words) {
+            self.write(name, Value { id, kind: Kind::B32 })?;
+        }
+        Ok(())
+    }
+
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
         let (dst, id, kind) = match inst {
+            Instruction::LaneId(dst) => (dst, self.lane_id()?, Kind::B32),
+            Instruction::Mma {
+                shape,
+                signed,
+                dst,
+                src,
+            } => {
+                self.emit_mma(shape, signed, dst, src)?;
+                return Ok(());
+            }
+            Instruction::LdMatrix {
+                count,
+                trans,
+                dst,
+                addr,
+            } => {
+                self.emit_ldmatrix(count, trans, dst, addr)?;
+                return Ok(());
+            }
             Instruction::Alu3(op, dst, src) => (dst, self.alu3(op, src)?, Kind::B32),
             Instruction::Alu64(op, dst, src) => {
                 let (id, kind) = self.alu64(op, src)?;
@@ -2112,7 +2396,11 @@ impl<'a> Emitter<'a> {
             block.instructions.iter().any(|inst| {
                 matches!(
                     inst,
-                    Instruction::ShuffleBfly { .. } | Instruction::ReduxSyncAdd { .. }
+                    Instruction::ShuffleBfly { .. }
+                        | Instruction::ReduxSyncAdd { .. }
+                        | Instruction::Mma { .. }
+                        | Instruction::LdMatrix { .. }
+                        | Instruction::LaneId(..)
                 )
             })
         });
