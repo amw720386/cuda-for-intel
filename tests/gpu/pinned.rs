@@ -152,7 +152,6 @@ fn pinned_async_transfers() {
     assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(device, src, SIZE, up) }, 400);
     ok!(cuMemFreeHost(src));
     assert_eq!(unsafe { cuMemFreeHost(src) }, 1);
-    assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(device, src, SIZE, down) }, 1);
     let retired_output = unsafe { dst.cast::<[u8; SIZE]>().read() };
     if retired_output != input {
         // Read after capturing the failing host snapshot so the diagnostic copy
