@@ -83,6 +83,12 @@ fn invoke(_name: &'static str, native: impl FnOnce() -> Status) -> Status {
     if let Some(status) = fault::status(_name) {
         return status;
     }
+    if crate::cuda::profile_on() {
+        let started = std::time::Instant::now();
+        let status = native();
+        crate::cuda::profile_note(_name, started.elapsed().as_nanos() as u64);
+        return status;
+    }
     native()
 }
 

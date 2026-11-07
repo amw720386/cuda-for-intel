@@ -1246,6 +1246,21 @@ impl<'a> Emitter<'a> {
     /// Four-way byte dot product with per-operand signedness, plus accumulate.
     fn dot4(&mut self, a: Word, b: Word, acc: Word, signed: [bool; 2]) -> Result<Word, Error> {
         let ty = self.u32_type;
+        if super::dot_product_enabled() {
+            // SPV_KHR_integer_dot_product maps to the Xe DP4A instruction. The dot of four byte
+            // pairs never overflows 32 bits, so adding the accumulator with wrap-around matches
+            // dp4a exactly (the saturating Acc forms would not).
+            self.declare("dot_product", Some(Capability::DotProduct), Some("SPV_KHR_integer_dot_product"));
+            self.declare("dot_product_packed", Some(Capability::DotProductInput4x8BitPacked), None);
+            let format = Some(rspirv::spirv::PackedVectorFormat::PackedVectorFormat4x8Bit);
+            let dot = match signed {
+                [true, true] => self.builder.s_dot(ty, None, a, b, format)?,
+                [false, false] => self.builder.u_dot(ty, None, a, b, format)?,
+                [true, false] => self.builder.su_dot(ty, None, a, b, format)?,
+                [false, true] => self.builder.su_dot(ty, None, b, a, format)?,
+            };
+            return Ok(self.builder.i_add(ty, None, acc, dot)?);
+        }
         let c24 = self.u32_const(24);
         let ff = self.u32_const(0xff);
         let mut acc = acc;
@@ -2016,29 +2031,10 @@ impl<'a> Emitter<'a> {
                 )
             }
             Instruction::Dp4a(dst, [a, b, c]) => {
-                // Soft-emulate CUDA dp4a.s32.s32: four signed i8×i8 products + accumulate.
                 let a = self.integer(a, Kind::B32)?;
                 let b = self.integer(b, Kind::B32)?;
-                let mut acc = self.integer(c, Kind::B32)?;
-                let ty = self.u32_type;
-                let shift24 = self.builder.constant_bit32(ty, 24);
-                for lane in 0..4u32 {
-                    let shift = self.builder.constant_bit32(ty, lane * 8);
-                    let a_byte = self.builder.shift_right_logical(ty, None, a, shift)?;
-                    let b_byte = self.builder.shift_right_logical(ty, None, b, shift)?;
-                    let a_sext = {
-                        let raised = self.builder.shift_left_logical(ty, None, a_byte, shift24)?;
-                        self.builder
-                            .shift_right_arithmetic(ty, None, raised, shift24)?
-                    };
-                    let b_sext = {
-                        let raised = self.builder.shift_left_logical(ty, None, b_byte, shift24)?;
-                        self.builder
-                            .shift_right_arithmetic(ty, None, raised, shift24)?
-                    };
-                    let prod = self.builder.i_mul(ty, None, a_sext, b_sext)?;
-                    acc = self.builder.i_add(ty, None, acc, prod)?;
-                }
+                let c = self.integer(c, Kind::B32)?;
+                let acc = self.dot4(a, b, c, [true, true])?;
                 (dst, acc, Kind::B32)
             }
             Instruction::Compare {

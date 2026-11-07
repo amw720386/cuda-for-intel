@@ -23,6 +23,14 @@ mod library;
 mod primary;
 mod streams;
 mod trace;
+
+pub(crate) fn profile_on() -> bool {
+    trace::profile_enabled()
+}
+
+pub(crate) fn profile_note(name: &'static str, nanos: u64) {
+    trace::profile_record(name, nanos);
+}
 mod vmm;
 use streams::Streams;
 
@@ -961,6 +969,42 @@ fn memset_bytes(dst: u64, value: u8, size: usize, stream: Opaque) -> CuResult {
     }))
 }
 
+/// Decides once whether `dp4a` may use the SPIR-V integer dot product: the driver must build a
+/// probe module that uses it. `CUDA_FOR_INTEL_DP4A=0` forces the scalar lowering.
+fn probe_dot_product(runtime: &Runtime, context: &mut CudaContext) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if std::env::var_os("CUDA_FOR_INTEL_DP4A").as_deref() == Some(std::ffi::OsStr::new("0")) {
+        return;
+    }
+    #[cfg(test)]
+    if runtime.api.is_fake() {
+        return;
+    }
+    ptx::set_dot_product(true);
+    let started = std::time::Instant::now();
+    let ok = match ptx::translate(ptx::DOT_PROBE_PTX) {
+        Ok(translated) => match context.backend.load_module(&runtime.api, &translated.words) {
+            Ok(mut module) => {
+                let _ = module.destroy(&runtime.api);
+                true
+            }
+            Err(error) => {
+                export_log(format_args!("dot product probe rejected by the driver: {error}"));
+                false
+            }
+        },
+        Err(error) => {
+            export_log(format_args!("dot product probe did not translate: {error}"));
+            false
+        }
+    };
+    ptx::set_dot_product(ok);
+    export_log(format_args!("dp4a lowering: integer dot product={ok} probe_ms={}", started.elapsed().as_millis()));
+}
+
 fn load_ptx(
     runtime: &Runtime,
     context: &mut CudaContext,
@@ -968,6 +1012,7 @@ fn load_ptx(
     image: &[u8],
     lenient: bool,
 ) -> Result<usize, CuResult> {
+    probe_dot_product(runtime, context);
     let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
     let started = std::time::Instant::now();
     let translate = if lenient { ptx::translate_lenient } else { ptx::translate };
@@ -1001,6 +1046,7 @@ fn load_ptx_entry(
     prepared: &str,
     name: &str,
 ) -> Result<usize, CuResult> {
+    probe_dot_product(runtime, context);
     let started = std::time::Instant::now();
     let translated = ptx::translate_entry(prepared, name).map_err(|error| {
         export_log(format_args!("lazy entry translation fell back: {name}: {error}"));
@@ -1054,7 +1100,21 @@ fn install_translation(
     let backend = context
         .backend
         .load_module(&runtime.api, &translated.words)
-        .inspect_err(|error| context.backend.health.observe(error))
+        .inspect_err(|error| {
+            context.backend.health.observe(error);
+            export_log(format_args!(
+                "module build failed: kernels={:?} spirv_words={} error={error}",
+                entries.keys().collect::<Vec<_>>(),
+                translated.words.len()
+            ));
+            // CFI_DUMP_PTX_DIR=<dir> also keeps the SPIR-V of every module the driver rejects.
+            if let Some(dir) = std::env::var_os("CFI_DUMP_PTX_DIR") {
+                let bytes: Vec<u8> = translated.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                let tag = entries.keys().next().map(|k| k.to_string_lossy().chars().take(60).collect::<String>()).unwrap_or_default();
+                let name = format!("build-fail-{}-{}.spv", tag.replace(|c: char| !c.is_ascii_alphanumeric(), "_"), translated.words.len());
+                let _ = std::fs::write(std::path::Path::new(&dir).join(name), bytes);
+            }
+        })
         .map_err(backend_error)?;
     export_log(format_args!(
         "module load: ptx_bytes={} kernels={} spirv_words={} translate_ms={} ze_ms={}",
