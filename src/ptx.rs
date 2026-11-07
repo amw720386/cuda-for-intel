@@ -893,6 +893,12 @@ pub(crate) fn dot_product_enabled() -> bool {
     DOT_PRODUCT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Bring-up switch for the dot-product encoding (`CFI_DP4A_MODE`): packed, signed or vec.
+pub(crate) fn dot_product_mode() -> &'static str {
+    static MODE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODE.get_or_init(|| std::env::var("CFI_DP4A_MODE").unwrap_or_else(|_| "packed".into()))
+}
+
 pub(crate) fn set_dot_product(enabled: bool) {
     DOT_PRODUCT.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }

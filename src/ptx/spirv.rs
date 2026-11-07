@@ -1258,14 +1258,33 @@ impl<'a> Emitter<'a> {
             // SPV_KHR_integer_dot_product maps to the Xe DP4A instruction. The dot of four byte
             // pairs never overflows 32 bits, so adding the accumulator with wrap-around matches
             // dp4a exactly (the saturating Acc forms would not).
+            // CFI_DP4A_MODE (bring-up): "packed" (default), "signed" (signed 32-bit result type),
+            // "vec" (v4i8 operands instead of the packed format).
+            let mode = super::dot_product_mode();
             self.declare("dot_product", Some(Capability::DotProduct), Some("SPV_KHR_integer_dot_product"));
-            self.declare("dot_product_packed", Some(Capability::DotProductInput4x8BitPacked), None);
-            let format = Some(rspirv::spirv::PackedVectorFormat::PackedVectorFormat4x8Bit);
-            let dot = match signed {
-                [true, true] => self.builder.s_dot(ty, None, a, b, format)?,
-                [false, false] => self.builder.u_dot(ty, None, a, b, format)?,
-                [true, false] => self.builder.su_dot(ty, None, a, b, format)?,
-                [false, true] => self.builder.su_dot(ty, None, b, a, format)?,
+            let dot = if mode == "vec" {
+                self.declare("dot_product_4x8", Some(Capability::DotProductInput4x8Bit), None);
+                let byte = self.builder.type_int(8, 0);
+                let vector = self.builder.type_vector(byte, 4);
+                let va = self.builder.bitcast(vector, None, a)?;
+                let vb = self.builder.bitcast(vector, None, b)?;
+                match signed {
+                    [true, true] => self.builder.s_dot(ty, None, va, vb, None)?,
+                    [false, false] => self.builder.u_dot(ty, None, va, vb, None)?,
+                    [true, false] => self.builder.su_dot(ty, None, va, vb, None)?,
+                    [false, true] => self.builder.su_dot(ty, None, vb, va, None)?,
+                }
+            } else {
+                self.declare("dot_product_packed", Some(Capability::DotProductInput4x8BitPacked), None);
+                let format = Some(rspirv::spirv::PackedVectorFormat::PackedVectorFormat4x8Bit);
+                let result_ty = if mode == "signed" { self.builder.type_int(32, 1) } else { ty };
+                let dot = match signed {
+                    [true, true] => self.builder.s_dot(result_ty, None, a, b, format)?,
+                    [false, false] => self.builder.u_dot(result_ty, None, a, b, format)?,
+                    [true, false] => self.builder.su_dot(result_ty, None, a, b, format)?,
+                    [false, true] => self.builder.su_dot(result_ty, None, b, a, format)?,
+                };
+                if mode == "signed" { self.builder.bitcast(ty, None, dot)? } else { dot }
             };
             return Ok(self.builder.i_add(ty, None, acc, dot)?);
         }
