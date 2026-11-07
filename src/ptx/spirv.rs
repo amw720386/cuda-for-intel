@@ -2031,12 +2031,17 @@ impl<'a> Emitter<'a> {
                     let value = self.params.get(&(src, offset)).copied().ok_or_else(|| {
                         Error::new(format!("unknown PTX parameter word {src}+{offset}"))
                     })?;
-                    if width != value.kind.width() {
+                    if width == Width::B32 && value.kind.width() == Width::B64 {
+                        // `ld.param.u32` of a `.u64` parameter reads its low word.
+                        let id = self.builder.u_convert(self.u32_type, None, value.id)?;
+                        (dst, id, Kind::B32)
+                    } else if width != value.kind.width() {
                         return Err(Error::new(format!(
                             "mismatched PTX parameter load for {src}"
                         )));
+                    } else {
+                        (dst, value.id, value.kind)
                     }
-                    (dst, value.id, value.kind)
                 }
             }
             Instruction::ParamS32(dst, src, offset) => {
