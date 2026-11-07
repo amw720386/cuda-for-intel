@@ -943,6 +943,14 @@ fn load_ptx(
             let preview: String = ptx.chars().take(120).collect();
             trace::record(format_args!("PTX translation rejected: {error}; preview={preview:?}"));
         }
+        // Bring-up aid: CFI_DUMP_PTX_DIR=<dir> keeps every rejected PTX module for offline study.
+        if let Some(dir) = std::env::var_os("CFI_DUMP_PTX_DIR") {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            ptx.hash(&mut hasher);
+            let path = std::path::Path::new(&dir).join(format!("reject-{:016x}.ptx", hasher.finish()));
+            let _ = std::fs::write(path, ptx);
+        }
         diagnostic(&error);
         // Always persist a short reject breadcrumb for fatbin bring-up.
         export_log(format_args!("PTX reject: {error}"));
