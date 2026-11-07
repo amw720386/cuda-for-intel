@@ -16,7 +16,6 @@
 	mov.u32 %r1, 1;
 	mov.u32 %r2, 1;
 	mov.u32 %r31, 1;
-	mov.u64 %rd3, 1;
 	mov.b64 %rd3, {%r1,%r2};
 	st.global.u32 [%rd2], %r1;
 	ret;

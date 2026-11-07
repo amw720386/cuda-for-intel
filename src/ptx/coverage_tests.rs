@@ -373,6 +373,14 @@ pub(super) mod interp {
                 machine.write(addr, bytes, value);
                 return None;
             }
+            Op::AtomicIAdd | Op::AtomicExchange => {
+                let (addr, value) = (get(values, 0), get(values, 3));
+                let bytes = w.max(8) / 8;
+                let old = machine.read(addr, bytes);
+                let new = if inst.class.opcode == Op::AtomicIAdd { mask(w, old.wrapping_add(value)) } else { value };
+                machine.write(addr, bytes, new);
+                old
+            }
             Op::ControlBarrier | Op::MemoryBarrier | Op::SelectionMerge | Op::LoopMerge | Op::Nop | Op::Line | Op::NoLine => return None,
             Op::Branch => {
                 *current = blocks[&id(&inst.operands[0])];
