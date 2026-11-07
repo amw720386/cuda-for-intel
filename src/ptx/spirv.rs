@@ -1784,7 +1784,12 @@ impl<'a> Emitter<'a> {
                     let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
                     self.builder.s_convert(ty, None, value)?
                 };
-                (dst, loaded, Kind::B32)
+                if self.declarations.get(dst) == Some(&Width::B64) {
+                    let wide = self.builder.s_convert(self.u64_type, None, loaded)?;
+                    (dst, wide, Kind::B64)
+                } else {
+                    (dst, loaded, Kind::B32)
+                }
             }
             Instruction::CvtaShared(dst, src) => {
                 let value = self.read(src)?;
@@ -2614,7 +2619,13 @@ impl<'a> Emitter<'a> {
                     let pointer = self.word_pointer(space, address)?;
                     self.builder.load(self.u32_type, None, pointer, None, [])?
                 };
-                (dst, id, Kind::B32)
+                // `ld.global.s32 %rd, [..]` widens into a 64-bit register (sign-extending).
+                if self.declarations.get(dst) == Some(&Width::B64) {
+                    let wide = self.builder.s_convert(self.u64_type, None, id)?;
+                    (dst, wide, Kind::B64)
+                } else {
+                    (dst, id, Kind::B32)
+                }
             }
             Instruction::Load16(space, dst, address) => {
                 let pointer = self.half_pointer(space, address)?;
@@ -2629,6 +2640,31 @@ impl<'a> Emitter<'a> {
                 let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
                 (dst, bits32, Kind::B32)
+            }
+            Instruction::LoadVecU8 {
+                space,
+                count,
+                dst,
+                addr,
+            } => {
+                let (base, base_off) = match addr.split_once('+') {
+                    Some((base, offset)) => (
+                        base,
+                        Self::parse_byte_offset(offset).ok_or_else(|| {
+                            Error::new(format!("unsupported PTX address offset {offset}"))
+                        })?,
+                    ),
+                    None => (addr, 0i64),
+                };
+                for index in 0..usize::from(count) {
+                    let off = base_off + index as i64;
+                    let lane_addr = if off == 0 { base.to_string() } else { format!("{base}+{off}") };
+                    let bytes = self.addressed_byte_pointer(space, &lane_addr)?;
+                    let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
+                    let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
+                    self.write(dst[index], Value { id: bits32, kind: Kind::B32 })?;
+                }
+                return Ok(());
             }
             Instruction::LoadVecU16 {
                 space,

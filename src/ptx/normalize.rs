@@ -59,7 +59,13 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
                 if let Some(open) = entry_open.take() {
                     let mut decls = ctx.take_decls();
                     if let (true, Some((name, align))) = (uses_dynamic, &dynamic) {
-                        decls.push(format!(".shared .align {align} .b8 {name} [ {} ] ; /*dyn*/", super::dynamic_shared_bytes()));
+                        // Dynamic window = min(device max, env, 64 KiB) minus the entry's static
+                        // shared arrays, so static + dynamic never exceeds the limit.
+                        let fixed: u64 = out[open..].iter().map(|l| static_shared_bytes(l)).sum();
+                        let window = (u64::from(super::dynamic_shared_bytes())
+                            .saturating_sub(fixed.next_multiple_of(16)))
+                        .max(16);
+                        decls.push(format!(".shared .align {align} .b8 {name} [ {window} ] ; /*dyn*/"));
                     }
                     uses_dynamic = false;
                     if !decls.is_empty() {
@@ -1401,5 +1407,30 @@ fn rewrite_wmma(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             Some(out)
         }
         _ => None,
+    }
+}
+
+/// Bytes of a normalized `.shared ... name [ N ] ;` declaration line (0 for any other line).
+fn static_shared_bytes(line: &str) -> u64 {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.first() != Some(&".shared") || line.contains("/*dyn*/") {
+        return 0;
+    }
+    let elem = tokens.iter().find_map(|t| match *t {
+        ".b8" | ".u8" | ".s8" => Some(1),
+        ".b16" | ".u16" | ".s16" | ".f16" => Some(2),
+        ".b32" | ".u32" | ".s32" | ".f32" => Some(4),
+        ".b64" | ".u64" | ".s64" | ".f64" => Some(8),
+        _ => None,
+    });
+    let count = tokens
+        .iter()
+        .position(|&t| t == "[")
+        .and_then(|i| tokens.get(i + 1))
+        .and_then(|n| n.parse::<u64>().ok());
+    match (elem, count) {
+        (Some(e), Some(n)) => e * n,
+        (Some(e), None) => e,
+        _ => 0,
     }
 }

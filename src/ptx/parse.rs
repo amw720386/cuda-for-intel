@@ -1000,6 +1000,28 @@ impl<'a> Parser<'a> {
                 "]",
             ] => Instruction::Load8(memory_space(op), dst, addr),
             [
+                op @ ("ld.global.v2.u8" | "ld.global.nc.v2.u8" | "ld.global.v2.b8" | "ld.global.nc.v2.b8"
+                | "ld.global.v4.u8" | "ld.global.nc.v4.u8" | "ld.global.v4.b8" | "ld.global.nc.v4.b8"),
+                "{",
+                a,
+                ",",
+                b,
+                rest @ ..,
+            ] => {
+                let count = if op.contains("v4") { 4u8 } else { 2 };
+                let (c, d, addr) = match (count, rest) {
+                    (4, [",", c, ",", d, "}", ",", "[", addr, "]"]) => (*c, *d, *addr),
+                    (2, ["}", ",", "[", addr, "]"]) => ("", "", *addr),
+                    _ => {
+                        return Err(Error::new(format!(
+                            "unsupported PTX instruction: {}",
+                            slice[..end].join(" ")
+                        )));
+                    }
+                };
+                Instruction::LoadVecU8 { space: Space::Global, count, dst: [a, b, c, d], addr }
+            }
+            [
                 op @ ("ld.global.v2.u16"
                 | "ld.global.nc.v2.u16"
                 | "ld.global.v2.b16"
