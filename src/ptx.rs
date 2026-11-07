@@ -908,6 +908,9 @@ mod tests {
             };
             let Ok(text) = String::from_utf8(ptx) else { continue };
             blobs += 1;
+            if let Some(dir) = std::env::var_os("CFI_SCAN_DUMP_DIR") {
+                let _ = std::fs::write(std::path::Path::new(&dir).join(format!("blob{blobs}.ptx")), &text);
+            }
             // One parse per module; emit each entry on its own to attribute failures.
             let prepared = match prepare(&text) {
                 Ok(prepared) => prepared,
