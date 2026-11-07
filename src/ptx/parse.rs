@@ -428,7 +428,7 @@ impl<'a> Parser<'a> {
                     addr,
                 }
             }
-            ["add.f32" | "add.rn.f32", dst, ",", a, ",", b] => {
+            ["add.f32" | "add.rn.f32" | "add.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Add([a, b]))
             }
             ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32", dst, ",", a, ",", b] => {
@@ -459,9 +459,18 @@ impl<'a> Parser<'a> {
             ["cvt.rn.f32.s16", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::FromSigned16([src]))
             }
-            ["div.rn.f32", dst, ",", a, ",", b] => Instruction::Float32(dst, FloatOp::Div([a, b])),
-            ["sqrt.rn.f32", dst, ",", src] => Instruction::Float32(dst, FloatOp::Sqrt([src])),
-            ["rsqrt.approx.f32", dst, ",", src] => {
+            [
+                "div.rn.f32" | "div.approx.f32" | "div.approx.ftz.f32" | "div.ftz.f32",
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => Instruction::Float32(dst, FloatOp::Div([a, b])),
+            ["sqrt.rn.f32" | "sqrt.approx.f32" | "sqrt.approx.ftz.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Sqrt([src]))
+            }
+            ["rsqrt.approx.f32" | "rsqrt.approx.ftz.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::RsqrtApprox([src]))
             }
             ["sin.approx.f32" | "sin.approx.ftz.f32", dst, ",", src] => {
@@ -753,6 +762,7 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
     parser.expect("64")?;
     let mut names = std::collections::HashSet::new();
     let mut entries = Vec::new();
+    let mut first_skip: Option<Error> = None;
     loop {
         skip_module_directives(&mut parser)?;
         if parser.peek().is_none() {
@@ -768,6 +778,9 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
                 entries.push(entry);
             }
             Err(error) => {
+                if first_skip.is_none() {
+                    first_skip = Some(error.clone());
+                }
                 parser.tokens = checkpoint;
                 // Consume optional `.visible` then `.entry name … { … }`.
                 parser.eat(".visible");
@@ -784,7 +797,9 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
         }
     }
     if entries.is_empty() {
-        return Err(Error::new("PTX module contains no supported .entry kernels"));
+        return Err(first_skip.unwrap_or_else(|| {
+            Error::new("PTX module contains no supported .entry kernels")
+        }));
     }
     Ok(entries)
 }

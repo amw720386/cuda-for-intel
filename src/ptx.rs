@@ -33,7 +33,7 @@ impl Param {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Error(String);
 
 impl Error {
@@ -377,6 +377,12 @@ mod tests {
         }
         assert!(translate(&GGML_ADD.replace("%rd10, 2;", "%rd10, 64;")).is_err());
         assert!(translate(&GGML_ADD.replace("%p3, %p1, %p2;", "%p3, %r4, %p2;")).is_err());
+    }
+
+    #[test]
+    fn translates_authentic_ggml_rms_norm_f32() {
+        let source = include_str!("../examples/ggml_rms_norm_auth.ptx");
+        translate(source).unwrap_or_else(|e| panic!("rms reject: {e}"));
     }
 
     #[test]

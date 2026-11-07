@@ -823,6 +823,51 @@ pub unsafe extern "system" fn cudaLaunchKernel(
     })
 }
 
+/// Keep header + a single `.entry` so sibling unsupported kernels in the same
+/// nvcc fatbin do not poison `cuModuleLoadData`.
+fn filter_ptx_entry(ptx: &[u8], entry_name: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(ptx).ok()?;
+    let header_end = text.find(".entry")?;
+    let header = &text[..header_end];
+    let needle = format!(".entry {}", String::from_utf8_lossy(entry_name));
+    let start = text.find(&needle)?;
+    let body = &text[start..];
+    let brace = body.find('{')?;
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, ch) in body[brace..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(brace + i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let mut out = String::new();
+    // Drop module `.global` LUTs — kernels that need them will fail explicitly later.
+    for line in header.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(".global")
+            || trimmed.starts_with(".const")
+            || trimmed.starts_with(".visible .global")
+            || trimmed.starts_with(".extern")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&body[..end]);
+    out.push('\n');
+    Some(out.into_bytes())
+}
+
 fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
     let (fat_key, name) = {
         let rt = runtime().lock().map_err(|_| UNKNOWN)?;
@@ -838,50 +883,43 @@ fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
         let rt = runtime().lock().map_err(|_| UNKNOWN)?;
         rt.pending_fatbins.get(&fat_key).copied()
     };
-    if let Some(image) = image {
-        match extract_ptx(image as *mut c_void) {
-            Some(ptx) => {
-                eprintln!(
-                    "CUDA for Intel resolve: extract ok fat={fat_key:#x} ptx={} name={}",
-                    ptx.len(),
-                    String::from_utf8_lossy(&name)
-                );
-                let err = ensure_context(drv);
-                if err != SUCCESS {
-                    eprintln!("CUDA for Intel resolve: ensure_context -> {err}");
-                    return Err(err);
-                }
-                let mut module = std::ptr::null_mut();
-                let mut bytes = ptx;
-                bytes.push(0);
-                let err = unsafe { (drv.cuModuleLoadData)(&mut module, bytes.as_ptr().cast()) };
-                eprintln!("CUDA for Intel resolve: cuModuleLoadData -> {err}");
-                if err == SUCCESS {
-                    if let Ok(mut rt) = runtime().lock() {
-                        rt.modules.insert(fat_key, module as usize);
-                        rt.pending_fatbins.remove(&fat_key);
-                    }
-                } else {
-                    return Err(err);
-                }
-            }
-            None => {
-                eprintln!(
-                    "CUDA for Intel resolve: extract_ptx failed fat={fat_key:#x} image={image:#x}"
-                );
-            }
-        }
+    let Some(image) = image else {
+        return Err(INVALID_VALUE);
+    };
+    let Some(raw) = extract_ptx(image as *mut c_void) else {
+        eprintln!(
+            "CUDA for Intel resolve: extract_ptx failed fat={fat_key:#x} image={image:#x}"
+        );
+        return Err(INVALID_VALUE);
+    };
+    let Some(mut filtered) = filter_ptx_entry(&raw, &name) else {
+        eprintln!(
+            "CUDA for Intel resolve: entry filter failed name={}",
+            String::from_utf8_lossy(&name)
+        );
+        return Err(INVALID_VALUE);
+    };
+    eprintln!(
+        "CUDA for Intel resolve: entry {} filtered {} -> {} bytes",
+        String::from_utf8_lossy(&name),
+        raw.len(),
+        filtered.len()
+    );
+    let err = ensure_context(drv);
+    if err != SUCCESS {
+        eprintln!("CUDA for Intel resolve: ensure_context -> {err}");
+        return Err(err);
     }
-    let module = runtime()
-        .lock()
-        .map_err(|_| UNKNOWN)?
-        .modules
-        .get(&fat_key)
-        .copied()
-        .ok_or(INVALID_VALUE)?;
+    let mut module = std::ptr::null_mut();
+    filtered.push(0);
+    let err = unsafe { (drv.cuModuleLoadData)(&mut module, filtered.as_ptr().cast()) };
+    eprintln!("CUDA for Intel resolve: cuModuleLoadData -> {err}");
+    if err != SUCCESS {
+        return Err(err);
+    }
     let mut function = std::ptr::null_mut();
     let c_name = std::ffi::CString::new(name.clone()).map_err(|_| INVALID_VALUE)?;
-    let err = unsafe { (drv.cuModuleGetFunction)(&mut function, module as CUmodule, c_name.as_ptr()) };
+    let err = unsafe { (drv.cuModuleGetFunction)(&mut function, module, c_name.as_ptr()) };
     if err != SUCCESS {
         eprintln!(
             "CUDA for Intel resolve: cuModuleGetFunction({}) -> {err}",
@@ -890,6 +928,9 @@ fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
         return Err(err);
     }
     if let Ok(mut rt) = runtime().lock() {
+        // Keep every per-entry module alive; do not drop pending fatbin images
+        // so sibling kernels from the same registration can load later.
+        rt.modules.insert(host_fun, module as usize);
         rt.functions.insert(host_fun, function as usize);
         rt.pending_functions.remove(&host_fun);
     }
