@@ -1358,6 +1358,7 @@ fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
 
 /// Translate one kernel of a lazy module and return its function handle.
 pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
+    ptx::set_lenient_undefined(true);
     // Translation settings (dp4a lowering, dynamic shared window) must be fixed before
     // any source is normalised or any cache key is computed.
     let lazy_context = state.lazy_modules.get(&module).map(|l| l.context);

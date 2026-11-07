@@ -258,7 +258,7 @@ impl<'a> Emitter<'a> {
     /// value that PTX guards so it is unused when absent): materialise a zero-initialised
     /// slot typed by the register's declaration.
     fn undefined_register_slot(&mut self, operand: &str) -> Result<Value, Error> {
-        let kind = match self.declarations.get(operand).filter(|_| self.written_somewhere.contains(operand)) {
+        let kind = match self.declarations.get(operand).filter(|w| super::lenient_undefined() || self.written_somewhere.contains(operand) || **w == Width::Predicate && false) {
             Some(Width::Predicate) => Kind::Predicate,
             Some(Width::B32) => Kind::B32,
             Some(Width::B64) => Kind::B64,

@@ -72,6 +72,7 @@ fn prefix_regs(src: &str) -> String {
 }
 
 fn probe(path: &str) {
+    ptx::set_lenient_undefined(true);
     std::panic::set_hook(Box::new(|_| {}));
     let raw = fs::read_to_string(path).unwrap();
     let prepared = ptx::prepare_module(&raw).unwrap_or_else(|e| { println!("prepare failed: {e}"); std::process::exit(1) });

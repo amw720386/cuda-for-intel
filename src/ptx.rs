@@ -925,6 +925,21 @@ pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Tra
     spirv::emit(vec![entry], device)
 }
 
+thread_local! {
+    static LENIENT_UNDEFINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// nvcc output may read a declared register that no path writes (an `undef` operand of a
+/// conversion); the runtime translates such reads as zero. Per thread, so unit tests that
+/// run in parallel keep the strict rule.
+pub(crate) fn set_lenient_undefined(on: bool) {
+    LENIENT_UNDEFINED.with(|c| c.set(on));
+}
+
+pub(crate) fn lenient_undefined() -> bool {
+    LENIENT_UNDEFINED.with(|c| c.get())
+}
+
 pub(crate) fn prepare_module(source: &str) -> Result<String, Error> {
     prepare(source)
 }
