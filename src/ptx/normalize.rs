@@ -26,6 +26,8 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
     tier3::check_unsupported(&statements)?;
     let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
+    let statements = hoist_module_shared(statements);
+    let mut entry_addr_regs = address_registers(&statements).into_iter();
     let mut entry_locals = tier3::entry_locals(&statements).into_iter();
     let mut ctx = Ctx::default();
     let mut out: Vec<String> = Vec::with_capacity(statements.len());
@@ -75,6 +77,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
         if is_entry_header(&stmt) {
             ctx.widths.clear();
             ctx.param_alias.clear();
+            ctx.addr_regs = entry_addr_regs.next().unwrap_or_default();
             tier3::begin_entry(&mut ctx.t3, entry_locals.next().unwrap_or_default(), dynamic.as_ref().map(|(name, _)| name.as_str()));
             ctx.block_threads = block_threads(&stmt);
             let text = fix_entry_header(&stmt);
@@ -400,6 +403,8 @@ struct Ctx {
     wmma_seq: u32,
     /// Registers holding the address of a kernel parameter (`mov.b64 %rd, name_param_N`).
     param_alias: std::collections::HashMap<String, String>,
+    /// 64-bit registers used as memory addresses somewhere in the current entry.
+    addr_regs: std::collections::HashSet<String>,
     t3: tier3::State,
 }
 
@@ -658,13 +663,30 @@ fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         "selp" => {
             let parts: Vec<&str> = op.split('.').collect();
             if parts.len() == 2 {
+                let has_f32_immediate = parts[1] == "f32"
+                    && inst.operands.iter().any(|o| {
+                        let o = o.trim();
+                        o.len() == 10 && (o.starts_with("0f") || o.starts_with("0F"))
+                    });
                 let ty = match parts[1] {
+                    "f32" if has_f32_immediate => Some("b32"),
                     "f64" => Some("b64"),
                     "s16" | "u16" | "b16" | "f16" | "bf16" | "f16x2" | "bf16x2" => Some("b32"),
                     _ => None,
                 };
                 if let Some(ty) = ty {
-                    let operands: Vec<String> = inst.operands.iter().map(|o| literal(o)).collect();
+                    let operands: Vec<String> = inst
+                        .operands
+                        .iter()
+                        .map(|o| {
+                            let t = o.trim();
+                            if has_f32_immediate && t.len() == 10 && (t.starts_with("0f") || t.starts_with("0F")) {
+                                format!("0x{}", &t[2..])
+                            } else {
+                                literal(o)
+                            }
+                        })
+                        .collect();
                     return Some(vec![render(&inst.guard, &format!("selp.{ty}"), &operands)]);
                 }
             }
@@ -690,6 +712,17 @@ fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
                 _ => return None,
             };
             return Some(vec![render(&inst.guard, name, &operands)]);
+        }
+        "fma" | "add" | "sub" | "mul"
+            if op.ends_with(".f32") && op.split('.').any(|p| matches!(p, "rm" | "rp" | "rz")) =>
+        {
+            // Directed rounding of f32 arithmetic only matters in libdevice slow paths
+            // (argument reduction, correctly rounded division); round to nearest there.
+            let parts: Vec<&str> = op
+                .split('.')
+                .map(|p| if matches!(p, "rm" | "rp" | "rz") { "rn" } else { p })
+                .collect();
+            return Some(vec![render(&inst.guard, &parts.join("."), &inst.operands)]);
         }
         "createpolicy" => {
             let dst = inst.operand(0);
@@ -1418,6 +1451,19 @@ fn rewrite_wmma(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
 /// `ld/st.global.v2/v4.u8` into scalar byte accesses.
 fn param_and_byte_vectors(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     let op = inst.op.as_str();
+    // A null `mov.u64 %rd, 0` of a register that is later an address (nvcc's
+    // "pointer or nothing" phi) must be an address-typed zero too.
+    if matches!(op, "mov.b64" | "mov.u64")
+        && inst.operands.len() == 2
+        && inst.operand(1).trim() == "0"
+        && ctx.addr_regs.contains(inst.operand(0).trim())
+    {
+        ctx.need64(1);
+        return Some(vec![
+            render(&inst.guard, "mov.u64", &["%__t64_0".to_owned(), "0".to_owned()]),
+            render(&inst.guard, "cvta.to.global.u64", &[inst.operand(0).trim().to_owned(), "%__t64_0".to_owned()]),
+        ]);
+    }
     // Alias tracking.
     if matches!(op, "mov.b64" | "mov.u64") && inst.operands.len() == 2 && inst.guard.is_empty() {
         let (dst, src) = (inst.operand(0).trim(), inst.operand(1).trim());
@@ -1529,4 +1575,116 @@ fn param_operand(ctx: &Ctx, operand: &str) -> Option<(String, i64)> {
     } else {
         None
     }
+}
+
+/// For each entry, the registers that appear inside a `[ ... ]` memory operand.
+fn address_registers(statements: &[Vec<String>]) -> Vec<std::collections::HashSet<String>> {
+    let mut out = Vec::new();
+    let mut current: Option<std::collections::HashSet<String>> = None;
+    for stmt in statements {
+        if is_entry_header(stmt) {
+            if let Some(done) = current.take() {
+                out.push(done);
+            }
+            current = Some(Default::default());
+            continue;
+        }
+        let Some(set) = current.as_mut() else { continue };
+        for (i, token) in stmt.iter().enumerate() {
+            let inner = if let Some(rest) = token.strip_prefix('[') {
+                if rest.is_empty() { stmt.get(i + 1).map(String::as_str).unwrap_or("") } else { rest }
+            } else {
+                continue;
+            };
+            let reg: String = inner.chars().take_while(|c| *c == '%' || c.is_ascii_alphanumeric() || *c == '_').collect();
+            if reg.starts_with('%') {
+                set.insert(reg);
+            }
+        }
+    }
+    if let Some(done) = current.take() {
+        out.push(done);
+    }
+    out
+}
+
+/// nvcc hoists function-scope `.shared` statics of inlined device functions to
+/// module scope. Move each declaration into every entry that references it so the
+/// per-entry shared-memory layout sees it.
+fn hoist_module_shared(statements: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    let is_decl = |stmt: &Vec<String>| stmt.first().is_some_and(|t| t == ".shared") || (stmt.first().is_some_and(|t| t == ".extern") && stmt.get(1).is_some_and(|t| t == ".shared"));
+    // Depth-0 shared declarations (not inside an entry body).
+    let mut depth = 0i32;
+    let mut module_decls: Vec<(String, Vec<String>)> = Vec::new();
+    let mut kept: Vec<Vec<String>> = Vec::with_capacity(statements.len());
+    for stmt in statements {
+        let opens = stmt.last().is_some_and(|t| t == "{");
+        let closes = stmt.first().is_some_and(|t| t == "}");
+        if depth == 0 && !opens && is_decl(&stmt) {
+            // `.shared [.align N] .type NAME[ [N] ] ;`
+            let mut k = 0;
+            while k < stmt.len() {
+                match stmt[k].as_str() {
+                    ".extern" | ".shared" | ".visible" | ".weak" => k += 1,
+                    ".align" => k += 2,
+                    _ => break,
+                }
+            }
+            // stmt[k] is the element type; the symbol follows.
+            if let Some(token) = stmt.get(k + 1) {
+                let name: String = token.chars().take_while(|c| *c != '[').collect();
+                if !name.is_empty() && !name.starts_with('.') && !name.starts_with('%') {
+                    module_decls.push((name, stmt));
+                    continue;
+                }
+            }
+        }
+        if opens {
+            depth += 1;
+        } else if closes {
+            depth -= 1;
+        }
+        kept.push(stmt);
+    }
+    if module_decls.is_empty() {
+        return kept;
+    }
+    let mut out: Vec<Vec<String>> = Vec::with_capacity(kept.len() + module_decls.len());
+    let mut i = 0;
+    while i < kept.len() {
+        if is_entry_header(&kept[i]) {
+            // Find the entry body extent.
+            let mut j = i + 1;
+            let mut d = 1i32;
+            let mut end = kept.len();
+            while j < kept.len() {
+                if kept[j].last().is_some_and(|t| t == "{") {
+                    d += 1;
+                } else if kept[j].first().is_some_and(|t| t == "}") {
+                    d -= 1;
+                    if d == 0 {
+                        end = j + 1;
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            out.push(kept[i].clone());
+            let body_start = i + 1;
+            for (name, decl) in &module_decls {
+                let used = kept[body_start..end].iter().any(|stmt| {
+                    stmt.iter().any(|t| t == name || t.starts_with(&format!("{name}+")) || t.contains(&format!("[{name}")))
+                });
+                if used {
+                    out.push(decl.clone());
+                }
+            }
+            out.extend(kept[body_start..end].iter().cloned());
+            i = end;
+        } else {
+            out.push(kept[i].clone());
+            i += 1;
+        }
+    }
+    out
 }

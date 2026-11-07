@@ -231,6 +231,17 @@ impl<'a> Emitter<'a> {
                 "missing or mismatched PTX declaration for {dst}"
             )));
         }
+        let mut value = value;
+        // A 64-bit register may be an integer on one path and a pointer on another
+        // (nvcc's "pointer or null" merges): convert to the slot's established kind.
+        if let Some(slot) = self.registers.get(dst).copied()
+            && slot.kind != value.kind
+            && slot.kind.width() == Width::B64
+            && value.kind.width() == Width::B64
+        {
+            let id = self.builder.bitcast(self.value_type(slot.kind), None, value.id)?;
+            value = Value { id, kind: slot.kind };
+        }
         let slot = if let Some(slot) = self.registers.get(dst).copied() {
             slot.require(value.kind, dst)?
         } else {

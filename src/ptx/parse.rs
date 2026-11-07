@@ -182,7 +182,7 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<usize>()
                     .ok()
-                    .filter(|&n| (1..=4096 - registers.len()).contains(&n))
+                    .filter(|&n| (1..=65536 - registers.len()).contains(&n))
                     .ok_or_else(|| Error::new("unsupported PTX register range"))?;
                 self.expect(">")?;
                 for index in 0..count {

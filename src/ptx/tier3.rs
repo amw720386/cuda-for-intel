@@ -1170,7 +1170,10 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             *operand = format!("[%__gsym+{off}]");
             changed = true;
         } else if ctx.t3.shared.iter().any(|n| *n == base)
-            && (off != 0 || inst.op.split('.').any(|p| matches!(p, "u64" | "s64" | "b64" | "f64")))
+            && (off != 0
+                || inst.op.split('.').any(|p| {
+                    matches!(p, "u64" | "s64" | "b64" | "f64" | "u8" | "s8" | "b8" | "u16" | "s16" | "b16" | "f16" | "bf16")
+                }))
         {
             ctx.t3.uses_ssym = true;
             lines.push(format!("mov.u32 %__ssym , {base} ;"));
