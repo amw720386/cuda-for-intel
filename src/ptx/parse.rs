@@ -617,13 +617,15 @@ impl<'a> Parser<'a> {
                     Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
                 };
                 let parts: Vec<&str> = op.split('.').collect();
+                // The `.shared` state space is optional: nvcc emits the generic form
+                // with a pointer produced by cvta.shared.
                 let (count, trans) = match parts[4..] {
-                    ["x1", "shared", "b16"] => (1u8, false),
-                    ["x2", "shared", "b16"] => (2, false),
-                    ["x4", "shared", "b16"] => (4, false),
-                    ["x1", "trans", "shared", "b16"] => (1, true),
-                    ["x2", "trans", "shared", "b16"] => (2, true),
-                    ["x4", "trans", "shared", "b16"] => (4, true),
+                    ["x1", "b16"] | ["x1", "shared", "b16"] => (1u8, false),
+                    ["x2", "b16"] | ["x2", "shared", "b16"] => (2, false),
+                    ["x4", "b16"] | ["x4", "shared", "b16"] => (4, false),
+                    ["x1", "trans", "b16"] | ["x1", "trans", "shared", "b16"] => (1, true),
+                    ["x2", "trans", "b16"] | ["x2", "trans", "shared", "b16"] => (2, true),
+                    ["x4", "trans", "b16"] | ["x4", "trans", "shared", "b16"] => (4, true),
                     _ => return Err(unsupported()),
                 };
                 let (regs, after) = rest_after_list_tokens(rest).ok_or_else(unsupported)?;
@@ -2126,7 +2128,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     while parser.eat(".shared") {
         parser.expect(".align")?;
         let align = parser.take()?;
-        if !matches!(align, "4" | "8" | "16") {
+        if !matches!(align, "1" | "2" | "4" | "8" | "16") {
             return Err(Error::new("unsupported PTX .shared alignment"));
         }
         parser.expect(".b8")?;
@@ -2139,8 +2141,9 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
             .take()?
             .parse::<u32>()
             .ok()
-            .filter(|&size| size != 0 && size.is_multiple_of(4))
-            .ok_or_else(|| Error::new("shared array size must be a positive multiple of four"))?;
+            .filter(|&size| size != 0)
+            .and_then(|size| size.checked_next_multiple_of(4))
+            .ok_or_else(|| Error::new("shared array size must be a positive 32-bit byte count"))?;
         parser.expect("]")?;
         parser.expect(";")?;
         // Offsets are prefix sums, so pad the previous symbol to honour this
