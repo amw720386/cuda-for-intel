@@ -1,0 +1,13 @@
+[package]
+name = "cudart_shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Minimal CUDA Runtime API shim over cuda-for-intel's Driver API"
+
+[lib]
+name = "cudart64_12"
+crate-type = ["cdylib"]
+
+[dependencies]
+libloading = "0.8"

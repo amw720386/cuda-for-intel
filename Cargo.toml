@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/cudart_shim"]
+resolver = "2"
+
 [package]
 name = "cuda-for-intel"
 version = "0.1.0"

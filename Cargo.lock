@@ -23,6 +23,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cudart_shim"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
