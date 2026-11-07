@@ -1,76 +1,7 @@
-   Compiling cudart_shim v0.1.0 (C:\Users\USER\cfi-work\integ\crates\cudart_shim)
-warning: irrefutable `if let` pattern
-   --> src\cuda\streams\timing.rs:188:16
-    |
-188 |             if let Page::Host(address) = page {
-    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    |
-    = note: this pattern will always match, so the `if let` is useless
-    = help: consider replacing the `if let` with a `let`
-    = note: `#[warn(irrefutable_let_patterns)]` on by default
-
-warning: unreachable pattern
-   --> src\ptx\parse.rs:861:13
-    |
-559 |             ["cvt.u32.u16" | "cvt.u16.u16", dst, ",", src] => {
-    |             ---------------------------------------------- matches all the relevant values
-...
-861 |             ["cvt.u32.u16", dst, ",", src] => {
-    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
-    |
-    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
-
-warning: variable does not need to be mutable
-    --> src\ptx\spirv.rs:2517:25
-     |
-2517 |                     let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
-     |                         ----^^^^
-     |                         |
-     |                         help: remove this `mut`
-     |
-     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-warning: variant `PeerAccessAlreadyEnabled` is never constructed
-  --> src\cuda.rs:58:5
-   |
-41 | pub(crate) enum CuResult {
-   |                 -------- variant in this enum
-...
-58 |     PeerAccessAlreadyEnabled = 704,
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `CuResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: method `render` is never used
-   --> src\ptx\normalize.rs:495:8
-    |
-450 | impl Inst {
-    | --------- method in this implementation
-...
-495 |     fn render(&self) -> String {
-    |        ^^^^^^
-
-warning: function `parse` is never used
-    --> src\ptx\parse.rs:2027:15
-     |
-2027 | pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
-     |               ^^^^^
-
-warning: fields `global_half_ptr` and `global_qword_ptr` are never read
-  --> src\ptx\spirv.rs:76:5
-   |
-65 | struct Emitter<'a> {
-   |        ------- fields in this struct
-...
-76 |     global_half_ptr: Word,
-   |     ^^^^^^^^^^^^^^^
-77 |     global_word_ptr: Word,
-78 |     global_qword_ptr: Word,
-   |     ^^^^^^^^^^^^^^^^
-
-warning: `cuda-for-intel` (lib) generated 7 warnings (run `cargo fix --lib -p cuda-for-intel` to apply 1 suggestion)
+   Compiling cfi-fatbin v0.1.0 (C:\Users\USER\cfi-work\integ\crates\fatbin)
+   Compiling cublas_shim v0.1.0 (C:\Users\USER\cfi-work\integ\crates\cublas_shim)
    Compiling cuda-for-intel v0.1.0 (C:\Users\USER\cfi-work\integ)
+   Compiling cudart_shim v0.1.0 (C:\Users\USER\cfi-work\integ\crates\cudart_shim)
 warning: variable does not need to be mutable
    --> crates\cudart_shim\src\lib.rs:388:13
     |
@@ -180,333 +111,84 @@ warning: multiple fields are never read
    |
    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
+warning: irrefutable `if let` pattern
+   --> src\cuda\streams\timing.rs:188:16
+    |
+188 |             if let Page::Host(address) = page {
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this pattern will always match, so the `if let` is useless
+    = help: consider replacing the `if let` with a `let`
+    = note: `#[warn(irrefutable_let_patterns)]` on by default
+
+warning: unreachable pattern
+   --> src\ptx\parse.rs:861:13
+    |
+559 |             ["cvt.u32.u16" | "cvt.u16.u16", dst, ",", src] => {
+    |             ---------------------------------------------- matches all the relevant values
+...
+861 |             ["cvt.u32.u16", dst, ",", src] => {
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\ptx\spirv.rs:2539:25
+     |
+2539 |                     let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
+     |                         ----^^^^
+     |                         |
+     |                         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `PeerAccessAlreadyEnabled` is never constructed
+  --> src\cuda.rs:58:5
+   |
+41 | pub(crate) enum CuResult {
+   |                 -------- variant in this enum
+...
+58 |     PeerAccessAlreadyEnabled = 704,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `CuResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `rp` is never used
+  --> src\ptx\tier3_mma.rs:82:8
+   |
+70 | impl<'a> Gen<'a> {
+   | ---------------- method in this implementation
+...
+82 |     fn rp(&mut self) -> String {
+   |        ^^
+
+warning: function `constant` is never used
+   --> src\ptx\tier3_mma.rs:425:4
+    |
+425 | fn constant(g: &mut Gen, v: u32) -> String {
+    |    ^^^^^^^^
+
+warning: function `parse` is never used
+    --> src\ptx\parse.rs:2027:15
+     |
+2027 | pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
+     |               ^^^^^
+
+warning: fields `global_half_ptr` and `global_qword_ptr` are never read
+  --> src\ptx\spirv.rs:76:5
+   |
+65 | struct Emitter<'a> {
+   |        ------- fields in this struct
+...
+76 |     global_half_ptr: Word,
+   |     ^^^^^^^^^^^^^^^
+77 |     global_word_ptr: Word,
+78 |     global_qword_ptr: Word,
+   |     ^^^^^^^^^^^^^^^^
+
 warning: `cudart_shim` (lib test) generated 6 warnings (run `cargo fix --lib -p cudart_shim --tests` to apply 1 suggestion)
-warning: unused imports: `ok` and `symbols`
- --> tests\gpu\hw_round2.rs:3:30
-  |
-3 | use super::{Handle, library, ok, symbols};
-  |                              ^^  ^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused variable: `cuEventCreate`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuEventCreate` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuEventDestroy_v2`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuEventDestroy_v2` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuEventRecord`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuEventRecord` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuStreamWaitEvent`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuStreamWaitEvent` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\graph_capture.rs:14:5
-   |
-14 | /     symbols!(dll;
-15 | |         cuInit(u32),
-16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-17 | |         cuCtxDestroy_v2(Handle),
-...  |
-42 | |         cuGraphExecDestroy(Handle),
-43 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuMemcpyHtoDAsync_v2`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\isolation.rs:60:5
-   |
-60 | /     symbols!(dll;
-61 | |         cuInit(u32),
-62 | |         cuDeviceGet(*mut i32, i32),
-63 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-...  |
-86 | |         cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
-87 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuMemcpyHtoDAsync_v2` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\isolation.rs:60:5
-   |
-60 | /     symbols!(dll;
-61 | |         cuInit(u32),
-62 | |         cuDeviceGet(*mut i32, i32),
-63 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-...  |
-86 | |         cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
-87 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuMemFree_v2`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\store_u8.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuMemFree_v2` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\store_u8.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuMemFree_v2`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\quantize_warp_ops.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuMemFree_v2` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\quantize_warp_ops.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuMemFree_v2`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\ctaid.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuMemFree_v2` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\ctaid.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused variable: `cuMemFree_v2`
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\shr_s64.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   |
-help: `cuMemFree_v2` is captured in macro and introduced a unused variable
-  --> tests\gpu.rs:92:17
-   |
-92 |               let $name = unsafe {
-   |                   ^^^^^
-   |
-  ::: tests\gpu\shr_s64.rs:10:5
-   |
-10 | /     symbols!(dll;
-11 | |         cuInit(u32),
-12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
-13 | |         cuCtxDestroy_v2(Handle),
-...  |
-21 | |         cuCtxSynchronize(),
-22 | |     );
-   | |_____- in this macro invocation
-   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: `cuda-for-intel` (test "gpu") generated 10 warnings (run `cargo fix --test "gpu" -p cuda-for-intel` to apply 1 suggestion)
-   Compiling cublas_shim v0.1.0 (C:\Users\USER\cfi-work\integ\crates\cublas_shim)
+warning: `cuda-for-intel` (lib) generated 8 warnings (run `cargo fix --lib -p cuda-for-intel` to apply 1 suggestion)
 warning: variable does not need to be mutable
    --> src\cuda\launch_args.rs:181:13
     |
@@ -535,12 +217,20 @@ warning: unnecessary `unsafe` block
     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
 
 warning: variable does not need to be mutable
-    --> src\ptx\spirv.rs:2517:25
+    --> src\ptx\spirv.rs:2539:25
      |
-2517 |                     let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
+2539 |                     let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
      |                         ----^^^^
      |                         |
      |                         help: remove this `mut`
+
+warning: unused variable: `n`
+   --> src\ptx\tier3_mma_tests.rs:195:13
+    |
+195 |     let (m, n) = if wide { (8, 8) } else { (m, n) };
+    |             ^ help: if this is intentional, prefix it with an underscore: `_n`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: field `lane` is never read
    --> src\ptx\coverage_tests.rs:140:13
@@ -551,9 +241,333 @@ warning: field `lane` is never read
 140 |         pub lane: u64,
     |             ^^^^
 
-   Compiling cfi-fatbin v0.1.0 (C:\Users\USER\cfi-work\integ\crates\fatbin)
-warning: `cuda-for-intel` (lib test) generated 9 warnings (4 duplicates) (run `cargo fix --lib -p cuda-for-intel --tests` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.88s
+warning: unused imports: `ok` and `symbols`
+ --> tests\gpu\hw_round2.rs:3:30
+  |
+3 | use super::{Handle, library, ok, symbols};
+  |                              ^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cuEventCreate`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuEventCreate` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuEventDestroy_v2`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuEventDestroy_v2` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuEventRecord`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuEventRecord` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuStreamWaitEvent`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuStreamWaitEvent` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\graph_capture.rs:14:5
+   |
+14 | /     symbols!(dll;
+15 | |         cuInit(u32),
+16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+17 | |         cuCtxDestroy_v2(Handle),
+...  |
+42 | |         cuGraphExecDestroy(Handle),
+43 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuMemcpyHtoDAsync_v2`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\isolation.rs:60:5
+   |
+60 | /     symbols!(dll;
+61 | |         cuInit(u32),
+62 | |         cuDeviceGet(*mut i32, i32),
+63 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+...  |
+86 | |         cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+87 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuMemcpyHtoDAsync_v2` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\isolation.rs:60:5
+   |
+60 | /     symbols!(dll;
+61 | |         cuInit(u32),
+62 | |         cuDeviceGet(*mut i32, i32),
+63 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+...  |
+86 | |         cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+87 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuMemFree_v2`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\store_u8.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\store_u8.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuMemFree_v2`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\quantize_warp_ops.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\quantize_warp_ops.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuMemFree_v2`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\ctaid.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\ctaid.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `cuMemFree_v2`
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\shr_s64.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   |
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+  --> tests\gpu.rs:94:17
+   |
+94 |               let $name = unsafe {
+   |                   ^^^^^
+   |
+  ::: tests\gpu\shr_s64.rs:10:5
+   |
+10 | /     symbols!(dll;
+11 | |         cuInit(u32),
+12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+13 | |         cuCtxDestroy_v2(Handle),
+...  |
+21 | |         cuCtxSynchronize(),
+22 | |     );
+   | |_____- in this macro invocation
+   = note: this warning originates in the macro `symbols` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `cuda-for-intel` (lib test) generated 11 warnings (5 duplicates) (run `cargo fix --lib -p cuda-for-intel --tests` to apply 3 suggestions)
+warning: `cuda-for-intel` (test "gpu") generated 10 warnings (run `cargo fix --test "gpu" -p cuda-for-intel` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.95s
      Running unittests src\lib.rs (target\debug\deps\cfi_fatbin-447ebf5e41c4bfc7.exe)
 
 running 1 test
@@ -567,8 +581,8 @@ running 41 tests
 test lt::tests::abi_struct_layout ... ok
 test lt::tests::heuristic_reports_zero_algos_or_errors ... ok
 test lt::tests::matmul_argument_errors_precede_driver_use ... ok
-test lt::tests::object_lifetime_and_stale_pointers ... ok
 test lt::tests::heuristic_returns_one_algo_for_linear ... ok
+test lt::tests::object_lifetime_and_stale_pointers ... ok
 test lt::tests::version_and_properties ... ok
 test ltplan::tests::attribute_sizes_defaults_and_errors ... ok
 test ltplan::tests::bias_type_defaults_to_d_and_can_override ... ok
@@ -606,11 +620,11 @@ test tests::pointer_offsets_wrap_for_negative_strides ... ok
 test tests::status_names_use_real_cublas_codes ... ok
 test ltplan::tests::plan_matches_literal_semantics ... ok
 
-test result: ok. 39 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.40s
+test result: ok. 39 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.42s
 
      Running unittests src\lib.rs (target\debug\deps\nvcuda-71e2b0d6d3c22ad1.exe)
 
-running 222 tests
+running 245 tests
 test cuda::current_stack::tests::null_current_does_not_expose_an_older_context ... ok
 test cuda::current_stack::tests::empty_stack_and_null_stay_empty ... ok
 test cuda::discovery::tests::resolves_driver_gap_entry_points_with_versioned_names ... ok
@@ -618,11 +632,11 @@ test cuda::discovery::tests::version_and_error_strings_work_before_initializatio
 test cuda::export_table::tests::invalid_hybrid_library_name_clears_outputs ... ok
 test cuda::export_table::tests::tools_callbacks_return_u32_buffers_with_cuda13_counts ... ok
 test cuda::gap_math::tests::address_ranges ... ok
+test cuda::discovery::tests::resolves_only_the_requested_abi ... ok
 test cuda::gap_math::tests::copy_2d_rows_follow_pitch ... ok
 test cuda::gap_math::tests::copy_3d_planes_use_height ... ok
 test cuda::gap_math::tests::function_attributes ... ok
 test cuda::gap_math::tests::launch_attributes ... ok
-test cuda::discovery::tests::resolves_only_the_requested_abi ... ok
 test cuda::gap_math::tests::memset_patterns ... ok
 test cuda::gap_math::tests::occupancy_is_bounded_by_threads_blocks_and_shared ... ok
 test cuda::gap_math::tests::pointer_attributes ... ok
@@ -632,8 +646,8 @@ test cuda::gaps::tests::argument_validation_precedes_driver_state ... ok
 test cuda::gaps::tests::gpu_memory_and_pointer_apis ... ignored, requires an Intel GPU
 test cuda::gaps::tests::calls_that_need_a_runtime_report_not_initialized ... ok
 test cuda::gaps::tests::pool_handles_are_validated_before_use ... ok
-test cuda::launch_args::tests::null_device_pointer_kernel_args_are_accepted ... ok
 test cuda::integrity::tests::md2_matches_rfc_1319_vector ... ok
+test cuda::launch_args::tests::null_device_pointer_kernel_args_are_accepted ... ok
 test cuda::ollama_bench::gated_ggml_add_device_time ... ignored, requires an Intel Level Zero GPU with kernel timestamps
 test cuda::ollama_bench::ggml_scale_clamp_timings ... ignored, requires release build and a Level Zero GPU with kernel timestamps
 test cuda::streams::batch_tests::gated_batch_buffered_queries_and_flush_triggers ... ignored, requires an Intel Level Zero GPU
@@ -714,8 +728,8 @@ test level_zero::tests::queue_selection_uses_capabilities_and_real_ordinals ... 
 test ptx::coverage_tests::accepts_ptx_isa_versions_emitted_by_cuda_11_to_13 ... ok
 test ptx::coverage_tests::atomics_fences_and_votes_lower_to_valid_spirv ... ok
 test ptx::coverage_tests::bit_field_extract_insert_permute_and_lop3 ... ok
-test ptx::coverage_tests::flattens_register_scopes_from_inline_asm_helpers ... ok
 test ptx::coverage_tests::executes_guarded_instructions_through_conditional_blocks ... ok
+test ptx::coverage_tests::flattens_register_scopes_from_inline_asm_helpers ... ok
 test ptx::coverage_tests::float_rounding_and_integer_conversions_validate ... ok
 test ptx::coverage_tests::integer_minmax_xor_abs_popc_clz ... ok
 test ptx::coverage_tests::mma_f16_shapes_match_reference ... ok
@@ -750,8 +764,8 @@ test ptx::tests::arithmetic_right_shift_64_and_16_clamp_to_sign_fill ... ok
 test ptx::tests::arithmetic_right_shift_clamps_to_sign_fill ... ok
 test ptx::coverage_tests::mma_m16n8k32_mixed_signedness_matches_reference ... ok
 test ptx::tests::float_not_equal_is_ordered_and_float_to_int_saturates ... ok
-test ptx::tests::emulates_directed_rounding_for_add_sub_mul ... ok
 test ptx::tests::global_u32_load_uses_aligned_word_loads ... ok
+test ptx::tests::emulates_directed_rounding_for_add_sub_mul ... ok
 test ptx::tests::half_extract_rewrite_does_not_glue_onto_line_comments ... ok
 test ptx::tests::half_conversion_honours_round_toward_zero ... ok
 test ptx::tests::ldmatrix_accepts_generic_form_without_shared_qualifier ... ok
@@ -760,8 +774,8 @@ test ptx::tests::lowers_ggml_grid_stride_instructions ... ok
 test ptx::tests::ignores_trailing_control_characters_after_the_last_entry ... ok
 test ptx::tests::lowers_reduction_control_flow_and_static_limits ... ok
 test ptx::tests::lowers_nvcc_aggregate_and_scalar_abi ... ok
-test ptx::tests::lowers_shfl_sync_bfly_via_subgroup_shuffle_xor ... ok
 test ptx::tests::lowers_round_to_nearest_fp32_operations_without_implicit_contraction ... ok
+test ptx::tests::lowers_shfl_sync_bfly_via_subgroup_shuffle_xor ... ok
 test ptx::tests::lowers_static_shared_memory_and_full_block_barrier ... ok
 test ptx::tests::lowers_signed_compares_widens_and_approx_rsqrt ... ok
 test ptx::tests::lowers_vector_float_memory ... ok
@@ -801,10 +815,10 @@ test ptx::tests::translates_mul_mat_vec_f16_dump ... ok
 test ptx::tests::translates_mul_mat_vec_q8_dump ... ok
 test ptx::tests::translates_mul_mat_vec_q8_ncols2_dump ... ok
 test ptx::tests::translates_generated_cublas_gemm_variants ... ok
+test ptx::tests::translates_mul_mat_vec_q_gated_dump ... ok
 test ptx::tests::translates_quantize_q8_1_dump ... ok
 test ptx::tests::translates_quantize_q8_1_simple ... ok
 test ptx::tests::translates_quantize_warp_ops ... ok
-test ptx::tests::translates_mul_mat_vec_q_gated_dump ... ok
 test ptx::tests::validate_opencl_spirv ... ignored, requires the Khronos spirv-val executable
 test ptx::tests::translates_rope_neox_half_dump ... ok
 test ptx::tier2_tests::assert_and_printf_calls_are_dropped ... ok
@@ -812,12 +826,12 @@ test ptx::tier2_tests::bf16_and_f16_scalar_arithmetic_matches_reference ... ok
 test ptx::tier2_tests::bf16_conversion_rounds_to_nearest_even_and_keeps_nan ... ok
 test ptx::tier2_tests::bit_manipulation_matches_reference ... ok
 test ptx::tier2_tests::accepts_modern_targets_and_isa_versions ... ok
-test ptx::tier2_tests::cp_async_is_a_synchronous_copy_with_no_op_group_operations ... ok
 test ptx::tier2_tests::drops_cache_hints_and_memory_order_qualifiers ... ok
+test ptx::tier2_tests::cp_async_is_a_synchronous_copy_with_no_op_group_operations ... ok
 test ptx::tier2_tests::exit_and_trap_end_the_thread ... ok
 test ptx::tier2_tests::extern_shared_arrays_alias_one_dynamic_window_after_static_shared ... ok
-test ptx::tier2_tests::half2_atomic_add_translates_and_validates ... ok
 test ptx::tier2_tests::f64_arithmetic_conversions_and_compares ... ok
+test ptx::tier2_tests::half2_atomic_add_translates_and_validates ... ok
 test ptx::tier2_tests::legacy_warp_intrinsics_gain_a_full_mask ... ok
 test ptx::tier2_tests::inlines_func_definitions_and_calls ... ok
 test ptx::tier2_tests::packed_half_arithmetic_and_conversions_match_reference ... ok
@@ -826,19 +840,42 @@ test ptx::tier2_tests::prmt_modes_dot_products_and_fns ... ok
 test ptx::tier2_tests::saturating_and_wide_integer_arithmetic ... ok
 test ptx::tier2_tests::saturating_nan_aware_f32_and_integer_conversions ... ok
 test ptx::tier2_tests::special_register_constants_and_lane_masks ... ok
-test ptx::tier2_tests::wide_and_extra_atomics_translate_and_validate ... ok
 test ptx::tier2_tests::warp_collectives_translate_and_validate ... ok
+test ptx::tier2_tests::wide_and_extra_atomics_translate_and_validate ... ok
 test ptx::tier2_tests::wide_vector_accesses_split_into_scalars ... ok
 test ptx::tier2_tests::wide_moves_and_64_bit_bit_manipulation ... ok
 test ptx::tier2_tests::wmma_m16n16k16_f16_is_emulated_on_top_of_mma ... ok
 test ptx::tier2_tests::wmma_with_half_accumulators_translates_and_validates ... ok
 test ptx::tier2_tests::wmma_loads_from_shared_memory ... ok
+test ptx::tier3_mma_tests::mma_sync_bf16_tf32_f16acc_and_f64 ... ok
+test ptx::tier3_mma_tests::wmma_bf16_all_shapes ... ok
+test ptx::tier3_mma_tests::wmma_f16_other_shapes_and_accumulators ... ok
+test ptx::tier3_tests::bar_red_single_thread_semantics ... ok
+test ptx::tier3_tests::carry_chain_32_bit_matches_reference ... ok
+test ptx::tier3_tests::carry_chain_64_bit ... ok
+test ptx::tier3_tests::constant_space_is_ordinary_memory ... ok
+test ptx::tier3_tests::counted_barriers_and_bar_red_translate_and_validate ... ok
+test ptx::tier3_tests::debug_sections_and_texture_errors ... ok
+test ptx::tier3_tests::f64_directed_rounding_matches_exact_arithmetic ... ok
+test ptx::tier3_tests::module_scope_const_and_global_data ... ok
+test ptx::tier3_tests::partial_mask_collectives_translate_and_validate ... ok
+test ptx::tier3_tests::partial_masks_const_loads_and_pack ... ok
+test ptx::tier3_tests::setp_pairs_and_literal_selp ... ok
+test ptx::tier3_tests::several_local_arrays_and_symbol_offsets ... ok
+test ptx::tier3_tests::shared_symbols_with_offsets_and_64_bit_accesses ... ok
+test ptx::tier3_tests::show_normalized ... ignored
+test ptx::tier3_tests::show_translate_error ... ignored
+test ptx::tier3_tests::sixteen_bit_integer_and_predicate_ops_match_reference ... ok
+test ptx::tier3_tests::stmatrix_places_fragments_like_hardware ... ok
+test ptx::tier3_tests::stmatrix_scatters_row_addresses ... ok
+test ptx::tier3_tests::video_scalar_and_simd_match_reference ... ok
+test ptx::tier3_mma_tests::wmma_tf32_f64_and_integers ... ok
 
-test result: ok. 194 passed; 0 failed; 28 ignored; 0 measured; 0 filtered out; finished in 1.60s
+test result: ok. 215 passed; 0 failed; 30 ignored; 0 measured; 0 filtered out; finished in 5.53s
 
      Running tests\gpu.rs (target\debug\deps\gpu-ee6bfd31e76cd756.exe)
 
-running 81 tests
+running 82 tests
 test asynchronous_stream_order_and_lifetimes ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 test compiled_ptx_atomic_tickets ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 test compiled_ptx_block_reduction ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
@@ -875,8 +912,9 @@ test hw_ggml::hw_ggml_bin_bcast_add_f32_broadcast ... ignored, requires a built 
 test hw_ggml::hw_ggml_dequantize_block_q8_0_to_half ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 test hw_ggml::hw_ggml_get_rows_float_batched ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 test hw_ggml::hw_ggml_mul_mat_vec_q8_0_q8_1 ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
-test hw_mma::f16_helpers_round_trip ... ok
+test hw_ggml_stock::hw_stock_ggml_kernels_compile ... ignored, requires CFI_STOCK_GGML_DLL, a built nvcuda.dll and an Intel Level Zero GPU
 test hw_float::directed_reference_self_check ... ok
+test hw_mma::f16_helpers_round_trip ... ok
 test hw_mma::hw_ldmatrix_all_counts_and_trans ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 test hw_mma::hw_ldmatrix_generic_pointer_without_shared_qualifier ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 test hw_mma::hw_mma_f16_f32_accumulate ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
@@ -921,7 +959,7 @@ test shr_s64::shr_s64_signed_div32 ... ignored, requires a built nvcuda.dll and 
 test soft_max_generic::soft_max_generic_ncols12_matches_cpu ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 test store_u8::store_u8_and_v2_u16_roundtrip ... ignored, requires a built nvcuda.dll and an Intel Level Zero GPU
 
-test result: ok. 2 passed; 0 failed; 79 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 80 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running unittests src\lib.rs (target\debug\deps\cudart64_12-d8d2664a960e2bd8.exe)
 

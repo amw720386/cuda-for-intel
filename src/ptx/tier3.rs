@@ -1104,7 +1104,8 @@ pub(super) fn decl(ctx: &mut Ctx, stmt: &[String]) -> Option<Vec<String>> {
         return Some(Vec::new());
     }
     ctx.t3.shared.push(name.clone());
-    let align = if align >= 16 { 16 } else if align >= 8 { 8 } else { 4 };
+    // The kernel parser honours power-of-two alignments up to 4096 (verified on hardware).
+    let align = if align.is_power_of_two() && align <= 4096 { align.max(4) } else if align >= 16 { 16 } else if align >= 8 { 8 } else { 4 };
     Some(vec![format!(".shared .align {align} .b8 {name} [ {} ] ;", bytes.next_multiple_of(4))])
 }
 
