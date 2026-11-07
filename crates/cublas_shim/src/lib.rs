@@ -13,8 +13,9 @@ const SUCCESS: c_int = 0;
 const NOT_INITIALIZED: c_int = 1;
 const ALLOC_FAILED: c_int = 3;
 const INVALID_VALUE: c_int = 7;
-const NOT_SUPPORTED: c_int = 14;
-const STATUS_MAPPING_ERROR: c_int = 11;
+const EXECUTION_FAILED: c_int = 13;
+const INTERNAL_ERROR: c_int = 14;
+const NOT_SUPPORTED: c_int = 15;
 
 type CuResult = c_int;
 type CUmodule = *mut c_void;
@@ -124,7 +125,7 @@ fn load_gemm_module(
     let err = unsafe { (drv.cuModuleLoadData)(&mut module, ptx.as_ptr().cast()) };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublas: ModuleLoadData {label} failed err={err}");
-        return Err(STATUS_MAPPING_ERROR);
+        return Err(EXECUTION_FAILED);
     }
     let mut tn: CUfunction = std::ptr::null_mut();
     let err = unsafe { (drv.cuModuleGetFunction)(&mut tn, module, entry.as_ptr()) };
@@ -133,7 +134,7 @@ fn load_gemm_module(
             "CUDA for Intel cublas: GetFunction {} failed err={err}",
             entry.to_string_lossy()
         );
-        return Err(STATUS_MAPPING_ERROR);
+        return Err(EXECUTION_FAILED);
     }
     Ok(GemmModule {
         _module: module,
@@ -241,6 +242,8 @@ pub unsafe extern "system" fn cublasGetStatusString(status: c_int) -> *const c_c
         ALLOC_FAILED => b"CUBLAS_STATUS_ALLOC_FAILED\0",
         INVALID_VALUE => b"CUBLAS_STATUS_INVALID_VALUE\0",
         NOT_SUPPORTED => b"CUBLAS_STATUS_NOT_SUPPORTED\0",
+        EXECUTION_FAILED => b"CUBLAS_STATUS_EXECUTION_FAILED\0",
+        INTERNAL_ERROR => b"CUBLAS_STATUS_INTERNAL_ERROR\0",
         _ => b"CUBLAS_STATUS_INTERNAL_ERROR\0",
     };
     s.as_ptr().cast()
@@ -281,7 +284,7 @@ pub unsafe extern "system" fn cublasSgemm_v2(
         return INVALID_VALUE;
     };
     let Ok(module) = sgemm_module() else {
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     };
     let Ok(drv) = driver() else {
         return NOT_INITIALIZED;
@@ -338,7 +341,7 @@ pub unsafe extern "system" fn cublasSgemm_v2(
     };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublasSgemm launch failed err={err}");
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     // Match NVIDIA cuBLAS synchronous-enough behavior for the default stream
     // when ggml follows with DtoH; explicit sync keeps probes deterministic.
@@ -351,7 +354,7 @@ pub unsafe extern "system" fn cublasSgemm_v2(
     let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublasSgemm sync failed err={err}");
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     SUCCESS
 }
@@ -458,7 +461,7 @@ unsafe fn cublasHgemm_tn(
         return INVALID_VALUE;
     };
     let Ok(module) = hgemm_module() else {
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     };
     let Ok(drv) = driver() else {
         return NOT_INITIALIZED;
@@ -523,7 +526,7 @@ unsafe fn cublasHgemm_tn(
     };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublasHgemm launch failed err={err}");
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     let sync_stream = if h.stream.is_null() {
         std::ptr::null_mut()
@@ -533,9 +536,16 @@ unsafe fn cublasHgemm_tn(
     let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublasHgemm sync failed err={err}");
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     SUCCESS
+}
+
+/// Address of matrix `index` in a strided batch. Strides are signed element counts;
+/// the result is only an address (it is never dereferenced on the host).
+fn batch_pointer(base: *const u8, index: i64, stride: i64, elem: usize) -> Option<*const u8> {
+    let bytes = index.checked_mul(stride)?.checked_mul(isize::try_from(elem).ok()? as i64)?;
+    Some(base.wrapping_offset(isize::try_from(bytes).ok()?))
 }
 
 #[unsafe(no_mangle)]
@@ -594,9 +604,18 @@ pub unsafe extern "system" fn cublasGemmStridedBatchedEx(
         "CUDA for Intel cublasGemmStridedBatchedEx batch={batch} m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} strideA={stride_a} strideB={stride_b} strideC={stride_c} a_type={a_type} compute={compute_type}"
     );
     for i in 0..batch as i64 {
-        let a_i = unsafe { (a as *const u8).add((i * stride_a) as usize * a_elem) as *const c_void };
-        let b_i = unsafe { (b as *const u8).add((i * stride_b) as usize * b_elem) as *const c_void };
-        let c_i = unsafe { (c as *mut u8).add((i * stride_c) as usize * c_elem) as *mut c_void };
+        let (Some(a_i), Some(b_i), Some(c_i)) = (
+            batch_pointer(a.cast(), i, stride_a, a_elem),
+            batch_pointer(b.cast(), i, stride_b, b_elem),
+            batch_pointer(c.cast_const().cast(), i, stride_c, c_elem),
+        ) else {
+            return INVALID_VALUE;
+        };
+        let (a_i, b_i, c_i) = (
+            a_i.cast::<c_void>(),
+            b_i.cast::<c_void>(),
+            c_i.cast_mut().cast::<c_void>(),
+        );
         let status = unsafe {
             cublasGemmEx(
                 handle,
@@ -681,7 +700,7 @@ pub unsafe extern "system" fn cublasGemmBatchedEx(
         eprintln!(
             "CUDA for Intel cublasGemmBatchedEx pre-DtoH stream sync failed err={err}"
         );
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     let batch_n = batch as usize;
     let bytes = batch_n * std::mem::size_of::<u64>();
@@ -693,21 +712,21 @@ pub unsafe extern "system" fn cublasGemmBatchedEx(
     };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublasGemmBatchedEx DtoH A failed err={err}");
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     let err = unsafe {
         (drv.cuMemcpyDtoH_v2)(b_ptrs.as_mut_ptr().cast(), b as u64, bytes)
     };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublasGemmBatchedEx DtoH B failed err={err}");
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     let err = unsafe {
         (drv.cuMemcpyDtoH_v2)(c_ptrs.as_mut_ptr().cast(), c as u64, bytes)
     };
     if err != SUCCESS {
         eprintln!("CUDA for Intel cublasGemmBatchedEx DtoH C failed err={err}");
-        return STATUS_MAPPING_ERROR;
+        return EXECUTION_FAILED;
     }
     // Cheap sanity: GGML never passes null matrix pointers into BatchedEx.
     if a_ptrs.iter().any(|&p| p == 0) || b_ptrs.iter().any(|&p| p == 0) || c_ptrs.iter().any(|&p| p == 0)
@@ -824,4 +843,29 @@ pub unsafe extern "system" fn cublasStrsmBatched(
 #[allow(dead_code)]
 fn _op_docs() {
     let _ = (CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_codes_match_cublas_abi() {
+        assert_eq!(EXECUTION_FAILED, 13);
+        assert_eq!(INTERNAL_ERROR, 14);
+        assert_eq!(NOT_SUPPORTED, 15);
+        let text = |status| unsafe { std::ffi::CStr::from_ptr(cublasGetStatusString(status)) };
+        assert_eq!(text(15).to_bytes(), b"CUBLAS_STATUS_NOT_SUPPORTED");
+        assert_eq!(text(13).to_bytes(), b"CUBLAS_STATUS_EXECUTION_FAILED");
+        assert_eq!(text(7).to_bytes(), b"CUBLAS_STATUS_INVALID_VALUE");
+    }
+
+    #[test]
+    fn batch_pointers_handle_negative_and_overflowing_strides() {
+        let base = 0x1000usize as *const u8;
+        assert_eq!(batch_pointer(base, 3, 4, 2), Some(0x1018usize as *const u8));
+        assert_eq!(batch_pointer(base, 2, -8, 4), Some(0xfc0usize as *const u8));
+        assert_eq!(batch_pointer(base, 5, 0, 4), Some(base));
+        assert_eq!(batch_pointer(base, i64::MAX, 2, 4), None);
+    }
 }

@@ -741,7 +741,9 @@ impl<'a> Parser<'a> {
             ["cvt.rzi.ftz.s32.f32" | "cvt.rzi.s32.f32", dst, ",", src] => {
                 Instruction::CvtRziS32(dst, src)
             }
-            ["cvt.rn.f16.f32" | "cvt.rz.f16.f32", dst, ",", src] => Instruction::CvtToHalf(dst, src),
+            [op @ ("cvt.rn.f16.f32" | "cvt.rz.f16.f32"), dst, ",", src] => {
+                Instruction::CvtToHalf(dst, src, *op == "cvt.rz.f16.f32")
+            }
             ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Sub([a, b]))
             }
@@ -1443,6 +1445,25 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
             .ok_or_else(|| Error::new("shared array size must be a positive multiple of four"))?;
         parser.expect("]")?;
         parser.expect(";")?;
+        // Offsets are prefix sums, so pad the previous symbol to honour this
+        // symbol's declared alignment inside the unified shared window.
+        let total = shared
+            .iter()
+            .try_fold(0u32, |total, &(_, bytes): &(&str, u32)| total.checked_add(bytes))
+            .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?;
+        let align: u32 = align.parse().unwrap_or(4);
+        let padding = total
+            .checked_next_multiple_of(align)
+            .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?
+            - total;
+        if padding != 0
+            && let Some(last) = shared.last_mut()
+        {
+            last.1 = last
+                .1
+                .checked_add(padding)
+                .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?;
+        }
         shared.push((name, size));
     }
     let blocks = parser.blocks()?;
