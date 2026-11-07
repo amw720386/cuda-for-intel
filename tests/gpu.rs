@@ -417,7 +417,7 @@ fn compiled_ptx_block_reduction() {
         )
     };
     assert_eq!(launch(1, 129, args.as_mut_ptr()), 1);
-    let mut null_input = 0u64;
+    let mut null_input = 0xdead_0000u64; // null is a valid optional pointer; unknown non-null is rejected
     let mut bad_args = args;
     bad_args[0] = (&mut null_input as *mut u64).cast();
     assert_eq!(launch(1, 16, bad_args.as_mut_ptr()), 1);
