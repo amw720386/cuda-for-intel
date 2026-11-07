@@ -931,6 +931,7 @@ mod tests {
                 let name = entry.name.to_owned();
                 if let Err(error) = spirv::emit(vec![entry], vars.device.clone()) {
                     failed += 1;
+                    eprintln!("SCAN_FAIL blob{blobs} {name} :: {error}");
                     kinds.entry(error.to_string()).or_default().push(name);
                 }
             }
