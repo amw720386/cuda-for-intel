@@ -269,6 +269,15 @@ fn lazy_kernel_function(state: &mut State, library: usize, name: &CStr) -> Resul
     let Some(Some(prepared)) = image.prepared.clone() else {
         return Ok(None);
     };
+    // CFI_DUMP_ENTRY=<substring> with CFI_DUMP_PTX_DIR keeps the normalised PTX of matching kernels.
+    if let (Some(pattern), Some(dir)) = (std::env::var_os("CFI_DUMP_ENTRY"), std::env::var_os("CFI_DUMP_PTX_DIR"))
+        && name.to_string_lossy().contains(&*pattern.to_string_lossy())
+        && let Some(start) = prepared.find(&format!(".entry {}", name.to_string_lossy()))
+    {
+        let end = prepared[start + 6..].find(".entry").map_or(prepared.len(), |e| start + 6 + e);
+        let file = format!("entry-{}.ptx", name.to_string_lossy().chars().take(80).collect::<String>());
+        let _ = std::fs::write(std::path::Path::new(&dir).join(file), &prepared[start..end]);
+    }
     let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
     context.check_live()?;
     let module = match load_ptx_entry(
