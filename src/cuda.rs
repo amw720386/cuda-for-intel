@@ -1238,16 +1238,26 @@ pub unsafe extern "system" fn cuLaunchKernel(
             // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
             // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
             if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
+                trace::record(format_args!(
+                    "launch rejected: dynamic shared {shared_bytes} > kernel window {}",
+                    entry.shared_bytes
+                ));
                 return Err(InvalidValue);
             }
             let grid = [grid_x, grid_y, grid_z];
             let block = [block_x, block_y, block_z];
-            validate_launch(
+            if let Err(error) = validate_launch(
                 &runtime.devices[context.device as usize].info,
                 grid,
                 block,
                 entry.max_threads,
-            )?;
+            ) {
+                trace::record(format_args!(
+                    "launch rejected: grid={grid:?} block={block:?} max_threads={:?}",
+                    entry.max_threads
+                ));
+                return Err(error);
+            }
             let args = unsafe {
                 launch_args::read(&entry.params, kernel_params, extra, |address| {
                     // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
