@@ -2168,16 +2168,28 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     }
     let blocks = parser.blocks()?;
     infer_direct_global_params(&mut params, &blocks);
-    // Dynamic / extern shared: nvcc emits `mov.u32 %r, symbol` without a local .shared decl.
-    if shared.is_empty() {
-        for inst in blocks.iter().flat_map(|block| &block.instructions) {
-            if let Instruction::SharedSymbol32(_, name) = inst {
-                // Allocate a generous workgroup buffer; CUDA launch shared size selects the
-                // live prefix. Softmax and similar kernels index from symbol address 0.
-                shared.push((*name, 48 * 1024));
-                break;
+    // Dynamic / extern shared: nvcc emits `mov.u32 %r, symbol` or `mov.b64 %rd, symbol`
+    // for an `.extern .shared` array that has no local .shared declaration. CUDA places
+    // the dynamic block after all static shared arrays; the launch's shared size selects
+    // the live prefix, so reserve the remainder of a 64 KiB window (or 48 KiB when no
+    // static arrays exist, as before).
+    let dynamic = blocks.iter().flat_map(|block| &block.instructions).find_map(|inst| {
+        match inst {
+            Instruction::SharedSymbol32(_, name) | Instruction::SharedAddress(_, name)
+                if !shared.iter().any(|(known, _)| known == name) =>
+            {
+                Some(*name)
             }
+            _ => None,
         }
+    });
+    if let Some(name) = dynamic {
+        let total: u32 = shared.iter().map(|&(_, bytes): &(&str, u32)| bytes).sum();
+        let budget = if shared.is_empty() { 48 * 1024 } else { 64 * 1024 - total.next_multiple_of(16) };
+        if let Some(last) = shared.last_mut() {
+            last.1 += total.next_multiple_of(16) - total;
+        }
+        shared.push((name, budget));
     }
     Ok(Entry {
         name,
