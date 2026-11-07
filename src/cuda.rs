@@ -944,6 +944,13 @@ fn load_ptx(
 ) -> Result<usize, CuResult> {
     let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
     let translated = ptx::translate(ptx).map_err(|error| {
+        if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            ptx.hash(&mut hasher);
+            let path = std::path::Path::new(&dir).join(format!("fail_{:016x}.ptx", hasher.finish()));
+            let _ = std::fs::write(path, ptx);
+        }
         if trace::enabled() {
             let preview: String = ptx.chars().take(120).collect();
             trace::record(format_args!("PTX translation rejected: {error}; preview={preview:?}"));
