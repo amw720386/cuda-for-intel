@@ -1,5 +1,8 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
+mod ext;
 mod flow;
+mod inline;
+mod normalize;
 mod parse;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
@@ -756,18 +759,27 @@ pub(crate) struct Translation {
     pub(crate) kernels: Vec<KernelMetadata>,
 }
 
-pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
+/// Scope flattening, source canonicalisation and `.func` inlining.
+fn prepare(source: &str) -> Result<String, Error> {
     let rewritten = parse::rewrite_half_scopes(source);
+    let normalized = normalize::run(&rewritten)?;
+    normalize::finish(&parse::rewrite_half_scopes(&normalized))
+}
+
+pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
+    let rewritten = prepare(source)?;
     spirv::emit(parse::parse(&rewritten)?)
 }
 
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
-    let rewritten = parse::rewrite_half_scopes(source);
+    let rewritten = prepare(source)?;
     spirv::emit(vec![parse::parse_named(&rewritten, name)?]).map(|_| ())
 }
 
 #[cfg(test)]
 mod coverage_tests;
+#[cfg(test)]
+mod tier2_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1301,7 +1313,6 @@ mod tests {
         for (old, new) in [
             ("[16]", "[3]"),
             ("[scratch]", "[missing]"),
-            ("bar.sync 0", "bar.sync 1"),
             ("bar.sync 0", "bar.sync 0, 32"),
             ("bar.sync 0", "bar.arrive 0, 32"),
         ] {

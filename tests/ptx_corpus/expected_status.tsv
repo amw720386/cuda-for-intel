@@ -44,7 +44,7 @@ ggml/store_u8_probe.ptx	pass	strict-pass
 ggml/vector_add.ptx	pass	strict-pass	
 handwritten/atomics/atom_acq_rel_sys_global_add_u32_21.ptx	pass	strict-pass	
 handwritten/atomics/atom_global_add_f32_1.ptx	pass	strict-pass	
-handwritten/atomics/atom_global_add_f64_2.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/atomics/atom_global_add_f64_2.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.global.add.f64 %fd1 , [ %rd2 ] , %fd2
 handwritten/atomics/atom_global_add_noftz_bf16x2_5.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.global.add.noftz.bf16x2 %r1 , [ %rd2 ] , %r2
 handwritten/atomics/atom_global_add_noftz_f16x2_4.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.global.add.noftz.f16x2 %r1 , [ %rd2 ] , %r2
 handwritten/atomics/atom_global_add_u32_0.ptx	pass	strict-pass	
@@ -82,25 +82,25 @@ handwritten/barrier/bar_sync_0.ptx	pass	strict-pass
 handwritten/barrier/bar_sync_count.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.sync 1 , 128
 handwritten/barrier/bar_sync_reg.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.sync %r1 , %r2
 handwritten/barrier/bar_warp_sync.ptx	pass	strict-pass	
-handwritten/barrier/barrier_cluster_arrive_wait.ptx	unsupported	strict-fail	unsupported PTX instruction: barrier.cluster.arrive
-handwritten/barrier/barrier_sync.ptx	unsupported	strict-fail	unsupported PTX instruction: barrier.sync 0
-handwritten/barrier/barrier_sync_aligned.ptx	unsupported	strict-fail	unsupported PTX instruction: barrier.sync.aligned 0
-handwritten/barrier/brkpt.ptx	unsupported	strict-fail	unsupported PTX instruction: brkpt
+handwritten/barrier/barrier_cluster_arrive_wait.ptx	pass	strict-pass	
+handwritten/barrier/barrier_sync.ptx	pass	strict-pass	
+handwritten/barrier/barrier_sync_aligned.ptx	pass	strict-pass	
+handwritten/barrier/brkpt.ptx	pass	strict-pass	
 handwritten/barrier/elect_sync.ptx	unsupported	strict-fail	unsupported PTX instruction: elect.sync %r1|%p1 , 0xffffffff
-handwritten/barrier/exit.ptx	unsupported	strict-fail	unsupported PTX instruction: exit
+handwritten/barrier/exit.ptx	pass	strict-pass	
 handwritten/barrier/fence_acq_rel_cta.ptx	pass	strict-pass	
 handwritten/barrier/fence_sc_gpu.ptx	pass	strict-pass	
 handwritten/barrier/getctarank.ptx	error	strict-fail	invalid PTX identifier getctarank.shared
-handwritten/barrier/griddepcontrol_wait.ptx	unsupported	strict-fail	unsupported PTX instruction: griddepcontrol.wait
-handwritten/barrier/ld_acquire_gpu.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.acquire.gpu.global.u32 %r1 , [ %rd2 ]
-handwritten/barrier/ld_relaxed_sys.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.relaxed.sys.global.u32 %r1 , [ %rd2 ]
+handwritten/barrier/griddepcontrol_wait.ptx	pass	strict-pass	
+handwritten/barrier/ld_acquire_gpu.ptx	pass	strict-pass	
+handwritten/barrier/ld_relaxed_sys.ptx	pass	strict-pass	
 handwritten/barrier/mapa_shared_cluster.ptx	error	strict-fail	invalid PTX identifier mapa.shared
 handwritten/barrier/membar_cta.ptx	pass	strict-pass	
 handwritten/barrier/membar_gl.ptx	pass	strict-pass	
-handwritten/barrier/nanosleep.ptx	unsupported	strict-fail	unsupported PTX instruction: nanosleep.u32 100
-handwritten/barrier/setmaxnreg_inc.ptx	error	strict-fail	expected a PTX sm target
-handwritten/barrier/st_release_gpu.ptx	unsupported	strict-fail	unsupported PTX instruction: st.release.gpu.global.u32 [ %rd2 ] , %r1
-handwritten/barrier/trap.ptx	unsupported	strict-fail	unsupported PTX instruction: trap
+handwritten/barrier/nanosleep.ptx	pass	strict-pass	
+handwritten/barrier/setmaxnreg_inc.ptx	pass	strict-pass	
+handwritten/barrier/st_release_gpu.ptx	pass	strict-pass	
+handwritten/barrier/trap.ptx	pass	strict-pass	
 handwritten/bitmanip/abs_s32.ptx	pass	strict-pass	
 handwritten/bitmanip/add_cc_addc.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 %r1 , %r2 , %r3
 handwritten/bitmanip/bfe_s32.ptx	pass	strict-pass	
@@ -162,54 +162,54 @@ handwritten/bitmanip/vset4_eq.ptx	unsupported	strict-fail	unsupported PTX instru
 handwritten/control/bra_uni_loop.ptx	pass	strict-pass	
 handwritten/control/pred_guard_neg.ptx	pass	strict-pass	
 handwritten/control/ret_in_branch.ptx	pass	strict-pass	
-handwritten/cp_async/cp_async_bulk_commit_group.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.bulk.commit_group
+handwritten/cp_async/cp_async_bulk_commit_group.ptx	pass	strict-pass	
 handwritten/cp_async/cp_async_bulk_g2s.ptx	error	strict-fail	invalid PTX identifier cp.async.bulk.shared
 handwritten/cp_async/cp_async_bulk_tensor_2d.ptx	error	strict-fail	invalid PTX identifier cp.async.bulk.tensor.2d.shared
-handwritten/cp_async/cp_async_ca_16.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.ca.shared.global [ %rd2 ] , [ %rd2 ] , 16
-handwritten/cp_async/cp_async_ca_4.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.ca.shared.global [ %rd2 ] , [ %rd2 ] , 4
-handwritten/cp_async/cp_async_ca_8.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.ca.shared.global [ %rd2 ] , [ %rd2 ] , 8
-handwritten/cp_async/cp_async_ca_zfill.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.ca.shared.global [ %rd2 ] , [ %rd2 ] , 16 , %r2
-handwritten/cp_async/cp_async_cg_16.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.cg.shared.global [ %rd2 ] , [ %rd2 ] , 16
-handwritten/cp_async/cp_async_cg_l2_128.ptx	error	strict-fail	invalid PTX identifier cp.async.cg.shared.global.L2
-handwritten/cp_async/cp_async_commit_group.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.commit_group
+handwritten/cp_async/cp_async_ca_16.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/cp_async/cp_async_ca_4.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/cp_async/cp_async_ca_8.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/cp_async/cp_async_ca_zfill.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/cp_async/cp_async_cg_16.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/cp_async/cp_async_cg_l2_128.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/cp_async/cp_async_commit_group.ptx	pass	strict-pass	
 handwritten/cp_async/cp_async_mbarrier_arrive.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.mbarrier.arrive.shared.b64 [ %rd2 ]
-handwritten/cp_async/cp_async_wait_all.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.wait_all
-handwritten/cp_async/cp_async_wait_group_0.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.wait_group 0
-handwritten/cp_async/cp_async_wait_group_2.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.wait_group 2
-handwritten/cp_async/fence_proxy_async.ptx	error	strict-fail	invalid PTX identifier fence.proxy.async.shared
+handwritten/cp_async/cp_async_wait_all.ptx	pass	strict-pass	
+handwritten/cp_async/cp_async_wait_group_0.ptx	pass	strict-pass	
+handwritten/cp_async/cp_async_wait_group_2.ptx	pass	strict-pass	
+handwritten/cp_async/fence_proxy_async.ptx	pass	strict-pass	
 handwritten/cp_async/mbarrier_arrive.ptx	unsupported	strict-fail	unsupported PTX instruction: mbarrier.arrive.shared.b64 %rd3 , [ %rd2 ]
 handwritten/cp_async/mbarrier_expect_tx.ptx	unsupported	strict-fail	unsupported PTX instruction: mbarrier.expect_tx.relaxed.cta.shared.b64 [ %rd2 ] , 128
 handwritten/cp_async/mbarrier_init.ptx	unsupported	strict-fail	unsupported PTX instruction: mbarrier.init.shared.b64 [ %rd2 ] , 32
 handwritten/cp_async/mbarrier_try_wait_parity.ptx	unsupported	strict-fail	unsupported PTX instruction: mbarrier.try_wait.parity.shared.b64 %p1 , [ %rd2 ] , %r1
-handwritten/cp_async/prefetch_tensormap.ptx	unsupported	strict-fail	unsupported PTX instruction: prefetch.tensormap [ %rd2 ]
+handwritten/cp_async/prefetch_tensormap.ptx	pass	strict-pass	
 handwritten/cp_async/red_async_add_u32.ptx	error	strict-fail	invalid PTX identifier red.async.relaxed.cluster.shared
 handwritten/cp_async/st_async_b32.ptx	error	strict-fail	invalid PTX identifier st.async.weak.shared
 handwritten/cvt/cvt_f32_bf16.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.f32.bf16 %f1 , %h1
 handwritten/cvt/cvt_f32_f16.ptx	pass	strict-pass	
-handwritten/cvt/cvt_f64_f32.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/cvt/cvt_f64_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.f64.f32 %fd1 , %f1
 handwritten/cvt/cvt_pack_sat_u8_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.pack.sat.u8.s32.b32 %r1 , %r2 , %r3 , %r4
 handwritten/cvt/cvt_rmi_f32_f32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_rn_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.bf16.f32 %h1 , %f1
 handwritten/cvt/cvt_rn_bf16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.bf16x2.f32 %r1 , %f1 , %f2
-handwritten/cvt/cvt_rn_e2m1x2_f32.ptx	error	strict-fail	expected a PTX sm target
+handwritten/cvt/cvt_rn_e2m1x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.satfinite.e2m1x2.f32 %h1 , %f1 , %f2
 handwritten/cvt/cvt_rn_f16_f32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_rn_f16x2_e4m3x2.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.e4m3x2 %r1 , %h1
 handwritten/cvt/cvt_rn_f16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.f32 %r1 , %f1 , %f2
-handwritten/cvt/cvt_rn_f32_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/cvt/cvt_rn_f32_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f32.f64 %f1 , %fd1
 handwritten/cvt/cvt_rn_f32_s32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_rn_relu_f16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.relu.f16.f32 %h1 , %f1
 handwritten/cvt/cvt_rn_satfinite_e4m3x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.satfinite.e4m3x2.f32 %h1 , %f1 , %f2
 handwritten/cvt/cvt_rn_satfinite_f16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.satfinite.f16x2.f32 %r1 , %f1 , %f2
 handwritten/cvt/cvt_rna_tf32_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rna.tf32.f32 %r1 , %f1
 handwritten/cvt/cvt_rni_s32_f32.ptx	pass	strict-pass	
-handwritten/cvt/cvt_rs_f16x2_f32.ptx	error	strict-fail	expected a PTX sm target
+handwritten/cvt/cvt_rs_f16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rs.f16x2.f32 %r1 , %f1 , %f2 , %r3
 handwritten/cvt/cvt_rzi_s32_f32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_s16_s8.ptx	pass	strict-pass	
 handwritten/cvt/cvt_s64_s32.ptx	pass	strict-pass	
 handwritten/cvt/cvt_u32_u64.ptx	pass	strict-pass	
 handwritten/cvt/cvt_u8_s32_sat.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.sat.u8.s32 %r1 , %r2
 handwritten/float_math/abs_f32.ptx	pass	strict-pass	
-handwritten/float_math/add_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/float_math/add_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: add.f64 %fd1 , %fd2 , %fd3
 handwritten/float_math/add_rz_f32.ptx	pass	strict-pass	
 handwritten/float_math/add_sat_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: add.sat.f32 %f1 , %f2 , %f3
 handwritten/float_math/copysign_f32.ptx	pass	strict-pass	
@@ -217,20 +217,20 @@ handwritten/float_math/cos_approx_f32.ptx	pass	strict-pass
 handwritten/float_math/div_approx_ftz_f32.ptx	pass	strict-pass	
 handwritten/float_math/div_full_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: div.full.f32 %f1 , %f2 , %f3
 handwritten/float_math/div_rn_f32.ptx	pass	strict-pass	
-handwritten/float_math/div_rn_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/float_math/div_rn_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: div.rn.f64 %fd1 , %fd2 , %fd3
 handwritten/float_math/ex2_approx_ftz_f32.ptx	pass	strict-pass	
 handwritten/float_math/fma_rn_f32.ptx	pass	strict-pass	
-handwritten/float_math/fma_rn_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/float_math/fma_rn_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: fma.rn.f64 %fd1 , %fd2 , %fd3 , %fd4
 handwritten/float_math/fma_rn_ftz_f32.ptx	pass	strict-pass	
 handwritten/float_math/lg2_approx_f32.ptx	pass	strict-pass	
 handwritten/float_math/mad_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mad.f32 %f1 , %f2 , %f3 , %f4
 handwritten/float_math/max_ftz_nan_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: max.ftz.NaN.f32 %f1 , %f2 , %f3
 handwritten/float_math/min_f32.ptx	pass	strict-pass	
 handwritten/float_math/mul_rm_f32.ptx	pass	strict-pass	
-handwritten/float_math/neg_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/float_math/neg_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: neg.f64 %fd1 , %fd2
 handwritten/float_math/rcp_approx_ftz_f32.ptx	pass	strict-pass	
 handwritten/float_math/rcp_rn_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: rcp.rn.f32 %f1 , %f2
-handwritten/float_math/rcp_rn_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/float_math/rcp_rn_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: rcp.rn.f64 %fd1 , %fd2
 handwritten/float_math/rsqrt_approx_f32.ptx	pass	strict-pass	
 handwritten/float_math/selp_f32.ptx	pass	strict-pass	
 handwritten/float_math/setp_lt_f32.ptx	pass	strict-pass	
@@ -238,9 +238,9 @@ handwritten/float_math/setp_nan_f32.ptx	unsupported	strict-fail	unsupported PTX 
 handwritten/float_math/sin_approx_f32.ptx	pass	strict-pass	
 handwritten/float_math/sqrt_approx_ftz_f32.ptx	pass	strict-pass	
 handwritten/float_math/sqrt_rn_f32.ptx	pass	strict-pass	
-handwritten/float_math/sqrt_rn_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/float_math/sqrt_rn_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: sqrt.rn.f64 %fd1 , %fd2
 handwritten/float_math/tanh_approx_f32.ptx	pass	strict-pass	
-handwritten/float_math/testp_inf_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/float_math/testp_inf_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: testp.infinite.f64 %p1 , %fd1
 handwritten/float_math/testp_nan_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: testp.notanumber.f32 %p1 , %f1
 handwritten/half_bf16/abs_bf16.ptx	unsupported	strict-fail	unsupported PTX instruction: abs.bf16 %h1 , %h2
 handwritten/half_bf16/add_bf16.ptx	unsupported	strict-fail	unsupported PTX instruction: add.rn.bf16 %h1 , %h2 , %h3
@@ -258,7 +258,7 @@ handwritten/half_bf16/neg_f16.ptx	unsupported	strict-fail	unsupported PTX instru
 handwritten/half_bf16/set_gt_f16x2.ptx	unsupported	strict-fail	unsupported PTX instruction: set.gt.f16x2.f16x2 %r1 , %r2 , %r3
 handwritten/half_bf16/setp_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: setp.lt.f16 %p1 , %h1 , %h2
 handwritten/half_bf16/tanh_approx_f16x2.ptx	unsupported	strict-fail	unsupported PTX instruction: tanh.approx.f16x2 %r1 , %r2
-handwritten/ldmatrix/ldmatrix_m16n16_b8.ptx	error	strict-fail	expected a PTX sm target
+handwritten/ldmatrix/ldmatrix_m16n16_b8.ptx	unsupported	strict-fail	unsupported PTX instruction: ldmatrix.sync.aligned.m16n16.x1.trans.shared.b8 { %r1 , %r2 } , [ %rd2 ]
 handwritten/ldmatrix/ldmatrix_x1.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/ldmatrix/ldmatrix_x1_trans.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/ldmatrix/ldmatrix_x2.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
@@ -266,43 +266,43 @@ handwritten/ldmatrix/ldmatrix_x2_trans.ptx	error	strict-fail	expected a shared a
 handwritten/ldmatrix/ldmatrix_x4.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/ldmatrix/ldmatrix_x4_trans.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
 handwritten/ldmatrix/stmatrix_x4.ptx	unsupported	strict-fail	unsupported PTX instruction: stmatrix.sync.aligned.m8n8.x4.shared.b16 [ %rd2 ] , { %r1 , %r2 , %r3 , %r4 }
-handwritten/memory/applypriority_L2.ptx	error	strict-fail	invalid PTX identifier applypriority.global.L2
-handwritten/memory/call_noreturn_stub.ptx	unsupported	strict-fail	unsupported PTX instruction: call.uni __assertfail , ( %rd3 , %rd4 , %r1 , %rd5 , %rd6 )
+handwritten/memory/applypriority_L2.ptx	pass	strict-pass	
+handwritten/memory/call_noreturn_stub.ptx	pass	strict-pass	
 handwritten/memory/const_array_init.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.u32 %r1 , [ %rd3 ]
-handwritten/memory/createpolicy_fractional.ptx	error	strict-fail	invalid PTX identifier createpolicy.fractional.L2
-handwritten/memory/discard_global_L2.ptx	unsupported	strict-fail	unsupported PTX instruction: discard.global.L2 [ %rd2 ] , 128
-handwritten/memory/func_call_internal.ptx	unsupported	strict-fail	unsupported PTX module directive .func
+handwritten/memory/createpolicy_fractional.ptx	pass	strict-pass	
+handwritten/memory/discard_global_L2.ptx	pass	strict-pass	
+handwritten/memory/func_call_internal.ptx	unsupported	strict-fail	unsupported integer operand a
 handwritten/memory/global_array_init.ptx	error	strict-fail	undefined PTX register tbl on an incoming path
 handwritten/memory/ld_const_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.u32 %r1 , [ %rd2 ]
-handwritten/memory/ld_global_L1_no_allocate.ptx	error	strict-fail	invalid PTX identifier ld.global.L1
-handwritten/memory/ld_global_L2_128B.ptx	error	strict-fail	invalid PTX identifier ld.global.L2
-handwritten/memory/ld_global_cs.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.cs.u32 %r1 , [ %rd2 ]
-handwritten/memory/ld_global_lu.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.lu.u32 %r1 , [ %rd2 ]
+handwritten/memory/ld_global_L1_no_allocate.ptx	pass	strict-pass	
+handwritten/memory/ld_global_L2_128B.ptx	pass	strict-pass	
+handwritten/memory/ld_global_cs.ptx	pass	strict-pass	
+handwritten/memory/ld_global_lu.ptx	pass	strict-pass	
 handwritten/memory/ld_global_nc_u32.ptx	pass	strict-pass	
 handwritten/memory/ld_global_nc_v4_u32.ptx	pass	strict-pass	
-handwritten/memory/ld_global_v2_u64.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v2.u64 { %rd3 , %rd4 } , [ %rd2 ]
+handwritten/memory/ld_global_v2_u64.ptx	pass	strict-pass	
 handwritten/memory/ld_global_v4_f32.ptx	pass	strict-pass	
 handwritten/memory/ld_param_v2.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.param.v2.u32 { %r1 , %r2 } , [ out ]
-handwritten/memory/ld_shared_cluster.ptx	error	strict-fail	invalid PTX identifier ld.shared
+handwritten/memory/ld_shared_cluster.ptx	error	strict-fail	invalid PTX identifier ld.global.shared
 handwritten/memory/ld_shared_v4.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/memory/ld_volatile_global.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.volatile.global.u32 %r1 , [ %rd2 ]
+handwritten/memory/ld_volatile_global.ptx	pass	strict-pass	
 handwritten/memory/local_depot.ptx	error	strict-fail	expected Local address for %rd2, got Address(Global)
 handwritten/memory/mov_b64_pack.ptx	unsupported	strict-fail	unsupported PTX instruction: mov.b64 %rd3 , { %r1 , %r2 }
 handwritten/memory/mov_vector_pack_b32.ptx	pass	strict-pass	
 handwritten/memory/multimem_ld_reduce.ptx	unsupported	strict-fail	unsupported PTX instruction: multimem.ld_reduce.relaxed.sys.global.add.u32 %r1 , [ %rd2 ]
-handwritten/memory/prefetch_global_L2.ptx	unsupported	strict-fail	unsupported PTX instruction: prefetch.global.L2 [ %rd2 ]
-handwritten/memory/prefetchu_L1.ptx	unsupported	strict-fail	unsupported PTX instruction: prefetchu.L1 [ %rd2 ]
+handwritten/memory/prefetch_global_L2.ptx	pass	strict-pass	
+handwritten/memory/prefetchu_L1.ptx	pass	strict-pass	
 handwritten/memory/shared_extern_dynamic.ptx	error	strict-fail	unknown PTX shared symbol dyn
-handwritten/memory/st_global_cs.ptx	unsupported	strict-fail	unsupported PTX instruction: st.global.cs.u32 [ %rd2 ] , %r1
+handwritten/memory/st_global_cs.ptx	pass	strict-pass	
 handwritten/memory/st_global_u16.ptx	pass	strict-pass	
 handwritten/memory/st_global_v4_u32.ptx	pass	strict-pass	
-handwritten/memory/st_global_wt.ptx	unsupported	strict-fail	unsupported PTX instruction: st.global.wt.u32 [ %rd2 ] , %r1
-handwritten/memory/vprintf_call.ptx	unsupported	strict-fail	unsupported PTX instruction: call.uni ( %r1 ) , vprintf , ( %rd3 , %rd4 )
+handwritten/memory/st_global_wt.ptx	pass	strict-pass	
+handwritten/memory/vprintf_call.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k16_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
 handwritten/mma/mma_m16n8k16_f16_f16acc.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 { %r10 , %r11 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %r7 , %r8 }
 handwritten/mma/mma_m16n8k16_f16_f32.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k16_f16_f32_scalar_regs.ptx	pass	strict-pass	
-handwritten/mma/mma_m16n8k16_f64_m8n8k4.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+handwritten/mma/mma_m16n8k16_f64_m8n8k4.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 { %fd1 , %fd2 } , { %fd3 } , { %fd4 } , { %fd5 , %fd6 }
 handwritten/mma/mma_m16n8k256_b1_xor_popc.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc { %r10 , %r11 , %r12 , %r13 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %r7 , %r8 , %r9 , %r14 }
 handwritten/mma/mma_m16n8k32_s8_s32.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k32_u8_satfinite.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.u8.s32 { %r10 , %r11 , %r12 , %r13 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %r7 , %r8 , %r9 , %r14 }
@@ -314,21 +314,21 @@ handwritten/mma/mma_m16n8k8_tf32_f32.ptx	unsupported	strict-fail	unsupported PTX
 handwritten/mma/mma_m8n8k16_s8.ptx	pass	strict-pass	
 handwritten/mma/mma_m8n8k4_f16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
 handwritten/mma/mma_sp_m16n8k32_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 , %r7 , %r8 } , { %f1 , %f2 , %f3 , %f4 } , %r9 , 0x0
-handwritten/mma/tcgen05_mma_sm100.ptx	error	strict-fail	expected a PTX sm target
-handwritten/mma/wgmma_m64n8k16_f16.ptx	error	strict-fail	expected a PTX sm target
+handwritten/mma/tcgen05_mma_sm100.ptx	error	strict-fail	invalid PTX identifier tcgen05.fence
+handwritten/mma/wgmma_m64n8k16_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: wgmma.fence.sync.aligned
 handwritten/redux/redux_sync_add_s32.ptx	pass	strict-pass	
 handwritten/redux/redux_sync_add_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.add.u32 %r1 , %r2 , 0xffffffff
 handwritten/redux/redux_sync_and_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.and.u32 %r1 , %r2 , 0xffffffff
-handwritten/redux/redux_sync_max_f32_nan.ptx	error	strict-fail	expected a PTX sm target
+handwritten/redux/redux_sync_max_f32_nan.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.max.NaN.f32 %f1 , %f2 , 0xffffffff
 handwritten/redux/redux_sync_max_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.max.u32 %r1 , %r2 , 0xffffffff
 handwritten/redux/redux_sync_min_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.min.s32 %r1 , %r2 , 0xffffffff
 handwritten/redux/redux_sync_min_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.min.u32 %r1 , %r2 , 0xffffffff
 handwritten/redux/redux_sync_or_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.or.u32 %r1 , %r2 , 0xffffffff
 handwritten/redux/redux_sync_xor_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.xor.u32 %r1 , %r2 , 0xffffffff
-handwritten/shfl/shfl_legacy_bfly_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: shfl.bfly.b32 %r1 , %r2 , 1 , 31
-handwritten/shfl/shfl_legacy_down_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: shfl.down.b32 %r1 , %r2 , 1 , 31
-handwritten/shfl/shfl_legacy_idx_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: shfl.idx.b32 %r1 , %r2 , 1 , 31
-handwritten/shfl/shfl_legacy_up_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: shfl.up.b32 %r1 , %r2 , 1 , 31
+handwritten/shfl/shfl_legacy_bfly_b32.ptx	pass	strict-fail	
+handwritten/shfl/shfl_legacy_down_b32.ptx	pass	strict-fail	
+handwritten/shfl/shfl_legacy_idx_b32.ptx	pass	strict-fail	
+handwritten/shfl/shfl_legacy_up_b32.ptx	pass	strict-fail	
 handwritten/shfl/shfl_sync_bfly_b32.ptx	pass	strict-pass	
 handwritten/shfl/shfl_sync_bfly_b32_imm.ptx	pass	strict-pass	
 handwritten/shfl/shfl_sync_bfly_f32.ptx	pass	strict-pass	
@@ -339,32 +339,32 @@ handwritten/shfl/shfl_sync_idx_b32_imm.ptx	pass	strict-pass
 handwritten/shfl/shfl_sync_idx_b64_via_mov.ptx	unsupported	strict-fail	unsupported PTX instruction: mov.b64 { %r2 , %r3 } , %rd3
 handwritten/shfl/shfl_sync_up_b32.ptx	error	strict-fail	shfl.sync requires an immediate clamp/segment-mask operand
 handwritten/shfl/shfl_sync_up_b32_imm.ptx	pass	strict-pass	
-handwritten/sreg/lanemask_eq.ptx	error	strict-fail	undefined PTX register %lanemask_eq on an incoming path
-handwritten/sreg/lanemask_ge.ptx	error	strict-fail	undefined PTX register %lanemask_ge on an incoming path
-handwritten/sreg/lanemask_gt.ptx	error	strict-fail	undefined PTX register %lanemask_gt on an incoming path
-handwritten/sreg/lanemask_le.ptx	error	strict-fail	undefined PTX register %lanemask_le on an incoming path
-handwritten/sreg/lanemask_lt.ptx	error	strict-fail	undefined PTX register %lanemask_lt on an incoming path
-handwritten/sreg/sreg_WARP_SZ.ptx	error	strict-fail	undefined PTX register %WARP_SZ on an incoming path
+handwritten/sreg/lanemask_eq.ptx	pass	strict-pass	
+handwritten/sreg/lanemask_ge.ptx	pass	strict-pass	
+handwritten/sreg/lanemask_gt.ptx	pass	strict-pass	
+handwritten/sreg/lanemask_le.ptx	pass	strict-pass	
+handwritten/sreg/lanemask_lt.ptx	pass	strict-pass	
+handwritten/sreg/sreg_WARP_SZ.ptx	pass	strict-pass	
 handwritten/sreg/sreg_clock.ptx	error	strict-fail	undefined PTX register %clock on an incoming path
 handwritten/sreg/sreg_clock64.ptx	error	strict-fail	undefined PTX register %clock64 on an incoming path
-handwritten/sreg/sreg_cluster_ctaid_x.ptx	unsupported	strict-fail	unsupported PTX built-in %cluster_ctaid.x
-handwritten/sreg/sreg_cluster_ctarank.ptx	error	strict-fail	undefined PTX register %cluster_ctarank on an incoming path
-handwritten/sreg/sreg_cluster_nctaid_x.ptx	unsupported	strict-fail	unsupported PTX built-in %cluster_nctaid.x
+handwritten/sreg/sreg_cluster_ctaid_x.ptx	pass	strict-pass	
+handwritten/sreg/sreg_cluster_ctarank.ptx	pass	strict-pass	
+handwritten/sreg/sreg_cluster_nctaid_x.ptx	pass	strict-pass	
 handwritten/sreg/sreg_ctaid_x.ptx	pass	strict-pass	
 handwritten/sreg/sreg_ctaid_y.ptx	pass	strict-pass	
 handwritten/sreg/sreg_ctaid_z.ptx	pass	strict-pass	
 handwritten/sreg/sreg_dynamic_smem_size.ptx	error	strict-fail	undefined PTX register %dynamic_smem_size on an incoming path
-handwritten/sreg/sreg_envreg0.ptx	error	strict-fail	undefined PTX register %envreg0 on an incoming path
+handwritten/sreg/sreg_envreg0.ptx	pass	strict-pass	
 handwritten/sreg/sreg_globaltimer.ptx	error	strict-fail	undefined PTX register %globaltimer on an incoming path
-handwritten/sreg/sreg_gridid.ptx	error	strict-fail	undefined PTX register %gridid on an incoming path
-handwritten/sreg/sreg_is_explicit_cluster.ptx	error	strict-fail	undefined PTX register %is_explicit_cluster on an incoming path
+handwritten/sreg/sreg_gridid.ptx	pass	strict-pass	
+handwritten/sreg/sreg_is_explicit_cluster.ptx	pass	strict-pass	
 handwritten/sreg/sreg_laneid.ptx	pass	strict-pass	
 handwritten/sreg/sreg_nctaid_x.ptx	pass	strict-pass	
-handwritten/sreg/sreg_nsmid.ptx	error	strict-fail	undefined PTX register %nsmid on an incoming path
+handwritten/sreg/sreg_nsmid.ptx	pass	strict-pass	
 handwritten/sreg/sreg_ntid_x.ptx	pass	strict-pass	
 handwritten/sreg/sreg_nwarpid.ptx	error	strict-fail	undefined PTX register %nwarpid on an incoming path
-handwritten/sreg/sreg_pm0.ptx	error	strict-fail	undefined PTX register %pm0 on an incoming path
-handwritten/sreg/sreg_smid.ptx	error	strict-fail	undefined PTX register %smid on an incoming path
+handwritten/sreg/sreg_pm0.ptx	pass	strict-pass	
+handwritten/sreg/sreg_smid.ptx	pass	strict-pass	
 handwritten/sreg/sreg_tid_x.ptx	pass	strict-pass	
 handwritten/sreg/sreg_tid_y.ptx	pass	strict-pass	
 handwritten/sreg/sreg_total_smem_size.ptx	error	strict-fail	undefined PTX register %total_smem_size on an incoming path
@@ -382,7 +382,7 @@ handwritten/vote/activemask.ptx	pass	strict-pass
 handwritten/vote/match_all_sync_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: match.all.sync.b32 %r1|%p1 , %r2 , 0xffffffff
 handwritten/vote/match_any_sync_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: match.any.sync.b32 %r1 , %r2 , 0xffffffff
 handwritten/vote/match_any_sync_b64.ptx	unsupported	strict-fail	unsupported PTX instruction: match.any.sync.b64 %r1 , %rd3 , 0xffffffff
-handwritten/vote/vote_legacy_ballot.ptx	unsupported	strict-fail	unsupported PTX instruction: vote.ballot.b32 %r1 , %p1
+handwritten/vote/vote_legacy_ballot.ptx	pass	strict-fail	
 handwritten/vote/vote_sync_all.ptx	pass	strict-pass	
 handwritten/vote/vote_sync_any.ptx	pass	strict-pass	
 handwritten/vote/vote_sync_ballot.ptx	pass	strict-pass	
@@ -391,14 +391,14 @@ handwritten/vote/vote_sync_uni.ptx	unsupported	strict-fail	unsupported PTX instr
 handwritten/wmma/wmma_load_a_m16n16k16_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: wmma.load.a.sync.aligned.row.m16n16k16.global.f16 { %r1 , %r2 , %r3 , %r4 , %r5 , %r6 , %r7 , %r8 } , [ %rd2 ] , 16
 handwritten/wmma/wmma_mma_m16n16k16_f16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 { %f1 , %f2 , %f3 , %f4 , %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 , %r5 , %r6 , %r7 , %r8 } , { %r9 , %r10 , %r11 , %r12 , %r13 , %r14 , %r15 , %r16 } , { %f1 , %f2 , %f3 , %f4 , %f5 , %f6 , %f7 , %f8 }
 handwritten/wmma/wmma_store_d_m16n16k16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [ %rd2 ] , { %f1 , %f2 , %f3 , %f4 , %f5 , %f6 , %f7 , %f8 } , 16
-zluda/atomics/atom_add.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg .u64 %in_addr
-zluda/atomics/atom_add_float.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg .u64 %in_addr
+zluda/atomics/atom_add.ptx	pass	strict-fail	
+zluda/atomics/atom_add_float.ptx	pass	strict-fail	
 zluda/atomics/atom_cas.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.cas.b32 %temp1 , [ %in_addr+4 ] , %temp1 , 100
 zluda/atomics/atom_inc.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.inc.u32 %temp1 , [ %in_addr ] , 101
-zluda/atomics/atomics_128.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.acquire.gpu.v2.u64 { %temp1 , %temp2 } , [ %in_addr ]
+zluda/atomics/atomics_128.ptx	pass	strict-fail	
 zluda/barrier/bar_red_and_pred.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.red.and.pred %pred , 1 , %cond
-zluda/barrier/membar.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp
-zluda/barrier/spirv_build__bar_sync.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.sync %temp_32
+zluda/barrier/membar.ptx	pass	strict-fail	
+zluda/barrier/spirv_build__bar_sync.ptx	pass	strict-fail	
 zluda/bitmanip/bfe.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
 zluda/bitmanip/bfi.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
 zluda/bitmanip/bfind_shiftamt.ptx	unsupported	strict-fail	unsupported PTX instruction: bfind.shiftamt.u32 temp0 , temp0
@@ -412,7 +412,7 @@ zluda/bitmanip/popc_b64.ptx	pass	strict-fail
 zluda/bitmanip/prmt.ptx	pass	strict-fail	
 zluda/bitmanip/prmt_signext.ptx	pass	strict-fail	
 zluda/bitmanip/prmt_slow.ptx	pass	strict-fail	
-zluda/bitmanip/sad_s64.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.s64 %temp1 , [ %in_addr ]
+zluda/bitmanip/sad_s64.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.b64 %temp2 , [ %in_addr + 8 ]
 zluda/bitmanip/shf_l.ptx	unsupported	strict-fail	unsupported PTX instruction: shf.l.clamp.b32 %result , %in_a , %in_b , %in_c
 zluda/bitmanip/shf_l_clamp.ptx	unsupported	strict-fail	unsupported PTX instruction: shf.l.clamp.b32 %result , %in_a , %in_b , %in_c
 zluda/bitmanip/shf_l_wrap.ptx	unsupported	strict-fail	unsupported PTX instruction: shf.l.wrap.b32 %result , %in_a , %in_b , %in_c
@@ -420,34 +420,34 @@ zluda/bitmanip/shf_r.ptx	unsupported	strict-fail	unsupported PTX instruction: sh
 zluda/bitmanip/shf_r_clamp.ptx	unsupported	strict-fail	unsupported PTX instruction: shf.r.clamp.b32 %result , %in_a , %in_b , %in_c
 zluda/bitmanip/shf_r_wrap.ptx	unsupported	strict-fail	unsupported PTX instruction: shf.r.wrap.b32 %result , %in_a , %in_b , %in_c
 zluda/bitmanip/vshr_clamp.ptx	unsupported	strict-fail	unsupported PTX instruction: vshr.u32.u32.u32.clamp.add temp0 , temp1 , temp2 , temp3
-zluda/control/assertfail.ptx	unsupported	strict-fail	unsupported PTX instruction: .param .b64 param0
-zluda/control/b64tof64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+zluda/control/assertfail.ptx	pass	strict-fail	
+zluda/control/b64tof64.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.u64 %temp
 zluda/control/block.ptx	error	strict-fail	undefined PTX register %__sc1_temp2 on an incoming path
 zluda/control/bra.ptx	error	strict-fail	unreachable PTX block
-zluda/control/call.ptx	error	strict-fail	unexpected end of PTX
-zluda/control/call_rnd.ptx	unsupported	strict-fail	unsupported PTX module directive .func
-zluda/control/exit.ptx	unsupported	strict-fail	unsupported PTX instruction: exit
-zluda/control/func_ptr.ptx	unsupported	strict-fail	unsupported PTX module directive .func
-zluda/control/instruction_mode_to_global_mode__call_with_mode.ptx	unsupported	strict-fail	unsupported PTX module directive .func
+zluda/control/call.ptx	error	strict-fail	PTX call argument was never stored
+zluda/control/call_rnd.ptx	pass	strict-fail	
+zluda/control/exit.ptx	pass	strict-fail	
+zluda/control/func_ptr.ptx	error	strict-fail	unknown PTX local symbol foobar
+zluda/control/instruction_mode_to_global_mode__call_with_mode.ptx	error	strict-fail	undefined PTX register %temp on an incoming path
 zluda/control/malformed_label.ptx	error	strict-fail	unreachable PTX block
-zluda/control/nanosleep.ptx	unsupported	strict-fail	unsupported PTX instruction: nanosleep.u32 1
+zluda/control/nanosleep.ptx	pass	strict-fail	
 zluda/control/noreturn.ptx	error	strict-fail	expected {, got .noreturn
 zluda/control/ntid.ptx	pass	strict-fail	
 zluda/control/test__operands.ptx	error	strict-fail	invalid PTX parameter offset
 zluda/control/tid.ptx	pass	strict-fail	
-zluda/control/trap.ptx	unsupported	strict-fail	unsupported PTX instruction: trap
+zluda/control/trap.ptx	pass	strict-fail	
 zluda/control/warp_sz.ptx	unsupported	strict-fail	unsupported integer operand WARP_SZ
-zluda/cp_async/cp_async.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .b32 from [ 4 ] = { 1 , 2 , 3 , 4 }
-zluda/cp_async/createpolicy.ptx	error	strict-fail	invalid PTX identifier createpolicy.fractional.L2
+zluda/cp_async/cp_async.ptx	error	strict-fail	expected .align, got .b32
+zluda/cp_async/createpolicy.ptx	pass	strict-fail	
 zluda/cvt/cvt_f16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.f32 %result , %temp1 , %temp2
-zluda/cvt/cvt_f64_f32.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+zluda/cvt/cvt_f64_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.ftz.f64.f32 %temp_f64 , %temp_f32
 zluda/cvt/cvt_pack.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.pack.sat.u8.s32.b32 %result1 , %src1 , %src2 , %src3
 zluda/cvt/cvt_relu_f16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.relu.f16x2.f32 result0 , temp0 , temp1
-zluda/cvt/cvt_rn_bf16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.f32 %in_b , [ %in_addr + 4 ]
+zluda/cvt/cvt_rn_bf16x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.f32 %in_b , [ %in_addr + 4 ]
 zluda/cvt/cvt_rn_f16x2_e4m3x2.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.e4m3x2 %result , %in
 zluda/cvt/cvt_rn_f16x2_e5m2x2.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.e5m2x2 %result , %in
-zluda/cvt/cvt_rn_satfinite_e4m3x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.f32 %in_b , [ %in_addr + 4 ]
-zluda/cvt/cvt_rn_satfinite_e5m2x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.f32 %in_b , [ %in_addr + 4 ]
+zluda/cvt/cvt_rn_satfinite_e4m3x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.f32 %in_b , [ %in_addr + 4 ]
+zluda/cvt/cvt_rn_satfinite_e5m2x2_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.f32 %in_b , [ %in_addr + 4 ]
 zluda/cvt/cvt_rni.ptx	pass	strict-fail	
 zluda/cvt/cvt_rni_u16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rni.u16.f32 %temp_u16 , %temp_f32
 zluda/cvt/cvt_rzi.ptx	pass	strict-fail	
@@ -458,7 +458,7 @@ zluda/cvt/cvt_sat_s_u.ptx	unsupported	strict-fail	unsupported PTX instruction: c
 zluda/cvt/cvt_u64_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rzi.u64.f16 %temp1_64 , %temp1
 zluda/cvt/cvta.ptx	error	strict-fail	expected Address(Global) for %in_addr, got B64
 zluda/cvt/uint_to_fp_bf16.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.bf16.f32 %result , %check_f32
-zluda/float_math/abs.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp2
+zluda/float_math/abs.ptx	pass	strict-fail	
 zluda/float_math/add_ftz.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
 zluda/float_math/copysign.ptx	pass	strict-fail	
 zluda/float_math/cos.ptx	pass	strict-fail	
@@ -471,15 +471,15 @@ zluda/float_math/fma_bf16x2.ptx	unsupported	strict-fail	unsupported PTX instruct
 zluda/float_math/fma_f16x2.ptx	unsupported	strict-fail	unsupported PTX instruction: fma.rn.f16x2 %temp1 , %temp1 , %temp2 , %temp3
 zluda/float_math/fmax.ptx	unsupported	strict-fail	unsupported PTX instruction: max.f16 %result1 , %temp2 , %temp1
 zluda/float_math/lg2.ptx	pass	strict-fail	
-zluda/float_math/max.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp1
+zluda/float_math/max.ptx	pass	strict-fail	
 zluda/float_math/min_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: min.f16 %temp1 , %temp1 , %temp2
 zluda/float_math/min_nan_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: min.NaN.f16 %temp1 , %temp1 , %temp2
 zluda/float_math/mul_ftz.ptx	pass	strict-fail	
 zluda/float_math/mul_non_ftz.ptx	pass	strict-fail	
-zluda/float_math/neg.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp1
+zluda/float_math/neg.ptx	pass	strict-fail	
 zluda/float_math/rcp.ptx	pass	strict-fail	
-zluda/float_math/rcp_f64.ptx	unsupported	strict-fail	unsupported PTX register type .f64
-zluda/float_math/rsqrt.ptx	unsupported	strict-fail	unsupported PTX register type .f64
+zluda/float_math/rcp_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: rcp.rz.f64 %temp , %temp
+zluda/float_math/rsqrt.ptx	unsupported	strict-fail	unsupported PTX instruction: rsqrt.approx.f64 %temp1 , %temp1
 zluda/float_math/set_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: set.gtu.u32.f16 result0 , in16_0 , in16_1
 zluda/float_math/set_gt_f16x2.ptx	unsupported	strict-fail	unsupported PTX instruction: set.gt.f16x2.f16x2 in32_2 , in32_0 , in32_1
 zluda/float_math/sin.ptx	pass	strict-fail	
@@ -492,50 +492,50 @@ zluda/integer/add_extended.ptx	unsupported	strict-fail	unsupported PTX instructi
 zluda/integer/add_non_coherent.ptx	pass	strict-fail	
 zluda/integer/add_s32_sat.ptx	unsupported	strict-fail	unsupported PTX instruction: add.sat.s32 temp2 , temp0 , temp1
 zluda/integer/add_tuning.ptx	pass	strict-fail	
-zluda/integer/addc_cc_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg .b32 %cc_cf
+zluda/integer/addc_cc_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 %cc_cf , 0xffffffffffffffffU , 1
 zluda/integer/and.ptx	pass	strict-fail	
-zluda/integer/mad_extended.ptx	error	strict-fail	expected ;, got ,
-zluda/integer/mad_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %dst
-zluda/integer/mad_wide.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.s64 %src3 , [ %in_addr+8 ]
-zluda/integer/min.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp1
-zluda/integer/mul24_hi_s32.ptx	unsupported	strict-fail	unsupported PTX parameter type .s64
+zluda/integer/mad_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: mad.lo.cc.u32 %r0 , %a0 , %b0 , %c0
+zluda/integer/mad_s32.ptx	pass	strict-fail	
+zluda/integer/mad_wide.ptx	unsupported	strict-fail	unsupported PTX instruction: mad.wide.s32 %dst , %src1 , %src2 , %src3
+zluda/integer/min.ptx	pass	strict-fail	
+zluda/integer/mul24_hi_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: mul24.hi.s32 %temp3 , %temp2 , %temp
 zluda/integer/mul24_hi_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: mul24.hi.u32 %temp2 , %temp , %temp
-zluda/integer/mul24_lo_s32.ptx	unsupported	strict-fail	unsupported PTX parameter type .s64
+zluda/integer/mul24_lo_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: mul24.lo.s32 %temp3 , %temp2 , %temp
 zluda/integer/mul24_lo_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: mul24.lo.u32 %temp2 , %temp , %temp
 zluda/integer/mul_hi.ptx	unsupported	strict-fail	unsupported PTX instruction: mul.hi.u64 %temp2 , %temp , 2
 zluda/integer/mul_lo.ptx	pass	strict-fail	
 zluda/integer/mul_wide.ptx	pass	strict-fail	
-zluda/integer/multiple_return.ptx	unsupported	strict-fail	unsupported PTX module directive .func
+zluda/integer/multiple_return.ptx	error	strict-fail	undefined PTX register %__c1_x on an incoming path
 zluda/integer/not.ptx	pass	strict-fail	
 zluda/integer/or.ptx	pass	strict-fail	
-zluda/integer/pred_not.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.u64 %temp2 , [ %in_addr + 8 ]
-zluda/integer/rem.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp1
-zluda/integer/selp.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.u16 %temp2 , [ %in_addr + 2 ]
-zluda/integer/selp_true.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.u16 %temp2 , [ %in_addr + 2 ]
-zluda/integer/setp.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.u64 %temp2 , [ %in_addr + 8 ]
-zluda/integer/setp_bool_and.ptx	error	strict-fail	expected ;, got ,
-zluda/integer/setp_gt.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.f32 %r2 , [ %in_addr + 4 ]
-zluda/integer/setp_leu.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.f32 %r2 , [ %in_addr + 4 ]
-zluda/integer/setp_nan.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.f32 %pair1_2 , [ %in_addr + 4 ]
-zluda/integer/setp_num.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.f32 %pair1_2 , [ %in_addr + 4 ]
+zluda/integer/pred_not.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.u64 %temp2 , [ %in_addr + 8 ]
+zluda/integer/rem.ptx	pass	strict-fail	
+zluda/integer/selp.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.u16 %temp2 , [ %in_addr + 2 ]
+zluda/integer/selp_true.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.u16 %temp2 , [ %in_addr + 2 ]
+zluda/integer/setp.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.u64 %temp2 , [ %in_addr + 8 ]
+zluda/integer/setp_bool_and.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.u32 %b , [ %in_addr + 4 ]
+zluda/integer/setp_gt.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.f32 %r2 , [ %in_addr + 4 ]
+zluda/integer/setp_leu.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.f32 %r2 , [ %in_addr + 4 ]
+zluda/integer/setp_nan.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.f32 %pair1_2 , [ %in_addr + 4 ]
+zluda/integer/setp_num.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.f32 %pair1_2 , [ %in_addr + 4 ]
 zluda/integer/setp_pred2.ptx	unsupported	strict-fail	unsupported PTX instruction: setp.lt.xor.u32 %p4|%p5 , %a , %b , %p1
 zluda/integer/shl.ptx	pass	strict-fail	
-zluda/integer/shr.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp
-zluda/integer/shr_oob.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s16 [ %out_addr ] , %temp
-zluda/integer/sign_extend.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp
+zluda/integer/shr.ptx	pass	strict-fail	
+zluda/integer/shr_oob.ptx	pass	strict-fail	
+zluda/integer/sign_extend.ptx	pass	strict-fail	
 zluda/integer/sub.ptx	pass	strict-fail	
 zluda/integer/sub_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: sub.cc.u32 r0 , a0 , b0
-zluda/integer/subc_cc_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg .b32 %cc_cf
+zluda/integer/subc_cc_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 %cc_cf , 0xffffffffffffffffU , 1
 zluda/integer/xor.ptx	pass	strict-fail	
 zluda/ldmatrix/ldmatrix.ptx	error	strict-fail	undefined PTX register %tid.x on an incoming path
 zluda/ldmatrix/ldmatrix_trans.ptx	unsupported	strict-fail	unsupported PTX register type .v2.b16
 zluda/memory/const.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.b16 %temp1 , [ constparams ]
 zluda/memory/const_ident.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.const.u64 %constparams_0 , [ constparams+0 ]
 zluda/memory/constant_f32.ptx	pass	strict-fail	
-zluda/memory/constant_negative.ptx	unsupported	strict-fail	unsupported PTX instruction: st.s32 [ %out_addr ] , %temp
-zluda/memory/extern_func.ptx	unsupported	strict-fail	unsupported PTX instruction: { .param .b64 param0
+zluda/memory/constant_negative.ptx	pass	strict-fail	
+zluda/memory/extern_func.ptx	unsupported	strict-fail	unsupported PTX instruction: call.uni ( retval0 ) , foobar , ( param0 )
 zluda/memory/extern_shared.ptx	error	strict-fail	undefined PTX register shared_mem on an incoming path
-zluda/memory/extern_shared_call.ptx	unsupported	strict-fail	unsupported PTX module directive .func
+zluda/memory/extern_shared_call.ptx	error	strict-fail	undefined PTX register shared_mem on an incoming path
 zluda/memory/global_array.ptx	error	strict-fail	unknown PTX local symbol foobar
 zluda/memory/global_array_f32.ptx	error	strict-fail	unknown PTX local symbol foobar
 zluda/memory/implicit_param.ptx	unsupported	strict-fail	unsupported PTX instruction: .param .b32 temp_param
@@ -548,15 +548,15 @@ zluda/memory/mov.ptx	pass	strict-fail
 zluda/memory/mov_address.ptx	error	strict-fail	expected .align, got .b8
 zluda/memory/non_scalar_ptr_offset.ptx	pass	strict-fail	
 zluda/memory/param_is_addressable.ptx	error	strict-fail	unknown PTX shared symbol input
-zluda/memory/reg_local.ptx	unsupported	strict-fail	unsupported PTX instruction: st.u64 [ local_x ] , %temp + 1
-zluda/memory/reg_multi.ptx	error	strict-fail	expected ;, got ,
-zluda/memory/shared_ptr_32.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg .u64 %in_addr
+zluda/memory/reg_local.ptx	unsupported	strict-fail	unsupported PTX instruction: st.global.u64 [ local_x ] , %temp + 1
+zluda/memory/reg_multi.ptx	pass	strict-fail	
+zluda/memory/shared_ptr_32.ptx	pass	strict-fail	
 zluda/memory/shared_ptr_take_address.ptx	error	strict-fail	unknown PTX local symbol shared_mem
-zluda/memory/shared_unify_extern.ptx	unsupported	strict-fail	unsupported PTX module directive .func
-zluda/memory/shared_unify_local.ptx	unsupported	strict-fail	unsupported PTX module directive .func
-zluda/memory/shared_variable.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg .u64 %in_addr
+zluda/memory/shared_unify_extern.ptx	error	strict-fail	undefined PTX register shared_mod on an incoming path
+zluda/memory/shared_unify_local.ptx	unsupported	strict-fail	unsupported PTX instruction: call ( out ) , add , ( %__c1_temp2 )
+zluda/memory/shared_variable.ptx	error	strict-fail	undefined PTX register shared_mem1 on an incoming path
 zluda/memory/spirv_build__global_extern_array.ptx	unsupported	strict-fail	PTX module contains no supported .entry kernels
-zluda/memory/spirv_build__param_func_array_0.ptx	error	strict-fail	unexpected end of PTX
+zluda/memory/spirv_build__param_func_array_0.ptx	unsupported	strict-fail	PTX module contains no supported .entry kernels
 zluda/memory/stateful_ld_st_ntid.ptx	error	strict-fail	expected Address(Global) for %in_addr, got B64
 zluda/memory/stateful_ld_st_ntid_chain.ptx	pass	strict-fail	
 zluda/memory/stateful_ld_st_ntid_sub.ptx	pass	strict-fail	
@@ -565,17 +565,17 @@ zluda/memory/stateful_neg_offset.ptx	unsupported	strict-fail	adding two PTX addr
 zluda/memory/test___Z9vectorAddPKfS0_Pfi.ptx	error	strict-fail	unexpected slash in PTX
 zluda/memory/test__vectorAdd_11.ptx	pass	strict-pass	
 zluda/memory/test__vectorAdd_kernel64.ptx	error	strict-fail	unexpected slash in PTX
-zluda/memory/vector.ptx	unsupported	strict-fail	unsupported PTX module directive .func
+zluda/memory/vector.ptx	unsupported	strict-fail	unsupported PTX register type .v2
 zluda/memory/vector4.ptx	unsupported	strict-fail	unsupported PTX register type .v4
 zluda/memory/vector8.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u32 { dst0 , dst1 , dst2 , dst3 , dst4 , dst5 , dst6 , dst7 } , [ %in_addr ]
 zluda/memory/vector8_extract.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u8 { temp0 , temp1 , temp2 , temp3 , temp4 , temp5 , temp6 , temp7 } , [ %in_addr ]
 zluda/memory/vector_extract.ptx	unsupported	strict-fail	unsupported PTX register type .v4.u16
 zluda/memory/vector_operand.ptx	pass	strict-fail	
-zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32.ptx	error	strict-fail	expected ;, got ,
-zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32_2x.ptx	error	strict-fail	expected ;, got ,
-zluda/mma/mma_m16n8k16_f32_f16_f16_f32.ptx	error	strict-fail	expected ;, got ,
-zluda/mma/mma_m16n8k32_s32_s8_s8_s32.ptx	unsupported	strict-fail	unsupported PTX module directive .func
-zluda/mma/mma_m16n8k32_s32_s8_s8_s32_interleave.ptx	unsupported	strict-fail	unsupported PTX module directive .func
+zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.bf16x2.f32 %a0a1 , in0 , in1
+zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32_2x.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.bf16x2.f32 %a0a1 , in0 , in1
+zluda/mma/mma_m16n8k16_f32_f16_f16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: cvt.rn.f16x2.f32 %a0a1 , in0 , in1
+zluda/mma/mma_m16n8k32_s32_s8_s8_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
+zluda/mma/mma_m16n8k32_s32_s8_s8_s32_interleave.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
 zluda/shfl/shfl_sync_bfly_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_bfly_dynamic_delta_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_down_b32_pred.ptx	pass	strict-fail	
@@ -585,39 +585,39 @@ zluda/shfl/shfl_sync_idx_dynamic_delta_b32_pred.ptx	pass	strict-fail
 zluda/shfl/shfl_sync_mode_b32.ptx	error	strict-fail	only full-warp shfl.sync.bfly.b32 clamp 0x1f is supported
 zluda/shfl/shfl_sync_up_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_up_dynamic_delta_b32_pred.ptx	pass	strict-fail	
-zluda/tex/test_ptx__tex_read_1d_float.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_1d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_1d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_1d_float_texobj.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_1d_int.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_1d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_1d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_1d_int_texobj.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_2d_float.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_2d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_2d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_2d_float_texobj.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_2d_int.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_2d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_2d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_2d_int_texobj.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_3d_float.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_3d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_3d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_3d_float_texobj.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_3d_int.ptx	error	strict-fail	expected ;, got ,
-zluda/tex/test_ptx__tex_read_3d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_3d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX parameter type .s32
-zluda/tex/test_ptx__tex_read_3d_int_texobj.ptx	error	strict-fail	expected ;, got ,
+zluda/tex/test_ptx__tex_read_1d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ tex , { %fx } ]
+zluda/tex/test_ptx__tex_read_1d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ tex , { %ix } ]
+zluda/tex/test_ptx__tex_read_1d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %ix } ]
+zluda/tex/test_ptx__tex_read_1d_float_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %fx } ]
+zluda/tex/test_ptx__tex_read_1d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ tex , { %fx } ]
+zluda/tex/test_ptx__tex_read_1d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ tex , { %ix } ]
+zluda/tex/test_ptx__tex_read_1d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %ix } ]
+zluda/tex/test_ptx__tex_read_1d_int_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %fx } ]
+zluda/tex/test_ptx__tex_read_2d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ tex , { %fx , %fy } ]
+zluda/tex/test_ptx__tex_read_2d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ tex , { %ix , %iy } ]
+zluda/tex/test_ptx__tex_read_2d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %ix , %iy } ]
+zluda/tex/test_ptx__tex_read_2d_float_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %fx , %fy } ]
+zluda/tex/test_ptx__tex_read_2d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ tex , { %fx , %fy } ]
+zluda/tex/test_ptx__tex_read_2d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ tex , { %ix , %iy } ]
+zluda/tex/test_ptx__tex_read_2d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %ix , %iy } ]
+zluda/tex/test_ptx__tex_read_2d_int_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %fx , %fy } ]
+zluda/tex/test_ptx__tex_read_3d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ tex , { %fx , %fy , %fz , %fz } ]
+zluda/tex/test_ptx__tex_read_3d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ tex , { %ix , %iy , %iz , %iz } ]
+zluda/tex/test_ptx__tex_read_3d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %ix , %iy , %iz , %iz } ]
+zluda/tex/test_ptx__tex_read_3d_float_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %fx , %fy , %fz , %fz } ]
+zluda/tex/test_ptx__tex_read_3d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ tex , { %fx , %fy , %fz , %fz } ]
+zluda/tex/test_ptx__tex_read_3d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ tex , { %ix , %iy , %iz , %iz } ]
+zluda/tex/test_ptx__tex_read_3d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %ix , %iy , %iz , %iz } ]
+zluda/tex/test_ptx__tex_read_3d_int_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %fx , %fy , %fz , %fz } ]
 zluda/vote_match_redux/activemask.ptx	pass	strict-fail	
-zluda/vote_match_redux/lanemask_lt.ptx	error	strict-fail	undefined PTX register %lanemask_lt on an incoming path
+zluda/vote_match_redux/lanemask_lt.ptx	pass	strict-fail	
 zluda/vote_match_redux/match_sync.ptx	unsupported	strict-fail	unsupported PTX instruction: match.any.sync.b32 %result , %source , 0xFFFFFFFF
 zluda/vote_match_redux/redux_sync_add_u32_partial.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.add.u32 %result , %tid , 0x55555555
 zluda/vote_match_redux/redux_sync_op_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.min.s32 %min_out , %in , 0xFFFFFFFF
 zluda/vote_match_redux/redux_sync_op_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: redux.sync.add.u32 %add_out , %tid , 0xFFFFFFFF
-zluda/vote_match_redux/vote_all.ptx	unsupported	strict-fail	unsupported PTX instruction: mov.pred %result_pred , 0
-zluda/vote_match_redux/vote_all_sub.ptx	unsupported	strict-fail	unsupported PTX instruction: mov.pred %result_pred , 0
+zluda/vote_match_redux/vote_all.ptx	pass	strict-fail	
+zluda/vote_match_redux/vote_all_sub.ptx	pass	strict-fail	
 zluda/vote_match_redux/vote_any.ptx	unsupported	strict-fail	unsupported PTX instruction: vote.sync.any.pred %result_pred , ! %tid_is_greater_equal_32 , 0xFFFFFFFF
-zluda/vote_match_redux/vote_any_nosync.ptx	unsupported	strict-fail	unsupported PTX instruction: vote.any.pred %result_pred , ! %tid_is_greater_equal_32
-zluda/vote_match_redux/vote_ballot.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg .u64 %out_offset
-zluda/vote_match_redux/vote_ballot_nosync.ptx	unsupported	strict-fail	unsupported PTX instruction: vote.ballot.b32 %result , %tid_is_greater_equal_34
+zluda/vote_match_redux/vote_any_nosync.ptx	unsupported	strict-fail	unsupported PTX instruction: vote.sync.any.pred %result_pred , ! %tid_is_greater_equal_32 , 0xffffffff
+zluda/vote_match_redux/vote_ballot.ptx	pass	strict-fail	
+zluda/vote_match_redux/vote_ballot_nosync.ptx	pass	strict-fail	
