@@ -5,7 +5,7 @@ set BIN=%~1
 set SHIM=%~2
 set C13=%~3
 set C12=%~4
-mkdir C:\Users\USER\cfi-work\gpu.lock 2>nul || (echo GPU LOCK HELD & exit /b 2)
+mkdir %USERPROFILE%\cfi-work\gpu.lock 2>nul || (echo GPU LOCK HELD & exit /b 2)
 set RD=%BIN%\run13
 mkdir "%RD%" 2>nul
 copy /y "%SHIM%\nvcuda.dll" "%RD%\" >nul
@@ -20,7 +20,7 @@ copy /y "%SHIM%\cublas64_12.dll" "%RD2%\cublasLt64_12.dll" >nul
 for %%F in (cublas_gemm cublaslt_bias) do copy /y "%BIN%\%%F.exe" "%RD2%\" >nul
 for %%F in (basic_kernels atomics_warp streams_graphs) do call :one "%RD%" %%F
 for %%F in (cublas_gemm cublaslt_bias) do call :one "%RD2%" %%F
-rmdir C:\Users\USER\cfi-work\gpu.lock
+rmdir %USERPROFILE%\cfi-work\gpu.lock
 exit /b 0
 :one
 echo ===== %2
