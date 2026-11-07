@@ -184,3 +184,44 @@ fn constant_space_is_ordinary_memory() {
     );
     assert_eq!(out, [41, 42]);
 }
+
+#[test]
+fn counted_barriers_and_bar_red_translate_and_validate() {
+    lower(&kernel(
+        "",
+        r#"    setp.eq.u32 %p1, %r0, 0;
+    bar.sync 1, 128;
+    bar.arrive 2, 64;
+    bar.sync 2, 64;
+    bar.red.popc.u32 %r2, 0, %p1;
+    bar.red.and.pred %p2, 0, %p1;
+    bar.red.or.pred %p3, 0, !%p1;
+    barrier.cta.sync 3, %r0;
+    bar.warp.sync 0xffffffff;
+    selp.u32 %r3, 1, 0, %p2;
+    selp.u32 %r4, 1, 0, %p3;
+    st.global.u32 [%rd15], %r2;
+    st.global.u32 [%rd15+4], %r3;
+    st.global.u32 [%rd15+8], %r4;"#,
+    ));
+}
+
+#[test]
+fn bar_red_single_thread_semantics() {
+    // One interpreted thread: popc counts 1, and-of-true is true, or-of-false is false.
+    let out = eval(
+        "",
+        r#"    mov.u32 %r1, 1;
+    setp.eq.u32 %p1, %r1, 1;
+    bar.red.popc.u32 %r2, 0, %p1;
+    bar.red.and.pred %p2, 0, %p1;
+    bar.red.or.pred %p3, 0, !%p1;
+    selp.u32 %r3, 1, 0, %p2;
+    selp.u32 %r4, 1, 0, %p3;
+    st.global.u32 [%rd15], %r2;
+    st.global.u32 [%rd15+4], %r3;
+    st.global.u32 [%rd15+8], %r4;"#,
+        3,
+    );
+    assert_eq!(out, [1, 1, 0]);
+}

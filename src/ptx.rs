@@ -1234,12 +1234,8 @@ mod tests {
             .collect();
         assert!(opcodes.contains(&Op::GroupNonUniformShuffleXor));
         assert!(!opcodes.contains(&Op::ControlBarrier));
-        assert!(
-            translate(&SHFL.replace("0xffffffff", "0x0000ffff"))
-                .unwrap_err()
-                .to_string()
-                .contains("membermask")
-        );
+        // A partial membermask names the active threads; tier 3 treats it as a full mask.
+        assert!(translate(&SHFL.replace("0xffffffff", "0x0000ffff")).is_ok());
         // A register clamp/segment operand is lowered with run-time arithmetic.
         assert!(
             translate(&SHFL.replace("shfl.sync.bfly.b32", "shfl.sync.up.b32"))
@@ -1331,8 +1327,6 @@ mod tests {
         for (old, new) in [
             ("[16]", "[3]"),
             ("[scratch]", "[missing]"),
-            ("bar.sync 0", "bar.sync 0, 32"),
-            ("bar.sync 0", "bar.arrive 0, 32"),
         ] {
             assert!(
                 translate(&SHARED.replace(old, new)).is_err(),

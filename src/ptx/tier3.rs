@@ -18,8 +18,10 @@ pub(super) struct State {
     xp: u32,
     /// The condition-code carry flag `CC.CF` is used by the entry.
     cc: bool,
-    /// Named-barrier lowering needs shared counters.
-    pub(super) named_barriers: bool,
+    /// Named-barrier and `bar.red` lowering need shared counters.
+    named_barriers: bool,
+    reductions: bool,
+    labels: u32,
 }
 
 impl State {
@@ -38,6 +40,38 @@ impl State {
         if self.cc {
             decls.push(".reg .b32 %__cc ;".into());
             decls.push("mov.b32 %__cc , 0 ;".into());
+        }
+        if self.named_barriers || self.reductions {
+            // 16 named barriers of (arrival count, generation) plus one reduction word.
+            decls.push(".shared .align 4 .b8 __t3_bar [ 136 ] ;".into());
+            decls.push(".reg .b32 %__bl ;".into());
+            decls.push(".reg .b32 %__bt ;".into());
+            decls.push(".reg .b32 %__bs ;".into());
+            decls.push(".reg .b32 %__bz ;".into());
+            decls.push(".reg .b32 %__bone ;".into());
+            decls.push("mov.b32 %__bz , 0 ;".into());
+            decls.push("mov.b32 %__bone , 1 ;".into());
+            decls.push("mov.u32 %__bs , __t3_bar ;".into());
+            decls.push(".reg .pred %__bp ;".into());
+            // Zero the barrier words once: thread i of the first 34 clears word i.
+            for line in [
+                "mov.u32 %__bt , %ntid.y ;",
+                "mov.u32 %__bl , %tid.z ;",
+                "mul.lo.u32 %__bt , %__bt , %__bl ;",
+                "mov.u32 %__bl , %tid.y ;",
+                "add.u32 %__bt , %__bt , %__bl ;",
+                "mov.u32 %__bl , %ntid.x ;",
+                "mul.lo.u32 %__bt , %__bt , %__bl ;",
+                "mov.u32 %__bl , %tid.x ;",
+                "add.u32 %__bt , %__bt , %__bl ;",
+            ] {
+                decls.push(line.into());
+            }
+            for i in 0..34 {
+                decls.push(format!("setp.eq.u32 %__bp , %__bt , {i} ;"));
+                decls.push(format!("@ %__bp st.shared.u32 [%__bs+{}] , %__bz ;", 4 * i));
+            }
+            decls.push("bar.sync 0 ;".into());
         }
         *self = State::default();
         decls
@@ -135,6 +169,7 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             let bits = if inst.op.ends_with("64") { 64 } else { 32 };
             Some(vec![render(&inst.guard, &format!("mov.b{bits}"), &[inst.operand(0).to_owned(), "49152".into()])])
         }
+        "bar" | "barrier" => barrier(ctx, inst),
         "shfl" => shfl_masks(ctx, inst),
         "vote" => vote_masks(ctx, inst),
         "cvt" => cvt_misc(ctx, inst),
@@ -704,4 +739,125 @@ fn selp_literal(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
     let _ = st;
     let src = if pick == 1 { inst.operand(1) } else { inst.operand(2) };
     Some(vec![render(&inst.guard, &format!("mov.b{bits}"), &[inst.operand(0).to_owned(), src.to_owned()])])
+}
+
+// ---- barriers ------------------------------------------------------------
+
+/// Named barriers with thread counts, `bar.arrive` and `bar.red.*`.
+///
+/// Counted barriers are emulated with shared-memory arrival counters and a
+/// generation word per barrier id (polled with atomics so the loop cannot be
+/// hoisted). Plain full-CTA barriers stay with the legacy rewrite.
+fn barrier(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').filter(|p| *p != "cta" && *p != "aligned").collect();
+    let kind = *parts.get(1)?;
+    match kind {
+        "warp" => return Some(vec![render(&inst.guard, "membar.gl", &[])]),
+        "sync" => {
+            let count = match inst.operands.len() {
+                1 => return None,
+                2 => inst.operand(1),
+                _ => return None,
+            };
+            if super::immediate(count).is_some_and(|c| Some(c as u32) == ctx.block_threads) {
+                return None;
+            }
+            Some(counted(ctx, inst, inst.operand(0), count, true))
+        }
+        "arrive" if inst.operands.len() == 2 => Some(counted(ctx, inst, inst.operand(0), inst.operand(1), false)),
+        "red" => reduction(ctx, inst, &parts),
+        _ => None,
+    }
+}
+
+fn counted(ctx: &mut Ctx, inst: &Inst, id: &str, count: &str, wait: bool) -> Vec<String> {
+    ctx.t3.named_barriers = true;
+    ctx.t3.labels += 1;
+    let label = format!("$L__t3_wait{}", ctx.t3.labels);
+    let base = match super::immediate(id) {
+        Some(n) if n < 16 => 8 * n,
+        _ => 0,
+    };
+    // Register ids select the slot through a computed shared address.
+    let mut b = B::new(&mut ctx.t3);
+    let (cnt, gword) = if super::immediate(id).is_some() {
+        (format!("[%__bs+{base}]"), format!("[%__bs+{}]", base + 4))
+    } else {
+        let a = b.t32();
+        b.p(format!("and.b32 {a} , {id} , 15 ;"));
+        b.p(format!("shl.b32 {a} , {a} , 3 ;"));
+        b.p(format!("add.u32 {a} , {a} , %__bs ;"));
+        (format!("[{a}]"), format!("[{a}+4]"))
+    };
+    let (g, old, junk, last, pw, nm1, c) = (b.t32(), b.t32(), b.t32(), b.tp(), b.tp(), b.t32(), b.reg(count, 32));
+    b.p("membar.gl ;");
+    if wait {
+        b.p(format!("atom.shared.add.u32 {g} , {gword} , %__bz ;"));
+    }
+    b.p(format!("atom.shared.add.u32 {old} , {cnt} , %__bone ;"));
+    b.p(format!("sub.u32 {nm1} , {c} , 1 ;"));
+    b.p(format!("setp.eq.u32 {last} , {old} , {nm1} ;"));
+    b.p(format!("@ {last} atom.shared.exch.b32 {junk} , {cnt} , %__bz ;"));
+    b.p(format!("@ {last} atom.shared.add.u32 {junk} , {gword} , %__bone ;"));
+    if wait {
+        b.p(format!("{label} :"));
+        b.p(format!("atom.shared.add.u32 {old} , {gword} , %__bz ;"));
+        b.p(format!("setp.eq.u32 {pw} , {old} , {g} ;"));
+        b.p(format!("@ {pw} bra {label} ;"));
+        b.p("membar.gl ;");
+    }
+    let _ = inst;
+    b.finish()
+}
+
+/// `bar.red.{popc,and,or}` over the whole CTA through one shared counter.
+fn reduction(ctx: &mut Ctx, inst: &Inst, parts: &[&str]) -> Option<Vec<String>> {
+    let op = *parts.get(2)?;
+    if !matches!(op, "popc" | "and" | "or") || inst.operands.len() != 3 {
+        return None;
+    }
+    // An id other than 0 is fine for a full barrier; a count is not supported here.
+    let pred = inst.operand(2);
+    let dst = inst.operand(0);
+    ctx.t3.reductions = true;
+    let word = "[%__bs+128]";
+    let mut b = B::new(&mut ctx.t3);
+    let (neg, pname) = match pred.strip_prefix('!') {
+        Some(n) => (true, n.trim().to_owned()),
+        None => (false, pred.to_owned()),
+    };
+    let (bit, junk, total, pz) = (b.t32(), b.t32(), b.t32(), b.tp());
+    // Leader zeroes the word between two barriers so back-to-back reductions cannot race.
+    b.p("bar.sync 0 ;");
+    for (reg, name) in [("%tid.x", "x"), ("%tid.y", "y"), ("%tid.z", "z")] {
+        let t = b.t32();
+        b.p(format!("mov.u32 {t} , {reg} ;"));
+        let _ = name;
+        b.p(format!("setp.eq.u32 {pz} , {t} , 0 ;"));
+        if name == "x" {
+            b.p(format!("selp.b32 {total} , 1 , 0 , {pz} ;"));
+        } else {
+            b.p(format!("selp.b32 {t} , 1 , 0 , {pz} ;"));
+            b.p(format!("and.b32 {total} , {total} , {t} ;"));
+        }
+    }
+    b.p(format!("setp.ne.u32 {pz} , {total} , 0 ;"));
+    b.p(format!("@ {pz} st.shared.u32 {word} , %__bz ;"));
+    b.p("bar.sync 0 ;");
+    // and counts the false predicates; or and popc count the true ones.
+    let count_true = op != "and" && !neg || op == "and" && neg;
+    if count_true {
+        b.p(format!("selp.b32 {bit} , 1 , 0 , {pname} ;"));
+    } else {
+        b.p(format!("selp.b32 {bit} , 0 , 1 , {pname} ;"));
+    }
+    b.p(format!("atom.shared.add.u32 {junk} , {word} , {bit} ;"));
+    b.p("bar.sync 0 ;");
+    b.p(format!("ld.shared.u32 {total} , {word} ;"));
+    match op {
+        "popc" => b.p(render(&inst.guard, "mov.b32", &[dst.to_owned(), total])),
+        "or" => b.p(render(&inst.guard, "setp.ne.u32", &[dst.to_owned(), total, "0".into()])),
+        _ => b.p(render(&inst.guard, "setp.eq.u32", &[dst.to_owned(), total, "0".into()])),
+    }
+    Some(b.finish())
 }

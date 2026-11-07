@@ -75,12 +75,12 @@ handwritten/atomics/red_global_max_u32_26.ptx	pass	strict-pass
 handwritten/atomics/red_global_or_b32_29.ptx	pass	strict-pass	
 handwritten/atomics/red_release_gpu_global_add_u32_30.ptx	pass	strict-pass	
 handwritten/atomics/red_shared_add_u32_28.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/barrier/bar_arrive.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.arrive 1 , 128
-handwritten/barrier/bar_red_and_pred.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.red.and.pred %p2 , 0 , %p1
-handwritten/barrier/bar_red_popc.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.red.popc.u32 %r1 , 0 , %p1
+handwritten/barrier/bar_arrive.ptx	pass	strict-pass	
+handwritten/barrier/bar_red_and_pred.ptx	pass	strict-pass	
+handwritten/barrier/bar_red_popc.ptx	pass	strict-pass	
 handwritten/barrier/bar_sync_0.ptx	pass	strict-pass	
-handwritten/barrier/bar_sync_count.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.sync 1 , 128
-handwritten/barrier/bar_sync_reg.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.sync %r1 , %r2
+handwritten/barrier/bar_sync_count.ptx	pass	strict-pass	
+handwritten/barrier/bar_sync_reg.ptx	pass	strict-pass	
 handwritten/barrier/bar_warp_sync.ptx	pass	strict-pass	
 handwritten/barrier/barrier_cluster_arrive_wait.ptx	pass	strict-pass	
 handwritten/barrier/barrier_sync.ptx	pass	strict-pass	
@@ -396,7 +396,7 @@ zluda/atomics/atom_add_float.ptx	pass	strict-fail
 zluda/atomics/atom_cas.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.cas.b32 %temp1 , [ %in_addr+4 ] , %temp1 , 100
 zluda/atomics/atom_inc.ptx	pass	strict-fail	
 zluda/atomics/atomics_128.ptx	pass	strict-fail	
-zluda/barrier/bar_red_and_pred.ptx	unsupported	strict-fail	unsupported PTX instruction: bar.red.and.pred %pred , 1 , %cond
+zluda/barrier/bar_red_and_pred.ptx	pass	strict-fail	
 zluda/barrier/membar.ptx	pass	strict-fail	
 zluda/barrier/spirv_build__bar_sync.ptx	pass	strict-fail	
 zluda/bitmanip/bfe.ptx	pass	strict-fail	
