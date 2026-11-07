@@ -39,7 +39,8 @@ PTX (never SASS). Verified by scanning the wheels' `.nv_fatb`:
 |---|---|
 | `CUDA_FOR_INTEL_TRACE=1` | trace driver entry points to stderr; `CUDA_FOR_INTEL_TRACE_ENTER=1` also logs entries; access violations in loaded modules are logged with module+offset |
 | `CFI_PTX_DUMP_DIR=dir` | write `raw_<hash>.ptx` (module PTX as supplied), `module_<handle>.ptx` (prepared), failing PTX, and per-kernel `.spv` |
-| `CFI_REPORT_CC=major.minor` | compute capability reported to applications (default 7.5); see docs/torch-arch-guard-stubs.md. `3.7` avoids the memory-efficient SDPA stub kernels and makes default attention correct |
+| `CFI_REPORT_CC=major.minor` | compute capability reported to applications. Default: chosen from the loaded torch build (`torch_cuda.dll` + `cudart64_110.dll` -> 3.7, + `cudart64_12.dll` -> 12.0), 7.5 for every other process. Explicit value always wins; see docs/torch-arch-guard-stubs.md |
+| `CFI_XMX=0/1/2` | native XMX (DPAS) fp16/bf16 GEMM: unset or 1 = on for qualifying calls (min(m,n) >= 128 and m*n*k >= 2^24; `CFI_XMX_MIN_DIM`, `CFI_XMX_MIN_WORK`), 0 = off, 2 = force for every qualifying call |
 | `CFI_ALLOW_EMPTY_KERNELS=1` | load architecture-guard stub kernels instead of failing with CUDA_ERROR_NO_BINARY_FOR_GPU (209) |
 | `CFI_NO_ALLOC_TOUCH=1` | skip the zero-fill of fresh `cuMemAlloc` buffers (without it a kernel's first touch of an untouched Level Zero allocation loses the device) |
 | `CFI_CUBLAS_TRACE=1` | trace cublasLt plan failures |
@@ -72,3 +73,21 @@ non-blocking copies, memory_stats.
 - cuDNN/NCCL/cuFFT/cuSOLVER paths are not available; first use of a very large module takes tens of
   seconds (see the translation cache).
 - Shutdown logs `cuLibraryUnload 999` after Level Zero teardown (harmless).
+
+## Expected speeds (Arc B390, torch 2.13 cuda128 and 2.2.2 cu118)
+
+| operation | XMX off | XMX on (default) |
+|---|---|---|
+| fp16 matmul 2048^3 | 14.7 ms (1170 GFLOP/s) | 4.8 ms (3560 GFLOP/s) |
+| fp16 Linear fwd+bwd, batch 64, hidden 1024 | 1.7-2.0 ms | 1.4-1.5 ms |
+
+The first use of a large ATen module translates its kernels (a cold GPT-style 4-layer
+encoder forward+backward took about 210 s); the on-disk translation cache makes warm runs
+about 16 s. Use `CFI_NO_CACHE=1` to disable the cache.
+
+## Smoke tests that pass (cuda128, auto cc 12.0, cudnn off, equal to CPU at the same seed)
+
+* 4-layer causal TransformerEncoder (d=64, 4 heads): forward rel err 2.4e-07, all 48 grads <= 5.2e-07.
+* ResNet-18 on random 32x32 images: loss identical (2.35571); fc grad rel err 3.3e-06.
+* MLP, 50 Adam steps (foreach): worst relative loss difference 5e-07.
+* Linear/transformer sets with XMX on and off give identical results.
