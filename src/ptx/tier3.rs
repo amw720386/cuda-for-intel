@@ -176,7 +176,25 @@ fn with_op(inst: &Inst, op: String) -> Inst {
     Inst { guard: inst.guard.clone(), op, operands: inst.operands.clone() }
 }
 
+/// `0xffU` / `12u` literals lose their suffix.
+fn strip_suffix_literal(operand: &str) -> Option<String> {
+    let t = operand.trim();
+    let body = t.strip_suffix(['U', 'u'])?;
+    let digits = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")).unwrap_or(body);
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()) && body.starts_with(|c: char| c.is_ascii_digit()))
+        .then(|| body.to_owned())
+}
+
 pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    if inst.operands.iter().any(|o| strip_suffix_literal(o).is_some()) {
+        let mut copy = with_op(inst, inst.op.clone());
+        for o in &mut copy.operands {
+            if let Some(clean) = strip_suffix_literal(o) {
+                *o = clean;
+            }
+        }
+        return Some(again(ctx, &copy));
+    }
     if inst.operands.iter().any(|o| o == "WARP_SZ" || o == "%WARP_SZ") {
         let mut copy = with_op(inst, inst.op.clone());
         for o in &mut copy.operands {
@@ -211,6 +229,8 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             Some(vec![render(&inst.guard, &format!("mov.b{bits}"), &[inst.operand(0).to_owned(), "49152".into()])])
         }
         "bar" | "barrier" => barrier(ctx, inst),
+        "stmatrix" => stmatrix(ctx, inst),
+        "atom" | "red" => atomic_forms(ctx, inst),
         "shfl" => shfl_masks(ctx, inst),
         "vote" => vote_masks(ctx, inst),
         "cvt" => cvt_misc(ctx, inst),
@@ -359,6 +379,17 @@ fn carry(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
     st.cc = true;
     let mut b = B::new(st);
     let dst = inst.operand(0).to_owned();
+    let inst = &{
+        let mut copy = with_op(inst, inst.op.clone());
+        if bits == 32 {
+            for o in copy.operands.iter_mut().skip(1) {
+                if let Some(v) = super::immediate(o) {
+                    *o = (v as u32).to_string();
+                }
+            }
+        }
+        copy
+    };
     let (a, bb) = match mul {
         Some(kind) => {
             let m = b.tn(bits);
@@ -711,6 +742,18 @@ fn setp_pair(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
         return None;
     }
     let dst = inst.operand(0);
+    if !dst.contains('|') {
+        // `setp.cmp.and.T p, a, b, !c`: the negated combine predicate needs its own register.
+        let c = inst.operands.get(3)?;
+        let name = c.strip_prefix('!')?.trim().to_owned();
+        let mut b = B::new(st);
+        let t = b.tp();
+        b.p(format!("not.pred {t} , {name} ;"));
+        let mut operands = inst.operands.clone();
+        operands[3] = t;
+        b.p(render(&inst.guard, &inst.op, &operands));
+        return Some(b.finish());
+    }
     let (p, q) = dst.split_once('|')?;
     let (p, q) = (p.trim(), q.trim());
     let mut b = B::new(st);
@@ -1061,4 +1104,136 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     let copy = Inst { guard: inst.guard.clone(), op: inst.op.clone(), operands };
     lines.extend(again(ctx, &copy));
     Some(lines)
+}
+
+// ---- source-level clean-up ----------------------------------------------------
+
+/// Drops debug-only directives (`.file`, `.loc`, `.section` blocks) that carry
+/// string literals or data the tokenizer has no use for.
+pub(super) fn strip_debug(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains(".file") && !source.contains(".loc") && !source.contains(".section") {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut skipping: Option<i32> = None;
+    for line in source.lines() {
+        let code = line.split("//").next().unwrap_or("");
+        let trimmed = code.trim_start();
+        if let Some(depth) = skipping.as_mut() {
+            *depth += code.matches('{').count() as i32 - code.matches('}').count() as i32;
+            if *depth <= 0 {
+                skipping = None;
+            }
+            continue;
+        }
+        if trimmed.starts_with(".file") || trimmed.starts_with(".loc") && !trimmed.starts_with(".local") {
+            continue;
+        }
+        if trimmed.starts_with(".section") {
+            let depth = code.matches('{').count() as i32 - code.matches('}').count() as i32;
+            if depth > 0 || !code.contains('{') && !code.contains(';') {
+                skipping = Some(depth);
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Texture, surface and sampler instructions need bindless image objects, which
+/// the OpenCL-environment SPIR-V target does not provide. Fail with a clear message.
+pub(super) fn check_unsupported(statements: &[super::Stmt]) -> Result<(), super::Error> {
+    for stmt in statements {
+        let first = stmt.first().map_or("", String::as_str);
+        let op = if first == "@" { stmt.get(2).or(stmt.get(3)).map_or("", String::as_str) } else { first };
+        let family = op.split('.').next().unwrap_or("");
+        if matches!(family, "tex" | "tld4" | "txq" | "suld" | "sust" | "sured" | "suq")
+            || matches!(first, ".texref" | ".surfref" | ".samplerref")
+            || stmt.iter().any(|t| matches!(t.as_str(), ".texref" | ".surfref" | ".samplerref"))
+        {
+            return Err(super::Error::new(format!(
+                "unsupported PTX instruction: {} (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)",
+                stmt.join(" ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+// ---- stmatrix --------------------------------------------------------------------
+
+/// `stmatrix.sync.aligned.m8n8.xN[.trans].shared.b16 [addr], {r...}`: lane `8i+j` supplies the
+/// address of row `j` of matrix `i`; each thread stores its 32-bit fragment to that row
+/// (or, transposed, two 16-bit halves to two rows).
+fn stmatrix(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    if parts.get(1) != Some(&"sync") || inst.operands.len() != 2 {
+        return None;
+    }
+    let count: usize = parts.iter().find_map(|p| p.strip_prefix('x')?.parse().ok())?;
+    let trans = parts.contains(&"trans");
+    let regs: Vec<String> = inst.operand(1).trim().trim_start_matches('{').trim_end_matches('}').split(',').map(|r| r.trim().to_owned()).filter(|r| !r.is_empty()).collect();
+    if regs.len() != count {
+        return None;
+    }
+    let addr = inst.operand(0).trim().trim_start_matches('[').trim_end_matches(']').trim().to_owned();
+    // Only 32-bit shared offsets can travel through a shuffle.
+    let (base, off) = match addr.split_once('+') {
+        Some((b, o)) => (b.trim().to_owned(), super::immediate(o)?),
+        None => (addr.clone(), 0),
+    };
+    if ctx.width_of(&base) == Some(64) {
+        return None;
+    }
+    let mut b = B::new(&mut ctx.t3);
+    let ctl = b.t32();
+    b.p(format!("mov.b32 {ctl} , 31 ;"));
+    let (lane, row, tl, src, from, my) = (b.t32(), b.t32(), b.t32(), b.t32(), b.t32(), b.t32());
+    b.p(format!("mov.u32 {lane} , %laneid ;"));
+    b.p(format!("shr.u32 {row} , {lane} , 2 ;"));
+    b.p(format!("and.b32 {tl} , {lane} , 3 ;"));
+    b.p(format!("add.u32 {my} , {base} , {off} ;"));
+    for (i, reg) in regs.iter().enumerate() {
+        if !trans {
+            b.p(format!("add.u32 {from} , {row} , {} ;", 8 * i));
+            b.p(format!("shfl.sync.idx.b32 {src} , {my} , {from} , {ctl} , 0xffffffff ;"));
+            let at = b.t32();
+            b.p(format!("shl.b32 {at} , {tl} , 2 ;"));
+            b.p(format!("add.u32 {at} , {src} , {at} ;"));
+            b.p(render(&inst.guard, "st.shared.u32", &[format!("[{at}]"), reg.clone()]));
+        } else {
+            for j in 0..2 {
+                // Column 2*tl+j of this thread's row becomes row 2*tl+j of the stored matrix.
+                b.p(format!("shl.b32 {from} , {tl} , 1 ;"));
+                b.p(format!("add.u32 {from} , {from} , {} ;", 8 * i + j));
+                b.p(format!("shfl.sync.idx.b32 {src} , {my} , {from} , {ctl} , 0xffffffff ;"));
+                let at = b.t32();
+                b.p(format!("shl.b32 {at} , {row} , 1 ;"));
+                b.p(format!("add.u32 {at} , {src} , {at} ;"));
+                let value = b.t32();
+                if j == 0 {
+                    b.p(format!("mov.b32 {value} , {reg} ;"));
+                } else {
+                    b.p(format!("shr.u32 {value} , {reg} , 16 ;"));
+                }
+                b.p(render(&inst.guard, "st.shared.u16", &[format!("[{at}]"), value]));
+            }
+        }
+    }
+    Some(b.finish())
+}
+
+/// Generic-space atomics are global; immediates in value positions move into registers.
+fn atomic_forms(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    let has_space = parts.iter().any(|p| matches!(*p, "global" | "shared") || p.starts_with("shared::") || p.starts_with("global::"));
+    if has_space {
+        return None;
+    }
+    let mut op = parts.clone();
+    op.insert(1, "global");
+    let copy = with_op(inst, op.join("."));
+    Some(again(ctx, &copy))
 }

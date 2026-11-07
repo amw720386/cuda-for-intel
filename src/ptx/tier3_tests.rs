@@ -1,6 +1,7 @@
 //! Tests for the tier-3 PTX lowering work (`tier3.rs` and friends). Executed on
 //! the SPIR-V interpreter from `coverage_tests` and validated with `spirv-val`.
-use super::coverage_tests::{interp, kernel, lower};
+use super::coverage_tests::{interp, kernel, kernel_with_shared, lower};
+use super::translate;
 
 fn eval(regs: &str, body: &str, words: usize) -> Vec<u32> {
     let module = lower(&kernel(regs, body));
@@ -264,4 +265,88 @@ fn shared_symbols_with_offsets_and_64_bit_accesses() {
     let mut machine = interp::Machine { params: vec![interp::GLOBAL, 0], ..Default::default() };
     interp::run(&module, &mut machine);
     assert_eq!([machine.read(interp::GLOBAL, 4), machine.read(interp::GLOBAL + 4, 4)], [7, 5]);
+}
+
+#[test]
+fn stmatrix_scatters_row_addresses() {
+    // Matrix 0 rows are 16 bytes apart in a 256-byte shared buffer; lane j supplies row j.
+    let regs = "    .reg .b32 %m<4>;";
+    let body = r#"    mov.u32 %r1, sb;
+    mov.u32 %r2, %laneid;
+    shl.b32 %r3, %r2, 4;
+    add.u32 %r3, %r3, %r1;
+    mov.u32 %m0, %r2;
+    mov.u32 %m1, %r2;
+    stmatrix.sync.aligned.m8n8.x2.shared.b16 [%r3], {%m0, %m1};
+    stmatrix.sync.aligned.m8n8.x1.trans.shared.b16 [%r3+128], {%m0};
+    bar.sync 0;
+    mov.u32 %r4, %tid.x;
+    ld.shared.u32 %r5, [%r3];
+    st.global.u32 [%rd15], %r5;"#;
+    lower(&kernel_with_shared(regs, ".shared .align 16 .b8 sb[512];", body));
+}
+
+#[test]
+fn debug_sections_and_texture_errors() {
+    let source = kernel("", "    st.global.u32 [%rd15], %r0;").replace(
+        ".address_size 64",
+        ".address_size 64\n.file 1 \"/tmp/a.cu\"\n.section .debug_abbrev\n{\n.b8 1, 17, 1\n}\n",
+    );
+    lower(&source);
+    let tex = kernel("    .reg .f32 %t<4>;", "    tex.1d.v4.f32.f32 {%t0, %t1, %t2, %t3}, [%rd15, {%f0}];");
+    let err = translate(&tex).unwrap_err().to_string();
+    assert!(err.contains("unsupported") && err.contains("bindless"), "{err}");
+}
+
+fn run_stmatrix(trans: bool) -> Vec<u32> {
+    let regs = "    .reg .b32 %m<4>;";
+    let body = format!(
+        r#"    mov.u32 %r1, sb;
+    mov.u32 %r2, %laneid;
+    shl.b32 %r3, %r2, 4;
+    add.u32 %r3, %r3, %r1;
+    shl.b32 %m0, %r2, 0;
+    add.u32 %r6, %r2, 100;
+    shl.b32 %r6, %r6, 16;
+    or.b32 %m0, %m0, %r6;
+    stmatrix.sync.aligned.m8n8.x1{}.shared.b16 [%r3], {{%m0}};
+    bar.sync 0;
+    shl.b32 %r4, %r2, 2;
+    add.u32 %r4, %r4, %r1;
+    ld.shared.u16 %r5, [%r4];
+    ld.shared.u16 %r7, [%r4+2];
+    mul.wide.u32 %rd1, %r2, 8;
+    add.s64 %rd2, %rd15, %rd1;
+    st.global.u32 [%rd2], %r5;
+    st.global.u32 [%rd2+4], %r7;"#,
+        if trans { ".trans" } else { "" }
+    );
+    let module = lower(&kernel_with_shared(regs, ".shared .align 16 .b8 sb[512];", &body));
+    let mut machine = interp::Machine { params: vec![interp::GLOBAL, 0], ..Default::default() };
+    interp::run_lanes(&module, &mut machine, 32);
+    (0..64).map(|i| machine.read(interp::GLOBAL + 4 * i, 4) as u32).collect()
+}
+
+#[test]
+fn stmatrix_places_fragments_like_hardware() {
+    // Rows are 16 bytes apart (8 halves per row of the 8x8 b16 matrix, stored densely at stride 8 halves).
+    let plain = run_stmatrix(false);
+    // Memory half index h = 8*row + col; thread L = 4*row + col/2 holds (L, L+100) for cols 2*(L%4)+{0,1}.
+    // Row addresses are 16 bytes apart but lanes read dense halves: row r starts at byte 16 r -> half 8 r.
+    for row in 0..8usize {
+        for col in 0..8usize {
+            let lane = 4 * row + col / 2;
+            let want = if col % 2 == 0 { lane as u32 } else { lane as u32 + 100 };
+            assert_eq!(plain[8 * row + col], want, "plain ({row},{col})");
+        }
+    }
+    let t = run_stmatrix(true);
+    for row in 0..8usize {
+        for col in 0..8usize {
+            // Stored matrix element (row, col) comes from the register element (col, row).
+            let lane = 4 * col + row / 2;
+            let want = if row % 2 == 0 { lane as u32 } else { lane as u32 + 100 };
+            assert_eq!(t[8 * row + col], want, "trans ({row},{col})");
+        }
+    }
 }

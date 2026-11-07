@@ -20,8 +20,10 @@ pub(super) type Stmt = Vec<String>;
 
 /// Entry point: returns canonical PTX text.
 pub(super) fn run(source: &str) -> Result<String, Error> {
-    let tokens = merge_addresses(merge_double_colons(parse::tokens(source)?));
+    let source = tier3::strip_debug(source);
+    let tokens = merge_addresses(merge_double_colons(parse::tokens(&source)?));
     let statements = split(tokens);
+    tier3::check_unsupported(&statements)?;
     let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
     let mut entry_locals = tier3::entry_locals(&statements).into_iter();
@@ -225,6 +227,10 @@ fn fix_entry_header(stmt: &[String]) -> String {
                 i += 2;
                 continue;
             }
+        }
+        if token == ".noreturn" {
+            i += 1;
+            continue;
         }
         out.push(token.to_owned());
         i += 1;
