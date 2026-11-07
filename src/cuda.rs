@@ -1149,7 +1149,8 @@ pub unsafe extern "system" fn cuLaunchKernel(
     kernel_params: *mut Opaque,
     extra: *mut Opaque,
 ) -> CuResult {
-    trace::call("cuLaunchKernel", || {
+    let mut launched = String::new();
+    let result = trace::call("cuLaunchKernel", || {
         status(state(|state| {
             let mut function = function.addr();
             if state.libraries.contains_kernel(function) {
@@ -1244,6 +1245,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 )?;
                 return Ok(());
             }
+            launched = name.to_string_lossy().into_owned();
             context.streams.launch(
                 &runtime.api,
                 &context.backend,
@@ -1253,7 +1255,26 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 &args,
             )
         }))
-    })
+    });
+    // Debug aid (CUDA_FOR_INTEL_SYNC_LAUNCH=1): wait after every launch so a device fault is
+    // attributed to the kernel that caused it instead of the next stream synchronize.
+    if result == Success && !launched.is_empty() && sync_launch_enabled() {
+        let waited = streams::cuStreamSynchronize(stream);
+        if waited != Success {
+            eprintln!(
+                "CUDA for Intel: kernel {launched} grid={:?} block={:?} faulted: {waited:?}",
+                [grid_x, grid_y, grid_z],
+                [block_x, block_y, block_z]
+            );
+            return waited;
+        }
+    }
+    result
+}
+
+fn sync_launch_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_SYNC_LAUNCH").is_some_and(|v| v != "0"))
 }
 
 #[unsafe(no_mangle)]

@@ -208,3 +208,77 @@ fn hw_k_compute_batched_ptrs_broadcast_tables() {
 fn u64s(b: &[u8]) -> Vec<u64> {
     b.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect()
 }
+
+/// The ggml flow: k_compute_batched_ptrs writes the pointer tables on a stream and
+/// cublasGemmBatchedEx (async shim mode) reads them on the same stream with no sync
+/// in between, repeated back to back. A race or ordering bug shows up as a fault.
+#[test]
+#[ignore = "requires a built nvcuda.dll, cublas64_12.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn hw_gqa_ptr_table_then_gemm_back_to_back_on_a_stream() {
+    unsafe { std::env::set_var("CFI_CUBLAS_ASYNC", "1") };
+    with_watchdog(200, || {
+        let lib = unsafe { libloading::Library::new(std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("cublas64_12.dll")) }.unwrap();
+        let ptx = include_str!("../../examples/k_compute_batched_ptrs_dump.ptx");
+        let entry = ptx.lines().find_map(|l| l.strip_prefix(".entry ").map(|r| r.trim_end_matches('(').to_string())).unwrap();
+        let dll = library();
+        symbols!(dll;
+            cuInit(u32),
+            cuCtxCreate_v2(*mut Handle, u32, i32),
+            cuStreamCreate(*mut Handle, u32),
+            cuStreamSynchronize(Handle),
+            cuModuleLoadData(*mut Handle, *const c_void),
+            cuModuleGetFunction(*mut Handle, Handle, *const std::ffi::c_char),
+            cuMemAlloc_v2(*mut u64, usize),
+            cuMemcpyHtoD_v2(u64, *const c_void, usize),
+            cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+        );
+        ok!(cuInit(0));
+        let mut ctx = null_mut();
+        ok!(cuCtxCreate_v2(&mut ctx, 0, test_device()));
+        let mut stream = null_mut();
+        ok!(cuStreamCreate(&mut stream, 0));
+        let src = std::ffi::CString::new(ptx).unwrap();
+        let mut module = null_mut();
+        ok!(cuModuleLoadData(&mut module, src.as_ptr().cast()));
+        let name = std::ffi::CString::new(entry).unwrap();
+        let mut kernel = null_mut();
+        ok!(cuModuleGetFunction(&mut kernel, module, name.as_ptr()));
+        type SetStream = unsafe extern "system" fn(*mut c_void, Handle) -> i32;
+        let create: libloading::Symbol<Create> = unsafe { lib.get(b"cublasCreate_v2\0") }.unwrap();
+        let set_stream: libloading::Symbol<SetStream> = unsafe { lib.get(b"cublasSetStream_v2\0") }.unwrap();
+        let gemm: libloading::Symbol<Batched> = unsafe { lib.get(b"cublasGemmBatchedEx\0") }.unwrap();
+        let mut handle = null_mut();
+        assert_eq!(unsafe { create(&mut handle) }, 0);
+        assert_eq!(unsafe { set_stream(handle, stream) }, 0);
+        for (name, ta, m, n, k) in [("kq", 1, 512, 512, 64), ("kqv a", 0, 64, 32, 128), ("kqv b", 0, 64, 32, 512), ("kqv c", 0, 64, 512, 512)] {
+            let (ne12, r2) = (14i64, 7i64);
+            let (a_bytes, b_bytes, c_bytes) = ((m * k * 2) as i64, (k * n * 2) as i64, (m * n * 4) as i64);
+            let (mut da, mut db, mut dc, mut p_src, mut p_dst) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            ok!(cuMemAlloc_v2(&mut da, (2 * a_bytes) as usize));
+            ok!(cuMemAlloc_v2(&mut db, (ne12 * b_bytes) as usize));
+            ok!(cuMemAlloc_v2(&mut dc, (ne12 * c_bytes) as usize));
+            ok!(cuMemAlloc_v2(&mut p_src, 2 * ne12 as usize * 8));
+            ok!(cuMemAlloc_v2(&mut p_dst, ne12 as usize * 8));
+            let zeros = vec![0u8; (ne12 * b_bytes) as usize];
+            ok!(cuMemcpyHtoD_v2(db, zeros.as_ptr().cast(), zeros.len()));
+            ok!(cuMemcpyHtoD_v2(da, zeros.as_ptr().cast(), (2 * a_bytes) as usize));
+            for iter in 0..100 {
+                let mut vals: Vec<Vec<u8>> = [da, db, dc, p_src, p_dst].iter().map(|v| v.to_le_bytes().to_vec()).collect();
+                for v in [ne12, 1, ne12, a_bytes, 0, b_bytes, 0, c_bytes, 0, r2, 1] {
+                    vals.push(v.to_le_bytes().to_vec());
+                }
+                let mut params: Vec<*mut c_void> = vals.iter_mut().map(|v| v.as_mut_ptr().cast()).collect();
+                ok!(cuLaunchKernel(kernel, 1, 1, 1, 16, 16, 1, 0, stream, params.as_mut_ptr(), null_mut()));
+                let (alpha, beta) = (1.0f32, 0.0f32);
+                let status = unsafe {
+                    gemm(handle, ta, 0, m, n, k, from_ref(&alpha), p_src as *const *const c_void, 2, if ta == 1 { k } else { m }, (p_src + ne12 as u64 * 8) as *const *const c_void, 2, k, from_ref(&beta), p_dst as *const *mut c_void, 0, m, ne12 as i32, 68, -1)
+                };
+                assert_eq!(status, 0, "{name} iter {iter}: gemm status");
+            }
+            let sync = unsafe { cuStreamSynchronize(stream) };
+            assert_eq!(sync, 0, "{name}: 100 back-to-back table+gemm launches faulted on stream sync");
+            println!("{name}: 100 back-to-back table+gemm launches ok");
+        }
+    });
+}
