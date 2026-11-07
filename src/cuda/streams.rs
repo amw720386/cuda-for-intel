@@ -1,4 +1,5 @@
 use super::CuResult::*;
+use super::graphs::Capture;
 use super::{
     Api, Context, CuResult, Opaque, State, backend_error, context_key, current, reserve_handle,
     state, status, with_context_handles,
@@ -65,6 +66,7 @@ struct Stream {
     generation: u64,
     pending: VecDeque<Submission>,
     append_error: Option<CuResult>,
+    capture: Option<Capture>,
     health: Arc<DeviceHealth>,
 }
 
@@ -104,6 +106,7 @@ impl Stream {
             generation: 0,
             pending: VecDeque::new(),
             append_error: None,
+            capture: None,
             health: Arc::clone(&context.health),
         })
     }
@@ -223,6 +226,9 @@ impl Stream {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
+        if let Some(capture) = &mut self.capture {
+            return Err(capture.invalidate());
+        }
         self.check()?;
         let list = match &mut self.batch {
             Some(batch) => batch.recording(api, context)?,
@@ -367,9 +373,14 @@ impl Streams {
     fn snapshot(&mut self, api: &Api, key: Option<usize>) -> Result<Vec<Completion>, CuResult> {
         self.selected(key)?
             .into_iter()
-            .filter_map(|stream| match stream.flush(api) {
-                Ok(()) => stream.snapshot().map(Ok),
-                Err(error) => Some(Err(error)),
+            .filter_map(|stream| {
+                if let Some(capture) = &mut stream.capture {
+                    return Some(Err(capture.invalidate()));
+                }
+                match stream.flush(api) {
+                    Ok(()) => stream.snapshot().map(Ok),
+                    Err(error) => Some(Err(error)),
+                }
             })
             .collect()
     }
@@ -542,6 +553,14 @@ impl Streams {
         let key = stream_key(handle)?;
         self.get(key)?;
         Ok(key)
+    }
+
+    pub(super) fn capture_slot(&mut self, key: usize) -> Result<&mut Option<Capture>, CuResult> {
+        Ok(&mut self.get_mut(key)?.capture)
+    }
+
+    pub(super) fn capture(&mut self, key: usize) -> Result<Option<&mut Capture>, CuResult> {
+        Ok(self.capture_slot(key)?.as_mut())
     }
 
     pub(super) fn wait_legacy(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {

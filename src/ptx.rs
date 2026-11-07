@@ -143,6 +143,7 @@ enum FloatOp<'a> {
     Lg2Approx([&'a str; 1]),
     Ex2Approx([&'a str; 1]),
     Abs([&'a str; 1]),
+    CopySign([&'a str; 2]),
     /// `neg.f32` / `neg.ftz.f32` â€” floating-point negation.
     Neg([&'a str; 1]),
     /// `tanh.approx.f32` â€” hyperbolic tangent.
@@ -154,9 +155,8 @@ enum FloatOp<'a> {
 impl<'a> FloatOp<'a> {
     fn inputs(&self) -> &[&'a str] {
         match self {
-            Self::Add(inputs) | Self::Sub(inputs) | Self::Mul(inputs) | Self::Div(inputs) => {
-                inputs
-            }
+            Self::Add(inputs) | Self::Sub(inputs) | Self::Mul(inputs)
+            | Self::Div(inputs) | Self::CopySign(inputs) => inputs,
             Self::Fma(inputs) => inputs,
             Self::MinMax { src, .. } => src,
             Self::FromUnsigned(inputs)
@@ -303,6 +303,7 @@ enum Instruction<'a> {
     StoreVecU16(Space, &'a str, [&'a str; 2]),
     /// `st.global.v4.u16` â€” four packed IEEE half stores.
     StoreVec4U16(Space, &'a str, [&'a str; 4]),
+    StoreVec4U8(&'a str, [&'a str; 4]),
     /// `ld.global.u8` â€” zero-extend a byte into a 32-bit slot.
     Load8(Space, &'a str, &'a str),
     /// `ld.global.v2/v4.u16` â€” packed IEEE half / u16 vector load.
@@ -445,6 +446,7 @@ impl<'a> Instruction<'a> {
             | StoreVec { .. }
             | StoreVecU16(..)
             | StoreVec4U16(..)
+            | StoreVec4U8(..)
             | Barrier => {
                 return None
             }
@@ -535,6 +537,11 @@ pub(crate) struct Translation {
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
     let rewritten = parse::rewrite_half_scopes(source);
     spirv::emit(parse::parse(&rewritten)?)
+}
+
+pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
+    let rewritten = parse::rewrite_half_scopes(source);
+    spirv::emit(vec![parse::parse_named(&rewritten, name)?]).map(|_| ())
 }
 
 #[cfg(test)]
@@ -947,7 +954,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_nvcc_operand_forms() {
         for (from, to) in [
-            (".version 8.8", ".version 9.0"),
+            (".version 8.8", ".version 9.1"),
             (".align 4 .b8", ".align 8 .b8"),
             ("param_5[12]", "param_5[10]"),
             ("param_5+8]", "param_5+12]"),

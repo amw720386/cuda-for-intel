@@ -10,6 +10,7 @@ mod discovery;
 #[cfg(windows)]
 mod dxgi_luid;
 mod export_table;
+mod graphs;
 #[cfg(windows)]
 mod integrity;
 mod launch_args;
@@ -45,12 +46,15 @@ pub(crate) enum CuResult {
     FileNotFound = 301,
     OperatingSystem = 304,
     InvalidHandle = 400,
+    IllegalState = 401,
     NotFound = 500,
     NotReady = 600,
     PrimaryContextActive = 708,
     ContextIsDestroyed = 709,
     LaunchFailed = 719,
     NotSupported = 801,
+    StreamCaptureUnsupported = 900,
+    StreamCaptureInvalidated = 901,
     Unknown = 999,
 }
 
@@ -92,6 +96,7 @@ struct State {
     incomplete_contexts: Vec<Context>,
     primary: HashMap<c_int, primary::Primary>,
     libraries: library::Libraries,
+    graphs: graphs::Graphs,
 }
 
 static RUNTIME: Mutex<Option<State>> = Mutex::new(None);
@@ -237,6 +242,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),
+                    graphs: graphs::Graphs::default(),
                 });
                 Success
             }
@@ -1106,6 +1112,11 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 }
                 export_log(summary.clone());
                 eprintln!("CUDA for Intel {summary}");
+            }
+            if let Some(capture) = context.streams.capture(stream)? {
+                // The caller's argument storage may expire before graph launch.
+                capture.push(unsafe { graphs::Kernel::capture(function, (grid, block), &args) })?;
+                return Ok(());
             }
             context.streams.launch(
                 &runtime.api,

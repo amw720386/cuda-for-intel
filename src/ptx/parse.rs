@@ -467,6 +467,7 @@ impl<'a> Parser<'a> {
                 src: [a, b],
             },
             ["not.pred", dst, ",", src] => Instruction::NotPred(dst, src),
+            ["neg.s32", dst, ",", src] => Instruction::Integer32(IntegerOp::Sub, dst, ["0", src]),
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
                 | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "div.u32"
@@ -720,6 +721,9 @@ impl<'a> Parser<'a> {
             ["abs.ftz.f32" | "abs.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Abs([src]))
             }
+            ["copysign.f32", dst, ",", sign, ",", magnitude] => {
+                Instruction::Float32(dst, FloatOp::CopySign([sign, magnitude]))
+            }
             ["neg.ftz.f32" | "neg.f32" | "neg.rn.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Neg([src]))
             }
@@ -841,7 +845,7 @@ impl<'a> Parser<'a> {
                 "}",
             ] => Instruction::StoreVecU16(Space::Global, addr, [a, b]),
             [
-                "st.global.v4.u16" | "st.global.v4.b16",
+                op @ ("st.global.v4.u16" | "st.global.v4.b16" | "st.global.v4.u8"),
                 "[",
                 addr,
                 "]",
@@ -855,7 +859,13 @@ impl<'a> Parser<'a> {
                 ",",
                 d,
                 "}",
-            ] => Instruction::StoreVec4U16(Space::Global, addr, [a, b, c, d]),
+            ] => {
+                if *op == "st.global.v4.u8" {
+                    Instruction::StoreVec4U8(addr, [a, b, c, d])
+                } else {
+                    Instruction::StoreVec4U16(Space::Global, addr, [a, b, c, d])
+                }
+            }
             [
                 op @ ("st.global.b32"
                 | "st.global.u32"
@@ -1259,7 +1269,7 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
         tokens: tokens(source)?.into_iter(),
     };
     parser.expect(".version")?;
-    if !matches!(parser.take()?, "4.1" | "8.8") {
+    if !matches!(parser.take()?, "4.1" | "8.8" | "9.0") {
         return Err(Error::new("unsupported PTX version"));
     }
     parser.expect(".target")?;
@@ -1314,6 +1324,19 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
         }));
     }
     Ok(entries)
+}
+
+pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, Error> {
+    let mut tokens = tokens(source)?;
+    let start = tokens
+        .windows(3)
+        .position(|tokens| tokens == [".entry", name, "("])
+        .ok_or_else(|| Error::new("PTX entry is absent"))?;
+    tokens.drain(..start);
+    let mut parser = Parser {
+        tokens: tokens.into_iter(),
+    };
+    parse_entry(&mut parser)
 }
 
 fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {

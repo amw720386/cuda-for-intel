@@ -863,6 +863,16 @@ impl<'a> Emitter<'a> {
                     [Operand::IdRef(value)],
                 )?
             }
+            FloatOp::CopySign([sign, magnitude]) => {
+                let sign = self.float_bits(sign)?;
+                let magnitude = self.float_bits(magnitude)?;
+                let u32_type = self.u32_type;
+                let sign_mask = self.builder.constant_bit32(u32_type, 0x8000_0000);
+                let magnitude_mask = self.builder.constant_bit32(u32_type, 0x7fff_ffff);
+                let sign = self.builder.bitwise_and(u32_type, None, sign, sign_mask)?;
+                let magnitude = self.builder.bitwise_and(u32_type, None, magnitude, magnitude_mask)?;
+                return Ok(self.builder.bitwise_or(u32_type, None, sign, magnitude)?);
+            }
             FloatOp::Trunc([source]) => {
                 let value = self.float_value(source)?;
                 self.builder.ext_inst(
@@ -1739,6 +1749,21 @@ impl<'a> Emitter<'a> {
                     .shift_left_logical(self.u32_type, None, hi, shift)?;
                 let packed = self.builder.bitwise_or(self.u32_type, None, lo, hi)?;
                 let pointer = self.word_pointer(space, addr)?;
+                self.builder.store(pointer, packed, None, [])?;
+                return Ok(());
+            }
+            Instruction::StoreVec4U8(addr, bytes) => {
+                let ty = self.u32_type;
+                let mask = self.builder.constant_bit32(ty, 0xff);
+                let mut packed = self.builder.constant_bit32(ty, 0);
+                for (index, byte) in bytes.into_iter().enumerate() {
+                    let byte = self.integer(byte, Kind::B32)?;
+                    let byte = self.builder.bitwise_and(ty, None, byte, mask)?;
+                    let shift = self.builder.constant_bit32(ty, index as u32 * 8);
+                    let byte = self.builder.shift_left_logical(ty, None, byte, shift)?;
+                    packed = self.builder.bitwise_or(ty, None, packed, byte)?;
+                }
+                let pointer = self.word_pointer(Space::Global, addr)?;
                 self.builder.store(pointer, packed, None, [])?;
                 return Ok(());
             }

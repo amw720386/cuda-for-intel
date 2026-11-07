@@ -45,6 +45,7 @@ impl Fixture {
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),
+                    graphs: graphs::Graphs::default(),
                 })
                 .is_none()
         );

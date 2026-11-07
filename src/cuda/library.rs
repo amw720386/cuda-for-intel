@@ -185,14 +185,30 @@ pub unsafe extern "system" fn cuKernelGetFunction(out: *mut Opaque, kernel: Opaq
 pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize, CuResult> {
     let (library, name) = state.libraries.kernels.get(&kernel).ok_or(InvalidHandle)?;
     let (library, name) = (*library, name.clone());
+    if trace::enabled() {
+        trace::record(format_args!(
+            "resolve library kernel {}",
+            name.to_string_lossy()
+        ));
+    }
     let (context, module) = module_for_library(state, library)?;
-    module_function(
+    let result = module_function(
         &state.runtime.api,
         state.contexts.get_mut(&context).ok_or(ContextIsDestroyed)?,
         &mut state.next_handle,
         module,
         &name,
-    )
+    );
+    if result == Err(NotFound) {
+        if trace::enabled()
+            && let Ok(source) = std::str::from_utf8(&state.libraries.images[&library].ptx)
+            && let Err(error) = ptx::diagnose_entry(source, &name.to_string_lossy())
+        {
+            trace::record(format_args!("library entry translation failed: {error}"));
+        }
+        return Err(InvalidPtx);
+    }
+    result
 }
 
 #[unsafe(no_mangle)]

@@ -1,4 +1,5 @@
 use super::export_table::cuGetExportTable;
+use super::graphs::*;
 use super::library::*;
 use super::primary::*;
 use super::streams::events::*;
@@ -73,6 +74,7 @@ fn error_info(code: c_int) -> Option<(&'static CStr, &'static CStr)> {
             c"operating system call failed",
         ),
         400 => (c"CUDA_ERROR_INVALID_HANDLE", c"invalid resource handle"),
+        401 => (c"CUDA_ERROR_ILLEGAL_STATE", c"illegal state"),
         500 => (c"CUDA_ERROR_NOT_FOUND", c"named symbol not found"),
         600 => (c"CUDA_ERROR_NOT_READY", c"operation is not ready"),
         708 => (
@@ -82,6 +84,14 @@ fn error_info(code: c_int) -> Option<(&'static CStr, &'static CStr)> {
         709 => (c"CUDA_ERROR_CONTEXT_IS_DESTROYED", c"context is destroyed"),
         719 => (c"CUDA_ERROR_LAUNCH_FAILED", c"launch failed"),
         801 => (c"CUDA_ERROR_NOT_SUPPORTED", c"operation not supported"),
+        900 => (
+            c"CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED",
+            c"operation not permitted during stream capture",
+        ),
+        901 => (
+            c"CUDA_ERROR_STREAM_CAPTURE_INVALIDATED",
+            c"stream capture invalidated",
+        ),
         999 => (c"CUDA_ERROR_UNKNOWN", c"unknown error"),
         _ => return None,
     })
@@ -205,6 +215,15 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuStreamDestroy" => entry!(cuStreamDestroy_v2, 4000),
         b"cuStreamSynchronize" => entry!(cuStreamSynchronize, 2000, DRIVER_ABI + 1, true),
         b"cuStreamQuery" => entry!(cuStreamQuery, 2000, DRIVER_ABI + 1, true),
+        b"cuStreamBeginCapture" => entry!(cuStreamBeginCapture_v2, 10010, DRIVER_ABI + 1, true),
+        b"cuStreamEndCapture" => entry!(cuStreamEndCapture, 10000, DRIVER_ABI + 1, true),
+        b"cuStreamIsCapturing" => entry!(cuStreamIsCapturing, 10000, DRIVER_ABI + 1, true),
+        b"cuGraphDestroy" => entry!(cuGraphDestroy, 10000),
+        b"cuGraphInstantiate" | b"cuGraphInstantiateWithFlags" => {
+            entry!(cuGraphInstantiateWithFlags, 11040)
+        }
+        b"cuGraphExecDestroy" => entry!(cuGraphExecDestroy, 10000),
+        b"cuGraphLaunch" => entry!(cuGraphLaunch, 10000, DRIVER_ABI + 1, true),
         b"cuEventCreate" => entry!(cuEventCreate, 2000),
         b"cuEventRecord" => entry!(cuEventRecord, 2000, DRIVER_ABI + 1, true),
         b"cuEventQuery" => entry!(cuEventQuery, 2000),

@@ -12,7 +12,13 @@ static void check(cudaError_t result, const char *operation) {
 }
 
 __global__ void write_value(int *output, int value) {
-    *output = value;
+    asm("neg.s32 %0, %1;" : "=r"(output[0]) : "r"(value));
+    float signed_value;
+    asm("copysign.f32 %0, %1, %2;" : "=f"(signed_value) : "f"(-0.0f), "f"(1.5f));
+    output[1] = __float_as_int(signed_value);
+    constexpr unsigned a = 0x1a1, b = 0x2b2, c = 0x3c3, d = 0x4d4;
+    asm volatile("st.global.v4.u8 [%0], {%1, %2, %3, %4};" ::
+                 "l"(output + 2), "r"(a), "r"(b), "r"(c), "r"(d) : "memory");
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -26,22 +32,43 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
     int *device = nullptr;
-    int result = 0;
+    int result[3] = {};
     constexpr int expected = 0x12345678;
     check(cudaSetDevice(0), "cudaSetDevice");
     check(cudaMalloc(reinterpret_cast<void **>(&device), sizeof(result)), "cudaMalloc");
     check(cudaMemset(device, 0x7e, sizeof(result)), "cudaMemset");
-    check(cudaMemcpy(&result, device, sizeof(result), cudaMemcpyDeviceToHost), "cudaMemcpy after fill");
-    if (result != 0x7e7e7e7e) {
-        std::fprintf(stderr, "Unexpected fill result %08x\n", static_cast<unsigned>(result));
+    check(cudaMemcpy(result, device, sizeof(result), cudaMemcpyDeviceToHost), "cudaMemcpy after fill");
+    if (result[0] != 0x7e7e7e7e) {
+        std::fprintf(stderr, "Unexpected fill result %08x\n", static_cast<unsigned>(result[0]));
         return 2;
     }
-    write_value<<<1, 1>>>(device, expected);
-    check(cudaGetLastError(), "write_value launch");
+    cudaStream_t stream = nullptr;
+    check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags");
+    check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), "cudaStreamBeginCapture");
+    int captured_value = -expected;
+    write_value<<<1, 1, 0, stream>>>(device, captured_value);
+    check(cudaGetLastError(), "write_value capture");
+    captured_value = 0;
+    cudaGraph_t graph = nullptr;
+    check(cudaStreamEndCapture(stream, &graph), "cudaStreamEndCapture");
+    check(cudaMemcpy(result, device, sizeof(result), cudaMemcpyDeviceToHost), "cudaMemcpy before replay");
+    if (result[0] != 0x7e7e7e7e) {
+        std::fprintf(stderr, "Capture modified device memory before replay\n");
+        return 2;
+    }
+    cudaGraphExec_t execution = nullptr;
+    check(cudaGraphInstantiateWithFlags(&execution, graph, 0), "cudaGraphInstantiateWithFlags");
+    check(cudaGraphDestroy(graph), "cudaGraphDestroy");
+    check(cudaGraphLaunch(execution, stream), "cudaGraphLaunch");
+    check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+    check(cudaGraphExecDestroy(execution), "cudaGraphExecDestroy");
+    check(cudaStreamDestroy(stream), "cudaStreamDestroy");
     check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-    check(cudaMemcpy(&result, device, sizeof(result), cudaMemcpyDeviceToHost), "cudaMemcpy");
+    check(cudaMemcpy(result, device, sizeof(result), cudaMemcpyDeviceToHost), "cudaMemcpy");
     check(cudaFree(device), "cudaFree");
     check(cudaDeviceReset(), "cudaDeviceReset");
-    std::printf("Kernel result %08x\n", static_cast<unsigned>(result));
-    return result == expected ? 0 : 2;
+    std::printf("Kernel results %08x %08x %08x\n", static_cast<unsigned>(result[0]),
+                static_cast<unsigned>(result[1]), static_cast<unsigned>(result[2]));
+    return result[0] == expected && static_cast<unsigned>(result[1]) == 0xbfc00000
+        && static_cast<unsigned>(result[2]) == 0xd4c3b2a1 ? 0 : 2;
 }
