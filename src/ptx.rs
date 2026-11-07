@@ -1,9 +1,12 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod flow;
+mod globals;
 mod parse;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
 mod cublas_ptxgen;
+
+pub(crate) use globals::GlobalVar;
 
 pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
     let tokens = parse::tokens(source)?;
@@ -309,6 +312,8 @@ enum Instruction<'a> {
     SharedSymbol32(&'a str, &'a str),
     /// `mov.u64 %rd, local_symbol` â€” 64-bit address of a `.local` depot.
     LocalSymbol64(&'a str, &'a str),
+    /// `mov.u64 %rd, symbol` for a module-scope `.global` or `.const` variable.
+    GlobalAddress(&'a str, &'a str),
     Builtin(&'a str, &'a str),
     Mad32(&'a str, [&'a str; 3]),
     /// CUDA `dp4a.s32.s32` â€” signed 4Ã—8-bit dot-product accumulate.
@@ -520,6 +525,7 @@ impl<'a> Instruction<'a> {
             | SharedAddress(dst, _)
             | SharedSymbol32(dst, _)
             | LocalSymbol64(dst, _)
+            | GlobalAddress(dst, _)
             | AtomicAdd32(dst, ..) => {
                 out.push(*dst);
                 &[]
@@ -772,20 +778,31 @@ pub(crate) struct KernelMetadata {
 pub(crate) struct Translation {
     pub(crate) words: Vec<u32>,
     pub(crate) kernels: Vec<KernelMetadata>,
+    /// Module-scope `.global` and `.const` variables, exported by name.
+    pub(crate) globals: Vec<globals::GlobalVar>,
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
     let rewritten = parse::rewrite_half_scopes(source);
-    spirv::emit(parse::parse(&rewritten)?)
+    // Constant-bank variables live in ordinary device memory, so reads are global loads.
+    let rewritten = if rewritten.contains("ld.const.") {
+        rewritten.replace("ld.const.", "ld.global.")
+    } else {
+        rewritten
+    };
+    let (entries, vars) = parse::parse_module(&rewritten)?;
+    spirv::emit(entries, vars.device)
 }
 
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
     let rewritten = parse::rewrite_half_scopes(source);
-    spirv::emit(vec![parse::parse_named(&rewritten, name)?]).map(|_| ())
+    spirv::emit(vec![parse::parse_named(&rewritten, name)?], Vec::new()).map(|_| ())
 }
 
 #[cfg(test)]
 mod coverage_tests;
+#[cfg(test)]
+mod globals_tests;
 
 #[cfg(test)]
 mod tests {
