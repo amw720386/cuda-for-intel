@@ -38,7 +38,7 @@ pub(crate) enum Param {
     U64,
     GlobalPtr,
     /// `.param .align N .b8 name[bytes]` â€” `words` is `bytes/4`, `align` is 4/8/16.
-    Words { words: u16, align: u16 },
+    Words { words: u16, align: u16, trim: u8 },
 }
 
 impl Param {
@@ -58,7 +58,7 @@ impl Param {
             Self::U16 => 2,
             Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
-            Self::Words { words, .. } => usize::from(words) * 4,
+            Self::Words { words, trim, .. } => usize::from(words) * 4 - usize::from(trim),
         }
     }
 }
@@ -1003,7 +1003,8 @@ mod tests {
                     .any(|inst| inst.class.opcode == opcode)
             );
         }
-        assert!(translate(&GGML_ADD.replace("%rd10, 2;", "%rd10, 64;")).is_err());
+        // Counts of 64 or more clamp to zero (PTX semantics) instead of being rejected.
+        assert!(translate(&GGML_ADD.replace("%rd10, 2;", "%rd10, 64;")).is_ok());
         assert!(translate(&GGML_ADD.replace("%p3, %p1, %p2;", "%p3, %r4, %p2;")).is_err());
     }
 
@@ -1045,7 +1046,7 @@ mod tests {
             assert_eq!(kernel.params[..2], [Param::GlobalPtr; 2]);
             assert_eq!(
                 kernel.params[5..8],
-                [Param::Words { words: 3, align: 4 }; 3]
+                [Param::Words { words: 3, align: 4, trim: 0 }; 3]
             );
             assert_eq!(function.parameters.len(), 20);
         }
@@ -1083,7 +1084,7 @@ mod tests {
         assert_eq!(kernel.params.last(), Some(&Param::U8));
         assert!(
             kernel.params.iter().any(|param| {
-                matches!(param, Param::Words { words: 2, align: 4 })
+                matches!(param, Param::Words { words: 2, align: 4, .. })
             }),
             "expected rope_corr_dims .b8[8] aggregate"
         );

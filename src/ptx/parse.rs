@@ -105,7 +105,16 @@ impl<'a> Parser<'a> {
                 return match (align, bytes) {
                     ("1", "1") => Ok((name, Param::U8)),
                     ("2", "2") => Ok((name, Param::U16)),
-                    _ => Err(Error::new("unsupported PTX parameter aggregate size")),
+                    _ => {
+                        // Odd-sized aggregates (`complex<Half>`, packed bool/short tuples).
+                        let align: u16 = align.parse().unwrap_or(1);
+                        let bytes: u16 = bytes
+                            .parse()
+                            .ok()
+                            .filter(|n| (1..=4096).contains(n))
+                            .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
+                        Ok((name, Param::Words { words: bytes.div_ceil(4), align, trim: (bytes.div_ceil(4) * 4 - bytes) as u8 }))
+                    }
                 };
             }
             ".align" => {
@@ -122,16 +131,15 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<u16>()
                     .ok()
-                    .filter(|n| {
-                        (4..=4096).contains(n) && n.is_multiple_of(4) && n.is_multiple_of(align)
-                    })
+                    .filter(|n| (1..=4096).contains(n) && n.is_multiple_of(align.min(4)))
                     .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
                 self.expect("]")?;
                 return Ok((
                     name,
                     Param::Words {
-                        words: bytes / 4,
+                        words: bytes.div_ceil(4),
                         align,
+                        trim: (bytes.div_ceil(4) * 4 - bytes) as u8,
                     },
                 ));
             }
@@ -234,6 +242,14 @@ impl<'a> Parser<'a> {
             Some(op) => {
                 patched = std::iter::once(op).chain(body[1..].iter().copied()).collect();
                 &patched[..]
+            }
+            None => body,
+        };
+        let setp_patched: Vec<&str>;
+        let body = match body.first().and_then(|op| canonical_setp(op)) {
+            Some(op) => {
+                setp_patched = std::iter::once(op).chain(body[1..].iter().copied()).collect();
+                &setp_patched[..]
             }
             None => body,
         };
@@ -2142,6 +2158,23 @@ pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'
         }));
     }
     Ok((entries, parser.vars))
+}
+
+/// `setp.eq.b64` and the unsigned `lo/ls/hi/hs` spellings map onto the canonical compares.
+fn canonical_setp(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "setp.eq.b64" => "setp.eq.u64",
+        "setp.ne.b64" => "setp.ne.u64",
+        "setp.lo.u64" => "setp.lt.u64",
+        "setp.ls.u64" => "setp.le.u64",
+        "setp.hi.u64" => "setp.gt.u64",
+        "setp.hs.u64" => "setp.ge.u64",
+        "setp.lo.u32" => "setp.lt.u32",
+        "setp.ls.u32" => "setp.le.u32",
+        "setp.hi.u32" => "setp.gt.u32",
+        "setp.hs.u32" => "setp.ge.u32",
+        _ => return None,
+    })
 }
 
 pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, Error> {

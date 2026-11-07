@@ -423,13 +423,13 @@ zluda/bitmanip/shf_r_wrap.ptx	pass	strict-fail
 zluda/bitmanip/vshr_clamp.ptx	pass	strict-fail	
 zluda/control/assertfail.ptx	pass	strict-fail	
 zluda/control/b64tof64.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.u64 %temp
-zluda/control/block.ptx	error	strict-fail	undefined PTX register %__sc1_temp2 on an incoming path
+zluda/control/block.ptx	pass	strict-fail	
 zluda/control/bra.ptx	error	strict-fail	unreachable PTX block
 zluda/control/call.ptx	error	strict-fail	PTX call argument was never stored
 zluda/control/call_rnd.ptx	pass	strict-fail	
 zluda/control/exit.ptx	pass	strict-fail	
 zluda/control/func_ptr.ptx	error	strict-fail	unknown PTX local symbol foobar
-zluda/control/instruction_mode_to_global_mode__call_with_mode.ptx	error	strict-fail	undefined PTX register %temp on an incoming path
+zluda/control/instruction_mode_to_global_mode__call_with_mode.ptx	error	strict-fail	undefined PTX register %__c1_pred on an incoming path
 zluda/control/malformed_label.ptx	error	strict-fail	unreachable PTX block
 zluda/control/nanosleep.ptx	pass	strict-fail	
 zluda/control/noreturn.ptx	pass	strict-fail	

@@ -116,7 +116,7 @@ mod tests {
         let params = [
             Param::U32,
             Param::GlobalPtr,
-            Param::Words { words: 3, align: 4 },
+            Param::Words { words: 3, align: 4, trim: 0 },
             Param::U64,
             Param::U8,
         ];
