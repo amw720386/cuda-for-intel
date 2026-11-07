@@ -640,7 +640,13 @@ fn bit_type(part: &str) -> &str {
     }
 }
 
+#[path = "vec_small.rs"]
+mod vec_small;
+
 fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    if let Some(lines) = vec_small::rewrite(ctx, inst) {
+        return Some(lines);
+    }
     if let Some(lines) = tier3::rewrite(ctx, inst) {
         return Some(lines);
     }

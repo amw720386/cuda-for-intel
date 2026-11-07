@@ -102,6 +102,10 @@ struct Emitter<'a> {
     params: HashMap<(&'a str, usize), Value>,
     /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
     param_array: Option<Word>,
+    /// Registers that merge integers into pointers (`mov.u64 %rd, 0` then `add` of a
+    /// global address): discovered by retrying a failed lowering, keyed per entry.
+    address_hints: HashMap<(String, String), Space>,
+    current_entry: String,
     /// Registers whose slot was created by a read that precedes every write.
     undef_slots: HashMap<String, Value>,
     /// Registers written by some instruction of the entry being lowered.
@@ -187,6 +191,8 @@ impl<'a> Emitter<'a> {
             locals: Vec::new(),
             params: HashMap::new(),
             param_array: None,
+            address_hints: HashMap::new(),
+            current_entry: String::new(),
             undef_slots: HashMap::new(),
             written_somewhere: HashSet::new(),
             param_bases: HashMap::new(),
@@ -277,9 +283,20 @@ impl<'a> Emitter<'a> {
             )));
         }
         let mut value = value;
+        if value.kind == Kind::B64
+            && let Some(&space) = self.address_hints.get(&(self.current_entry.clone(), dst.to_string()))
+        {
+            let kind = Kind::Address(space);
+            let id = self.builder.convert_u_to_ptr(self.value_type(kind), None, value.id)?;
+            value = Value { id, kind };
+        }
         let known = self.registers.get(dst).or_else(|| self.undef_slots.get(dst)).copied();
         let slot = if let Some(slot) = known {
             self.registers.insert(dst, slot);
+            if slot.kind == Kind::B64 && matches!(value.kind, Kind::Address(_)) {
+                let id = self.builder.bitcast(self.u64_type, None, value.id)?;
+                value = Value { id, kind: Kind::B64 };
+            }
             if slot.kind != value.kind && self.undef_slots.contains_key(dst) && slot.kind.width() == value.kind.width() {
                 // The slot was created by a read before any write (typed by its declaration).
                 let id = self.builder.bitcast(self.value_type(slot.kind), None, value.id)?;
@@ -326,6 +343,19 @@ impl<'a> Emitter<'a> {
             });
         }
         self.integer(operand, Kind::B64)
+    }
+
+    /// Sub-word loads may target a 64-bit register: extend the 32-bit result.
+    fn widen_to_declaration(&mut self, dst: &'a str, id: Word, signed: bool) -> Result<(&'a str, Word, Kind), Error> {
+        if self.declarations.get(dst) == Some(&Width::B64) {
+            let wide = if signed {
+                self.builder.s_convert(self.u64_type, None, id)?
+            } else {
+                self.builder.u_convert(self.u64_type, None, id)?
+            };
+            return Ok((dst, wide, Kind::B64));
+        }
+        Ok((dst, id, Kind::B32))
     }
 
     fn parse_u32(operand: &str) -> Option<u32> {
@@ -630,6 +660,16 @@ impl<'a> Emitter<'a> {
         {
             // Module-scope variable named directly in the address operand.
             let pointer = self.builder.bitcast(byte_ty, None, variable)?;
+            if offset == 0 {
+                return Ok(pointer);
+            }
+            let bytes = self.builder.constant_bit64(self.i64_type, offset as u64);
+            return Ok(self.builder.ptr_access_chain(byte_ty, None, pointer, bytes, [])?);
+        }
+        if space == Space::Shared && self.shared_offsets.contains_key(base) {
+            // Shared symbol named directly in the address operand.
+            let word = self.shared_base(base)?;
+            let pointer = self.builder.bitcast(byte_ty, None, word)?;
             if offset == 0 {
                 return Ok(pointer);
             }
@@ -1783,7 +1823,10 @@ impl<'a> Emitter<'a> {
             }
             Instruction::LoadSigned { space, bits, dst, addr } => {
                 let ty = self.u32_type;
-                let loaded = if bits == 8 {
+                let loaded = if bits == 32 {
+                    let pointer = self.word_pointer(space, addr)?;
+                    self.builder.load(ty, None, pointer, None, [])?
+                } else if bits == 8 {
                     let bytes = self.addressed_byte_pointer(space, addr)?;
                     let value = self.builder.load(self.u8_type, None, bytes, None, [])?;
                     self.builder.s_convert(ty, None, value)?
@@ -1792,7 +1835,7 @@ impl<'a> Emitter<'a> {
                     let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
                     self.builder.s_convert(ty, None, value)?
                 };
-                (dst, loaded, Kind::B32)
+                self.widen_to_declaration(dst, loaded, true)?
             }
             Instruction::CvtaShared(dst, src) => {
                 let value = self.read(src)?;
@@ -2221,8 +2264,8 @@ impl<'a> Emitter<'a> {
                 dst,
                 src: [a, b],
             } => {
-                let a = self.read(a)?.require(Kind::Predicate, a)?;
-                let b = self.read(b)?.require(Kind::Predicate, b)?;
+                let a = self.predicate_operand(a)?;
+                let b = self.predicate_operand(b)?;
                 let ty = self.bool_type;
                 let id = if and {
                     self.builder.logical_and(ty, None, a, b)?
@@ -2640,7 +2683,7 @@ impl<'a> Emitter<'a> {
                     let pointer = self.word_pointer(space, address)?;
                     self.builder.load(self.u32_type, None, pointer, None, [])?
                 };
-                (dst, id, Kind::B32)
+                self.widen_to_declaration(dst, id, false)?
             }
             Instruction::Load16(space, dst, address) => {
                 let pointer = self.half_pointer(space, address)?;
@@ -2648,13 +2691,13 @@ impl<'a> Emitter<'a> {
                     .builder
                     .load(self.u16_type, None, pointer, None, [])?;
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits16)?;
-                (dst, bits32, Kind::B32)
+                self.widen_to_declaration(dst, bits32, false)?
             }
             Instruction::Load8(space, dst, address) => {
                 let bytes = self.addressed_byte_pointer(space, address)?;
                 let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
-                (dst, bits32, Kind::B32)
+                self.widen_to_declaration(dst, bits32, false)?
             }
             Instruction::LoadVecU16 {
                 space,
@@ -2778,7 +2821,7 @@ impl<'a> Emitter<'a> {
             }
             Instruction::Store32(space, address, src) => {
                 let pointer = self.word_pointer(space, address)?;
-                let value = self.read(src)?.require(Kind::B32, src)?;
+                let value = self.integer(src, Kind::B32)?;
                 self.builder.store(pointer, value, None, [])?;
                 return Ok(());
             }
@@ -2986,21 +3029,51 @@ pub(super) fn emit(
     entries: Vec<Entry<'_>>,
     globals: Vec<GlobalVar>,
 ) -> Result<Translation, Error> {
-    let mut emitter = Emitter::new();
-    emitter.declare_globals(&globals);
-    let kernels = entries
-        .into_iter()
-        .map(|entry| emitter.emit_entry(entry))
-        .collect::<Result<_, _>>()?;
-    Ok(Translation {
-        words: emitter.builder.module().assemble(),
-        kernels,
-        globals,
-    })
+    let mut hints: HashMap<(String, String), Space> = HashMap::new();
+    loop {
+        let mut emitter = Emitter::new();
+        emitter.address_hints = hints.clone();
+        emitter.declare_globals(&globals);
+        let result = entries
+            .iter()
+            .cloned()
+            .map(|entry| emitter.emit_entry(entry))
+            .collect::<Result<Vec<_>, _>>();
+        match result {
+            Ok(kernels) => {
+                return Ok(Translation {
+                    words: emitter.builder.module().assemble(),
+                    kernels,
+                    globals,
+                });
+            }
+            Err(error) => {
+                // "expected Address(Global) for %rd13, got B64": a register that holds
+                // either an integer or a pointer is a pointer slot; lower again.
+                let text = error.to_string();
+                let hint = text.strip_prefix("expected Address(").and_then(|rest| {
+                    let (space, rest) = rest.split_once(") for ")?;
+                    let (reg, kind) = rest.split_once(", got ")?;
+                    let space = match space {
+                        "Global" => Space::Global,
+                        "Shared" => Space::Shared,
+                        "Local" => Space::Local,
+                        _ => return None,
+                    };
+                    (kind == "B64").then(|| (reg.to_string(), space))
+                });
+                match hint {
+                    Some((reg, space)) if hints.insert((emitter.current_entry.clone(), reg.clone()), space).is_none() => {}
+                    _ => return Err(error),
+                }
+            }
+        }
+    }
 }
 
 impl<'a> Emitter<'a> {
     fn emit_entry(&mut self, entry: Entry<'a>) -> Result<KernelMetadata, Error> {
+        self.current_entry = entry.name.to_string();
         let flow = Flow::analyze(&entry.blocks)?;
         self.declarations = entry.registers;
         self.registers.clear();

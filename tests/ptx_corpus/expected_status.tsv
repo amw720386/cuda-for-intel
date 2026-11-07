@@ -457,7 +457,7 @@ zluda/cvt/cvt_s32_f32.ptx	pass	strict-fail
 zluda/cvt/cvt_s64_s32.ptx	pass	strict-fail	
 zluda/cvt/cvt_sat_s_u.ptx	pass	strict-fail	
 zluda/cvt/cvt_u64_f16.ptx	pass	strict-fail	
-zluda/cvt/cvta.ptx	error	strict-fail	expected Address(Global) for %in_addr, got B64
+zluda/cvt/cvta.ptx	pass	strict-fail	
 zluda/cvt/uint_to_fp_bf16.ptx	pass	strict-fail	
 zluda/float_math/abs.ptx	pass	strict-fail	
 zluda/float_math/add_ftz.ptx	pass	strict-fail	
@@ -542,7 +542,7 @@ zluda/memory/global_array_f32.ptx	pass	strict-fail
 zluda/memory/implicit_param.ptx	unsupported	strict-fail	unsupported PTX instruction: .param .b32 temp_param
 zluda/memory/instruction_mode_to_global_mode__fold_denormal.ptx	error	strict-fail	undefined PTX register %temp1 on an incoming path
 zluda/memory/ld_st.ptx	pass	strict-fail	
-zluda/memory/ld_st_implicit.ptx	error	strict-fail	missing or mismatched PTX declaration for %temp
+zluda/memory/ld_st_implicit.ptx	pass	strict-fail	
 zluda/memory/ld_st_offset.ptx	pass	strict-fail	
 zluda/memory/local_align.ptx	pass	strict-fail	
 zluda/memory/mov.ptx	pass	strict-fail	
@@ -553,12 +553,12 @@ zluda/memory/reg_local.ptx	unsupported	strict-fail	unsupported PTX instruction: 
 zluda/memory/reg_multi.ptx	pass	strict-fail	
 zluda/memory/shared_ptr_32.ptx	pass	strict-fail	
 zluda/memory/shared_ptr_take_address.ptx	error	strict-fail	unknown PTX local symbol shared_mem
-zluda/memory/shared_unify_extern.ptx	error	strict-fail	undefined PTX register shared_mod on an incoming path
+zluda/memory/shared_unify_extern.ptx	error	strict-fail	undefined PTX register %__c1_temp1 on an incoming path
 zluda/memory/shared_unify_local.ptx	unsupported	strict-fail	unsupported PTX instruction: call ( out ) , add , ( %__c1_temp2 )
 zluda/memory/shared_variable.ptx	pass	strict-fail	
 zluda/memory/spirv_build__global_extern_array.ptx	unsupported	strict-fail	PTX module contains no supported .entry kernels
 zluda/memory/spirv_build__param_func_array_0.ptx	unsupported	strict-fail	PTX module contains no supported .entry kernels
-zluda/memory/stateful_ld_st_ntid.ptx	error	strict-fail	expected Address(Global) for %in_addr, got B64
+zluda/memory/stateful_ld_st_ntid.ptx	pass	strict-fail	
 zluda/memory/stateful_ld_st_ntid_chain.ptx	pass	strict-fail	
 zluda/memory/stateful_ld_st_ntid_sub.ptx	pass	strict-fail	
 zluda/memory/stateful_ld_st_simple.ptx	pass	strict-fail	

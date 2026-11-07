@@ -980,7 +980,11 @@ impl<'a> Parser<'a> {
                 } else {
                     Space::Global
                 };
-                Instruction::Load32(space, dst, addr)
+                if op.ends_with(".s32") {
+                    Instruction::LoadSigned { space, bits: 32, dst, addr }
+                } else {
+                    Instruction::Load32(space, dst, addr)
+                }
             }
             [
                 op @ ("ld.global.u64" | "ld.global.b64" | "ld.global.nc.u64" | "ld.global.nc.b64"
