@@ -2173,23 +2173,25 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     // the dynamic block after all static shared arrays; the launch's shared size selects
     // the live prefix, so reserve the remainder of a 64 KiB window (or 48 KiB when no
     // static arrays exist, as before).
-    let dynamic = blocks.iter().flat_map(|block| &block.instructions).find_map(|inst| {
-        match inst {
-            Instruction::SharedSymbol32(_, name) | Instruction::SharedAddress(_, name)
-                if !shared.iter().any(|(known, _)| known == name) =>
-            {
-                Some(*name)
-            }
-            _ => None,
+    // Every `.extern .shared` array aliases the start of the dynamic block.
+    let mut dynamic: Vec<&str> = Vec::new();
+    for inst in blocks.iter().flat_map(|block| &block.instructions) {
+        if let Instruction::SharedSymbol32(_, name) | Instruction::SharedAddress(_, name) = inst
+            && !shared.iter().any(|(known, _)| known == name)
+            && !dynamic.contains(name)
+        {
+            dynamic.push(name);
         }
-    });
-    if let Some(name) = dynamic {
+    }
+    if let Some((&first, aliases)) = dynamic.split_first() {
         let total: u32 = shared.iter().map(|&(_, bytes): &(&str, u32)| bytes).sum();
         let budget = if shared.is_empty() { 48 * 1024 } else { 64 * 1024 - total.next_multiple_of(16) };
         if let Some(last) = shared.last_mut() {
             last.1 += total.next_multiple_of(16) - total;
         }
-        shared.push((name, budget));
+        // Zero-sized aliases precede the real block so they share its offset.
+        shared.extend(aliases.iter().map(|&name| (name, 0)));
+        shared.push((first, budget));
     }
     Ok(Entry {
         name,
