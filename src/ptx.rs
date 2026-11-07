@@ -549,6 +549,9 @@ pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
 }
 
 #[cfg(test)]
+mod coverage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rspirv::spirv::Op;

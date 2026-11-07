@@ -162,7 +162,8 @@ impl<'a> Parser<'a> {
             let width = match self.take()? {
                 ".pred" => Width::Predicate,
                 // 16-bit regs are tracked as B32 slots holding zero-extended values.
-                ".b16" | ".u16" | ".s16" | ".b32" | ".u32" | ".s32" | ".f32" => Width::B32,
+                ".b16" | ".u16" | ".s16" | ".f16" | ".u8" | ".s8" | ".b8" | ".b32" | ".u32" | ".s32"
+                | ".f32" | ".f16x2" => Width::B32,
                 ".b64" | ".u64" | ".s64" => Width::B64,
                 ty => return Err(Error::new(format!("unsupported PTX register type {ty}"))),
             };
@@ -973,11 +974,13 @@ impl<'a> Parser<'a> {
             Jump(&'a str),
             Branch(&'a str, bool, &'a str),
             Fallthrough,
+            /// `@p inst;` / `@p ret;` — executes the next block only when the guard holds.
+            Guard(&'a str, bool),
         }
         let mut labels = HashMap::new();
         let mut blocks = Vec::new();
         while !self.eat("}") {
-            if blocks.len() == 512 {
+            if blocks.len() >= 2048 {
                 return Err(Error::new("too many PTX blocks"));
             }
             while self.label() {
@@ -1002,10 +1005,25 @@ impl<'a> Parser<'a> {
                 } else if self.eat("@") {
                     let invert = self.eat("!");
                     let predicate = self.identifier()?;
-                    if !self.eat("bra") {
-                        self.expect("bra.uni")?;
+                    if self.eat("bra") || self.eat("bra.uni") {
+                        End::Branch(predicate, invert, self.identifier()?)
+                    } else if self.eat("ret") {
+                        self.expect(";")?;
+                        blocks.push((
+                            std::mem::take(&mut instructions),
+                            End::Guard(predicate, invert),
+                        ));
+                        blocks.push((Vec::new(), End::Return));
+                        continue;
+                    } else {
+                        let inst = self.instruction()?;
+                        blocks.push((
+                            std::mem::take(&mut instructions),
+                            End::Guard(predicate, invert),
+                        ));
+                        blocks.push((vec![inst], End::Fallthrough));
+                        continue;
                     }
-                    End::Branch(predicate, invert, self.identifier()?)
                 } else if self.eat("bra") || self.eat("bra.uni") {
                     End::Jump(self.identifier()?)
                 } else {
@@ -1037,6 +1055,20 @@ impl<'a> Parser<'a> {
                     End::Return => Terminator::Return,
                     End::Jump(label) => Terminator::Jump(target(label)?),
                     End::Fallthrough => Terminator::Jump(next()?),
+                    End::Guard(predicate, invert) => {
+                        let (mut taken, mut other) = (next()?, index + 2);
+                        if other >= count {
+                            return Err(Error::new("PTX block falls off the end of the entry"));
+                        }
+                        if invert {
+                            std::mem::swap(&mut taken, &mut other);
+                        }
+                        Terminator::Branch {
+                            predicate,
+                            taken,
+                            other,
+                        }
+                    }
                     End::Branch(predicate, invert, label) => {
                         let (mut taken, mut other) = (target(label)?, next()?);
                         if invert {
@@ -1271,7 +1303,225 @@ impl HalfExtract {
 }
 
 pub(super) fn rewrite_half_scopes(source: &str) -> String {
-    rewrite_half_extract_scopes(source)
+    rewrite_register_scopes(&rewrite_half_extract_scopes(source))
+}
+
+fn ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'%' | b'.')
+}
+
+/// Index just past the comment starting at `i`, if one starts there.
+fn skip_comment(bytes: &[u8], i: usize) -> Option<usize> {
+    if bytes[i..].starts_with(b"//") {
+        Some(bytes[i..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| i + n))
+    } else if bytes[i..].starts_with(b"/*") {
+        let end = bytes[i + 2..].windows(2).position(|w| w == b"*/");
+        Some(end.map_or(bytes.len(), |n| i + 2 + n + 2))
+    } else {
+        None
+    }
+}
+
+/// Index of the `}` matching the `{` at `open`.
+fn matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let (mut depth, mut i) = (0usize, open);
+    while i < bytes.len() {
+        if let Some(next) = skip_comment(bytes, i) {
+            i = next;
+            continue;
+        }
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Flatten nested `{ .reg ...; ... }` scopes (nvcc inline-asm helpers such as
+/// `__cvta_generic_to_shared`) into the entry body: the scope's registers are
+/// renamed to unique names and hoisted next to the entry's own `.reg`
+/// declarations, and the scope braces are dropped.
+fn rewrite_register_scopes(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut counter = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if let Some(next) = skip_comment(bytes, i) {
+            out.push_str(&source[i..next]);
+            i = next;
+            continue;
+        }
+        if bytes[i] == b'{'
+            && let Some(close) = matching_brace(bytes, i)
+        {
+            let body = &source[i + 1..close];
+            if has_nested_reg_scope(body) {
+                let mut hoisted = String::new();
+                let flat = flatten_scopes(body, &mut counter, &mut hoisted);
+                out.push('{');
+                out.push_str(&insert_after_register_declarations(&flat, &hoisted));
+                out.push('}');
+            } else {
+                out.push_str(&source[i..=close]);
+            }
+            i = close + 1;
+            continue;
+        }
+        let ch = source[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn has_nested_reg_scope(body: &str) -> bool {
+    let mut rest = body;
+    while let Some(at) = rest.find('{') {
+        if rest[at + 1..].trim_start().starts_with(".reg") {
+            return true;
+        }
+        rest = &rest[at + 1..];
+    }
+    false
+}
+
+/// Splice `hoisted` after the leading `.local`/`.reg` declaration statements.
+fn insert_after_register_declarations(body: &str, hoisted: &str) -> String {
+    if hoisted.is_empty() {
+        return body.to_owned();
+    }
+    let bytes = body.as_bytes();
+    let (mut pos, mut insert) = (0usize, 0usize);
+    loop {
+        // Skip whitespace and comments to the next statement.
+        let mut i = pos;
+        while i < bytes.len() {
+            if let Some(next) = skip_comment(bytes, i) {
+                i = next;
+            } else if bytes[i].is_ascii_whitespace() {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let rest = &body[i..];
+        if !(rest.starts_with(".reg") || rest.starts_with(".local")) {
+            break;
+        }
+        let Some(semi) = rest.find(';') else { break };
+        pos = i + semi + 1;
+        insert = pos;
+    }
+    format!("{}\n{}{}", &body[..insert], hoisted, &body[insert..])
+}
+
+/// Rewrites the scopes in `body` (an entry body or a scope body). Registers
+/// declared in a scope are renamed and their declarations appended to `hoisted`.
+fn flatten_scopes(body: &str, counter: &mut usize, hoisted: &mut String) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0usize;
+    // Previous significant byte, to tell a scope `{` from a vector operand `{`.
+    let mut prev = b';';
+    while i < bytes.len() {
+        if let Some(next) = skip_comment(bytes, i) {
+            out.push_str(&body[i..next]);
+            i = next;
+            continue;
+        }
+        let b = bytes[i];
+        if b == b'{'
+            && matches!(prev, b';' | b'}' | b':' | b'{')
+            && let Some(close) = matching_brace(bytes, i)
+        {
+            let inner = &body[i + 1..close];
+            if inner.trim_start().starts_with(".reg") {
+                *counter += 1;
+                let id = *counter;
+                let mut renames: Vec<(String, String, bool)> = Vec::new();
+                let mut rest = inner;
+                loop {
+                    let trimmed = rest.trim_start();
+                    if !trimmed.starts_with(".reg") {
+                        break;
+                    }
+                    let semi = trimmed.find(';').unwrap_or(trimmed.len() - 1);
+                    let decl = &trimmed[4..semi];
+                    let mut parts = decl.split_whitespace();
+                    let ty = parts.next().unwrap_or("");
+                    let names = parts.collect::<Vec<_>>().join("");
+                    for name in names.split(',').filter(|n| !n.is_empty()) {
+                        let (base, range) = match name.find('<') {
+                            Some(at) => (&name[..at], &name[at..]),
+                            None => (name, ""),
+                        };
+                        let new = format!("%__sc{id}_{}", base.trim_start_matches('%'));
+                        hoisted.push_str(&format!(".reg {ty} {new}{range};\n"));
+                        renames.push((base.to_owned(), new, !range.is_empty()));
+                    }
+                    rest = &trimmed[(semi + 1).min(trimmed.len())..];
+                }
+                let renamed = rename_identifiers(rest, &renames);
+                out.push_str(&flatten_scopes(&renamed, counter, hoisted));
+            } else {
+                out.push('{');
+                out.push_str(&flatten_scopes(inner, counter, hoisted));
+                out.push('}');
+            }
+            i = close + 1;
+            prev = b'}';
+            continue;
+        }
+        if !b.is_ascii_whitespace() {
+            prev = b;
+        }
+        let ch = body[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Replaces whole-identifier occurrences (`base` or `base<digits>`) by `new`.
+fn rename_identifiers(text: &str, renames: &[(String, String, bool)]) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if ident_byte(bytes[i]) && bytes[i] != b'.' {
+            let start = i;
+            while i < bytes.len() && ident_byte(bytes[i]) {
+                i += 1;
+            }
+            let word = &text[start..i];
+            let mapped = renames.iter().find_map(|(base, new, ranged)| {
+                if word == base {
+                    Some(new.clone())
+                } else if !ranged {
+                    None
+                } else {
+                    word.strip_prefix(base.as_str())
+                        .filter(|tail| !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()))
+                        .map(|tail| format!("{new}{tail}"))
+                }
+            });
+            out.push_str(mapped.as_deref().unwrap_or(word));
+        } else {
+            let ch = text[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
