@@ -348,6 +348,25 @@ macro_rules! loader_api {
                 self._library.is_none()
             }
 
+            /// Declare that the kernel may dereference device/host/shared USM pointers it was not
+            /// given as arguments (pointer tables, linked structures), as ggml's batched GEMM does.
+            /// Without this the driver need not keep those allocations resident for the dispatch.
+            fn set_indirect_access(&self, kernel: Raw) {
+                if std::env::var_os("CUDA_FOR_INTEL_NO_INDIRECT").is_some() {
+                    return;
+                }
+                #[cfg(not(test))]
+                let library = Some(&self._library);
+                #[cfg(test)]
+                let library = self._library.as_ref();
+                let Some(library) = library else { return };
+                type SetIndirect = unsafe extern "system" fn(Raw, u32) -> Status;
+                if let Ok(set) = unsafe { library.get::<SetIndirect>(b"zeKernelSetIndirectAccess\0") } {
+                    // ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST | DEVICE | SHARED
+                    let _ = unsafe { set(kernel, 0b111) };
+                }
+            }
+
             /// Print private/spill/SLM sizes of a kernel when `CUDA_FOR_INTEL_LOG` is set.
             /// Uses a direct loader lookup so the fake backend needs no extra entry point.
             fn log_kernel_properties(&self, kernel: Raw, name: &CStr) {
@@ -599,6 +618,7 @@ impl Module {
         call("zeKernelCreate", || unsafe {
             (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
         })?;
+        api.set_indirect_access(kernel);
         api.log_kernel_properties(kernel, name);
         let kernel = Handle(kernel);
         self.kernels.push(kernel);

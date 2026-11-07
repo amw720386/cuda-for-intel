@@ -117,3 +117,84 @@ fn hw_launch_stress_sync_intervals_do_not_leak_or_exhaust() {
     }
     assert!(report.iter().all(|(_, bad)| !bad), "{report:#?}");
 }
+
+const VADD: &str = ".version 8.0\n.target sm_80\n.address_size 64\n.visible .entry vadd(.param .u64 vadd_p0, .param .u64 vadd_p1, .param .u64 vadd_p2, .param .u64 vadd_p3)\n{\n.reg .pred %p<2>;\n.reg .b32 %r<8>;\n.reg .b64 %rd<20>;\n.reg .f32 %f<4>;\nld.param.u64 %rd1, [vadd_p0];\nld.param.u64 %rd2, [vadd_p1];\nld.param.u64 %rd3, [vadd_p2];\nld.param.u64 %rd4, [vadd_p3];\ncvta.to.global.u64 %rd5, %rd1;\ncvta.to.global.u64 %rd6, %rd2;\ncvta.to.global.u64 %rd7, %rd3;\nmov.u32 %r1, %ctaid.x;\nmov.u32 %r2, %ntid.x;\nmov.u32 %r3, %tid.x;\nmad.lo.s32 %r4, %r1, %r2, %r3;\ncvt.u64.u32 %rd8, %r4;\nmov.u32 %r5, %nctaid.x;\nmul.lo.s32 %r6, %r5, %r2;\ncvt.u64.u32 %rd9, %r6;\n$loop:\nsetp.ge.u64 %p1, %rd8, %rd4;\n@%p1 bra $done;\nshl.b64 %rd10, %rd8, 2;\nadd.s64 %rd11, %rd5, %rd10;\nadd.s64 %rd12, %rd6, %rd10;\nadd.s64 %rd13, %rd7, %rd10;\nld.global.f32 %f1, [%rd11];\nld.global.f32 %f2, [%rd12];\nadd.f32 %f3, %f1, %f2;\nst.global.f32 [%rd13], %f3;\nadd.s64 %rd8, %rd8, %rd9;\nbra $loop;\n$done:\nret;\n}\n";
+
+fn system_available_mb() -> u64 {
+    #[repr(C)]
+    struct MemoryStatus {
+        length: u32,
+        load: u32,
+        fields: [u64; 7],
+    }
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+    }
+    let mut status = MemoryStatus { length: size_of::<MemoryStatus>() as u32, load: 0, fields: [0; 7] };
+    unsafe { GlobalMemoryStatusEx(&mut status) };
+    status.fields[1] >> 20 // ullAvailPhys
+}
+
+/// Unsynchronised 14336-group dispatches over large buffers. Reports system RAM at the
+/// first failure so integrated-GPU memory pressure can be told apart from a runtime limit.
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU; hold the GPU lock"]
+#[allow(non_snake_case)]
+fn hw_big_dispatch_loop_unsynchronised() {
+    let launches: usize = std::env::var("CFI_BIG_LAUNCHES").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+    let bytes: usize = std::env::var("CFI_BIG_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024) << 20;
+    let min_free_mb: u64 = std::env::var("CFI_MIN_AVAILABLE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(20 * 1024);
+    let before = system_available_mb();
+    println!("system available RAM before: {before} MB");
+    if before < min_free_mb {
+        println!("SKIP: available RAM {before} MB below required {min_free_mb} MB");
+        return;
+    }
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuStreamCreate(*mut Handle, u32),
+        cuStreamSynchronize(Handle),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemGetInfo_v2(*mut usize, *mut usize),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+    );
+    ok!(cuInit(0));
+    let mut ctx = null_mut();
+    ok!(cuCtxCreate_v2(&mut ctx, 0, test_device()));
+    let mut stream = null_mut();
+    ok!(cuStreamCreate(&mut stream, 0));
+    let src = std::ffi::CString::new(VADD).unwrap();
+    let mut module = null_mut();
+    ok!(cuModuleLoadData(&mut module, src.as_ptr().cast()));
+    let mut kernel = null_mut();
+    ok!(cuModuleGetFunction(&mut kernel, module, c"vadd".as_ptr()));
+    let (mut a, mut b, mut c) = (0u64, 0u64, 0u64);
+    ok!(cuMemAlloc_v2(&mut a, bytes));
+    ok!(cuMemAlloc_v2(&mut b, bytes));
+    ok!(cuMemAlloc_v2(&mut c, bytes));
+    let (mut free, mut total) = (0usize, 0usize);
+    ok!(cuMemGetInfo_v2(&mut free, &mut total));
+    println!("after alloc: cuMemGetInfo free {} MB / {} MB, system available {} MB", free >> 20, total >> 20, system_available_mb());
+    let mut n = (bytes / 4) as u64;
+    let mut failure = None;
+    for i in 0..launches {
+        let (mut pa, mut pb, mut pc) = (a, b, c);
+        let mut params: [*mut c_void; 4] = [(&mut pa as *mut u64).cast(), (&mut pb as *mut u64).cast(), (&mut pc as *mut u64).cast(), (&mut n as *mut u64).cast()];
+        let status = unsafe { cuLaunchKernel(kernel, 14336, 1, 1, 256, 1, 1, 0, stream, params.as_mut_ptr(), null_mut()) };
+        if status != 0 {
+            println!("FAILURE launch {i}: status {status}; system available {} MB (was {before} MB)", system_available_mb());
+            failure = Some(i);
+            break;
+        }
+        if i % 100 == 0 {
+            println!("launch {i}: system available {} MB", system_available_mb());
+        }
+    }
+    let sync = unsafe { cuStreamSynchronize(stream) };
+    println!("final sync {sync}, system available {} MB", system_available_mb());
+    assert!(failure.is_none() && sync == 0, "failure {failure:?} sync {sync}");
+}
