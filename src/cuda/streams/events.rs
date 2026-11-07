@@ -47,8 +47,10 @@ pub unsafe extern "system" fn cuEventCreate(out: *mut Opaque, flags: u32) -> CuR
                 return Err(InvalidValue);
             }
             match flags {
-                0 | 2 => {}                                // DEFAULT or DISABLE_TIMING
-                1 | 3 | 6 | 7 => return Err(NotSupported), // BLOCKING_SYNC or INTERPROCESS
+                // DEFAULT, BLOCKING_SYNC and DISABLE_TIMING. BLOCKING_SYNC only picks the
+                // host wait strategy and host waits here always block in the driver.
+                0..=3 => {}
+                6 | 7 => return Err(NotSupported), // INTERPROCESS
                 _ => return Err(InvalidValue),
             }
             let key = reserve_handle(next)?;
