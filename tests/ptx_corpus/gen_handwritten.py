@@ -30,6 +30,17 @@ def probe(fam, name, lines, target="sm_80", version="8.0", pre="", entry=None):
     for r in sorted(x for x in used if x.startswith("%p")): init.append(f"setp.eq.u32 {r}, %r31, 1;")
     body = "\n".join("\t" + l for l in init) + "\n" + body
     fdreg = "\t.reg .f64 %fd<8>;\n" if "%fd" in body else ""
+    # Shared/local probes need a real address of that space (a global pointer is not valid PTX there).
+    decl = ""
+    uses_shared = "[%rd2]" in body and re.search(r"\b(ld|st|atom|red|ldmatrix|stmatrix|cp\.async\.c[ag])\.[a-z0-9.]*shared\b(?!::)", body) is not None and not any(x in body for x in ("::cluster", "mbarrier", "cp.async.bulk", "pre"))
+    if uses_shared:
+        decl += "\t.shared .align 16 .b8 sbuf[1024];\n"
+        body = body.replace("\tmov.u32 %r2, 1;\n", "", 1).replace("[%rd2]", "[%r2]", 1)
+        body = "\tmov.u32 %r2, sbuf;\n" + body
+    if ".local" in body and "[%rd2]" in body:
+        decl = "\t.local .align 8 .b8 depot[64];\n" + decl
+        body = body.replace("[%rd2]", "[depot]", 1)
+    fdreg += decl
     txt = f".version {version}\n.target {target}\n.address_size 64\n{pre}\n.visible .entry {name}(\n\t.param .u64 out\n)\n{{\n{REGS}{fdreg}\tld.param.u64 %rd1, [out];\n\tcvta.to.global.u64 %rd2, %rd1;\n{body}\n\tst.global.u32 [%rd2], %r1;\n\tret;\n}}\n"
     (d / f"{name}.ptx").write_text(txt)
 
@@ -45,8 +56,11 @@ for n, t, ab, cd, k in [
  ("m16n8k4_tf32_f32","m16n8k4","tf32","f32",None),
 ]:
     shape = t
-    # fragment arity per shape/type (approximate; the translator should reject on opcode first)
-    probe("mma", f"mma_{n}", [f"mma.sync.aligned.{shape}.row.col.{cd}.{ab}.{ab}.{cd} {D}, {A}, {B}, {C};"], target=k or "sm_80")
+    # fragment arity per shape/type (PTX ISA tables)
+    a2, b1 = "{%r1,%r2}", "{%r5}"
+    arity = {"m16n8k8_f16_f32": (a2, b1), "m16n8k8_bf16_f32": (a2, b1), "m16n8k4_tf32_f32": (a2, b1)}
+    Aa, Bb = arity.get(n, (A, B))
+    probe("mma", f"mma_{n}", [f"mma.sync.aligned.{shape}.row.col.{cd}.{ab}.{ab}.{cd} {D}, {Aa}, {Bb}, {C};"], target=k or "sm_80")
 probe("mma","mma_m16n8k16_f16_f16acc",["mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%r10,%r11}, {%r1,%r2,%r3,%r4}, {%r5,%r6}, {%r7,%r8};"])
 probe("mma","mma_m16n8k32_s8_s32",["mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%r10,%r11,%r12,%r13}, {%r1,%r2,%r3,%r4}, {%r5,%r6}, {%r7,%r8,%r9,%r14};"])
 probe("mma","mma_m16n8k32_u8_satfinite",["mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.u8.s32 {%r10,%r11,%r12,%r13}, {%r1,%r2,%r3,%r4}, {%r5,%r6}, {%r7,%r8,%r9,%r14};"])

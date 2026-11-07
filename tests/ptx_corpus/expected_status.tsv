@@ -64,9 +64,9 @@ handwritten/atomics/atom_global_min_u32_10.ptx	pass	strict-pass
 handwritten/atomics/atom_global_or_b32_12.ptx	pass	strict-pass	
 handwritten/atomics/atom_global_xor_b32_14.ptx	pass	strict-pass	
 handwritten/atomics/atom_relaxed_gpu_global_add_u32_20.ptx	pass	strict-pass	
-handwritten/atomics/atom_shared_add_f32_18.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/atomics/atom_shared_add_u32_17.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/atomics/atom_shared_cas_b32_19.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/atomics/atom_shared_add_f32_18.ptx	pass	strict-pass	
+handwritten/atomics/atom_shared_add_u32_17.ptx	pass	strict-pass	
+handwritten/atomics/atom_shared_cas_b32_19.ptx	pass	strict-pass	
 handwritten/atomics/red_global_add_f32_24.ptx	pass	strict-pass	
 handwritten/atomics/red_global_add_noftz_f16x2_25.ptx	pass	strict-pass	
 handwritten/atomics/red_global_add_u32_23.ptx	pass	strict-pass	
@@ -74,7 +74,7 @@ handwritten/atomics/red_global_add_u64_27.ptx	pass	strict-pass
 handwritten/atomics/red_global_max_u32_26.ptx	pass	strict-pass	
 handwritten/atomics/red_global_or_b32_29.ptx	pass	strict-pass	
 handwritten/atomics/red_release_gpu_global_add_u32_30.ptx	pass	strict-pass	
-handwritten/atomics/red_shared_add_u32_28.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/atomics/red_shared_add_u32_28.ptx	pass	strict-pass	
 handwritten/barrier/bar_arrive.ptx	pass	strict-pass	
 handwritten/barrier/bar_red_and_pred.ptx	pass	strict-pass	
 handwritten/barrier/bar_red_popc.ptx	pass	strict-pass	
@@ -165,12 +165,12 @@ handwritten/control/ret_in_branch.ptx	pass	strict-pass
 handwritten/cp_async/cp_async_bulk_commit_group.ptx	pass	strict-pass	
 handwritten/cp_async/cp_async_bulk_g2s.ptx	error	strict-fail	invalid PTX identifier cp.async.bulk.shared
 handwritten/cp_async/cp_async_bulk_tensor_2d.ptx	error	strict-fail	invalid PTX identifier cp.async.bulk.tensor.2d.shared
-handwritten/cp_async/cp_async_ca_16.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/cp_async/cp_async_ca_4.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/cp_async/cp_async_ca_8.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/cp_async/cp_async_ca_zfill.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/cp_async/cp_async_cg_16.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
-handwritten/cp_async/cp_async_cg_l2_128.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/cp_async/cp_async_ca_16.ptx	pass	strict-pass	
+handwritten/cp_async/cp_async_ca_4.ptx	pass	strict-pass	
+handwritten/cp_async/cp_async_ca_8.ptx	pass	strict-pass	
+handwritten/cp_async/cp_async_ca_zfill.ptx	pass	strict-pass	
+handwritten/cp_async/cp_async_cg_16.ptx	pass	strict-pass	
+handwritten/cp_async/cp_async_cg_l2_128.ptx	pass	strict-pass	
 handwritten/cp_async/cp_async_commit_group.ptx	pass	strict-pass	
 handwritten/cp_async/cp_async_mbarrier_arrive.ptx	unsupported	strict-fail	unsupported PTX instruction: cp.async.mbarrier.arrive.shared.b64 [ %rd2 ]
 handwritten/cp_async/cp_async_wait_all.ptx	pass	strict-pass	
@@ -258,14 +258,14 @@ handwritten/half_bf16/neg_f16.ptx	pass	strict-pass
 handwritten/half_bf16/set_gt_f16x2.ptx	pass	strict-pass	
 handwritten/half_bf16/setp_f16.ptx	pass	strict-pass	
 handwritten/half_bf16/tanh_approx_f16x2.ptx	pass	strict-pass	
-handwritten/ldmatrix/ldmatrix_m16n16_b8.ptx	unsupported	strict-fail	unsupported PTX instruction: ldmatrix.sync.aligned.m16n16.x1.trans.shared.b8 { %r1 , %r2 } , [ %rd2 ]
-handwritten/ldmatrix/ldmatrix_x1.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
-handwritten/ldmatrix/ldmatrix_x1_trans.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
-handwritten/ldmatrix/ldmatrix_x2.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
-handwritten/ldmatrix/ldmatrix_x2_trans.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
-handwritten/ldmatrix/ldmatrix_x4.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
-handwritten/ldmatrix/ldmatrix_x4_trans.ptx	error	strict-fail	expected a shared address for %rd2, got Address(Global)
-handwritten/ldmatrix/stmatrix_x4.ptx	unsupported	strict-fail	unsupported PTX instruction: stmatrix.sync.aligned.m8n8.x4.shared.b16 [ %rd2 ] , { %r1 , %r2 , %r3 , %r4 }
+handwritten/ldmatrix/ldmatrix_m16n16_b8.ptx	unsupported	strict-fail	unsupported PTX instruction: ldmatrix.sync.aligned.m16n16.x1.trans.shared.b8 { %r1 , %r2 } , [ %r2 ]
+handwritten/ldmatrix/ldmatrix_x1.ptx	pass	strict-pass	
+handwritten/ldmatrix/ldmatrix_x1_trans.ptx	pass	strict-pass	
+handwritten/ldmatrix/ldmatrix_x2.ptx	pass	strict-pass	
+handwritten/ldmatrix/ldmatrix_x2_trans.ptx	pass	strict-pass	
+handwritten/ldmatrix/ldmatrix_x4.ptx	pass	strict-pass	
+handwritten/ldmatrix/ldmatrix_x4_trans.ptx	pass	strict-pass	
+handwritten/ldmatrix/stmatrix_x4.ptx	unsupported	strict-fail	unsupported PTX instruction: stmatrix.sync.aligned.m8n8.x4.shared.b16 [ %r2 ] , { %r1 , %r2 , %r3 , %r4 }
 handwritten/memory/applypriority_L2.ptx	pass	strict-pass	
 handwritten/memory/call_noreturn_stub.ptx	pass	strict-pass	
 handwritten/memory/const_array_init.ptx	error	strict-fail	unknown PTX local symbol ctbl
@@ -284,9 +284,9 @@ handwritten/memory/ld_global_v2_u64.ptx	pass	strict-pass
 handwritten/memory/ld_global_v4_f32.ptx	pass	strict-pass	
 handwritten/memory/ld_param_v2.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.param.v2.u32 { %r1 , %r2 } , [ out ]
 handwritten/memory/ld_shared_cluster.ptx	error	strict-fail	invalid PTX identifier ld.global.shared
-handwritten/memory/ld_shared_v4.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
+handwritten/memory/ld_shared_v4.ptx	pass	strict-pass	
 handwritten/memory/ld_volatile_global.ptx	pass	strict-pass	
-handwritten/memory/local_depot.ptx	error	strict-fail	expected Local address for %rd2, got Address(Global)
+handwritten/memory/local_depot.ptx	error	strict-fail	undefined PTX register depot on an incoming path
 handwritten/memory/mov_b64_pack.ptx	pass	strict-pass	
 handwritten/memory/mov_vector_pack_b32.ptx	pass	strict-pass	
 handwritten/memory/multimem_ld_reduce.ptx	unsupported	strict-fail	unsupported PTX instruction: multimem.ld_reduce.relaxed.sys.global.add.u32 %r1 , [ %rd2 ]
@@ -298,19 +298,19 @@ handwritten/memory/st_global_u16.ptx	pass	strict-pass
 handwritten/memory/st_global_v4_u32.ptx	pass	strict-pass	
 handwritten/memory/st_global_wt.ptx	pass	strict-pass	
 handwritten/memory/vprintf_call.ptx	pass	strict-pass	
-handwritten/mma/mma_m16n8k16_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
-handwritten/mma/mma_m16n8k16_f16_f16acc.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 { %r10 , %r11 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %r7 , %r8 }
+handwritten/mma/mma_m16n8k16_bf16_f32.ptx	pass	strict-pass	
+handwritten/mma/mma_m16n8k16_f16_f16acc.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k16_f16_f32.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k16_f16_f32_scalar_regs.ptx	pass	strict-pass	
-handwritten/mma/mma_m16n8k16_f64_m8n8k4.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 { %fd1 , %fd2 } , { %fd3 } , { %fd4 } , { %fd5 , %fd6 }
+handwritten/mma/mma_m16n8k16_f64_m8n8k4.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k256_b1_xor_popc.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc { %r10 , %r11 , %r12 , %r13 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %r7 , %r8 , %r9 , %r14 }
 handwritten/mma/mma_m16n8k32_s8_s32.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k32_u8_satfinite.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.u8.s32 { %r10 , %r11 , %r12 , %r13 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %r7 , %r8 , %r9 , %r14 }
-handwritten/mma/mma_m16n8k4_tf32_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
+handwritten/mma/mma_m16n8k4_tf32_f32.ptx	pass	strict-pass	
 handwritten/mma/mma_m16n8k64_s4.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 { %r10 , %r11 , %r12 , %r13 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %r7 , %r8 , %r9 , %r14 }
-handwritten/mma/mma_m16n8k8_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
-handwritten/mma/mma_m16n8k8_f16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
-handwritten/mma/mma_m16n8k8_tf32_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
+handwritten/mma/mma_m16n8k8_bf16_f32.ptx	pass	strict-pass	
+handwritten/mma/mma_m16n8k8_f16_f32.ptx	pass	strict-pass	
+handwritten/mma/mma_m16n8k8_tf32_f32.ptx	pass	strict-pass	
 handwritten/mma/mma_m8n8k16_s8.ptx	pass	strict-pass	
 handwritten/mma/mma_m8n8k4_f16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 } , { %f1 , %f2 , %f3 , %f4 }
 handwritten/mma/mma_sp_m16n8k32_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 { %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 } , { %r5 , %r6 , %r7 , %r8 } , { %f1 , %f2 , %f3 , %f4 } , %r9 , 0x0
@@ -571,8 +571,8 @@ zluda/memory/vector8.ptx	unsupported	strict-fail	unsupported PTX instruction: ld
 zluda/memory/vector8_extract.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u8 { %temp0 , %temp1 , %temp2 , %temp3 , %temp4 , %temp5 , %temp6 , %temp7 } , [ %in_addr ]
 zluda/memory/vector_extract.ptx	unsupported	strict-fail	unsupported PTX register type .v4.u16
 zluda/memory/vector_operand.ptx	pass	strict-fail	
-zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %d0 , %d1 , %d2 , %d3 } , { %a0a1 , %a2a3 , %a4a5 , %a6a7 } , { %b0b1 , %b2b3 } , { %in0 , %in1 , %in2 , %in3 }
-zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32_2x.ptx	unsupported	strict-fail	unsupported PTX instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %d0 , %d1 , %d2 , %d3 } , { %a0a1 , %a2a3 , %a4a5 , %a6a7 } , { %b0b1 , %b2b3 } , { %in0 , %in1 , %in2 , %in3 }
+zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32.ptx	pass	strict-fail	
+zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32_2x.ptx	pass	strict-fail	
 zluda/mma/mma_m16n8k16_f32_f16_f16_f32.ptx	pass	strict-fail	
 zluda/mma/mma_m16n8k32_s32_s8_s8_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
 zluda/mma/mma_m16n8k32_s32_s8_s8_s32_interleave.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
