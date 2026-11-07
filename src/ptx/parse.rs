@@ -53,7 +53,7 @@ struct Parser<'a> {
 }
 
 /// Stock GGML MMQ kernels declare roughly 7000 registers.
-const MAX_PTX_REGISTERS: usize = 65536;
+const MAX_PTX_REGISTERS: usize = 400_000;
 
 impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&'a str> {
