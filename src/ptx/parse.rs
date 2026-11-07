@@ -45,6 +45,9 @@ struct Parser<'a> {
     tokens: std::vec::IntoIter<&'a str>,
 }
 
+/// Stock GGML MMQ kernels declare roughly 7000 registers.
+const MAX_PTX_REGISTERS: usize = 65536;
+
 impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&'a str> {
         self.tokens.as_slice().first().copied()
@@ -176,7 +179,7 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<usize>()
                     .ok()
-                    .filter(|&n| (1..=4096 - registers.len()).contains(&n))
+                    .filter(|&n| (1..=MAX_PTX_REGISTERS - registers.len()).contains(&n))
                     .ok_or_else(|| Error::new("unsupported PTX register range"))?;
                 self.expect(">")?;
                 for index in 0..count {
@@ -185,7 +188,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             } else {
-                if registers.len() == 4096 {
+                if registers.len() == MAX_PTX_REGISTERS {
                     return Err(Error::new("too many PTX registers"));
                 }
                 if registers.insert(name.to_owned(), width).is_some() {
