@@ -391,8 +391,26 @@ fn exec(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, shared_elem: u64, pointees: &Ha
         match step(ctx, inv, mem, inst, shared_elem, pointees) {
             Flow::Next => {}
             Flow::Jump(label) => {
+                let from = f.blocks[inv.block].label.as_ref().unwrap().result_id.unwrap();
                 inv.block = ctx.blocks[&label];
                 inv.ip = 0;
+                // Phis of the target read their incoming values from the state at the jump.
+                let target = &f.blocks[inv.block];
+                let mut assigned = Vec::new();
+                for phi in target.instructions.iter().take_while(|i| i.class.opcode == Op::Phi) {
+                    let w = ctx.widths.get(&phi.result_type.unwrap()).copied().unwrap_or(0);
+                    let value = phi
+                        .operands
+                        .chunks(2)
+                        .find(|pair| id(&pair[1]) == from)
+                        .map(|pair| inv.vals[&id(&pair[0])])
+                        .unwrap_or_else(|| panic!("phi without incoming edge from {from}"));
+                    assigned.push((phi.result_id.unwrap(), (value.0, w)));
+                    inv.ip += 1;
+                }
+                for (r, v) in assigned {
+                    inv.vals.insert(r, v);
+                }
             }
             Flow::Barrier => {
                 inv.status = Status::AtBarrier;
@@ -628,6 +646,19 @@ fn step(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, inst: &Instruction, shared_elem
                 arg(0).round()
             } else if op == C::fma as u32 {
                 arg(0).mul_add(arg(1), arg(2))
+            } else if op == C::trunc as u32 {
+                arg(0).trunc()
+            } else if op == C::floor as u32 {
+                arg(0).floor()
+            } else if op == C::ceil as u32 {
+                arg(0).ceil()
+            } else if op == C::rint as u32 {
+                arg(0).round_ties_even()
+            } else if op == C::fmin as u32 {
+                let (a, b) = (arg(0), arg(1));
+                if a.is_nan() { b } else if b.is_nan() { a } else { a.min(b) }
+            } else if op == C::sqrt as u32 {
+                arg(0).sqrt()
             } else {
                 // integer extended instructions
                 let a = |i: usize| get(inv, 2 + i).0;

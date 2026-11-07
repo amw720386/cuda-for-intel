@@ -222,12 +222,16 @@ fn geometry_mapping_rejects_unexpected_launches() {
 /// Runs the stock ggml-cuda PTX entry (when `CFI_STOCK_PTX_DIR` points at the extracted blobs)
 /// through the PTX translator and the interpreter, and compares it with the native kernel.
 fn translated_words(blob_file: &str, entry: &str) -> Option<Vec<u32>> {
+    translated(blob_file, entry).map(|t| t.0)
+}
+
+fn translated(blob_file: &str, entry: &str) -> Option<(Vec<u32>, Vec<crate::ptx::Param>)> {
     let dir = std::env::var_os("CFI_STOCK_PTX_DIR")?;
     let source = std::fs::read_to_string(std::path::Path::new(&dir).join(blob_file)).ok()?;
     let prepared = crate::ptx::prepare_source(&source).ok()?;
     crate::ptx::set_dot_product(true);
     let t = crate::ptx::translate_entry(&prepared, entry).unwrap_or_else(|e| panic!("{entry}: {e}"));
-    Some(t.words)
+    Some((t.words, t.kernels[0].params.clone()))
 }
 
 #[test]
@@ -240,7 +244,8 @@ fn translated_stock_mmvq_matches_native_on_the_interpreter() {
         (refs::Q8_0, 4, 2, 2, 2),
     ] {
         let entry = format!("_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{ncols}EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj");
-        let Some(stock) = translated_words("blob29.ptx", &entry) else { return };
+        let Some((stock, params)) = translated("blob29.ptx", &entry) else { return };
+        assert_eq!(params, super::mmvq_layout(), "{entry}: registry layout must equal the real one");
         let pr = problem(ty, ncols as usize, 6, 512, nch, ratio, nsamples, false, 77);
         let nw = pr.p.nwarps;
         let native = run_native(&pr, mmvq::Cfg { ty, ncols, nwarps: nw as u32 });
@@ -251,4 +256,25 @@ fn translated_stock_mmvq_matches_native_on_the_interpreter() {
         println!("type {ty} ncols {ncols} ch {nch}/{ratio} samples {nsamples}: native vs translated stock PTX: nmse {nmse}, {bad} bitwise differences");
         assert!(nmse < 1e-10);
     }
+}
+
+#[test]
+fn translated_stock_quantize_matches_native_on_the_interpreter() {
+    let name = "_Z13quantize_q8_1PKfPvxxxxxj5uint3";
+    let dir = std::env::var_os("CFI_STOCK_PTX_DIR");
+    let Some(dir) = dir else { return };
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| std::fs::read_to_string(p).is_ok_and(|s| s.contains(&format!(".entry {name}("))));
+    let Some(file) = file else { return };
+    let Some((stock, params)) = translated(file.file_name().unwrap().to_str().unwrap(), name) else { return };
+    assert_eq!(params, super::quantize_layout());
+    let case = probe::quantize_case(96, 128, 3, 2, 2, 9);
+    let mut sim = Sim { dev: Dev::default(), words: &stock };
+    let translated_out = case.run(&mut sim).unwrap();
+    let native_words = quantize::build(true);
+    let mut sim = Sim { dev: Dev::default(), words: &native_words };
+    assert_eq!(case.run(&mut sim).unwrap(), translated_out, "native quantize_q8_1 must equal the translated stock kernel");
 }
