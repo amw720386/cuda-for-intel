@@ -32,15 +32,20 @@ pub(super) fn ensure_lazy_library(state: &mut State, library: usize) -> Result<(
     let context_key = current().ok_or(InvalidContext)?;
     state.contexts.get(&context_key).ok_or(ContextIsDestroyed)?.check_live()?;
     let source = std::str::from_utf8(&image.ptx).map_err(|_| InvalidPtx)?;
-    let prepared = ptx::prepare_module(source).map_err(|_| InvalidPtx)?;
-    let names = ptx::entry_names(&prepared)
+    let names = ptx::entry_names(source)
         .map_err(|_| InvalidPtx)?
         .into_iter()
         .filter_map(|n| CString::new(n).ok())
         .collect();
     state.lazy_modules.insert(
         library,
-        super::LazyModule { context: context_key, prepared, names, children: HashMap::new() },
+        super::LazyModule {
+            context: context_key,
+            raw: source.to_owned(),
+            prepared: std::cell::OnceCell::new(),
+            names,
+            children: HashMap::new(),
+        },
     );
     Ok(())
 }

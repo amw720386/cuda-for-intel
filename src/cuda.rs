@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
 mod current_stack;
+mod xcache;
 mod discovery;
 #[cfg(windows)]
 mod dxgi_luid;
@@ -102,7 +103,9 @@ struct CudaContext {
 /// A PTX module whose kernels are translated one at a time on first lookup.
 pub(crate) struct LazyModule {
     pub(crate) context: usize,
-    pub(crate) prepared: String,
+    /// PTX as the application supplied it; `prepared` is derived on first translation.
+    pub(crate) raw: String,
+    pub(crate) prepared: std::cell::OnceCell<String>,
     pub(crate) names: std::collections::HashSet<CString>,
     /// kernel name -> (hidden child module, function handle)
     pub(crate) children: HashMap<CString, (usize, usize)>,
@@ -1169,11 +1172,7 @@ pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_v
                 let _ = std::fs::write(path, source);
             }
         }
-        let prepared = ptx::prepare_module(source).map_err(|error| {
-            diagnose_reject(source, &error);
-            InvalidPtx
-        })?;
-        let names = ptx::entry_names(&prepared)
+        let names = ptx::entry_names(source)
             .map_err(|_| InvalidPtx)?
             .into_iter()
             .filter_map(|name| CString::new(name).ok())
@@ -1183,7 +1182,8 @@ pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_v
             key,
             LazyModule {
                 context: context_key,
-                prepared,
+                raw: source.to_owned(),
+                prepared: std::cell::OnceCell::new(),
                 names,
                 children: HashMap::new(),
             },
@@ -1210,9 +1210,16 @@ fn diagnose_reject(ptx: &str, error: &ptx::Error) {
 /// True for an entry with parameters whose body never touches global or shared
 /// memory and has no atomics or barriers.
 fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
-    let needle = format!(".entry {name} ");
-    let Some(start) = prepared.find(&needle) else { return false };
-    let rest = &prepared[start + needle.len()..];
+    let needle = format!(".entry {name}");
+    let mut from = 0;
+    let rest = loop {
+        let Some(at) = prepared[from..].find(&needle) else { return false };
+        let end = from + at + needle.len();
+        if prepared[end..].starts_with(|c: char| c == ' ' || c == '(' || c == '\n' || c == '\r') {
+            break &prepared[end..];
+        }
+        from = end;
+    };
     let body = rest.split("\n.entry ").next().unwrap_or(rest);
     if !body.contains(".param") {
         return false;
@@ -1240,7 +1247,7 @@ pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr
     if trace::enabled() {
         trace::record(format_args!("lazy kernel {}", name.to_string_lossy()));
     }
-    if is_arch_guard_stub(&lazy.prepared, &name.to_string_lossy())
+    if is_arch_guard_stub(&lazy.raw, &name.to_string_lossy())
         && std::env::var_os("CFI_ALLOW_EMPTY_KERNELS").is_none()
     {
         // `#if __CUDA_ARCH__ >= N` bodies compile to an empty kernel (often a vprintf
@@ -1254,10 +1261,34 @@ pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr
     if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {
         let path = std::path::Path::new(&dir).join(format!("module_{module:x}.ptx"));
         if !path.exists() {
-            let _ = std::fs::write(path, &lazy.prepared);
+            let _ = std::fs::write(path, &lazy.raw);
         }
     }
-    let translated = ptx::translate_prepared_entry(&lazy.prepared, &name.to_string_lossy())
+    let entry_name = name.to_string_lossy();
+    let cache_key = xcache::key(&lazy.raw, &entry_name);
+    let cached = xcache::get(cache_key);
+    let translated = if let Some(hit) = cached {
+        if trace::enabled() {
+            trace::record(format_args!("translation cache hit for {}", entry_name.chars().take(80).collect::<String>()));
+        }
+        Ok(hit)
+    } else {
+        let result = (|| {
+            let prepared = match lazy.prepared.get() {
+                Some(p) => p,
+                None => {
+                    let p = ptx::prepare_module(&lazy.raw)?;
+                    lazy.prepared.get_or_init(|| p)
+                }
+            };
+            ptx::translate_prepared_entry(prepared, &entry_name)
+        })();
+        if let Ok(t) = &result {
+            xcache::put(cache_key, t);
+        }
+        result
+    };
+    let translated = translated
         .map_err(|error| {
             if trace::enabled() {
                 trace::record(format_args!(
