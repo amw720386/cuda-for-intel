@@ -152,6 +152,17 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             if taken == other || !varying.contains(predicate) || checked_branches[index] {
                 continue;
             }
+            // An early-exit guard (`@p bra $exit` where the target only returns) lets some
+            // threads leave before a barrier. CUDA counts exited threads as arrived, and the
+            // hardware barrier does the same for terminated invocations, so it is not a
+            // divergence hazard for the barriers that follow.
+            let exit_only = |block: usize| {
+                blocks[block].instructions.is_empty()
+                    && matches!(blocks[block].end, Terminator::Return)
+            };
+            if exit_only(taken) || exit_only(other) {
+                continue;
+            }
             checked_branches[index] = true;
             let mut seen = vec![false; blocks.len()];
             let mut stack = vec![taken, other];

@@ -169,6 +169,8 @@ enum AtomicOp {
     Xor,
     Exch,
     Cas,
+    Inc,
+    Dec,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +264,8 @@ enum FloatOp<'a> {
     RoundNearest([&'a str; 1]),
     Floor([&'a str; 1]),
     Ceil([&'a str; 1]),
+    /// `cvt.sat.f32.f32` — clamp to [0, 1], NaN becomes 0.
+    Saturate([&'a str; 1]),
 }
 
 impl<'a> FloatOp<'a> {
@@ -288,6 +292,7 @@ impl<'a> FloatOp<'a> {
             | Self::RoundNearest(inputs)
             | Self::Floor(inputs)
             | Self::Ceil(inputs)
+            | Self::Saturate(inputs)
             | Self::Trunc(inputs) => inputs,
         }
     }
@@ -380,12 +385,15 @@ enum Instruction<'a> {
     Alu64(Alu64Op, &'a str, [&'a str; 3]),
     /// `mov.u32 %r, %laneid`.
     LaneId(&'a str),
+    /// `mov.u32 %r, %warpid` or `%lanemask_*`, derived from the linear thread index.
+    Special(&'a str, &'a str),
     /// `atom.*` / `red.*` on 32-bit words. `dst` is absent for `red`; `src` is
     /// `[value, compare]` for `cas` (`[compare, value]` in PTX order) else `[value, "0"]`.
     Atomic {
         op: AtomicOp,
         space: Space,
         float: bool,
+        wide: bool,
         signed: bool,
         dst: Option<&'a str>,
         addr: &'a str,
@@ -546,7 +554,7 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 src
             }
-            LaneId(dst) => {
+            LaneId(dst) | Special(dst, _) => {
                 out.push(*dst);
                 &[]
             }
@@ -1315,6 +1323,49 @@ mod tests {
             ret;
         }
     ";
+
+    #[test]
+    fn shared_arrays_accept_byte_alignment_and_odd_sizes() {
+        let translated = translate(
+            "
+            .version 4.1
+            .target sm_52
+            .address_size 64
+            .entry odd_shared() {
+                .reg .b32 %r;
+                .shared .align 1 .b8 tag[3];
+                .shared .align 16 .b8 wide[32];
+                mov.u32 %r, wide;
+                ld.shared.b32 %r, [wide];
+                ret;
+            }
+            ",
+        )
+        .unwrap();
+        // 3 bytes round up to 4, then 12 bytes of padding keep `wide` 16-byte aligned.
+        assert_eq!(translated.kernels[0].shared_bytes, 48);
+    }
+
+    #[test]
+    fn ldmatrix_accepts_generic_form_without_shared_qualifier() {
+        for op in ["ldmatrix.sync.aligned.m8n8.x2.b16", "ldmatrix.sync.aligned.m8n8.x2.trans.b16"] {
+            let source = format!(
+                "
+                .version 7.0
+                .target sm_80
+                .address_size 64
+                .entry ldm() {{
+                    .reg .b32 %r<4>;
+                    .shared .align 16 .b8 tile[512];
+                    mov.u32 %r0, tile;
+                    {op} {{%r1, %r2}}, [%r0];
+                    ret;
+                }}
+                "
+            );
+            translate(&source).unwrap();
+        }
+    }
 
     #[test]
     fn lowers_static_shared_memory_and_full_block_barrier() {
