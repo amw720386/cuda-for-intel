@@ -3,8 +3,10 @@
 //! Layout and GUID coverage follow the publicly documented ZLUDA dark-API map
 //! (MIT). Only the slots required for cudart device enumeration / primary
 //! context retain are wired initially; remaining slots stay null.
+use super::discovery::cuGetProcAddress_v2;
 use super::primary::cuDevicePrimaryCtxRetain;
 use super::*;
+use std::ffi::CStr;
 use std::sync::OnceLock;
 
 /// CUDART_INTERFACE — `{6BD5FB6C-5BF4-E74A-8987-D93912FD9DF9}`
@@ -22,6 +24,17 @@ const CONTEXT_LOCAL_STORAGE: [u8; 16] = [
     0xC6, 0x93, 0x33, 0x6E, 0x11, 0x21, 0xDF, 0x11, 0xA8, 0xC3, 0x68, 0xF3, 0x55, 0xD8, 0x95, 0x93,
 ];
 
+/// HYBRID_CUDART — `{DD9E98A4-F410-4844-99B0-E2AEB7B432B5}`
+///
+/// Windows CUDA 13 static cudart requests this table, then calls slot 1 to
+/// obtain a `__cudaGetProcAddress` resolver (ZLUDA dark-api map, MIT).
+const HYBRID_CUDART: [u8; 16] = [
+    0xDD, 0x9E, 0x98, 0xA4, 0xF4, 0x10, 0x48, 0x44, 0x99, 0xB0, 0xE2, 0xAE, 0xB7, 0xB4, 0x32, 0xB5,
+];
+
+/// Token returned by `hybrid_runtime_load_get_proc_address` (ZLUDA value).
+const HYBRID_RUNTIME_TOKEN: usize = 302_100_128;
+
 const PTR_SIZE: usize = size_of::<*const c_void>();
 
 fn tables() -> &'static Tables {
@@ -33,6 +46,7 @@ struct Tables {
     cudart: [*const c_void; 13],
     tools_hooks: [*const c_void; 7],
     context_local: [*const c_void; 4],
+    hybrid_cudart: [*const c_void; 3],
     /// Oversized null stub for GUIDs we have not reverse-engineered yet.
     /// Slot 0 is the byte size of the table; remaining slots stay null so a
     /// probing cudart neither sees a missing export-table mechanism nor
@@ -69,6 +83,11 @@ impl Tables {
         context_local[1] = context_local_storage_delete as *const c_void;
         context_local[2] = context_local_storage_get as *const c_void;
 
+        let mut hybrid_cudart = [std::ptr::null(); 3];
+        hybrid_cudart[0] = (3 * PTR_SIZE) as *const c_void;
+        hybrid_cudart[1] = hybrid_runtime_load_get_proc_address as *const c_void;
+        hybrid_cudart[2] = hybrid_runtime_free as *const c_void;
+
         let mut unknown_stub = [std::ptr::null(); 16];
         unknown_stub[0] = (16 * PTR_SIZE) as *const c_void;
 
@@ -76,6 +95,7 @@ impl Tables {
             cudart,
             tools_hooks,
             context_local,
+            hybrid_cudart,
             unknown_stub,
         }
     }
@@ -159,6 +179,92 @@ unsafe extern "system" fn context_local_storage_get(
     Success
 }
 
+fn ptr_desc(p: *const c_void) -> String {
+    let addr = p as usize;
+    if p.is_null() {
+        return "<null>".into();
+    }
+    // Print as C string only when the address looks like user memory and the
+    // first bytes are printable ASCII (driver symbol names are ASCII).
+    if (0x10000..0x0000_7FFF_FFFF_FFFF).contains(&addr) {
+        let bytes = unsafe { std::slice::from_raw_parts(p.cast::<u8>(), 64) };
+        if bytes.iter().take_while(|b| **b != 0).all(|b| b.is_ascii_graphic() || *b == b'_')
+            && bytes[0] != 0
+        {
+            if let Ok(s) = unsafe { CStr::from_ptr(p.cast()) }.to_str() {
+                return s.into();
+            }
+        }
+    }
+    format!("<ptr:{addr:#x}>")
+}
+
+/// Hybrid-cudart resolver. Public CUDA documents `cudaGetDriverEntryPointByVersion`
+/// as `(symbol, funcPtr, cudaVersion, flags, status)`. Empirically CUDA 13's
+/// static cudart may pass an extra leading context pointer before that sequence;
+/// both layouts are accepted.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn __cudaGetProcAddress(
+    a0: *mut c_void,
+    a1: *mut c_void,
+    a2: *mut c_void,
+    a3: u64,
+    a4: *mut c_int,
+) -> CuResult {
+    let d0 = ptr_desc(a0);
+    let d1 = ptr_desc(a1);
+    let d2 = ptr_desc(a2);
+    super::export_log(format!(
+        "__cudaGetProcAddress raw a0={d0} a1={d1} a2={d2} a3={a3:#x} a4={a4:?}"
+    ));
+
+    // Layout A: (symbol, out, version, flags, query) — matches public driver entry API.
+    if d0.starts_with("cu") || d0.starts_with("__") {
+        let version = a2 as usize as c_int;
+        return unsafe {
+            cuGetProcAddress_v2(a0.cast(), a1.cast(), version, a3, a4)
+        };
+    }
+    // Layout B: (ctx, symbol, out, version, query) — leading opaque context.
+    if d1.starts_with("cu") || d1.starts_with("__") {
+        let version = a3 as c_int;
+        return unsafe { cuGetProcAddress_v2(a1.cast(), a2.cast(), version, 0, a4) };
+    }
+
+    InvalidValue
+}
+
+unsafe extern "system" fn hybrid_runtime_load_get_proc_address(
+    name: *const c_char,
+    fn_ptr: *mut *const c_void,
+    token: *mut usize,
+) -> CuResult {
+    if name.is_null() || fn_ptr.is_null() || token.is_null() {
+        return InvalidValue;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    super::export_log(format!("hybrid_runtime_load_get_proc_address name={name}"));
+    // ZLUDA allowlists NVIDIA hybrid DLL names. We serve the resolver from this
+    // driver DLL directly so stock CUDA 13 static cudart does not need
+    // nvcudart_hybrid64.dll on disk.
+    if name != "nvcudart_hybrid64.dll" && name != "nvcudart_hybrid64a.dll" {
+        return InvalidValue;
+    }
+    unsafe {
+        fn_ptr.write(__cudaGetProcAddress as *const c_void);
+        token.write(HYBRID_RUNTIME_TOKEN);
+    }
+    Success
+}
+
+unsafe extern "system" fn hybrid_runtime_free(token: usize) -> CuResult {
+    super::export_log(format!("hybrid_runtime_free token={token}"));
+    if token != HYBRID_RUNTIME_TOKEN {
+        return InvalidHandle;
+    }
+    Success
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuGetExportTable(
     table: *mut *const c_void,
@@ -175,6 +281,8 @@ pub unsafe extern "system" fn cuGetExportTable(
             "TOOLS_RUNTIME_CALLBACK_HOOKS"
         } else if guid == CONTEXT_LOCAL_STORAGE {
             "CONTEXT_LOCAL_STORAGE"
+        } else if guid == HYBRID_CUDART {
+            "HYBRID_CUDART"
         } else {
             "UNKNOWN"
         };
@@ -199,6 +307,8 @@ pub unsafe extern "system" fn cuGetExportTable(
             tables.tools_hooks.as_ptr().cast()
         } else if guid == CONTEXT_LOCAL_STORAGE {
             tables.context_local.as_ptr().cast()
+        } else if guid == HYBRID_CUDART {
+            tables.hybrid_cudart.as_ptr().cast()
         } else {
             // Present a sized null stub. Returning NotFound here made cudart 12
             // report cudaErrorInsufficientDriver (35); a 1-slot stub let it

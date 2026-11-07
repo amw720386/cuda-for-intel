@@ -7,7 +7,7 @@
 
 use libloading::Library;
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
+use std::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void, CStr};
 use std::sync::{Mutex, OnceLock};
 
 const SUCCESS: c_int = 0;
@@ -704,6 +704,92 @@ pub unsafe extern "system" fn cudaDeviceCanAccessPeer(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaDeviceEnablePeerAccess(_peer: c_int, _flags: c_uint) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaDeviceDisablePeerAccess(_peer: c_int) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaDeviceReset() -> c_int {
+    // Best-effort: synchronize then clear the last error. Full context teardown
+    // is not required for stock ggml-cuda LoadLibrary / init probes.
+    let _ = unsafe { cudaDeviceSynchronize() };
+    set_error(SUCCESS)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaMemcpy3DPeerAsync(
+    _p: *const c_void,
+    _stream: CUstream,
+) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaStreamBeginCapture(
+    _stream: CUstream,
+    _mode: c_uint,
+) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaStreamEndCapture(
+    _stream: CUstream,
+    _p_graph: *mut *mut c_void,
+) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaStreamIsCapturing(
+    _stream: CUstream,
+    status: *mut c_uint,
+) -> c_int {
+    // cudaStreamCaptureStatusNone = 0
+    if !status.is_null() {
+        unsafe { status.write(0) };
+    }
+    set_error(SUCCESS)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaGraphDestroy(_graph: *mut c_void) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaGraphExecDestroy(_graph_exec: *mut c_void) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaGraphExecUpdate(
+    _graph_exec: *mut c_void,
+    _graph: *mut c_void,
+    _error_node: *mut *mut c_void,
+    _update_result: *mut c_uint,
+) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaGraphInstantiate(
+    _p_graph_exec: *mut *mut c_void,
+    _graph: *mut c_void,
+    _flags: c_ulonglong,
+) -> c_int {
+    set_error(NOT_SUPPORTED)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudaGraphLaunch(
+    _graph_exec: *mut c_void,
+    _stream: CUstream,
+) -> c_int {
     set_error(NOT_SUPPORTED)
 }
 

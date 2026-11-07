@@ -2,6 +2,7 @@ use super::export_table::cuGetExportTable;
 use super::primary::*;
 use super::streams::events::*;
 use super::streams::{cuStreamCreate, cuStreamDestroy_v2, cuStreamQuery, cuStreamSynchronize};
+use super::vmm::*;
 use super::*;
 
 // Entry-point negotiation ceiling. Feature and ABI support are per symbol.
@@ -200,6 +201,15 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuEventSynchronize" => entry!(cuEventSynchronize, 2000),
         b"cuEventDestroy" => entry!(cuEventDestroy_v2, 4000),
         b"cuStreamWaitEvent" => entry!(cuStreamWaitEvent, 3020, DRIVER_ABI + 1, true),
+        // Virtual memory management (exported as NotSupported stubs; attr 102 = 0).
+        b"cuMemAddressReserve" => entry!(cuMemAddressReserve, 10020),
+        b"cuMemAddressFree" => entry!(cuMemAddressFree, 10020),
+        b"cuMemCreate" => entry!(cuMemCreate, 10020),
+        b"cuMemRelease" => entry!(cuMemRelease, 10020),
+        b"cuMemMap" => entry!(cuMemMap, 10020),
+        b"cuMemUnmap" => entry!(cuMemUnmap, 10020),
+        b"cuMemSetAccess" => entry!(cuMemSetAccess, 10020),
+        b"cuMemGetAllocationGranularity" => entry!(cuMemGetAllocationGranularity, 10020),
         _ => Err(MISSING),
     }
 }

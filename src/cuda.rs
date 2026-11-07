@@ -14,6 +14,7 @@ mod launch_args;
 mod primary;
 mod streams;
 mod trace;
+mod vmm;
 use streams::Streams;
 
 #[cfg(all(test, windows))]
