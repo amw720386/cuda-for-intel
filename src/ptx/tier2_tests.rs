@@ -550,7 +550,8 @@ fn warp_collectives_translate_and_validate() {
     st.global.u32 [%rd15+8], %r17;"#,
     ));
     assert!(has_op(&module, Op::GroupNonUniformIAdd));
-    assert!(has_op(&module, Op::GroupNonUniformAllEqual));
+    // AllEqual is emulated with BroadcastFirst + All (Intel's OpenCL backend lacks AllEqual).
+    assert!(has_op(&module, Op::GroupNonUniformBroadcastFirst));
     assert!(has_op(&module, Op::GroupNonUniformElect));
     assert!(has_op(&module, Op::GroupNonUniformBitwiseXor));
     // Partial membermasks cannot be honoured.

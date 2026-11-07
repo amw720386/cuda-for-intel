@@ -751,10 +751,10 @@ fn rewrite_mov(inst: &Inst) -> Option<Vec<String>> {
         let lines = match sreg {
             "WARP_SZ" => vec![line(mov, &[dst, "32"])],
             "gridid" | "smid" | "pm0" | "pm1" | "pm2" | "pm3" | "pm4" | "pm5" | "pm6" | "pm7"
-            | "envreg0" | "cluster_ctaid" | "cluster_ctarank" | "cluster_nctarank"
+            | "envreg0" | "cluster_ctaid" | "cluster_ctarank"
             | "cluster_ctaid.x" | "is_explicit_cluster" | "aggr_smem_size" => vec![line(mov, &[dst, "0"])],
             "nsmid" => vec![line(mov, &[dst, "1"])],
-            "cluster_nctaid" => vec![line(mov, &[dst, "1"])],
+            "cluster_nctaid" | "cluster_nctarank" => vec![line(mov, &[dst, "1"])],
             "lanemask_eq" => vec![
                 line("mov.u32", &[dst, "%laneid"]),
                 line("shl.b32", &[dst, "1", dst]),

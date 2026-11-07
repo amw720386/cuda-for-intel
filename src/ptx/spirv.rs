@@ -1152,22 +1152,6 @@ impl<'a> Emitter<'a> {
     }
 
     /// CUDA lane id: the linear thread index modulo 32 (subgroups are 32 wide).
-    fn linear_tid(&mut self) -> Result<Word, Error> {
-        let ty = self.u32_type;
-        let tid: Vec<Word> = ["x", "y", "z"]
-            .iter()
-            .map(|axis| self.builtin(&format!("%tid.{axis}")))
-            .collect::<Result<_, _>>()?;
-        let ntid: Vec<Word> = ["x", "y"]
-            .iter()
-            .map(|axis| self.builtin(&format!("%ntid.{axis}")))
-            .collect::<Result<_, _>>()?;
-        let inner = self.builder.i_mul(ty, None, tid[2], ntid[1])?;
-        let inner = self.builder.i_add(ty, None, inner, tid[1])?;
-        let linear = self.builder.i_mul(ty, None, inner, ntid[0])?;
-        Ok(self.builder.i_add(ty, None, linear, tid[0])?)
-    }
-
     fn lane_id(&mut self) -> Result<Word, Error> {
         let ty = self.u32_type;
         let linear = self.linear_tid()?;
