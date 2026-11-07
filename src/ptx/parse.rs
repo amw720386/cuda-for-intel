@@ -351,6 +351,18 @@ impl<'a> Parser<'a> {
                 value,
             ] => Instruction::AtomicAdd32(dst, address, value),
             ["mov.u32", dst, ",", "%laneid"] => Instruction::LaneId(dst),
+            ["mov.u32" | "mov.b32", dst, ",", reg] if special_constant(reg).is_some() => {
+                Instruction::Move32(dst, special_constant(reg).unwrap())
+            }
+            ["mov.u64" | "mov.b64", dst, ",", reg] if special_constant(reg).is_some() => {
+                Instruction::Move64(dst, special_constant(reg).unwrap())
+            }
+            ["mov.u32" | "mov.b32", dst, ",", reg @ ("%warpid"
+            | "%lanemask_eq"
+            | "%lanemask_lt"
+            | "%lanemask_le"
+            | "%lanemask_gt"
+            | "%lanemask_ge")] => Instruction::Special(dst, reg),
             ["mov.u32", dst, ",", src] => {
                 if src.contains('.') {
                     Instruction::Builtin(dst, src)
@@ -667,7 +679,9 @@ impl<'a> Parser<'a> {
                         "xor" => kind = Some(AtomicOp::Xor),
                         "exch" => kind = Some(AtomicOp::Exch),
                         "cas" => kind = Some(AtomicOp::Cas),
-                        "u32" | "b32" | "s32" | "f32" => ty = Some(part),
+                        "inc" => kind = Some(AtomicOp::Inc),
+                        "dec" => kind = Some(AtomicOp::Dec),
+                        "u32" | "b32" | "s32" | "f32" | "u64" | "b64" | "s64" => ty = Some(part),
                         _ => return Err(unsupported()),
                     }
                 }
@@ -678,7 +692,14 @@ impl<'a> Parser<'a> {
                 if float && kind != AtomicOp::Add {
                     return Err(unsupported());
                 }
-                let signed = ty == "s32";
+                let wide = ty.ends_with("64");
+                if matches!(kind, AtomicOp::Inc | AtomicOp::Dec) && (wide || float) {
+                    return Err(unsupported());
+                }
+                if wide && float {
+                    return Err(unsupported());
+                }
+                let signed = ty.starts_with('s');
                 let (dst, rest) = if returns {
                     match rest {
                         [dst, ",", rest @ ..] => (Some(*dst), rest),
@@ -701,6 +722,7 @@ impl<'a> Parser<'a> {
                     op: kind,
                     space,
                     float,
+                    wide,
                     signed,
                     dst,
                     addr: src.0,
@@ -1083,6 +1105,13 @@ impl<'a> Parser<'a> {
             ["cvt.rpi.f32.f32" | "cvt.rpi.ftz.f32.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Ceil([src]))
             }
+            [
+                "cvt.sat.f32.f32" | "cvt.sat.ftz.f32.f32" | "cvt.ftz.sat.f32.f32" | "cvt.rn.sat.f32.f32"
+                | "cvt.rn.ftz.sat.f32.f32" | "cvt.rn.sat.ftz.f32.f32",
+                dst,
+                ",",
+                src,
+            ] => Instruction::Float32(dst, FloatOp::Saturate([src])),
             ["cvt.rni.s32.f32" | "cvt.rni.ftz.s32.f32", dst, ",", src] => {
                 Instruction::CvtRniS32(dst, src)
             }
@@ -1095,8 +1124,8 @@ impl<'a> Parser<'a> {
             ["cvt.rzi.ftz.s32.f32" | "cvt.rzi.s32.f32", dst, ",", src] => {
                 Instruction::CvtRziS32(dst, src)
             }
-            [op @ ("cvt.rn.f16.f32" | "cvt.rz.f16.f32"), dst, ",", src] => {
-                Instruction::CvtToHalf(dst, src, *op == "cvt.rz.f16.f32")
+            [op @ ("cvt.rn.f16.f32" | "cvt.rz.f16.f32" | "cvt.rn.ftz.f16.f32" | "cvt.rz.ftz.f16.f32"), dst, ",", src] => {
+                Instruction::CvtToHalf(dst, src, op.starts_with("cvt.rz."))
             }
             ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32" | "sub.rn.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Sub([a, b]))
@@ -1127,7 +1156,7 @@ impl<'a> Parser<'a> {
             ["cvt.rn.f32.s32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::FromSigned([src]))
             }
-            ["cvt.f32.f16" | "cvt.rn.f32.f16", dst, ",", src] => {
+            ["cvt.f32.f16" | "cvt.rn.f32.f16" | "cvt.ftz.f32.f16" | "cvt.rn.ftz.f32.f16", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::FromHalf([src]))
             }
             ["cvt.rn.f32.s16", dst, ",", src] => {
@@ -1533,6 +1562,22 @@ fn directed_float(op: &str) -> Option<(super::rounded::Arith, super::rounded::Mo
         _ => return None,
     };
     Some((kind, mode))
+}
+
+/// Special registers with a fixed, sensible value on this target.
+/// Clocks read as zero (no portable SPIR-V counter); clusters are of size one.
+fn special_constant(reg: &str) -> Option<&'static str> {
+    Some(match reg {
+        "%warpsize" => "32",
+        "%nwarpid" => "32",
+        "%smid" | "%gridid" | "%clock" | "%clock_hi" | "%clock64" | "%globaltimer"
+        | "%globaltimer_lo" | "%globaltimer_hi" | "%cluster_ctaid.x" | "%cluster_ctaid.y"
+        | "%cluster_ctaid.z" | "%cluster_ctarank" | "%is_explicit_cluster"
+        | "%total_smem_size" | "%aggr_smem_size" | "%dynamic_smem_size" => "0",
+        "%nsmid" => "64",
+        "%cluster_nctaid.x" | "%cluster_nctaid.y" | "%cluster_nctaid.z" | "%cluster_nctarank" => "1",
+        _ => return None,
+    })
 }
 
 fn skip_module_declaration(parser: &mut Parser<'_>) -> Result<(), Error> {
@@ -2128,7 +2173,8 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     while parser.eat(".shared") {
         parser.expect(".align")?;
         let align = parser.take()?;
-        if !matches!(align, "1" | "2" | "4" | "8" | "16") {
+        // Shared local memory addresses start at zero, so offset alignment is address alignment.
+        if !align.parse::<u32>().is_ok_and(|a| a.is_power_of_two() && a <= 4096) {
             return Err(Error::new("unsupported PTX .shared alignment"));
         }
         parser.expect(".b8")?;

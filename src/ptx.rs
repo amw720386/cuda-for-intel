@@ -166,6 +166,8 @@ enum AtomicOp {
     Xor,
     Exch,
     Cas,
+    Inc,
+    Dec,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,6 +261,8 @@ enum FloatOp<'a> {
     RoundNearest([&'a str; 1]),
     Floor([&'a str; 1]),
     Ceil([&'a str; 1]),
+    /// `cvt.sat.f32.f32` — clamp to [0, 1], NaN becomes 0.
+    Saturate([&'a str; 1]),
 }
 
 impl<'a> FloatOp<'a> {
@@ -285,6 +289,7 @@ impl<'a> FloatOp<'a> {
             | Self::RoundNearest(inputs)
             | Self::Floor(inputs)
             | Self::Ceil(inputs)
+            | Self::Saturate(inputs)
             | Self::Trunc(inputs) => inputs,
         }
     }
@@ -377,12 +382,15 @@ enum Instruction<'a> {
     Alu64(Alu64Op, &'a str, [&'a str; 3]),
     /// `mov.u32 %r, %laneid`.
     LaneId(&'a str),
+    /// `mov.u32 %r, %warpid` or `%lanemask_*`, derived from the linear thread index.
+    Special(&'a str, &'a str),
     /// `atom.*` / `red.*` on 32-bit words. `dst` is absent for `red`; `src` is
     /// `[value, compare]` for `cas` (`[compare, value]` in PTX order) else `[value, "0"]`.
     Atomic {
         op: AtomicOp,
         space: Space,
         float: bool,
+        wide: bool,
         signed: bool,
         dst: Option<&'a str>,
         addr: &'a str,
@@ -536,7 +544,7 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 src
             }
-            LaneId(dst) => {
+            LaneId(dst) | Special(dst, _) => {
                 out.push(*dst);
                 &[]
             }

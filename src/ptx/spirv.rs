@@ -889,6 +889,25 @@ impl<'a> Emitter<'a> {
                 let magnitude = self.builder.bitwise_and(u32_type, None, magnitude, magnitude_mask)?;
                 return Ok(self.builder.bitwise_or(u32_type, None, sign, magnitude)?);
             }
+            FloatOp::Saturate([source]) => {
+                let value = self.float_value(source)?;
+                let zero = self.builder.constant_bit32(ty, 0);
+                let one = self.builder.constant_bit32(ty, 0x3f80_0000);
+                let low = self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::fmax as u32,
+                    [value, zero].map(Operand::IdRef),
+                )?;
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::fmin as u32,
+                    [low, one].map(Operand::IdRef),
+                )?
+            }
             FloatOp::RoundNearest([source]) | FloatOp::Floor([source]) | FloatOp::Ceil([source]) => {
                 let value = self.float_value(source)?;
                 let op = match op {
@@ -1128,7 +1147,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// CUDA lane id: the linear thread index modulo 32 (subgroups are 32 wide).
-    fn lane_id(&mut self) -> Result<Word, Error> {
+    fn linear_tid(&mut self) -> Result<Word, Error> {
         let ty = self.u32_type;
         let tid: Vec<Word> = ["x", "y", "z"]
             .iter()
@@ -1141,7 +1160,12 @@ impl<'a> Emitter<'a> {
         let inner = self.builder.i_mul(ty, None, tid[2], ntid[1])?;
         let inner = self.builder.i_add(ty, None, inner, tid[1])?;
         let linear = self.builder.i_mul(ty, None, inner, ntid[0])?;
-        let linear = self.builder.i_add(ty, None, linear, tid[0])?;
+        Ok(self.builder.i_add(ty, None, linear, tid[0])?)
+    }
+
+    fn lane_id(&mut self) -> Result<Word, Error> {
+        let ty = self.u32_type;
+        let linear = self.linear_tid()?;
         let mask = self.builder.constant_bit32(ty, 31);
         Ok(self.builder.bitwise_and(ty, None, linear, mask)?)
     }
@@ -1438,6 +1462,7 @@ impl<'a> Emitter<'a> {
         op: AtomicOp,
         space: Space,
         float: bool,
+        wide: bool,
         signed: bool,
         dst: Option<&'a str>,
         addr: &str,
@@ -1446,16 +1471,61 @@ impl<'a> Emitter<'a> {
         if space == Space::Local {
             return Err(Error::new("atomics on local memory are not supported"));
         }
-        let pointer = self.word_pointer(space, addr)?;
-        let ty = self.u32_type;
+        let (ty, kind) = if wide {
+            self.declare("int64_atomics", Some(Capability::Int64Atomics), None);
+            (self.u64_type, Kind::B64)
+        } else {
+            (self.u32_type, Kind::B32)
+        };
+        let pointer = if wide {
+            let bytes = self.addressed_byte_pointer(space, addr)?;
+            let wide_ptr = self.typed_pointer(space, self.u64_type);
+            self.builder.bitcast(wide_ptr, None, bytes)?
+        } else {
+            self.word_pointer(space, addr)?
+        };
         let scope_kind = if space == Space::Global { Scope::Device } else { Scope::Workgroup };
         if space == Space::Global {
             self.device_atomics = true;
         }
-        let scope = self.builder.constant_bit32(ty, scope_kind as u32);
-        let relaxed = self.builder.constant_bit32(ty, MemorySemantics::empty().bits());
-        let value = self.integer(src[0], Kind::B32)?;
+        let scope = self.builder.constant_bit32(self.u32_type, scope_kind as u32);
+        let relaxed = self.builder.constant_bit32(self.u32_type, MemorySemantics::empty().bits());
+        let value = self.integer(src[0], kind)?;
         let previous = match op {
+            AtomicOp::Inc | AtomicOp::Dec => {
+                // atom.inc: old >= b ? 0 : old + 1; atom.dec: (old == 0 || old > b) ? b : old - 1.
+                // Compare-exchange loop on the 32-bit word.
+                let zero = self.u32_const(0);
+                let one = self.u32_const(1);
+                let init = self.builder.atomic_i_add(ty, None, pointer, scope, relaxed, zero)?;
+                let before = self.builder.id();
+                self.builder.branch(before)?;
+                self.builder.begin_block(Some(before))?;
+                let head = self.builder.id();
+                let exit = self.builder.id();
+                self.builder.branch(head)?;
+                self.builder.begin_block(Some(head))?;
+                let got = self.builder.id();
+                let old = self.builder.phi(ty, None, [(init, before), (got, head)])?;
+                let new = if op == AtomicOp::Inc {
+                    let wrap = self.builder.u_greater_than_equal(self.bool_type, None, old, value)?;
+                    let next = self.builder.i_add(ty, None, old, one)?;
+                    self.builder.select(ty, None, wrap, zero, next)?
+                } else {
+                    let is_zero = self.builder.i_equal(self.bool_type, None, old, zero)?;
+                    let above = self.builder.u_greater_than(self.bool_type, None, old, value)?;
+                    let wrap = self.builder.logical_or(self.bool_type, None, is_zero, above)?;
+                    let next = self.builder.i_sub(ty, None, old, one)?;
+                    self.builder.select(ty, None, wrap, value, next)?
+                };
+                self.builder.atomic_compare_exchange(
+                    ty, Some(got), pointer, scope, relaxed, relaxed, new, old,
+                )?;
+                let done = self.builder.i_equal(self.bool_type, None, got, old)?;
+                self.builder.branch_conditional(done, exit, head, [])?;
+                self.builder.begin_block(Some(exit))?;
+                old
+            }
             AtomicOp::Add if float => {
                 self.declare(
                     "atomic_f32_add",
@@ -1496,14 +1566,14 @@ impl<'a> Emitter<'a> {
                 self.builder.atomic_exchange(ty, None, pointer, scope, relaxed, value)?
             }
             AtomicOp::Cas => {
-                let compare = self.integer(src[1], Kind::B32)?;
+                let compare = self.integer(src[1], kind)?;
                 self.builder.atomic_compare_exchange(
                     ty, None, pointer, scope, relaxed, relaxed, value, compare,
                 )?
             }
         };
         if let Some(dst) = dst {
-            self.write(dst, Value { id: previous, kind: Kind::B32 })?;
+            self.write(dst, Value { id: previous, kind })?;
         }
         Ok(())
     }
@@ -1587,8 +1657,8 @@ impl<'a> Emitter<'a> {
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
         let inst = self.resolve_generic(inst);
         let (dst, id, kind) = match inst {
-            Instruction::Atomic { op, space, float, signed, dst, addr, src } => {
-                self.emit_atomic(op, space, float, signed, dst, addr, src)?;
+            Instruction::Atomic { op, space, float, wide, signed, dst, addr, src } => {
+                self.emit_atomic(op, space, float, wide, signed, dst, addr, src)?;
                 return Ok(());
             }
             Instruction::Shuffle { mode, dst, pred, src } => {
@@ -1651,6 +1721,29 @@ impl<'a> Emitter<'a> {
                 }
             }
             Instruction::LaneId(dst) => (dst, self.lane_id()?, Kind::B32),
+            Instruction::Special(dst, name) => {
+                let ty = self.u32_type;
+                let lane = self.lane_id()?;
+                let one = self.u32_const(1);
+                let bit = self.builder.shift_left_logical(ty, None, one, lane)?;
+                let below = self.builder.i_sub(ty, None, bit, one)?;
+                let id = match name {
+                    "%lanemask_eq" => bit,
+                    "%lanemask_lt" => below,
+                    "%lanemask_le" => self.builder.bitwise_or(ty, None, below, bit)?,
+                    "%lanemask_gt" => {
+                        let le = self.builder.bitwise_or(ty, None, below, bit)?;
+                        self.builder.not(ty, None, le)?
+                    }
+                    "%lanemask_ge" => self.builder.not(ty, None, below)?,
+                    _ => {
+                        let linear = self.linear_tid()?;
+                        let five = self.u32_const(5);
+                        self.builder.shift_right_logical(ty, None, linear, five)?
+                    }
+                };
+                (dst, id, Kind::B32)
+            }
             Instruction::Mma {
                 shape,
                 signed,
