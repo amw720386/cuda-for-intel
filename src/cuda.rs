@@ -13,6 +13,7 @@ mod dxgi_luid;
 mod export_table;
 mod gap_math;
 mod gaps;
+mod graph_api;
 mod graphs;
 #[cfg(windows)]
 mod integrity;
@@ -505,6 +506,9 @@ fn context_key(handle: Opaque) -> Result<usize, CuResult> {
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize() -> CuResult {
     trace::call("cuCtxSynchronize", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         streams::synchronize_context(std::ptr::null_mut())
     })
 }
@@ -512,6 +516,9 @@ pub extern "system" fn cuCtxSynchronize() -> CuResult {
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize_v2(handle: Opaque) -> CuResult {
     trace::call("cuCtxSynchronize_v2", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         streams::synchronize_context(handle)
     })
 }
@@ -594,6 +601,9 @@ fn contains_range(allocations: &BTreeMap<usize, usize>, address: usize, size: us
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuResult {
     trace::call("cuMemAlloc_v2", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         status(with_context(|runtime, context| {
             if out.is_null() || size == 0 {
                 return Err(InvalidValue);
@@ -616,6 +626,9 @@ pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuRes
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
     trace::call("cuMemFree_v2", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         if address != 0 {
             streams::drain_unlocked(None);
         }
@@ -639,6 +652,9 @@ pub unsafe extern "system" fn cuMemHostAlloc(
     flags: c_uint,
 ) -> CuResult {
     trace::call("cuMemHostAlloc", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         status(with_context(|runtime, context| {
             if out.is_null() || size == 0 || flags & !7 != 0 {
                 return Err(InvalidValue);
@@ -664,6 +680,9 @@ pub unsafe extern "system" fn cuMemHostAlloc(
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFreeHost(host: Opaque) -> CuResult {
     trace::call("cuMemFreeHost", || {
+        if let Err(error) = graphs::unsafe_call() {
+            return error;
+        }
         streams::drain_unlocked(None);
         status(with_context(|runtime, context| {
             if !context.host_allocations.contains_key(&host.addr()) {

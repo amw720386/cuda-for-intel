@@ -33,6 +33,7 @@ impl Streams {
                     }
                     Some(_) => {
                         capture.note_wait(producer, key, sequence);
+                        capture.apply_wait(event, key);
                         Some(Ok(()))
                     }
                     None => {
@@ -43,11 +44,58 @@ impl Streams {
                         capture.join(key);
                         *self.capture_slot(key).ok()? = Some(capture.clone());
                         capture.note_wait(producer, key, sequence);
+                        capture.apply_wait(event, key);
                         Some(Ok(()))
                     }
                 }
             }
         }
+    }
+
+    /// Record `event` on `key` when a graph event-record node is replayed.
+    pub(in crate::cuda) fn replay_event_record(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        event: usize,
+        key: usize,
+    ) -> Result<(), CuResult> {
+        if !self.events.contains_key(&event) {
+            return Err(InvalidHandle);
+        }
+        self.captured.remove(&event);
+        let completion = self.event_marker(api, context, key, None)?;
+        self.events.insert(
+            event,
+            Some(Recording {
+                producer: key,
+                fence: completion,
+            }),
+        );
+        Ok(())
+    }
+
+    /// Make `key` wait for `event` when a graph event-wait node is replayed.
+    pub(in crate::cuda) fn replay_event_wait(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        event: usize,
+        key: usize,
+    ) -> Result<(), CuResult> {
+        let recording = self
+            .events
+            .get(&event)
+            .ok_or(InvalidHandle)?
+            .as_ref()
+            .map(|recording| (recording.producer, Arc::clone(&recording.fence)));
+        if let Some((producer, fence)) = recording {
+            if key != producer {
+                self.flush_producer(api, producer, &fence)?;
+            }
+            self.event_marker(api, context, key, Some(fence))?;
+        }
+        Ok(())
     }
 
     fn event(&self, handle: Opaque) -> Result<&Option<Recording>, CuResult> {
@@ -116,6 +164,7 @@ pub extern "system" fn cuEventRecord(event: Opaque, stream: Opaque) -> CuResult 
                     return Err(StreamCaptureInvalidated);
                 }
                 let sequence = capture.record_event(key);
+                capture.snapshot_event(event.addr(), key);
                 streams
                     .captured
                     .insert(event.addr(), (capture, key, sequence));

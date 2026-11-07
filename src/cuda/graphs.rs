@@ -1,25 +1,35 @@
-//! Stream capture and replay of supported CUDA operations.
+//! Graph model, stream capture and replay of supported CUDA operations.
 //!
-//! Capture records kernel launches, memcpy and memset operations into a node
-//! list instead of submitting them. Events recorded on a capturing stream and
-//! waited on by another stream fork that stream into the same capture, so
-//! multi-stream fork/join patterns are accepted. The recorded order is the
-//! program order of the capturing calls, which is a valid topological order of
-//! the CUDA dependency graph. Launching a graph re-issues the nodes in that
-//! order on the launch stream: correct first, with no concurrency between
-//! branches. Graphs have no public node handles; explicit graph building,
-//! node getters and conditional/memory-allocation nodes are not implemented.
+//! A graph is a [`Dag`]: nodes with handles and dependency edges. Capture
+//! records kernel launches, memcpy, memset, host functions and
+//! nested graphs; every stream keeps the set of nodes its next operation
+//! depends on, and events carry that set from one stream to another, so
+//! fork/join patterns produce real edges. `cuStreamGetCaptureInfo` reports the
+//! graph being built and these dependencies, and
+//! `cuStreamUpdateCaptureDependencies` edits them. Instantiation orders nodes
+//! topologically (ready nodes first, earliest created first) and
+//! `cuGraphLaunch` issues them on the launch stream in that order. Independent
+//! branches therefore run in program order on one stream, which is always a
+//! legal schedule. Host functions run between submitted segments with the
+//! runtime lock released. The explicit construction API is in `graph_api.rs`.
+//! Conditional and memory-allocation nodes are not implemented.
 
 use super::*;
 use crate::level_zero::KernelArg;
 use std::cell::Cell;
+use std::collections::{BTreeSet, HashSet};
 use std::mem::MaybeUninit;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::thread::ThreadId;
 
 #[derive(Default)]
 pub(super) struct Graphs {
-    graphs: HashMap<usize, Graph>,
-    executable: HashMap<usize, Graph>,
+    pub(super) graphs: HashMap<usize, Dag>,
+    pub(super) executable: HashMap<usize, Exec>,
+    /// Argument blocks handed out by `cuGraphKernelNodeGetParams`, valid until
+    /// the next query of the same node.
+    pub(super) param_storage: HashMap<usize, (Vec<Box<[u8]>>, Vec<usize>)>,
 }
 
 impl Graphs {
@@ -27,19 +37,246 @@ impl Graphs {
         self.graphs.retain(|_, graph| graph.context != context);
         self.executable.retain(|_, graph| graph.context != context);
     }
+
+    /// The graph that owns `node`.
+    pub(super) fn owner(&self, node: usize) -> Option<usize> {
+        self.graphs
+            .iter()
+            .find(|(_, dag)| dag.find(node).is_some())
+            .map(|(&handle, _)| handle)
+    }
+}
+
+/// Node handles are unique across graphs and never collide with other handles.
+static NEXT_NODE: AtomicUsize = AtomicUsize::new(0x4000_0000_0001);
+
+pub(super) fn new_node_id() -> usize {
+    NEXT_NODE.fetch_add(1, Ordering::Relaxed)
+}
+
+/// One node of a graph under construction with the nodes it depends on.
+#[derive(Clone)]
+pub(super) struct Entry {
+    pub(super) id: usize,
+    pub(super) node: Node,
+    pub(super) deps: Vec<usize>,
+}
+
+/// A graph with node handles and dependency edges, in node creation order.
+#[derive(Clone, Default)]
+pub(super) struct Dag {
+    pub(super) context: usize,
+    pub(super) entries: Vec<Entry>,
+    /// A stream capture is appending nodes to this graph.
+    pub(super) capturing: bool,
+    /// Original node -> node in this graph, for graphs made by `cuGraphClone`.
+    pub(super) clone_map: HashMap<usize, usize>,
+}
+
+impl Dag {
+    pub(super) fn new(context: usize) -> Self {
+        Self {
+            context,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn find(&self, id: usize) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.id == id)
+    }
+
+    pub(super) fn entry(&self, id: usize) -> Result<&Entry, CuResult> {
+        self.find(id)
+            .map(|index| &self.entries[index])
+            .ok_or(InvalidValue)
+    }
+
+    pub(super) fn entry_mut(&mut self, id: usize) -> Result<&mut Entry, CuResult> {
+        let index = self.find(id).ok_or(InvalidValue)?;
+        Ok(&mut self.entries[index])
+    }
+
+    /// Add a node depending on `deps`, which must be distinct nodes of this graph.
+    pub(super) fn add(&mut self, node: Node, deps: &[usize]) -> Result<usize, CuResult> {
+        let mut unique = Vec::with_capacity(deps.len());
+        for &dep in deps {
+            if self.find(dep).is_none() || unique.contains(&dep) {
+                return Err(InvalidValue);
+            }
+            unique.push(dep);
+        }
+        let id = new_node_id();
+        self.entries.push(Entry {
+            id,
+            node,
+            deps: unique,
+        });
+        Ok(id)
+    }
+
+    pub(super) fn children(&self, id: usize) -> Vec<usize> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.deps.contains(&id))
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    pub(super) fn roots(&self) -> Vec<usize> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.deps.is_empty())
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    /// Whether `from` already reaches `to` (so an edge `to -> from` would close a cycle).
+    pub(super) fn reaches(&self, from: usize, to: usize) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![from];
+        while let Some(id) = stack.pop() {
+            if id == to {
+                return true;
+            }
+            if seen.insert(id) {
+                stack.extend(self.children(id));
+            }
+        }
+        false
+    }
+
+    pub(super) fn add_edge(&mut self, from: usize, to: usize) -> Result<(), CuResult> {
+        self.find(from).ok_or(InvalidValue)?;
+        self.find(to).ok_or(InvalidValue)?;
+        if self.entry(to)?.deps.contains(&from) || from == to || self.reaches(to, from) {
+            return Err(InvalidValue);
+        }
+        self.entry_mut(to)?.deps.push(from);
+        Ok(())
+    }
+
+    pub(super) fn remove_edge(&mut self, from: usize, to: usize) -> Result<(), CuResult> {
+        let deps = &mut self.entry_mut(to)?.deps;
+        let position = deps.iter().position(|&dep| dep == from).ok_or(InvalidValue)?;
+        deps.remove(position);
+        Ok(())
+    }
+
+    pub(super) fn remove_node(&mut self, id: usize) -> Result<(), CuResult> {
+        let index = self.find(id).ok_or(InvalidValue)?;
+        self.entries.remove(index);
+        for entry in &mut self.entries {
+            entry.deps.retain(|&dep| dep != id);
+        }
+        Ok(())
+    }
+
+    /// Indices in dependency order. A node is issued as soon as all of its
+    /// dependencies have been, earliest-created ready node first.
+    pub(super) fn order(&self) -> Vec<usize> {
+        let position: HashMap<usize, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.id, index))
+            .collect();
+        let mut waiting: Vec<usize> = self.entries.iter().map(|entry| entry.deps.len()).collect();
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); self.entries.len()];
+        for (index, entry) in self.entries.iter().enumerate() {
+            for dep in &entry.deps {
+                dependents[position[dep]].push(index);
+            }
+        }
+        let mut ready: BTreeSet<usize> = (0..self.entries.len())
+            .filter(|&index| waiting[index] == 0)
+            .collect();
+        let mut order = Vec::with_capacity(self.entries.len());
+        while let Some(index) = ready.pop_first() {
+            order.push(index);
+            for &next in &dependents[index] {
+                waiting[next] -= 1;
+                if waiting[next] == 0 {
+                    ready.insert(next);
+                }
+            }
+        }
+        order
+    }
+
+    /// The executable form: nodes in dependency order with their handles.
+    pub(super) fn exec(&self) -> Exec {
+        let order = self.order();
+        Exec {
+            context: self.context,
+            nodes: order.iter().map(|&i| self.entries[i].node.clone()).collect(),
+            ids: order.iter().map(|&i| self.entries[i].id).collect(),
+        }
+    }
+
+    pub(super) fn flatten(&self) -> Arc<[Node]> {
+        self.exec().nodes
+    }
+
+    /// Copy with fresh node handles.
+    pub(super) fn duplicate(&self) -> Dag {
+        let mut map = HashMap::new();
+        let mut copy = Dag::new(self.context);
+        for entry in &self.entries {
+            let id = new_node_id();
+            map.insert(entry.id, id);
+            copy.entries.push(Entry {
+                id,
+                node: entry.node.clone(),
+                deps: entry.deps.iter().map(|dep| map[dep]).collect(),
+            });
+        }
+        copy.clone_map = map;
+        copy
+    }
+}
+
+/// An instantiated graph: nodes in dependency order and the handles of the
+/// graph nodes they came from.
+#[derive(Clone)]
+pub(super) struct Exec {
+    pub(super) context: usize,
+    pub(super) nodes: Arc<[Node]>,
+    pub(super) ids: Arc<[usize]>,
+}
+
+impl Exec {
+    pub(super) fn replace(&mut self, id: usize, node: Node) -> Result<(), CuResult> {
+        let index = self.ids.iter().position(|&candidate| candidate == id).ok_or(InvalidValue)?;
+        let mut nodes = self.nodes.to_vec();
+        nodes[index] = node;
+        self.nodes = nodes.into();
+        Ok(())
+    }
+
+    pub(super) fn node(&self, id: usize) -> Result<&Node, CuResult> {
+        let index = self.ids.iter().position(|&candidate| candidate == id).ok_or(InvalidValue)?;
+        Ok(&self.nodes[index])
+    }
+}
+
+/// A host function launched by a graph or stream.
+#[derive(Clone, Copy)]
+pub(super) struct HostFn {
+    pub(super) function: usize,
+    pub(super) data: usize,
 }
 
 #[derive(Clone)]
-struct Graph {
-    context: usize,
-    nodes: Arc<[Node]>,
-}
-
 pub(super) enum Node {
     Kernel(Kernel),
     Copy(Copy),
     Fill(Fill),
-    /// A previously captured graph launched into a capturing stream.
+    Empty,
+    Host(HostFn),
+    EventRecord(usize),
+    EventWait(usize),
+    /// A previously captured graph launched into a capturing stream, or a
+    /// child graph node.
     Child(Arc<[Node]>),
 }
 
@@ -50,6 +287,7 @@ pub(super) enum CopyKind {
     DeviceToDevice,
 }
 
+#[derive(Clone)]
 pub(super) struct Copy {
     pub(super) dst: usize,
     pub(super) src: usize,
@@ -57,6 +295,7 @@ pub(super) struct Copy {
     pub(super) kind: CopyKind,
 }
 
+#[derive(Clone)]
 pub(super) struct Fill {
     pub(super) dst: usize,
     pub(super) value: u8,
@@ -64,7 +303,7 @@ pub(super) struct Fill {
 }
 
 impl Node {
-    fn validate(&self, context: &CudaContext) -> Result<(), CuResult> {
+    pub(super) fn validate(&self, context: &CudaContext) -> Result<(), CuResult> {
         match self {
             Node::Kernel(kernel) => kernel.validate(context),
             Node::Copy(copy) => {
@@ -79,11 +318,12 @@ impl Node {
             Node::Fill(fill) => contains_range(&context.allocations, fill.dst, fill.size)
                 .then_some(())
                 .ok_or(InvalidValue),
+            Node::Empty | Node::Host(_) | Node::EventRecord(_) | Node::EventWait(_) => Ok(()),
             Node::Child(nodes) => nodes.iter().try_for_each(|node| node.validate(context)),
         }
     }
 
-    fn replay(&self, runtime: &Runtime, context: &mut CudaContext, stream: usize) -> Result<(), CuResult> {
+    pub(super) fn replay(&self, runtime: &Runtime, context: &mut CudaContext, stream: usize) -> Result<(), CuResult> {
         match self {
             Node::Kernel(kernel) => kernel.replay(&runtime.api, context, stream),
             Node::Copy(copy) => match copy.kind {
@@ -132,6 +372,19 @@ impl Node {
                     fill.size,
                 ),
             ),
+            Node::Empty => Ok(()),
+            // Host functions run between segments in `cuGraphLaunch`, outside the lock.
+            Node::Host(_) => Ok(()),
+            Node::EventRecord(event) => {
+                context
+                    .streams
+                    .replay_event_record(&runtime.api, &context.backend, *event, stream)
+            }
+            Node::EventWait(event) => {
+                context
+                    .streams
+                    .replay_event_wait(&runtime.api, &context.backend, *event, stream)
+            }
             Node::Child(nodes) => nodes
                 .iter()
                 .try_for_each(|node| node.replay(runtime, context, stream)),
@@ -160,7 +413,9 @@ impl Node {
                     Err(PARAMETERS)
                 }
             }
-            (Node::Fill(_), Node::Fill(_)) => Ok(()),
+            (Node::Fill(_), Node::Fill(_)) | (Node::Empty, Node::Empty) => Ok(()),
+            (Node::Host(_), Node::Host(_)) => Ok(()),
+            (Node::EventRecord(_), Node::EventRecord(_)) | (Node::EventWait(_), Node::EventWait(_)) => Ok(()),
             (Node::Child(old), Node::Child(new)) => nodes_updatable(old, new),
             _ => {
                 let _ = TOPOLOGY;
@@ -190,27 +445,57 @@ struct Inner {
     origin: usize,
     #[allow(dead_code)]
     mode: c_int,
+    /// Graph the nodes are appended to when the capture ends.
+    graph: usize,
+    /// The capture appends to a caller-supplied graph (`cuStreamBeginCaptureToGraph`).
+    to_graph: bool,
     invalidated: bool,
-    nodes: Vec<Node>,
+    entries: Vec<Entry>,
     members: HashMap<usize, Member>,
+    /// Nodes the next operation on each stream depends on.
+    frontier: HashMap<usize, Vec<usize>>,
+    /// Frontier of the stream when each event was recorded.
+    snapshots: HashMap<usize, Vec<usize>>,
+    /// Storage for the dependency list handed out by `cuStreamGetCaptureInfo`.
+    reported: Vec<usize>,
 }
 
 /// A capture session shared by the origin stream and every stream forked into it.
 #[derive(Clone)]
 pub(super) struct Capture(Arc<Mutex<Inner>>);
 
+/// Captures in progress, for rejecting calls that are unsafe during capture.
+static ACTIVE: Mutex<Vec<(Weak<Mutex<Inner>>, ThreadId, c_int)>> = Mutex::new(Vec::new());
+
 impl Capture {
-    pub(super) fn new(id: u64, origin: usize, mode: c_int) -> Self {
+    pub(super) fn new(
+        id: u64,
+        origin: usize,
+        mode: c_int,
+        graph: usize,
+        to_graph: bool,
+        dependencies: Vec<usize>,
+    ) -> Self {
         let mut members = HashMap::new();
         members.insert(origin, Member::default());
-        Self(Arc::new(Mutex::new(Inner {
+        let thread = std::thread::current().id();
+        let inner = Arc::new(Mutex::new(Inner {
             id,
             origin,
             mode,
+            graph,
+            to_graph,
             invalidated: false,
-            nodes: Vec::new(),
+            entries: Vec::new(),
             members,
-        })))
+            frontier: HashMap::from([(origin, dependencies)]),
+            snapshots: HashMap::new(),
+            reported: Vec::new(),
+        }));
+        let mut active = ACTIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.retain(|(weak, _, _)| weak.strong_count() > 0);
+        active.push((Arc::downgrade(&inner), thread, mode));
+        Self(inner)
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -225,6 +510,19 @@ impl Capture {
         self.inner().id
     }
 
+    pub(super) fn graph(&self) -> usize {
+        self.inner().graph
+    }
+
+    pub(super) fn to_graph(&self) -> bool {
+        self.inner().to_graph
+    }
+
+    /// Whether `node` was captured so far.
+    pub(super) fn contains(&self, node: usize) -> bool {
+        self.inner().entries.iter().any(|entry| entry.id == node)
+    }
+
     pub(super) fn is_origin(&self, stream: usize) -> bool {
         self.inner().origin == stream
     }
@@ -237,15 +535,48 @@ impl Capture {
         self.inner().members.keys().copied().collect()
     }
 
-    /// Append a node produced by `stream`.
+    /// Append a node produced by `stream`, depending on the stream's frontier.
     pub(super) fn push(&self, stream: usize, node: Node) -> Result<(), CuResult> {
+        self.push_node(stream, node).map(|_| ())
+    }
+
+    pub(super) fn push_node(&self, stream: usize, node: Node) -> Result<usize, CuResult> {
         let mut inner = self.inner();
         if inner.invalidated {
             return Err(StreamCaptureInvalidated);
         }
         inner.members.entry(stream).or_default().sequence += 1;
-        inner.nodes.push(node);
-        Ok(())
+        let id = new_node_id();
+        let deps = inner.frontier.insert(stream, vec![id]).unwrap_or_default();
+        inner.entries.push(Entry { id, node, deps });
+        Ok(id)
+    }
+
+    /// Graph and dependencies reported for `stream`; the list stays valid until
+    /// the next call.
+    pub(super) fn info(&self, stream: usize) -> (usize, *const Opaque, usize) {
+        let mut inner = self.inner();
+        let frontier = inner.frontier.get(&stream).cloned().unwrap_or_default();
+        inner.reported = frontier;
+        (
+            inner.graph,
+            inner.reported.as_ptr().cast(),
+            inner.reported.len(),
+        )
+    }
+
+    /// Replace (`set`) or extend the dependencies of the next operation on `stream`.
+    pub(super) fn update_dependencies(&self, stream: usize, nodes: &[usize], set: bool) {
+        let mut inner = self.inner();
+        let frontier = inner.frontier.entry(stream).or_default();
+        if set {
+            frontier.clear();
+        }
+        for &node in nodes {
+            if !frontier.contains(&node) {
+                frontier.push(node);
+            }
+        }
     }
 
     pub(super) fn invalidate(&self) -> CuResult {
@@ -270,6 +601,25 @@ impl Capture {
         self.inner().members.entry(stream).or_default().sequence
     }
 
+    /// Remember what `event`, recorded now on `stream`, depends on.
+    pub(super) fn snapshot_event(&self, event: usize, stream: usize) {
+        let mut inner = self.inner();
+        let frontier = inner.frontier.get(&stream).cloned().unwrap_or_default();
+        inner.snapshots.insert(event, frontier);
+    }
+
+    /// `waiter` waited for `event`: its next operation depends on the event's nodes.
+    pub(super) fn apply_wait(&self, event: usize, waiter: usize) {
+        let mut inner = self.inner();
+        let snapshot = inner.snapshots.get(&event).cloned().unwrap_or_default();
+        let frontier = inner.frontier.entry(waiter).or_default();
+        for node in snapshot {
+            if !frontier.contains(&node) {
+                frontier.push(node);
+            }
+        }
+    }
+
     /// `waiter` waited for an event recorded on `producer` at `sequence`.
     pub(super) fn note_wait(&self, producer: usize, waiter: usize, sequence: u64) {
         if producer == waiter {
@@ -282,8 +632,8 @@ impl Capture {
         }
     }
 
-    /// Finish the session, returning its nodes.
-    fn finish(&self) -> Result<Vec<Node>, CuResult> {
+    /// Finish the session, returning the captured nodes.
+    fn finish(&self) -> Result<Vec<Entry>, CuResult> {
         let mut inner = self.inner();
         if inner.invalidated {
             return Err(StreamCaptureInvalidated);
@@ -296,14 +646,43 @@ impl Capture {
         {
             return Err(StreamCaptureUnjoined);
         }
-        Ok(std::mem::take(&mut inner.nodes))
+        Ok(std::mem::take(&mut inner.entries))
     }
 }
 
+/// Reject a call that CUDA forbids while a capture could be affected: global
+/// captures forbid it on every thread, thread-local ones on the capturing
+/// thread, and relaxed ones never. The calling thread's mode, set with
+/// `cuThreadExchangeStreamCaptureMode`, can opt out. The capture is
+/// invalidated, as in CUDA.
+pub(super) fn unsafe_call() -> Result<(), CuResult> {
+    let thread_mode = THREAD_MODE.get();
+    if thread_mode == 2 {
+        return Ok(());
+    }
+    let me = std::thread::current().id();
+    let mut active = ACTIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    active.retain(|(weak, _, _)| weak.strong_count() > 0);
+    for (weak, thread, mode) in active.iter() {
+        let hit = (*mode == 0 && thread_mode == 0) || (*mode != 2 && *thread == me);
+        if hit && let Some(inner) = weak.upgrade() {
+            return Err(Capture(inner).invalidate());
+        }
+    }
+    Ok(())
+}
+
+fn deactivate(capture: &Capture) {
+    let mut active = ACTIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    active.retain(|(weak, _, _)| weak.strong_count() > 0 && !std::ptr::eq(weak.as_ptr(), Arc::as_ptr(&capture.0)));
+}
+
+#[derive(Clone)]
 pub(super) struct Kernel {
-    function: usize,
-    geometry: ([u32; 3], [u32; 3]),
-    args: Vec<Box<[MaybeUninit<u8>]>>,
+    pub(super) function: usize,
+    pub(super) geometry: ([u32; 3], [u32; 3]),
+    pub(super) shared: u32,
+    pub(super) args: Vec<Box<[MaybeUninit<u8>]>>,
 }
 
 impl Kernel {
@@ -326,6 +705,7 @@ impl Kernel {
         Self {
             function,
             geometry,
+            shared: 0,
             args,
         }
     }
@@ -336,7 +716,7 @@ impl Kernel {
         module.entries.get(name).ok_or(InvalidHandle)
     }
 
-    fn validate(&self, context: &CudaContext) -> Result<(), CuResult> {
+    pub(super) fn validate(&self, context: &CudaContext) -> Result<(), CuResult> {
         let entry = self.entry(context)?;
         entry.function.ok_or(InvalidHandle)?;
         let mut index = 0;
@@ -373,19 +753,25 @@ impl Kernel {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamBeginCapture_v2(stream: Opaque, mode: c_int) -> CuResult {
-    trace::call("cuStreamBeginCapture_v2", || begin_capture(stream, mode))
+    trace::call("cuStreamBeginCapture_v2", || begin_capture(stream, mode, None))
 }
 
 /// Pre-CUDA 10.1 form: always global mode.
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamBeginCapture(stream: Opaque) -> CuResult {
-    trace::call("cuStreamBeginCapture", || begin_capture(stream, 0))
+    trace::call("cuStreamBeginCapture", || begin_capture(stream, 0, None))
 }
 
-fn begin_capture(stream: Opaque, mode: c_int) -> CuResult {
+/// Capture into a graph the caller owns; the first captured nodes depend on `dependencies`.
+pub(super) fn begin_capture(
+    stream: Opaque,
+    mode: c_int,
+    target: Option<(usize, Vec<usize>)>,
+) -> CuResult {
     status(state(|state| {
         let owner = current().ok_or(InvalidContext)?;
         let id = reserve_handle(&mut state.next_handle)?;
+        let new_graph = reserve_handle(&mut state.next_handle)?;
         let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
         context.check_live()?;
         let key = context.streams.launch_key(stream)?;
@@ -400,9 +786,29 @@ fn begin_capture(stream: Opaque, mode: c_int) -> CuResult {
         if slot.is_some() {
             return Err(IllegalState);
         }
-        // All modes capture identically; global/thread-local do not yet reject
-        // unsafe calls (such as allocation) made during capture.
-        *slot = Some(Capture::new(id as u64, key, mode));
+        let (graph, to_graph, dependencies) = match target {
+            Some((graph, dependencies)) => {
+                let dag = state.graphs.graphs.get_mut(&graph).ok_or(InvalidValue)?;
+                if dag.context != owner {
+                    return Err(InvalidContext);
+                }
+                if dag.capturing {
+                    return Err(IllegalState);
+                }
+                if dependencies.iter().any(|&node| dag.find(node).is_none()) {
+                    return Err(InvalidValue);
+                }
+                dag.capturing = true;
+                (graph, true, dependencies)
+            }
+            None => {
+                let mut dag = Dag::new(owner);
+                dag.capturing = true;
+                state.graphs.graphs.insert(new_graph, dag);
+                (new_graph, false, Vec::new())
+            }
+        };
+        *slot = Some(Capture::new(id as u64, key, mode, graph, to_graph, dependencies));
         Ok(())
     }))
 }
@@ -456,15 +862,24 @@ pub unsafe extern "system" fn cuStreamEndCapture(stream: Opaque, out: *mut Opaqu
                 .streams
                 .captured
                 .retain(|_, (candidate, _, _)| !candidate.same(&capture));
-            let nodes = capture.finish()?;
-            let graph = reserve_handle(&mut state.next_handle)?;
-            state.graphs.graphs.insert(
-                graph,
-                Graph {
-                    context: owner,
-                    nodes: nodes.into(),
-                },
-            );
+            deactivate(&capture);
+            let graph = capture.graph();
+            let entries = match capture.finish() {
+                Ok(entries) => entries,
+                Err(error) => {
+                    if capture.to_graph() {
+                        if let Some(dag) = state.graphs.graphs.get_mut(&graph) {
+                            dag.capturing = false;
+                        }
+                    } else {
+                        state.graphs.graphs.remove(&graph);
+                    }
+                    return Err(error);
+                }
+            };
+            let dag = state.graphs.graphs.get_mut(&graph).ok_or(InvalidHandle)?;
+            dag.entries.extend(entries);
+            dag.capturing = false;
             unsafe { out.write(std::ptr::without_provenance_mut(graph)) };
             Ok(())
         }))
@@ -510,8 +925,7 @@ pub unsafe extern "system" fn cuStreamGetCaptureInfo(
     })
 }
 
-/// There is no graph object while capture is in progress, so the graph and the
-/// dependency set are reported as empty.
+/// Graph being captured into and the nodes the next operation depends on.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuStreamGetCaptureInfo_v2(
     stream: Opaque,
@@ -526,14 +940,23 @@ pub unsafe extern "system" fn cuStreamGetCaptureInfo_v2(
         if result != Success {
             return result;
         }
+        let info = with_context(|_, context| {
+            let key = context.streams.launch_key(stream)?;
+            Ok(context.streams.capture(key)?.map(|capture| capture.info(key)))
+        });
+        let (graph, dependencies, count) = match info {
+            Ok(Some(info)) => info,
+            Ok(None) => (0, std::ptr::null(), 0),
+            Err(error) => return error,
+        };
         if !graph_out.is_null() {
-            graph_out.write(std::ptr::null_mut());
+            graph_out.write(std::ptr::without_provenance_mut(graph));
         }
         if !dependencies_out.is_null() {
-            dependencies_out.write(std::ptr::null());
+            dependencies_out.write(dependencies);
         }
         if !count_out.is_null() {
-            count_out.write(0);
+            count_out.write(count);
         }
         Success
     })
@@ -558,6 +981,7 @@ pub unsafe extern "system" fn cuStreamGetCaptureInfo_v3(
             dependencies_out,
             count_out,
         );
+        // Every edge is a default edge, which CUDA reports as no edge data.
         if result == Success && !edges_out.is_null() {
             edges_out.write(std::ptr::null());
         }
@@ -569,12 +993,17 @@ pub unsafe extern "system" fn cuStreamGetCaptureInfo_v3(
 pub extern "system" fn cuGraphDestroy(graph: Opaque) -> CuResult {
     trace::call("cuGraphDestroy", || {
         status(state(|state| {
-            state
+            if state
                 .graphs
                 .graphs
-                .remove(&graph.addr())
-                .map(|_| ())
-                .ok_or(InvalidHandle)
+                .get(&graph.addr())
+                .ok_or(InvalidHandle)?
+                .capturing
+            {
+                return Err(IllegalState);
+            }
+            state.graphs.graphs.remove(&graph.addr());
+            Ok(())
         }))
     })
 }
@@ -584,14 +1013,13 @@ fn instantiate(out: *mut Opaque, graph: Opaque) -> Result<(), CuResult> {
         return Err(InvalidValue);
     }
     state(|state| {
-        let graph = state
-            .graphs
-            .graphs
-            .get(&graph.addr())
-            .ok_or(InvalidHandle)?
-            .clone();
+        let dag = state.graphs.graphs.get(&graph.addr()).ok_or(InvalidHandle)?;
+        if dag.capturing {
+            return Err(IllegalState);
+        }
+        let exec = dag.exec();
         let handle = reserve_handle(&mut state.next_handle)?;
-        state.graphs.executable.insert(handle, graph);
+        state.graphs.executable.insert(handle, exec);
         unsafe { out.write(std::ptr::without_provenance_mut(handle)) };
         Ok(())
     })
@@ -702,7 +1130,7 @@ fn exec_update(exec: Opaque, graph: Opaque) -> (CuResult, c_int) {
             .graphs
             .get(&graph.addr())
             .ok_or(InvalidHandle)?
-            .clone();
+            .exec();
         let old = state
             .graphs
             .executable
@@ -717,6 +1145,7 @@ fn exec_update(exec: Opaque, graph: Opaque) -> (CuResult, c_int) {
             return Err(GraphExecUpdateFailure);
         }
         old.nodes = new.nodes;
+        old.ids = new.ids;
         Ok(())
     });
     (status_of(outcome), result)
@@ -787,10 +1216,34 @@ pub extern "system" fn cuGraphUpload(graph: Opaque, stream: Opaque) -> CuResult 
     })
 }
 
+fn flatten<'a>(nodes: &'a [Node], steps: &mut Vec<&'a Node>) {
+    for node in nodes {
+        match node {
+            Node::Child(children) => flatten(children, steps),
+            node => steps.push(node),
+        }
+    }
+}
+
+/// Call a host function after the work issued before it on `stream` finished.
+/// Runs with the runtime lock released, so the function may use the API.
+pub(super) fn call_host(stream: Opaque, host: HostFn) -> CuResult {
+    let result = super::streams::cuStreamSynchronize(stream);
+    if result != Success {
+        return result;
+    }
+    let function: unsafe extern "system" fn(*mut c_void) =
+        unsafe { std::mem::transmute(host.function) };
+    unsafe { function(std::ptr::with_exposed_provenance_mut(host.data)) };
+    Success
+}
+
+/// Replay a graph in dependency order on one stream. Independent branches are
+/// issued one after another (ready-order), which is always a legal schedule.
 #[unsafe(no_mangle)]
 pub extern "system" fn cuGraphLaunch(graph: Opaque, stream: Opaque) -> CuResult {
     trace::call("cuGraphLaunch", || {
-        status(state(|state| {
+        let prepared = state(|state| {
             let graph = state
                 .graphs
                 .executable
@@ -810,12 +1263,44 @@ pub extern "system" fn cuGraphLaunch(graph: Opaque, stream: Opaque) -> CuResult 
             }
             if let Some(capture) = context.streams.capture(key)? {
                 // Launching into a capturing stream adds the graph as a child node.
-                return capture.push(key, Node::Child(Arc::clone(&graph.nodes)));
+                capture.push(key, Node::Child(Arc::clone(&graph.nodes)))?;
+                return Ok(None);
             }
-            for node in &*graph.nodes {
-                node.replay(&state.runtime, context, key)?;
+            Ok(Some((graph.context, key, Arc::clone(&graph.nodes))))
+        });
+        let (owner, key, nodes) = match prepared {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return Success,
+            Err(error) => return error,
+        };
+        let mut steps = Vec::new();
+        flatten(&nodes, &mut steps);
+        let mut next = 0;
+        while next < steps.len() {
+            let host = state(|state| {
+                let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
+                context.check_live()?;
+                while next < steps.len() {
+                    let node = steps[next];
+                    next += 1;
+                    if let Node::Host(host) = node {
+                        return Ok(Some(*host));
+                    }
+                    node.replay(&state.runtime, context, key)?;
+                }
+                Ok(None)
+            });
+            match host {
+                Ok(Some(host)) => {
+                    let result = call_host(stream, host);
+                    if result != Success {
+                        return result;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => return error,
             }
-            Ok(())
-        }))
+        }
+        Success
     })
 }
