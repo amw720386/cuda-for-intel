@@ -1,0 +1,96 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.entry _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj(
+.param .u64 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_0,
+.param .u64 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_1,
+.param .f32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_2,
+.param .f32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_3,
+.param .u32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_4,
+.param .align 4 .b8 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_5[12],
+.param .align 4 .b8 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_6[12],
+.param .align 4 .b8 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_7[12],
+.param .u32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_8,
+.param .u32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_9,
+.param .u32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_10,
+.param .u32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_11,
+.param .u32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_12,
+.param .u32 _Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_13
+)
+{
+.reg .pred %p<2>;
+.reg .f32 %f<5>;
+.reg .b32 %r<36>;
+.reg .b64 %rd<22>;
+
+
+ld.param.u64 %rd1, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_0];
+ld.param.u64 %rd2, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_1];
+ld.param.f32 %f1, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_2];
+ld.param.f32 %f2, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_3];
+ld.param.u32 %r17, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_4];
+ld.param.u32 %r11, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_8];
+ld.param.u32 %r12, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_9];
+ld.param.u32 %r13, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_10];
+ld.param.u32 %r14, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_11];
+ld.param.u32 %r15, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_12];
+ld.param.u32 %r16, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_13];
+ld.param.u32 %r10, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_7+8];
+ld.param.u32 %r9, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_7+4];
+ld.param.u32 %r8, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_7];
+ld.param.u32 %r7, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_6+8];
+ld.param.u32 %r6, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_6+4];
+ld.param.u32 %r5, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_6];
+ld.param.u32 %r4, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_5+8];
+ld.param.u32 %r3, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_5+4];
+ld.param.u32 %r2, [_Z9scale_f32IfEvPKT_PS0_ffj5uint3S4_S4_jjjjjj_param_5];
+mov.u32 %r18, %ctaid.x;
+mov.u32 %r19, %ntid.x;
+mov.u32 %r20, %tid.x;
+mad.lo.s32 %r1, %r18, %r19, %r20;
+setp.ge.u32 %p1, %r1, %r17;
+@%p1 bra $L__BB1_2;
+
+cvta.to.global.u64 %rd3, %rd1;
+mul.hi.u32 %r21, %r1, %r2;
+add.s32 %r22, %r21, %r1;
+shr.u32 %r23, %r22, %r3;
+mul.lo.s32 %r24, %r23, %r4;
+sub.s32 %r25, %r1, %r24;
+mul.hi.u32 %r26, %r23, %r5;
+add.s32 %r27, %r23, %r26;
+shr.u32 %r28, %r27, %r6;
+mul.lo.s32 %r29, %r28, %r7;
+sub.s32 %r30, %r23, %r29;
+mul.hi.u32 %r31, %r28, %r8;
+add.s32 %r32, %r28, %r31;
+shr.u32 %r33, %r32, %r9;
+mul.lo.s32 %r34, %r33, %r10;
+sub.s32 %r35, %r28, %r34;
+cvt.u64.u32 %rd4, %r25;
+mul.wide.u32 %rd5, %r30, %r11;
+add.s64 %rd6, %rd5, %rd4;
+mul.wide.u32 %rd7, %r35, %r12;
+add.s64 %rd8, %rd6, %rd7;
+mul.wide.u32 %rd9, %r33, %r13;
+add.s64 %rd10, %rd8, %rd9;
+mul.wide.u32 %rd11, %r30, %r14;
+add.s64 %rd12, %rd11, %rd4;
+mul.wide.u32 %rd13, %r35, %r15;
+add.s64 %rd14, %rd12, %rd13;
+mul.wide.u32 %rd15, %r33, %r16;
+add.s64 %rd16, %rd14, %rd15;
+shl.b64 %rd17, %rd10, 2;
+add.s64 %rd18, %rd3, %rd17;
+ld.global.f32 %f3, [%rd18];
+fma.rn.ftz.f32 %f4, %f3, %f1, %f2;
+cvta.to.global.u64 %rd19, %rd2;
+shl.b64 %rd20, %rd16, 2;
+add.s64 %rd21, %rd19, %rd20;
+st.global.f32 [%rd21], %f4;
+
+$L__BB1_2:
+ret;
+
+}

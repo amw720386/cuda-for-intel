@@ -442,11 +442,24 @@ pub unsafe extern "system" fn cudaMemcpyAsync(
     if err != SUCCESS {
         return set_error(err);
     }
-    // kind: 1 HtoD, 2 DtoH, 3 DtoD (cudaMemcpyKind)
+    // cudaMemcpyKind: HostToHost=0, HtoD=1, DtoH=2, DtoD=3, Default=4
     let err = match kind {
-        1 => unsafe { (drv.cuMemcpyHtoDAsync)(dst as u64, src, count, stream) },
+        1 | 4 => unsafe { (drv.cuMemcpyHtoDAsync)(dst as u64, src, count, stream) },
         2 => unsafe { (drv.cuMemcpyDtoHAsync)(dst, src as u64, count, stream) },
-        _ => NOT_SUPPORTED,
+        0 => {
+            if count == 0 || dst.is_null() || src.is_null() {
+                SUCCESS
+            } else {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.cast::<u8>(), dst.cast::<u8>(), count);
+                }
+                SUCCESS
+            }
+        }
+        _ => {
+            eprintln!("CUDA for Intel cudaMemcpyAsync: unsupported kind={kind}");
+            NOT_SUPPORTED
+        }
     };
     set_error(err)
 }
@@ -664,12 +677,66 @@ pub unsafe extern "system" fn cudaHostUnregister(_ptr: *mut c_void) -> c_int {
     set_error(NOT_SUPPORTED)
 }
 
+/// Layout matches CUDA 12 `cudaFuncAttributes` in driver_types.h (leading fields
+/// used by ggml; trailing reserved[] zeroed).
+#[repr(C)]
+struct CudaFuncAttributes {
+    shared_size_bytes: usize,
+    const_size_bytes: usize,
+    local_size_bytes: usize,
+    max_threads_per_block: c_int,
+    num_regs: c_int,
+    ptx_version: c_int,
+    binary_version: c_int,
+    cache_mode_ca: c_int,
+    max_dynamic_shared_size_bytes: c_int,
+    preferred_shmem_carveout: c_int,
+    cluster_dim_must_be_set: c_int,
+    required_cluster_width: c_int,
+    required_cluster_height: c_int,
+    required_cluster_depth: c_int,
+    cluster_scheduling_policy_preference: c_int,
+    non_portable_cluster_size_allowed: c_int,
+    reserved: [c_int; 16],
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaFuncGetAttributes(
-    _attr: *mut c_void,
-    _func: *const c_void,
+    attr: *mut c_void,
+    func: *const c_void,
 ) -> c_int {
-    set_error(NOT_SUPPORTED)
+    if attr.is_null() || func.is_null() {
+        return set_error(INVALID_VALUE);
+    }
+    // Ensure the host stub is registered so later launches can resolve it.
+    if let Ok(drv) = driver() {
+        let _ = resolve_function(drv, func as usize);
+    }
+    // ggml uses ptxVersion >= 90 to enable Programmatic Dependent Launch.
+    // Our fatbins are PTX 8.x / sm_80-virtual — report 80 so PDL stays off.
+    let filled = CudaFuncAttributes {
+        shared_size_bytes: 0,
+        const_size_bytes: 0,
+        local_size_bytes: 0,
+        max_threads_per_block: 1024,
+        num_regs: 32,
+        ptx_version: 80,
+        binary_version: 80,
+        cache_mode_ca: 0,
+        max_dynamic_shared_size_bytes: 48 * 1024,
+        preferred_shmem_carveout: -1,
+        cluster_dim_must_be_set: 0,
+        required_cluster_width: 0,
+        required_cluster_height: 0,
+        required_cluster_depth: 0,
+        cluster_scheduling_policy_preference: 0,
+        non_portable_cluster_size_allowed: 0,
+        reserved: [0; 16],
+    };
+    unsafe {
+        std::ptr::write(attr.cast::<CudaFuncAttributes>(), filled);
+    }
+    set_error(SUCCESS)
 }
 
 #[unsafe(no_mangle)]
@@ -695,11 +762,20 @@ pub unsafe extern "system" fn cudaOccupancyMaxActiveBlocksPerMultiprocessorWithF
     set_error(SUCCESS)
 }
 
+/// CUDA `dim3` — 12 bytes; on Win64 x64 this is passed by hidden pointer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Dim3 {
+    x: c_uint,
+    y: c_uint,
+    z: c_uint,
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaLaunchKernel(
     func: *const c_void,
-    grid: [c_uint; 3],
-    block: [c_uint; 3],
+    grid: Dim3,
+    block: Dim3,
     args: *mut *mut c_void,
     shared_mem: usize,
     stream: CUstream,
@@ -713,6 +789,9 @@ pub unsafe extern "system" fn cudaLaunchKernel(
     }
     let key = func as usize;
     if let Err(err) = resolve_function(drv, key) {
+        eprintln!(
+            "CUDA for Intel cudaLaunchKernel: resolve failed err={err} host_fun={key:#x}"
+        );
         return set_error(err);
     }
     let function = match runtime().lock() {
@@ -720,17 +799,22 @@ pub unsafe extern "system" fn cudaLaunchKernel(
         Err(_) => None,
     };
     let Some(function) = function else {
+        eprintln!("CUDA for Intel cudaLaunchKernel: no device fn for host={key:#x}");
         return set_error(INVALID_VALUE);
     };
+    eprintln!(
+        "CUDA for Intel cudaLaunchKernel: grid=({},{},{}) block=({},{},{}) shmem={shared_mem} stream={stream:?}",
+        grid.x, grid.y, grid.z, block.x, block.y, block.z
+    );
     set_error(unsafe {
         (drv.cuLaunchKernel)(
             function as CUfunction,
-            grid[0],
-            grid[1],
-            grid[2],
-            block[0],
-            block[1],
-            block[2],
+            grid.x,
+            grid.y,
+            grid.z,
+            block.x,
+            block.y,
+            block.z,
             shared_mem as c_uint,
             stream,
             args,
@@ -755,22 +839,36 @@ fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
         rt.pending_fatbins.get(&fat_key).copied()
     };
     if let Some(image) = image {
-        if let Some(ptx) = extract_ptx(image as *mut c_void) {
-            let err = ensure_context(drv);
-            if err != SUCCESS {
-                return Err(err);
-            }
-            let mut module = std::ptr::null_mut();
-            let mut bytes = ptx;
-            bytes.push(0);
-            let err = unsafe { (drv.cuModuleLoadData)(&mut module, bytes.as_ptr().cast()) };
-            if err == SUCCESS {
-                if let Ok(mut rt) = runtime().lock() {
-                    rt.modules.insert(fat_key, module as usize);
-                    rt.pending_fatbins.remove(&fat_key);
+        match extract_ptx(image as *mut c_void) {
+            Some(ptx) => {
+                eprintln!(
+                    "CUDA for Intel resolve: extract ok fat={fat_key:#x} ptx={} name={}",
+                    ptx.len(),
+                    String::from_utf8_lossy(&name)
+                );
+                let err = ensure_context(drv);
+                if err != SUCCESS {
+                    eprintln!("CUDA for Intel resolve: ensure_context -> {err}");
+                    return Err(err);
                 }
-            } else {
-                return Err(err);
+                let mut module = std::ptr::null_mut();
+                let mut bytes = ptx;
+                bytes.push(0);
+                let err = unsafe { (drv.cuModuleLoadData)(&mut module, bytes.as_ptr().cast()) };
+                eprintln!("CUDA for Intel resolve: cuModuleLoadData -> {err}");
+                if err == SUCCESS {
+                    if let Ok(mut rt) = runtime().lock() {
+                        rt.modules.insert(fat_key, module as usize);
+                        rt.pending_fatbins.remove(&fat_key);
+                    }
+                } else {
+                    return Err(err);
+                }
+            }
+            None => {
+                eprintln!(
+                    "CUDA for Intel resolve: extract_ptx failed fat={fat_key:#x} image={image:#x}"
+                );
             }
         }
     }
@@ -782,9 +880,13 @@ fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
         .copied()
         .ok_or(INVALID_VALUE)?;
     let mut function = std::ptr::null_mut();
-    let c_name = std::ffi::CString::new(name).map_err(|_| INVALID_VALUE)?;
+    let c_name = std::ffi::CString::new(name.clone()).map_err(|_| INVALID_VALUE)?;
     let err = unsafe { (drv.cuModuleGetFunction)(&mut function, module as CUmodule, c_name.as_ptr()) };
     if err != SUCCESS {
+        eprintln!(
+            "CUDA for Intel resolve: cuModuleGetFunction({}) -> {err}",
+            String::from_utf8_lossy(&name)
+        );
         return Err(err);
     }
     if let Ok(mut rt) = runtime().lock() {
@@ -805,33 +907,55 @@ pub unsafe extern "system" fn cudaLaunchKernelExC(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaLaunchCooperativeKernel(
-    _func: *const c_void,
-    _grid: [c_uint; 3],
-    _block: [c_uint; 3],
-    _args: *mut *mut c_void,
-    _shared: usize,
-    _stream: CUstream,
+    func: *const c_void,
+    grid: Dim3,
+    block: Dim3,
+    args: *mut *mut c_void,
+    shared: usize,
+    stream: CUstream,
 ) -> c_int {
-    set_error(NOT_SUPPORTED)
+    // No hardware cooperative groups yet — fall back to a normal launch.
+    unsafe { cudaLaunchKernel(func, grid, block, args, shared, stream) }
+}
+
+thread_local! {
+    static LAUNCH_CONFIG: std::cell::Cell<Option<(Dim3, Dim3, usize, CUstream)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn __cudaPushCallConfiguration(
-    _grid: [c_uint; 3],
-    _block: [c_uint; 3],
-    _shared: usize,
-    _stream: CUstream,
+    grid: Dim3,
+    block: Dim3,
+    shared: usize,
+    stream: CUstream,
 ) -> c_int {
+    LAUNCH_CONFIG.with(|slot| slot.set(Some((grid, block, shared, stream))));
     SUCCESS
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn __cudaPopCallConfiguration(
-    _grid: *mut [c_uint; 3],
-    _block: *mut [c_uint; 3],
-    _shared: *mut usize,
-    _stream: *mut CUstream,
+    grid: *mut Dim3,
+    block: *mut Dim3,
+    shared: *mut usize,
+    stream: *mut CUstream,
 ) -> c_int {
+    let Some((g, b, sh, st)) = LAUNCH_CONFIG.with(|slot| slot.take()) else {
+        return INVALID_VALUE;
+    };
+    if !grid.is_null() {
+        unsafe { grid.write(g) };
+    }
+    if !block.is_null() {
+        unsafe { block.write(b) };
+    }
+    if !shared.is_null() {
+        unsafe { shared.write(sh) };
+    }
+    if !stream.is_null() {
+        unsafe { stream.write(st) };
+    }
     SUCCESS
 }
 
@@ -844,37 +968,67 @@ struct FatbinHandle {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn __cudaRegisterFatBinary(fatbin: *mut c_void) -> *mut c_void {
-    // Defer module load until first launch: loading during CRT/DllMain init of
-    // ggml-cuda.dll can turn translator failures into ERROR_DLL_INIT_FAILED.
+    // CUDA Runtime ABI: return a void** slot whose pointee is our FatbinHandle.
+    // Returning the handle pointer directly made callers read FatbinHandle.id
+    // (1,2,3…) as a nested pointer.
     let id = {
         let mut rt = runtime().lock().unwrap();
         rt.next_fatbin = rt.next_fatbin.saturating_add(1);
         rt.next_fatbin
     };
-    let handle = Box::new(FatbinHandle {
+    let handle = Box::into_raw(Box::new(FatbinHandle {
         id,
         image: fatbin as usize,
-    });
-    let ptr = Box::into_raw(handle);
+    }));
+    let slot = Box::into_raw(Box::new(handle));
     if let Ok(mut rt) = runtime().lock() {
-        rt.pending_fatbins.insert(ptr as usize, fatbin as usize);
+        rt.pending_fatbins.insert(handle as usize, fatbin as usize);
     }
-    ptr.cast()
+    slot.cast()
+}
+
+fn fatbin_handle_from_slot(fatbin: *mut c_void) -> Option<*mut FatbinHandle> {
+    if fatbin.is_null() {
+        return None;
+    }
+    let handle = unsafe { *(fatbin as *mut *mut FatbinHandle) };
+    if handle.is_null() {
+        None
+    } else {
+        Some(handle)
+    }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn __cudaRegisterFatBinaryEnd(_fatbin: *mut c_void) {}
+pub unsafe extern "system" fn __cudaRegisterFatBinaryEnd(fatbin: *mut c_void) {
+    // Do not ModuleLoadData here: CUDA invokes this during CRT/static init for every
+    // fatbin (147 in ggml-cuda). Eager PTX→SPIR-V under the loader is too heavy and
+    // unsafe. Keep the image in pending_fatbins; resolve_function loads on first launch.
+    let Some(handle_ptr) = fatbin_handle_from_slot(fatbin) else {
+        eprintln!("CUDA for Intel fatbin end: bad slot={fatbin:?}");
+        return;
+    };
+    let id = unsafe { (*handle_ptr).id };
+    let image = unsafe { (*handle_ptr).image };
+    // One-shot extract smoke check on the first fatbin only (diagnostics).
+    if id == 1 {
+        match extract_ptx(image as *mut c_void) {
+            Some(ptx) => eprintln!(
+                "CUDA for Intel fatbin end: id=1 extract ok ({} PTX bytes); defer ModuleLoad",
+                ptx.len()
+            ),
+            None => eprintln!(
+                "CUDA for Intel fatbin end: id=1 extract_ptx failed image={image:#x}"
+            ),
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn __cudaUnregisterFatBinary(fatbin: *mut c_void) {
-    // Called during process teardown; be liberal about already-freed state.
-    if fatbin.is_null() {
+    let Some(handle_ptr) = fatbin_handle_from_slot(fatbin) else {
         return;
-    }
-    let handle_ptr = unsafe { *(fatbin as *mut *mut FatbinHandle) };
-    if handle_ptr.is_null() {
-        return;
-    }
+    };
     let key = handle_ptr as usize;
     if let Ok(mut rt) = runtime().lock() {
         rt.modules.remove(&key);
@@ -882,6 +1036,7 @@ pub unsafe extern "system" fn __cudaUnregisterFatBinary(fatbin: *mut c_void) {
     }
     unsafe { drop(Box::from_raw(handle_ptr)) };
     unsafe { *(fatbin as *mut *mut FatbinHandle) = std::ptr::null_mut() };
+    unsafe { drop(Box::from_raw(fatbin as *mut *mut FatbinHandle)) };
 }
 
 #[unsafe(no_mangle)]
@@ -928,70 +1083,141 @@ pub unsafe extern "system" fn __cudaRegisterVar(
 ) {
 }
 
-/// Best-effort PTX extraction from a CUDA fatbin / fatbinc wrapper.
+/// Extract PTX from a CUDA fatbinc wrapper / fatbin (ZLUDA layout, MIT).
 ///
-/// Must never scan unbounded memory: the registration path runs during
-/// `DllMain`/`CRT` init of ggml-cuda.dll, and a fault becomes ERROR_DLL_INIT_FAILED.
+/// Must never scan unbounded memory: registration can run under the loader lock.
 fn extract_ptx(fatbin: *mut c_void) -> Option<Vec<u8>> {
     if fatbin.is_null() {
         return None;
     }
     unsafe {
         let wrapper = fatbin.cast::<u8>();
-        // fatbinc wrapper: magic 0x466243B1 at offset 0; on x64 `data*` is at +8.
         let magic = read_u32(wrapper)?;
         let data_ptr = if magic == 0x4662_43B1 {
             let addr = read_usize(wrapper.add(8))?;
             if addr == 0 {
+                eprintln!("CUDA for Intel extract: fatbinc data ptr null");
                 return None;
             }
             addr as *const u8
         } else {
+            eprintln!("CUDA for Intel extract: unexpected magic {magic:#x} at {fatbin:?}");
             wrapper
         };
         let header_magic = read_u32(data_ptr)?;
         if header_magic != 0xBA55_ED50 {
-            // Only accept clearly textual PTX with a bounded probe.
-            let probe = std::slice::from_raw_parts(data_ptr, 16);
-            if probe.starts_with(b".version") || probe.starts_with(b"//") {
-                let mut out = Vec::new();
-                for i in 0..16 * 1024 * 1024 {
-                    let b = data_ptr.add(i).read();
-                    if b == 0 {
-                        break;
-                    }
-                    out.push(b);
-                }
-                return Some(out);
-            }
+            eprintln!(
+                "CUDA for Intel extract: fatbin magic {header_magic:#x} at {data_ptr:?} (want BA55ED50)"
+            );
             return None;
         }
-        // FatbinHeader: magic u32, version u16, header_size u16, size u64
-        let header_size = read_u16(data_ptr.add(6))? as usize;
-        let total_size = read_u64(data_ptr.add(8))? as usize;
-        if header_size < 16 || total_size <= header_size || total_size > 64 * 1024 * 1024 {
+        // FatbinHeader: magic u32, version u16, header_size u16, files_size u64
+        let frame_header_size = read_u16(data_ptr.add(6))? as usize;
+        let files_size = read_u64(data_ptr.add(8))? as usize;
+        if frame_header_size < 16 || files_size == 0 || files_size > 64 * 1024 * 1024 {
             return None;
         }
-        let mut offset = header_size;
-        while offset + 16 <= total_size {
+        let mut offset = frame_header_size;
+        let end = frame_header_size + files_size;
+        while offset + 64 <= end {
             let entry = data_ptr.add(offset);
-            let kind = entry.read();
-            let entry_size = read_u64(entry.add(8))? as usize;
-            if entry_size < 16 || offset + entry_size > total_size {
+            let kind = read_u16(entry)?;
+            let version = read_u16(entry.add(2))?;
+            let header_size = read_u32(entry.add(4))? as usize;
+            let payload_size = read_u32(entry.add(8))? as usize;
+            let compressed_size = read_u32(entry.add(16))? as usize;
+            let flags = read_u64(entry.add(40))?;
+            let uncompressed_payload = read_u64(entry.add(56))? as usize;
+            if header_size < 64 || version != 0x101 {
                 break;
             }
-            let payload_len = entry_size - 16;
-            let payload = std::slice::from_raw_parts(entry.add(16), payload_len);
-            if kind == 1 || payload.starts_with(b".version") {
-                let end = payload
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(payload.len());
-                return Some(payload[..end].to_vec());
+            let payload_span = payload_size.max(compressed_size);
+            if offset + header_size + payload_span > end {
+                break;
             }
-            offset += entry_size;
+            if kind == 0x01 {
+                // PTX (FatbinFileHeader::HEADER_KIND_PTX)
+                let payload = std::slice::from_raw_parts(entry.add(header_size), payload_span);
+                let mut ptx = match decompress_fatbin_payload(
+                    payload,
+                    flags,
+                    compressed_size,
+                    uncompressed_payload,
+                ) {
+                    Some(p) => p,
+                    None => {
+                        eprintln!(
+                            "CUDA for Intel extract: PTX decompress failed flags={flags:#x} csize={compressed_size} usize={uncompressed_payload}"
+                        );
+                        offset += header_size + payload_size.max(compressed_size);
+                        continue;
+                    }
+                };
+                while ptx.last() == Some(&0) {
+                    ptx.pop();
+                }
+                if ptx.windows(8).any(|w| w == b".version") || ptx.starts_with(b".version") {
+                    return Some(ptx);
+                }
+                eprintln!(
+                    "CUDA for Intel extract: decompressed {} bytes but no .version marker",
+                    ptx.len()
+                );
+            }
+            // Advance by payload_size (container field), matching ZLUDA/fatbin layout.
+            offset += header_size + payload_size;
         }
         None
+    }
+}
+
+// ZLUDA FatbinFileHeaderFlags (MIT): Is64Bit=1, Windows=0x40, Lz4=0x2000, Zstd=0x8000.
+const FLAG_DEFLATE: u64 = 0x1000;
+const FLAG_LZ4: u64 = 0x2000;
+const FLAG_ZSTD: u64 = 0x8000;
+
+fn decompress_fatbin_payload(
+    payload: &[u8],
+    flags: u64,
+    compressed_size: usize,
+    uncompressed_payload: usize,
+) -> Option<Vec<u8>> {
+    let bound = uncompressed_payload.max(1024).min(64 * 1024 * 1024);
+    let src_len = if compressed_size == 0 {
+        payload.len()
+    } else {
+        compressed_size.min(payload.len())
+    };
+    let src = &payload[..src_len];
+    if flags & FLAG_ZSTD != 0 {
+        return zstd::stream::decode_all(src).ok().and_then(|out| {
+            if uncompressed_payload != 0 && out.len() > bound {
+                None
+            } else {
+                Some(out)
+            }
+        });
+    }
+    if flags & FLAG_LZ4 != 0 {
+        return lz4_flex::block::decompress(src, bound).ok();
+    }
+    if flags & FLAG_DEFLATE != 0 {
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+        let mut decoder = ZlibDecoder::new(src);
+        let mut out = Vec::with_capacity(bound.min(src.len() * 4));
+        decoder.read_to_end(&mut out).ok()?;
+        return Some(out);
+    }
+    let len = payload_size_or(payload.len(), uncompressed_payload);
+    Some(payload[..len].to_vec())
+}
+
+fn payload_size_or(available: usize, uncompressed: usize) -> usize {
+    if uncompressed == 0 {
+        available
+    } else {
+        uncompressed.min(available)
     }
 }
 

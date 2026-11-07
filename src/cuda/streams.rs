@@ -31,8 +31,12 @@ const PER_THREAD: usize = 2;
 
 fn stream_key(handle: Opaque) -> Result<usize, CuResult> {
     match handle.addr() {
-        0 | LEGACY => Ok(0),
-        PER_THREAD => Err(NotSupported),
+        // CUDA special stream handles:
+        //   0 / cudaStreamLegacy (1) → legacy default stream
+        //   cudaStreamPerThread (2) → per-thread default stream
+        // True per-thread isolation is not implemented yet; map PerThread onto
+        // the legacy stream so Runtime clients (ggml-cuda) can memcpy/launch.
+        0 | LEGACY | PER_THREAD => Ok(0),
         key => Ok(key),
     }
 }

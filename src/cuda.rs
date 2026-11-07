@@ -587,21 +587,29 @@ unsafe fn copy_async(
         if size == 0 {
             return Ok(());
         }
-        if !contains_range(&context.allocations, device as usize, size)
-            || !contains_range(&context.host_allocations, host.addr(), size)
-        {
+        if host.is_null() || !contains_range(&context.allocations, device as usize, size) {
             return Err(InvalidValue);
         }
-        let device = std::ptr::with_exposed_provenance_mut(device as usize);
+        let device_ptr = std::ptr::with_exposed_provenance_mut(device as usize);
         let (dst, src) = if to_device {
-            (device, host)
+            (device_ptr, host)
         } else {
-            (host, device)
+            (host, device_ptr)
         };
-        unsafe {
-            context
-                .streams
-                .copy(&runtime.api, &context.backend, key, (dst, src), size)
+        // NVIDIA Runtime allows async copies from pageable host memory (may
+        // synchronize). Our Level Zero path needs registered/pinned host for
+        // true async; fall back to a blocking copy for ordinary host pointers.
+        if contains_range(&context.host_allocations, host.addr(), size) {
+            unsafe {
+                context
+                    .streams
+                    .copy(&runtime.api, &context.backend, key, (dst, src), size)
+            }
+        } else {
+            context.streams.wait_legacy(&runtime.api, u64::MAX)?;
+            unsafe { context.backend.copy(&runtime.api, dst, src, size) }
+                .inspect_err(|error| context.backend.health.observe(error))
+                .map_err(backend_error)
         }
     }))
 }
@@ -677,9 +685,12 @@ fn load_ptx(
     let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
     let translated = ptx::translate(ptx).map_err(|error| {
         if trace::enabled() {
-            trace::record(format_args!("PTX translation rejected"));
+            let preview: String = ptx.chars().take(120).collect();
+            trace::record(format_args!("PTX translation rejected: {error}; preview={preview:?}"));
         }
         diagnostic(&error);
+        // Always persist a short reject breadcrumb for fatbin bring-up.
+        export_log(format!("PTX reject: {error}"));
         InvalidPtx
     })?;
     let device = &runtime.devices[context.device as usize];

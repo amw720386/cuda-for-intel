@@ -380,6 +380,28 @@ mod tests {
     }
 
     #[test]
+    fn translates_authentic_ggml_scale_f32_module() {
+        let source = include_str!("../examples/ggml_scale_f32_auth.ptx");
+        let translated = translate(source).unwrap();
+        assert_eq!(translated.kernels.len(), 1);
+        assert!(translated.kernels[0].name.contains("scale_f32IfEv"));
+    }
+
+    #[test]
+    fn translates_authentic_ggml_scale_fatbin_skipping_globals_and_bf16() {
+        // Real nvcc fatbin payload: 11 `.global` LUT tables + bf16 + f32 entries.
+        let source = include_str!("../examples/ggml_scale_module_full.ptx");
+        let translated = translate(source).unwrap();
+        assert!(
+            translated
+                .kernels
+                .iter()
+                .any(|k| k.name.contains("scale_f32IfEv")),
+            "f32 scale entry must survive best-effort module parse"
+        );
+    }
+
+    #[test]
     fn lowers_nvcc_aggregate_and_scalar_abi() {
         let translated = translate(GGML_MODERN).unwrap();
         assert_eq!(translated.kernels.len(), 2);

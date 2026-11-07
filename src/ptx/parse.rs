@@ -11,7 +11,8 @@ fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
 
     let mut tokens = Vec::new();
     loop {
-        source = source.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        // nvcc fatbin PTX often pads with NULs after the last kernel.
+        source = source.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\0');
         let Some(first) = source.chars().next() else {
             return Ok(tokens);
         };
@@ -641,6 +642,97 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Skip a module-level declaration (`.global` / `.const` / …) through its
+/// terminating `;`, including `{…}` initializers used by nvcc lookup tables.
+fn skip_module_declaration(parser: &mut Parser<'_>) -> Result<(), Error> {
+    let mut depth = 0i32;
+    loop {
+        let token = parser.take()?;
+        match token {
+            "{" => depth += 1,
+            "}" => depth -= 1,
+            ";" if depth == 0 => return Ok(()),
+            _ => {}
+        }
+        if depth < 0 {
+            return Err(Error::new("unbalanced braces in PTX module declaration"));
+        }
+    }
+}
+
+/// Consume storage-class / linkage prefixes that are not `.entry`.
+fn skip_module_directives(parser: &mut Parser<'_>) -> Result<(), Error> {
+    loop {
+        let Some(first) = parser.peek() else {
+            return Ok(());
+        };
+        match first {
+            ".entry" => return Ok(()),
+            ".visible" | ".weak" | ".extern" | ".common" => {
+                // `.visible .entry` begins a kernel — leave the attribute for
+                // `parse_entry`. Other `.visible .global` forms are skipped.
+                let rest = parser.tokens.as_slice();
+                if rest.get(1) == Some(&".entry") {
+                    return Ok(());
+                }
+                parser.take()?;
+                // Optional second linkage/storage token, then declaration body.
+                if matches!(
+                    parser.peek(),
+                    Some(".global" | ".const" | ".shared" | ".local" | ".tex")
+                ) {
+                    parser.take()?;
+                }
+                skip_module_declaration(parser)?;
+            }
+            ".global" | ".const" | ".shared" | ".local" | ".tex" => {
+                parser.take()?;
+                skip_module_declaration(parser)?;
+            }
+            other if other.chars().all(|c| c == '\0') => {
+                parser.take()?;
+            }
+            other => {
+                return Err(Error::new(format!(
+                    "unsupported PTX module directive {other}"
+                )));
+            }
+        }
+    }
+}
+
+/// Advance past a failed `.entry` body so remaining kernels can still load.
+fn skip_failed_entry(parser: &mut Parser<'_>) -> Result<(), Error> {
+    // We may be mid-signature or past `{`. Seek the entry's opening brace if
+    // needed, then balance to the matching close.
+    let mut depth = 0i32;
+    let mut seen_brace = false;
+    while let Some(token) = parser.peek() {
+        if token == "{" {
+            parser.take()?;
+            depth += 1;
+            seen_brace = true;
+            break;
+        }
+        if token == ".entry" || token == ".visible" {
+            // No body yet — abandon this stub.
+            return Ok(());
+        }
+        parser.take()?;
+    }
+    if !seen_brace {
+        return Ok(());
+    }
+    while depth > 0 {
+        match parser.take()? {
+            "{" => depth += 1,
+            "}" => depth -= 1,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
     let mut parser = Parser {
         tokens: tokens(source)?.into_iter(),
@@ -662,15 +754,39 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
     let mut names = std::collections::HashSet::new();
     let mut entries = Vec::new();
     loop {
-        let entry = parse_entry(&mut parser)?;
-        if !names.insert(entry.name) {
-            return Err(Error::new("duplicate PTX entry name"));
-        }
-        entries.push(entry);
+        skip_module_directives(&mut parser)?;
         if parser.peek().is_none() {
-            return Ok(entries);
+            break;
+        }
+        // Snapshot so a failed kernel can be skipped without aborting the module.
+        let checkpoint = parser.tokens.clone();
+        match parse_entry(&mut parser) {
+            Ok(entry) => {
+                if !names.insert(entry.name) {
+                    return Err(Error::new("duplicate PTX entry name"));
+                }
+                entries.push(entry);
+            }
+            Err(error) => {
+                parser.tokens = checkpoint;
+                // Consume optional `.visible` then `.entry name … { … }`.
+                parser.eat(".visible");
+                if parser.eat(".entry") {
+                    let _ = parser.identifier();
+                    skip_failed_entry(&mut parser)?;
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+        if parser.peek().is_none() {
+            break;
         }
     }
+    if entries.is_empty() {
+        return Err(Error::new("PTX module contains no supported .entry kernels"));
+    }
+    Ok(entries)
 }
 
 fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
