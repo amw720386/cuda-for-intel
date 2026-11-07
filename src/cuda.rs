@@ -890,7 +890,18 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let args = unsafe {
                 launch_args::read(&entry.params, kernel_params, extra, |address| {
                     contains_range(&context.allocations, address as usize, 1)
-                })?
+                })
+            };
+            let args = match args {
+                Ok(args) => args,
+                Err(error) => {
+                    export_log(format!(
+                        "cuLaunchKernel args rejected for {} ({} params)",
+                        name.to_string_lossy(),
+                        entry.params.len()
+                    ));
+                    return Err(error);
+                }
             };
             context.streams.launch(
                 &runtime.api,

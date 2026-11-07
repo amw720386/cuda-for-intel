@@ -59,6 +59,7 @@ impl Value {
 struct Emitter<'a> {
     builder: Builder,
     bool_type: Word,
+    u8_type: Word,
     u16_type: Word,
     u32_type: Word,
     u64_type: Word,
@@ -68,6 +69,7 @@ struct Emitter<'a> {
     global_byte_ptr: Word,
     global_half_ptr: Word,
     global_word_ptr: Word,
+    global_qword_ptr: Word,
     shared_byte_ptr: Word,
     shared_word_ptr: Word,
     shared: Option<(&'a str, Word)>,
@@ -115,6 +117,7 @@ impl<'a> Emitter<'a> {
         let global_byte_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u8_type);
         let global_half_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u16_type);
         let global_word_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u32_type);
+        let global_qword_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u64_type);
         let shared_byte_ptr = builder.type_pointer(None, StorageClass::Workgroup, u8_type);
         let shared_word_ptr = builder.type_pointer(None, StorageClass::Workgroup, u32_type);
         // OpenCL's Physical64 environment uses size_t vectors for these built-ins.
@@ -128,6 +131,7 @@ impl<'a> Emitter<'a> {
         Self {
             builder,
             bool_type,
+            u8_type,
             u16_type,
             u32_type,
             u64_type,
@@ -137,6 +141,7 @@ impl<'a> Emitter<'a> {
             global_byte_ptr,
             global_half_ptr,
             global_word_ptr,
+            global_qword_ptr,
             shared_byte_ptr,
             shared_word_ptr,
             shared: None,
@@ -158,6 +163,7 @@ impl<'a> Emitter<'a> {
 
     fn param_type(&self, param: Param) -> Word {
         match param {
+            Param::U8 => self.u8_type,
             Param::U32 | Param::Words(_) => self.u32_type,
             Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
@@ -703,6 +709,16 @@ impl<'a> Emitter<'a> {
                     [Operand::IdRef(value)],
                 )?
             }
+            FloatOp::RcpApprox([source]) => {
+                let value = self.float_value(source)?;
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::native_recip as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
             FloatOp::SinApprox([source])
             | FloatOp::CosApprox([source])
             | FloatOp::Lg2Approx([source])
@@ -739,6 +755,26 @@ impl<'a> Emitter<'a> {
                     )));
                 }
                 (dst, value.id, value.kind)
+            }
+            Instruction::ParamS8(dst, src) => {
+                let value = self.params.get(&(src, 0)).copied().ok_or_else(|| {
+                    Error::new(format!("unknown PTX parameter word {src}"))
+                })?;
+                if value.kind != Kind::B32 {
+                    return Err(Error::new(format!(
+                        "mismatched PTX parameter load for {src}"
+                    )));
+                }
+                // Sign-extend the low 8 bits into the b16/b32 destination slot.
+                let ty = self.u32_type;
+                let shift = self.builder.constant_bit32(ty, 24);
+                let raised = self
+                    .builder
+                    .shift_left_logical(ty, None, value.id, shift)?;
+                let id = self
+                    .builder
+                    .shift_right_arithmetic(ty, None, raised, shift)?;
+                (dst, id, Kind::B32)
             }
             Instruction::ToGlobal(dst, src) => {
                 // The frontend accepts only pointers to device allocations for this state space.
@@ -792,11 +828,34 @@ impl<'a> Emitter<'a> {
             Instruction::Compare {
                 op,
                 signed,
+                bits16,
                 dst,
                 src: [a, b],
             } => {
-                let a = self.integer(a, Kind::B32)?;
-                let b = self.integer(b, Kind::B32)?;
+                let mut a = self.integer(a, Kind::B32)?;
+                let mut b = self.integer(b, Kind::B32)?;
+                if bits16 {
+                    let shift = self.builder.constant_bit32(self.u32_type, 16);
+                    let narrow = |emitter: &mut Self, value: Word, signed: bool| -> Result<Word, Error> {
+                        let raised =
+                            emitter
+                                .builder
+                                .shift_left_logical(emitter.u32_type, None, value, shift)?;
+                        if signed {
+                            Ok(emitter.builder.shift_right_arithmetic(
+                                emitter.u32_type,
+                                None,
+                                raised,
+                                shift,
+                            )?)
+                        } else {
+                            let mask = emitter.builder.constant_bit32(emitter.u32_type, 0xffff);
+                            Ok(emitter.builder.bitwise_and(emitter.u32_type, None, value, mask)?)
+                        }
+                    };
+                    a = narrow(self, a, signed)?;
+                    b = narrow(self, b, signed)?;
+                }
                 let ty = self.bool_type;
                 let id = match (op, signed) {
                     (Comparison::Equal, _) => self.builder.i_equal(ty, None, a, b),
@@ -816,6 +875,28 @@ impl<'a> Emitter<'a> {
                         self.builder.s_greater_than_equal(ty, None, a, b)
                     }
                 }?;
+                (dst, id, Kind::Predicate)
+            }
+            Instruction::CompareFloat {
+                op,
+                dst,
+                src: [a, b],
+            } => {
+                let a = self.float_value(a)?;
+                let b = self.float_value(b)?;
+                let ty = self.bool_type;
+                // PTX float setp uses ordered compares (NaN → false for eq/lt/…).
+                let id = match op {
+                    Comparison::Equal => self.builder.f_ord_equal(ty, None, a, b),
+                    Comparison::NotEqual => self.builder.f_unord_not_equal(ty, None, a, b),
+                    Comparison::Less => self.builder.f_ord_less_than(ty, None, a, b),
+                    Comparison::LessEqual => self.builder.f_ord_less_than_equal(ty, None, a, b),
+                    Comparison::Greater => self.builder.f_ord_greater_than(ty, None, a, b),
+                    Comparison::GreaterEqual => {
+                        self.builder.f_ord_greater_than_equal(ty, None, a, b)
+                    }
+                }?;
+                self.fp32 = true;
                 (dst, id, Kind::Predicate)
             }
             Instruction::PredicateLogic {
@@ -844,6 +925,7 @@ impl<'a> Emitter<'a> {
                     IntegerOp::And => self.builder.bitwise_and(ty, None, a, b),
                     IntegerOp::Or => self.builder.bitwise_or(ty, None, a, b),
                     IntegerOp::Div => self.builder.s_div(ty, None, a, b),
+                    IntegerOp::DivUnsigned => self.builder.u_div(ty, None, a, b),
                     IntegerOp::Rem => self.builder.s_rem(ty, None, a, b),
                     IntegerOp::SignExtend8 => {
                         // PTX cvt.s32.s8 sign-extends the low 8 bits of the source.
@@ -981,6 +1063,11 @@ impl<'a> Emitter<'a> {
                 };
                 (dst, id, Kind::B64)
             }
+            Instruction::Narrow(dst, src) => {
+                let src = self.integer(src, Kind::B64)?;
+                let id = self.builder.u_convert(self.u32_type, None, src)?;
+                (dst, id, Kind::B32)
+            }
             Instruction::Add64(dst, [a, b]) => {
                 let value = self.add64(a, b)?;
                 (dst, value.id, value.kind)
@@ -996,6 +1083,16 @@ impl<'a> Emitter<'a> {
                 let id = self
                     .builder
                     .shift_left_logical(self.u64_type, None, value, shift)?;
+                (dst, id, Kind::B64)
+            }
+            Instruction::Load64(space, dst, address) => {
+                let bytes_ptr = self.addressed_byte_pointer(space, address)?;
+                let pointer = self
+                    .builder
+                    .bitcast(self.global_qword_ptr, None, bytes_ptr)?;
+                let id = self
+                    .builder
+                    .load(self.u64_type, None, pointer, None, [])?;
                 (dst, id, Kind::B64)
             }
             Instruction::Load32(space, dst, address) => {
@@ -1220,6 +1317,11 @@ impl<'a> Emitter<'a> {
             }
             let mut id = values.next().unwrap();
             let kind = match param {
+                Param::U8 => {
+                    // Promote byte params to B32 slots; ld.param.s8 sign-extends later.
+                    id = self.builder.u_convert(self.u32_type, None, id)?;
+                    Kind::B32
+                }
                 Param::U32 => Kind::B32,
                 Param::F32 => {
                     id = self.builder.bitcast(self.u32_type, None, id)?;

@@ -9,6 +9,7 @@ use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Param {
+    U8,
     U32,
     F32,
     U64,
@@ -19,6 +20,7 @@ pub(crate) enum Param {
 impl Param {
     pub(crate) fn alignment(self) -> usize {
         match self {
+            Self::U8 => 1,
             Self::U64 | Self::GlobalPtr => 8,
             Self::U32 | Self::F32 | Self::Words(_) => 4,
         }
@@ -26,6 +28,7 @@ impl Param {
 
     pub(crate) fn size(self) -> usize {
         match self {
+            Self::U8 => 1,
             Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
             Self::Words(words) => usize::from(words) * 4,
@@ -90,6 +93,7 @@ enum IntegerOp {
     ShiftRightLogical,
     ShiftRightArithmetic,
     Div,
+    DivUnsigned,
     Rem,
     MulHighUnsigned,
     SignExtend8,
@@ -115,6 +119,7 @@ enum FloatOp<'a> {
     Div([&'a str; 2]),
     Sqrt([&'a str; 1]),
     RsqrtApprox([&'a str; 1]),
+    RcpApprox([&'a str; 1]),
     SinApprox([&'a str; 1]),
     CosApprox([&'a str; 1]),
     Lg2Approx([&'a str; 1]),
@@ -135,6 +140,7 @@ impl<'a> FloatOp<'a> {
             | Self::FromSigned16(inputs)
             | Self::Sqrt(inputs)
             | Self::RsqrtApprox(inputs)
+            | Self::RcpApprox(inputs)
             | Self::SinApprox(inputs)
             | Self::CosApprox(inputs)
             | Self::Lg2Approx(inputs)
@@ -146,6 +152,8 @@ impl<'a> FloatOp<'a> {
 #[derive(Clone, Copy, Debug)]
 enum Instruction<'a> {
     Param(Width, &'a str, &'a str, usize),
+    /// `ld.param.s8` — load a byte parameter and sign-extend into a b16/b32 slot.
+    ParamS8(&'a str, &'a str),
     ToGlobal(&'a str, &'a str),
     SharedAddress(&'a str, &'a str),
     Builtin(&'a str, &'a str),
@@ -155,6 +163,13 @@ enum Instruction<'a> {
     Compare {
         op: Comparison,
         signed: bool,
+        /// When true, compare the low 16 bits as signed/unsigned 16-bit values.
+        bits16: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
+    CompareFloat {
+        op: Comparison,
         dst: &'a str,
         src: [&'a str; 2],
     },
@@ -176,10 +191,13 @@ enum Instruction<'a> {
         dst: &'a str,
         src: &'a str,
     },
+    /// `cvt.u32.u64` — truncate the low 32 bits of a 64-bit value.
+    Narrow(&'a str, &'a str),
     ShiftLeft64(&'a str, [&'a str; 2]),
     Add64(&'a str, [&'a str; 2]),
     Mul64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
+    Load64(Space, &'a str, &'a str),
     Load16(Space, &'a str, &'a str),
     LoadVec {
         space: Space,
@@ -213,7 +231,7 @@ impl<'a> Instruction<'a> {
         use Instruction::*;
         out.clear();
         Some(match self {
-            Param(_, dst, ..) | SharedAddress(dst, _) | AtomicAdd32(dst, ..) => {
+            Param(_, dst, ..) | ParamS8(dst, _) | SharedAddress(dst, _) | AtomicAdd32(dst, ..) => {
                 out.push(*dst);
                 &[]
             }
@@ -221,7 +239,7 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 src
             }
-            Load32(_, dst, addr) | Load16(_, dst, addr) => {
+            Load32(_, dst, addr) | Load64(_, dst, addr) | Load16(_, dst, addr) => {
                 out.push(*dst);
                 std::slice::from_ref(addr)
             }
@@ -235,11 +253,12 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
-            Widen { dst, src, .. } => {
+            Widen { dst, src, .. } | Narrow(dst, src) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
             Compare { dst, src, .. }
+            | CompareFloat { dst, src, .. }
             | PredicateLogic { dst, src, .. }
             | Integer32(_, dst, src)
             | MulWide32 { dst, src, .. }
@@ -267,7 +286,11 @@ impl<'a> Instruction<'a> {
     fn is_memory_load(&self) -> bool {
         matches!(
             self,
-            Self::Load32(..) | Self::Load16(..) | Self::LoadVec { .. } | Self::AtomicAdd32(..)
+            Self::Load32(..)
+                | Self::Load64(..)
+                | Self::Load16(..)
+                | Self::LoadVec { .. }
+                | Self::AtomicAdd32(..)
         )
     }
 
@@ -441,6 +464,19 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(translated.kernels[0].fp32);
         assert!(translated.kernels[0].fp32_fma);
+    }
+
+    #[test]
+    fn translates_authentic_ggml_rope_norm_entry() {
+        let translated = translate(include_str!("../examples/ggml_rope_auth.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let kernel = &translated.kernels[0];
+        assert!(kernel.fp32 && kernel.fp32_fma);
+        assert_eq!(kernel.params.last(), Some(&Param::U8));
+        assert!(
+            kernel.params.iter().any(|param| matches!(param, Param::Words(2))),
+            "expected rope_corr_dims .b8[8] aggregate"
+        );
     }
 
     #[test]

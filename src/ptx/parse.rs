@@ -100,6 +100,7 @@ impl<'a> Parser<'a> {
                 self.expect("]")?;
                 return Ok((name, Param::Words(bytes / 4)));
             }
+            ".u8" | ".s8" => Param::U8,
             ".u32" | ".b32" => Param::U32,
             ".f32" => Param::F32,
             ".u64" | ".b64" if self.eat(".ptr") => {
@@ -212,6 +213,7 @@ impl<'a> Parser<'a> {
                 };
                 Instruction::Param(Width::B32, dst, name, offset)
             }
+            ["ld.param.s8", dst, ",", "[", src, "]"] => Instruction::ParamS8(dst, src),
             ["ld.param.b64" | "ld.param.u64", dst, ",", "[", src, "]"] => {
                 Instruction::Param(Width::B64, dst, src, 0)
             }
@@ -265,14 +267,16 @@ impl<'a> Parser<'a> {
                 op @ ("setp.ge.u32" | "setp.gt.u32" | "setp.lt.u32" | "setp.le.u32" | "setp.eq.u32"
                 | "setp.ne.u32" | "setp.eq.b32" | "setp.ne.b32" | "setp.ge.s32"
                 | "setp.gt.s32" | "setp.lt.s32" | "setp.le.s32" | "setp.eq.s32"
-                | "setp.ne.s32"),
+                | "setp.ne.s32" | "setp.eq.s16" | "setp.ne.s16" | "setp.lt.s16"
+                | "setp.le.s16" | "setp.gt.s16" | "setp.ge.s16"),
                 dst,
                 ",",
                 a,
                 ",",
                 b,
             ] => {
-                let signed = op.ends_with(".s32");
+                let bits16 = op.ends_with(".s16") || op.ends_with(".u16");
+                let signed = op.ends_with(".s32") || op.ends_with(".s16");
                 let comparison = match &op[5..7] {
                     "ge" => Comparison::GreaterEqual,
                     "gt" => Comparison::Greater,
@@ -284,6 +288,31 @@ impl<'a> Parser<'a> {
                 Instruction::Compare {
                     op: comparison,
                     signed,
+                    bits16,
+                    dst,
+                    src: [a, b],
+                }
+            }
+            [
+                op @ ("setp.eq.f32" | "setp.eq.ftz.f32" | "setp.ne.f32" | "setp.ne.ftz.f32"
+                | "setp.lt.f32" | "setp.lt.ftz.f32" | "setp.le.f32" | "setp.le.ftz.f32"
+                | "setp.gt.f32" | "setp.gt.ftz.f32" | "setp.ge.f32" | "setp.ge.ftz.f32"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => {
+                let comparison = match &op[5..7] {
+                    "ge" => Comparison::GreaterEqual,
+                    "gt" => Comparison::Greater,
+                    "lt" => Comparison::Less,
+                    "le" => Comparison::LessEqual,
+                    "eq" => Comparison::Equal,
+                    _ => Comparison::NotEqual,
+                };
+                Instruction::CompareFloat {
+                    op: comparison,
                     dst,
                     src: [a, b],
                 }
@@ -295,7 +324,8 @@ impl<'a> Parser<'a> {
             },
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
-                | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "rem.s32"),
+                | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "div.u32"
+                | "rem.s32"),
                 dst,
                 ",",
                 a,
@@ -312,6 +342,7 @@ impl<'a> Parser<'a> {
                     "mul.hi.u32" => IntegerOp::MulHighUnsigned,
                     "shr.s32" => IntegerOp::ShiftRightArithmetic,
                     "div.s32" => IntegerOp::Div,
+                    "div.u32" => IntegerOp::DivUnsigned,
                     "rem.s32" => IntegerOp::Rem,
                     _ => IntegerOp::ShiftRightLogical,
                 };
@@ -341,6 +372,7 @@ impl<'a> Parser<'a> {
                 dst,
                 src,
             },
+            ["cvt.u32.u64", dst, ",", src] => Instruction::Narrow(dst, src),
             ["mul.wide.u32", dst, ",", a, ",", b] => Instruction::MulWide32 {
                 signed: false,
                 dst,
@@ -376,6 +408,14 @@ impl<'a> Parser<'a> {
                 };
                 Instruction::Load32(space, dst, addr)
             }
+            [
+                "ld.global.u64" | "ld.global.b64" | "ld.global.nc.u64" | "ld.global.nc.b64",
+                dst,
+                ",",
+                "[",
+                addr,
+                "]",
+            ] => Instruction::Load64(Space::Global, dst, addr),
             [
                 op @ ("ld.global.u16" | "ld.global.b16" | "ld.global.nc.u16" | "ld.global.nc.b16"),
                 dst,
@@ -434,10 +474,17 @@ impl<'a> Parser<'a> {
             ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Sub([a, b]))
             }
-            [op @ ("min.f32" | "max.f32"), dst, ",", a, ",", b] => Instruction::Float32(
+            [
+                op @ ("min.f32" | "max.f32" | "min.ftz.f32" | "max.ftz.f32"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => Instruction::Float32(
                 dst,
                 FloatOp::MinMax {
-                    min: *op == "min.f32",
+                    min: op.starts_with("min."),
                     src: [a, b],
                 },
             ),
@@ -473,6 +520,9 @@ impl<'a> Parser<'a> {
             ["rsqrt.approx.f32" | "rsqrt.approx.ftz.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::RsqrtApprox([src]))
             }
+            ["rcp.approx.f32" | "rcp.approx.ftz.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::RcpApprox([src]))
+            }
             ["sin.approx.f32" | "sin.approx.ftz.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::SinApprox([src]))
             }
@@ -501,7 +551,8 @@ impl<'a> Parser<'a> {
                 Instruction::Store32(space, addr, src)
             }
             [
-                op @ ("st.global.v2.f32" | "st.global.v4.f32" | "st.shared.v2.f32"),
+                op @ ("st.global.v2.f32" | "st.global.v2.u32" | "st.global.v4.f32"
+                | "st.shared.v2.f32"),
                 "[",
                 addr,
                 "]",
@@ -512,9 +563,10 @@ impl<'a> Parser<'a> {
                 b,
                 rest @ ..,
             ] => {
+                // v2.u32 shares the float-vector store path; bit patterns are preserved.
                 let (count, space) = match *op {
                     "st.global.v4.f32" => (4u8, Space::Global),
-                    "st.global.v2.f32" => (2, Space::Global),
+                    "st.global.v2.f32" | "st.global.v2.u32" => (2, Space::Global),
                     _ => (2, Space::Shared),
                 };
                 let (c, d) = if count == 4 {

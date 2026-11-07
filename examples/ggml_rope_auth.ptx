@@ -1,0 +1,180 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.entry _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib(
+.param .u64 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_0,
+.param .u64 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_1,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_2,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_3,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_4,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_5,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_6,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_7,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_8,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_9,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_10,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_11,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_12,
+.param .u64 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_13,
+.param .f32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_14,
+.param .f32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_15,
+.param .f32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_16,
+.param .align 4 .b8 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_17[8],
+.param .f32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_18,
+.param .u64 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_19,
+.param .u64 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_20,
+.param .u32 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_21,
+.param .u8 _Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_22
+)
+{
+.reg .pred %p<8>;
+.reg .b16 %rs<2>;
+.reg .f32 %f<55>;
+.reg .b32 %r<48>;
+.reg .b64 %rd<18>;
+
+
+ld.param.s8 %rs1, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_22];
+ld.param.u64 %rd3, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_0];
+ld.param.u64 %rd4, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_1];
+ld.param.u32 %r20, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_2];
+ld.param.u32 %r9, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_3];
+ld.param.u32 %r10, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_4];
+ld.param.u32 %r11, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_5];
+ld.param.u32 %r12, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_6];
+ld.param.u32 %r13, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_7];
+ld.param.u32 %r14, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_8];
+ld.param.u32 %r15, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_9];
+ld.param.u32 %r16, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_10];
+ld.param.u32 %r17, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_11];
+ld.param.u32 %r18, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_12];
+ld.param.u64 %rd5, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_13];
+ld.param.f32 %f9, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_14];
+ld.param.f32 %f10, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_15];
+ld.param.f32 %f53, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_16];
+ld.param.f32 %f14, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_18];
+ld.param.u64 %rd6, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_20];
+ld.param.u32 %r19, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_21];
+ld.param.f32 %f13, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_17+4];
+ld.param.f32 %f12, [_Z9rope_normILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxib_param_17];
+mov.u32 %r21, %ctaid.y;
+mov.u32 %r22, %ntid.y;
+mov.u32 %r23, %tid.y;
+mad.lo.s32 %r24, %r22, %r21, %r23;
+shl.b32 %r1, %r24, 1;
+setp.ge.s32 %p1, %r1, %r20;
+@%p1 bra $L__BB16_9;
+
+mov.u32 %r25, %ntid.x;
+mov.u32 %r26, %ctaid.x;
+mov.u32 %r27, %tid.x;
+mad.lo.s32 %r28, %r25, %r26, %r27;
+mul.lo.s32 %r29, %r10, %r9;
+div.s32 %r2, %r28, %r29;
+mul.lo.s32 %r30, %r29, %r2;
+sub.s32 %r3, %r28, %r30;
+div.u32 %r4, %r3, %r9;
+mul.lo.s32 %r31, %r2, %r16;
+mad.lo.s32 %r47, %r4, %r15, %r31;
+setp.eq.s32 %p2, %r19, 0;
+@%p2 bra $L__BB16_3;
+
+cvta.to.global.u64 %rd7, %rd6;
+mul.wide.u32 %rd8, %r4, 8;
+add.s64 %rd9, %rd7, %rd8;
+ld.global.nc.u64 %rd10, [%rd9];
+cvt.u32.u64 %r32, %rd10;
+mul.lo.s32 %r47, %r32, %r19;
+
+$L__BB16_3:
+mul.lo.s32 %r33, %r4, %r9;
+sub.s32 %r34, %r3, %r33;
+add.s32 %r35, %r18, %r17;
+setp.ge.s32 %p3, %r1, %r35;
+setp.lt.s32 %p4, %r1, %r18;
+or.pred %p5, %p4, %p3;
+mad.lo.s32 %r36, %r2, %r13, %r1;
+mad.lo.s32 %r37, %r4, %r12, %r36;
+mad.lo.s32 %r38, %r34, %r11, %r37;
+cvta.to.global.u64 %rd11, %rd3;
+mul.wide.s32 %rd12, %r38, 4;
+add.s64 %rd1, %rd11, %rd12;
+mad.lo.s32 %r39, %r34, %r14, %r1;
+add.s32 %r40, %r47, %r39;
+cvta.to.global.u64 %rd13, %rd4;
+mul.wide.s32 %rd14, %r40, 4;
+add.s64 %rd2, %rd13, %rd14;
+@%p5 bra $L__BB16_7;
+bra.uni $L__BB16_4;
+
+$L__BB16_7:
+setp.ne.s16 %p7, %rs1, 0;
+@%p7 bra $L__BB16_9;
+
+ld.global.nc.u32 %r45, [%rd1+4];
+ld.global.nc.u32 %r46, [%rd1];
+st.global.v2.u32 [%rd2], {%r46, %r45};
+bra.uni $L__BB16_9;
+
+$L__BB16_4:
+sub.s32 %r8, %r1, %r18;
+cvta.to.global.u64 %rd15, %rd5;
+mul.wide.u32 %rd16, %r4, 4;
+add.s64 %rd17, %rd15, %rd16;
+ld.global.nc.u32 %r41, [%rd17];
+cvt.rn.f32.s32 %f15, %r41;
+cvt.rn.f32.s32 %f16, %r8;
+mov.f32 %f17, 0f40000000;
+div.approx.ftz.f32 %f18, %f16, %f17;
+lg2.approx.ftz.f32 %f19, %f14;
+mul.ftz.f32 %f20, %f18, %f19;
+ex2.approx.ftz.f32 %f21, %f20;
+mul.ftz.f32 %f22, %f21, %f15;
+mov.f32 %f23, 0f3F800000;
+div.approx.ftz.f32 %f1, %f22, %f23;
+mul.ftz.f32 %f54, %f1, %f9;
+setp.eq.ftz.f32 %p6, %f10, 0f00000000;
+@%p6 bra $L__BB16_6;
+
+shr.u32 %r42, %r8, 31;
+add.s32 %r43, %r8, %r42;
+shr.s32 %r44, %r43, 1;
+cvt.rn.f32.s32 %f24, %r44;
+sub.ftz.f32 %f25, %f24, %f12;
+sub.ftz.f32 %f26, %f13, %f12;
+mov.f32 %f27, 0f3A83126F;
+max.ftz.f32 %f28, %f27, %f26;
+div.approx.ftz.f32 %f29, %f25, %f28;
+mov.f32 %f30, 0f00000000;
+max.ftz.f32 %f31, %f30, %f29;
+min.ftz.f32 %f33, %f23, %f31;
+sub.ftz.f32 %f34, %f23, %f33;
+mul.ftz.f32 %f35, %f34, %f10;
+sub.ftz.f32 %f36, %f23, %f35;
+mul.ftz.f32 %f37, %f54, %f36;
+fma.rn.ftz.f32 %f54, %f1, %f35, %f37;
+rcp.approx.ftz.f32 %f38, %f9;
+lg2.approx.ftz.f32 %f39, %f38;
+mul.ftz.f32 %f40, %f39, 0f3F317218;
+fma.rn.ftz.f32 %f41, %f40, 0f3DCCCCCD, 0f3F800000;
+mul.ftz.f32 %f53, %f41, %f53;
+
+$L__BB16_6:
+cos.approx.ftz.f32 %f42, %f54;
+mul.ftz.f32 %f43, %f53, %f42;
+sin.approx.ftz.f32 %f44, %f54;
+mul.ftz.f32 %f45, %f53, %f44;
+ld.global.nc.f32 %f46, [%rd1];
+mul.ftz.f32 %f47, %f43, %f46;
+ld.global.nc.f32 %f48, [%rd1+4];
+mul.ftz.f32 %f49, %f45, %f48;
+mul.ftz.f32 %f50, %f43, %f48;
+fma.rn.ftz.f32 %f51, %f46, %f45, %f50;
+sub.ftz.f32 %f52, %f47, %f49;
+st.global.v2.f32 [%rd2], {%f52, %f51};
+
+$L__BB16_9:
+ret;
+
+}

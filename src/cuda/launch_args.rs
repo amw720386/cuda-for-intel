@@ -76,11 +76,17 @@ pub(super) unsafe fn read(
         } else {
             unsafe { kernel_params.add(index).read_unaligned() }
         };
-        if value.is_null()
-            || (param == Param::GlobalPtr
-                && !valid_pointer(unsafe { value.cast::<u64>().read_unaligned() }))
-        {
+        // `args[i]` itself must be non-null (points at the host-side argument word).
+        // The device pointer *value* may be null — CUDA kernels receive optional buffers
+        // this way (GGML RoPE freq/ext tables), so only reject non-null unknown addresses.
+        if value.is_null() {
             return Err(InvalidValue);
+        }
+        if param == Param::GlobalPtr {
+            let address = unsafe { value.cast::<u64>().read_unaligned() };
+            if address != 0 && !valid_pointer(address) {
+                return Err(InvalidValue);
+            }
         }
         // Pass raw byte ranges directly. A CUDA aggregate may contain padding
         // whose bytes were never initialized by the caller.
@@ -107,9 +113,10 @@ mod tests {
 
     #[test]
     fn packed_options_and_aggregate_alignment() {
-        let params = [Param::U32, Param::GlobalPtr, Param::Words(3), Param::U64];
-        let mut bytes = [0u8; 40];
+        let params = [Param::U32, Param::GlobalPtr, Param::Words(3), Param::U64, Param::U8];
+        let mut bytes = [0u8; 41];
         bytes[8..16].copy_from_slice(&42u64.to_ne_bytes());
+        bytes[40] = 0xab;
         let mut count = bytes.len();
         let mut short_count = count - 1;
         let buffer = bytes.as_mut_ptr().cast();
@@ -126,13 +133,13 @@ mod tests {
         let args = read_with(&extra).ok().unwrap();
         assert_eq!(
             args.iter().map(|arg| arg.size).collect::<Vec<_>>(),
-            [4, 8, 4, 4, 4, 8]
+            [4, 8, 4, 4, 4, 8, 1]
         );
         assert_eq!(
             args.iter()
                 .map(|arg| arg.value.addr() - buffer.addr())
                 .collect::<Vec<_>>(),
-            [0, 8, 16, 20, 24, 32]
+            [0, 8, 16, 20, 24, 32, 40]
         );
         for malformed in [
             vec![pointer_tag, buffer, null_mut()],
@@ -158,5 +165,35 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn null_device_pointer_kernel_args_are_accepted() {
+        let mut null_ptr = 0u64;
+        let mut live = 42u64;
+        let params = [Param::GlobalPtr, Param::GlobalPtr];
+        let mut kernel_params = [
+            from_mut(&mut null_ptr).cast(),
+            from_mut(&mut live).cast(),
+        ];
+        let args = unsafe {
+            read(&params, kernel_params.as_ptr(), null_mut(), |address| {
+                address == 42
+            })
+        }
+        .expect("null device pointers are valid CUDA kernel args");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].size, 8);
+        assert_eq!(args[1].size, 8);
+        // Non-null unknown addresses remain rejected.
+        live = 99;
+        assert!(matches!(
+            unsafe {
+                read(&params, kernel_params.as_ptr(), null_mut(), |address| {
+                    address == 42
+                })
+            },
+            Err(InvalidValue)
+        ));
     }
 }
