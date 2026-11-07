@@ -1,7 +1,7 @@
 use super::CuResult::*;
 use super::{
-    Api, Context, CuResult, Opaque, State, backend_error, current, reserve_handle, state, status,
-    with_context_handles,
+    Api, Context, CuResult, Opaque, State, backend_error, context_key, current, reserve_handle,
+    state, status, with_context_handles,
 };
 use crate::cuda::trace;
 use crate::level_zero::KernelArg;
@@ -751,9 +751,13 @@ fn synchronize(
     })
 }
 
-pub(super) fn synchronize_context() -> CuResult {
-    status(synchronize(|_| {
-        Ok((current().ok_or(InvalidContext)?, None))
+pub(super) fn synchronize_context(handle: Opaque) -> CuResult {
+    status(synchronize(|state| {
+        let key = context_key(handle)?;
+        if !handle.is_null() && !state.contexts.contains_key(&key) {
+            return Err(InvalidContext);
+        }
+        Ok((key, None))
     }))
 }
 

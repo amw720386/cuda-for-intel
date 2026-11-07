@@ -6,7 +6,7 @@ use super::vmm::*;
 use super::*;
 
 // Entry-point negotiation ceiling. Feature and ABI support are per symbol.
-const DRIVER_ABI: c_int = 13000;
+pub(super) const DRIVER_ABI: c_int = 13000;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuDriverGetVersion(out: *mut c_int) -> CuResult {
@@ -176,7 +176,9 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuCtxSetCurrent" => entry!(cuCtxSetCurrent, 4000),
         b"cuCtxGetApiVersion" => entry!(cuCtxGetApiVersion, 3020),
         b"cuCtxGetFlags" => entry!(cuCtxGetFlags, 7000),
+        b"cuCtxGetDevice" if version >= 13000 => entry!(cuCtxGetDevice_v2, 13000),
         b"cuCtxGetDevice" => entry!(cuCtxGetDevice, 2000, 13000, false),
+        b"cuCtxSynchronize" if version >= 13000 => entry!(cuCtxSynchronize_v2, 13000),
         b"cuCtxSynchronize" => entry!(cuCtxSynchronize, 2000, 13000, false),
         b"cuMemAlloc" => entry!(cuMemAlloc_v2, 3020),
         b"cuMemFree" => entry!(cuMemFree_v2, 3020),
@@ -319,7 +321,6 @@ mod tests {
         for (symbol, version, flags, expected) in [
             (c"cuMemAlloc", 3010, 0, VERSION),
             (c"cuCtxCreate", 12000, 0, VERSION),
-            (c"cuCtxGetDevice", 13000, 0, VERSION),
             (c"cuMemcpyHtoD", 12000, 2, MISSING),
             (c"cuMemAlloc_v2", 12000, 0, MISSING),
         ] {
@@ -330,6 +331,21 @@ mod tests {
             );
             assert!(function.is_null());
             assert_eq!(query, expected);
+        }
+        for (name, legacy, explicit) in [
+            (
+                c"cuCtxGetDevice",
+                cuCtxGetDevice as Opaque,
+                cuCtxGetDevice_v2 as Opaque,
+            ),
+            (
+                c"cuCtxSynchronize",
+                cuCtxSynchronize as Opaque,
+                cuCtxSynchronize_v2 as Opaque,
+            ),
+        ] {
+            assert_eq!(lookup(name.to_bytes(), 12000, false), Ok(legacy));
+            assert_eq!(lookup(name.to_bytes(), 13000, false), Ok(explicit));
         }
         assert_eq!(
             resolve(c"cuGetExportTable", &mut function, 3000, 0, &mut query),

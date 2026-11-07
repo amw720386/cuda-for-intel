@@ -1,6 +1,7 @@
 //! Resolve the WDDM adapter LUID so CUDA Runtime can match our device to DXGI.
 #![cfg(windows)]
 
+use libloading::os::windows::{LOAD_LIBRARY_SEARCH_SYSTEM32, Library};
 use std::ffi::c_void;
 use std::ptr;
 
@@ -65,12 +66,6 @@ struct DxgiObject {
     vtbl: *const c_void,
 }
 
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn LoadLibraryA(name: *const u8) -> *mut c_void;
-    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
-}
-
 unsafe fn vtbl<T>(obj: *mut c_void) -> *const T {
     unsafe { (*(obj as *mut DxgiObject)).vtbl as *const T }
 }
@@ -82,8 +77,8 @@ fn luid_bytes(luid: Luid) -> [u8; 8] {
     bytes
 }
 
-/// Return the 8-byte Windows LUID for the adapter matching `vendor_id`/`device_id`.
-pub fn adapter_luid(vendor_id: u32, device_id: u32) -> Option<[u8; 8]> {
+/// Return the adapter's LUID and, for an exact PCI ID match, its subsystem ID.
+pub fn adapter_identity(vendor_id: u32, device_id: u32) -> Option<([u8; 8], Option<u32>)> {
     type CreateFactory = unsafe extern "system" fn(*const Guid, *mut *mut c_void) -> HRESULT;
     // IID_IDXGIFactory = {7b7166ec-21c7-44ae-b21a-c9ae321ae369}
     const IID_FACTORY: Guid = Guid {
@@ -94,15 +89,8 @@ pub fn adapter_luid(vendor_id: u32, device_id: u32) -> Option<[u8; 8]> {
     };
 
     unsafe {
-        let module = LoadLibraryA(c"dxgi.dll".as_ptr().cast());
-        if module.is_null() {
-            return None;
-        }
-        let symbol = GetProcAddress(module, c"CreateDXGIFactory".as_ptr().cast());
-        if symbol.is_null() {
-            return None;
-        }
-        let create: CreateFactory = std::mem::transmute(symbol);
+        let module = Library::load_with_flags("dxgi.dll", LOAD_LIBRARY_SEARCH_SYSTEM32).ok()?;
+        let create = module.get::<CreateFactory>(b"CreateDXGIFactory").ok()?;
         let mut factory = ptr::null_mut();
         if create(&IID_FACTORY, &mut factory) < 0 || factory.is_null() {
             return None;
@@ -125,7 +113,7 @@ pub fn adapter_luid(vendor_id: u32, device_id: u32) -> Option<[u8; 8]> {
                 // Microsoft Basic Render Driver is vendor 0x1414.
                 let software = desc.vendor_id == 0x1414;
                 if desc.vendor_id == vendor_id && desc.device_id == device_id {
-                    exact = Some(bytes);
+                    exact = Some((bytes, Some(desc.sub_sys_id)));
                 } else if !software && desc.vendor_id == vendor_id && fallback.is_none() {
                     fallback = Some(bytes);
                 } else if !software && fallback.is_none() {
@@ -142,6 +130,6 @@ pub fn adapter_luid(vendor_id: u32, device_id: u32) -> Option<[u8; 8]> {
             }
         }
         (factory_vtbl.release)(factory);
-        exact.or(fallback)
+        exact.or_else(|| fallback.map(|luid| (luid, None)))
     }
 }

@@ -10,6 +10,8 @@ mod discovery;
 #[cfg(windows)]
 mod dxgi_luid;
 mod export_table;
+#[cfg(windows)]
+mod integrity;
 mod launch_args;
 mod primary;
 mod streams;
@@ -407,20 +409,55 @@ pub extern "system" fn cuCtxSetCurrent(handle: Opaque) -> CuResult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuCtxGetDevice(out: *mut c_int) -> CuResult {
-    trace::call("cuCtxGetDevice", || {
-        status(with_context(|_, context| {
-            if out.is_null() {
-                return Err(InvalidValue);
-            }
-            unsafe { out.write(context.device) };
-            Ok(())
-        }))
+    trace::call("cuCtxGetDevice", || unsafe {
+        context_device(out, std::ptr::null_mut())
     })
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuCtxGetDevice_v2(out: *mut c_int, handle: Opaque) -> CuResult {
+    trace::call("cuCtxGetDevice_v2", || unsafe {
+        context_device(out, handle)
+    })
+}
+
+unsafe fn context_device(out: *mut c_int, handle: Opaque) -> CuResult {
+    status(state(|state| {
+        let key = context_key(handle)?;
+        let context = state.contexts.get(&key).ok_or(if handle.is_null() {
+            ContextIsDestroyed
+        } else {
+            InvalidContext
+        })?;
+        context.check_live()?;
+        if out.is_null() {
+            return Err(InvalidValue);
+        }
+        unsafe { out.write(context.device) };
+        Ok(())
+    }))
+}
+
+fn context_key(handle: Opaque) -> Result<usize, CuResult> {
+    if handle.is_null() {
+        current().ok_or(InvalidContext)
+    } else {
+        Ok(handle.addr())
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn cuCtxSynchronize() -> CuResult {
-    trace::call("cuCtxSynchronize", streams::synchronize_context)
+    trace::call("cuCtxSynchronize", || {
+        streams::synchronize_context(std::ptr::null_mut())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuCtxSynchronize_v2(handle: Opaque) -> CuResult {
+    trace::call("cuCtxSynchronize_v2", || {
+        streams::synchronize_context(handle)
+    })
 }
 
 impl CudaContext {
@@ -1137,7 +1174,8 @@ pub unsafe extern "system" fn cuDeviceGetLuid(
             // CUDA Runtime matches devices to WDDM adapters by LUID. A synthetic
             // value makes cudart report cudaErrorInsufficientDriver (35).
             #[cfg(windows)]
-            let bytes = dxgi_luid::adapter_luid(info.vendor_id, info.device_id);
+            let bytes =
+                dxgi_luid::adapter_identity(info.vendor_id, info.device_id).map(|(luid, _)| luid);
             #[cfg(not(windows))]
             let bytes: Option<[u8; 8]> = None;
             let Some(bytes) = bytes else {
@@ -1317,6 +1355,19 @@ fn attribute(info: &DeviceInfo, attr: c_int) -> Result<c_int, CuResult> {
         115 => 0,                           // MEMORY_POOLS_SUPPORTED
         116..=119 => 0,                     // GPUDirect RDMA / mempool handles
         120..=134 => 0,                     // cluster / dma-buf / IPC / NUMA / MPS
+        139 => {
+            // PCI device ID in the upper half, vendor ID in the lower half.
+            let device = u16::try_from(info.device_id).map_err(|_| NotSupported)?;
+            let vendor = u16::try_from(info.vendor_id).map_err(|_| NotSupported)?;
+            return Ok(((u32::from(device) << 16) | u32::from(vendor)) as c_int);
+        }
+        #[cfg(windows)]
+        140 => {
+            let (_, subsystem) =
+                dxgi_luid::adapter_identity(info.vendor_id, info.device_id).ok_or(NotSupported)?;
+            return subsystem.map(|id| id as c_int).ok_or(NotSupported);
+        }
+        141..=143 => 0, // Host NUMA VMM, memory pools and multinode IPC.
         _ => {
             if trace::enabled() {
                 trace::record(format_args!(

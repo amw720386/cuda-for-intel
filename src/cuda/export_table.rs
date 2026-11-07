@@ -3,7 +3,6 @@
 //! Layout and GUID coverage follow the publicly documented ZLUDA dark-API map
 //! (MIT). Only the slots required for cudart device enumeration / primary
 //! context retain are wired initially; remaining slots stay null.
-use super::discovery::cuGetProcAddress_v2;
 use super::primary::cuDevicePrimaryCtxRetain;
 use super::*;
 use std::ffi::CStr;
@@ -19,9 +18,21 @@ const TOOLS_RUNTIME_CALLBACK_HOOKS: [u8; 16] = [
     0xA0, 0x94, 0x79, 0x8C, 0x2E, 0x74, 0x2E, 0x74, 0x93, 0xF2, 0x08, 0x00, 0x20, 0x0C, 0x0A, 0x66,
 ];
 
+const TOOLS_TLS: [u8; 16] = [
+    0x42, 0xD8, 0x5A, 0x81, 0x23, 0xF6, 0xCB, 0x47, 0x82, 0x98, 0xF6, 0xE7, 0x8A, 0x3A, 0xEC, 0xDC,
+];
+
 /// CONTEXT_LOCAL_STORAGE_INTERFACE_V0301 — `{C693336E-1121-DF11-A8C3-68F355D89593}`
 const CONTEXT_LOCAL_STORAGE: [u8; 16] = [
     0xC6, 0x93, 0x33, 0x6E, 0x11, 0x21, 0xDF, 0x11, 0xA8, 0xC3, 0x68, 0xF3, 0x55, 0xD8, 0x95, 0x93,
+];
+
+const CONTEXT_CHECKS: [u8; 16] = [
+    0x26, 0x3E, 0x88, 0x60, 0x7C, 0xD2, 0x61, 0x43, 0x92, 0xF6, 0xBB, 0xD5, 0x00, 0x6D, 0xFA, 0x7E,
+];
+
+const INTEGRITY_CHECK: [u8; 16] = [
+    0xD4, 0x08, 0x20, 0x55, 0xBD, 0xE6, 0x70, 0x4B, 0x8D, 0x34, 0xBA, 0x12, 0x3C, 0x66, 0xE1, 0xF2,
 ];
 
 /// HYBRID_CUDART — `{DD9E98A4-F410-4844-99B0-E2AEB7B432B5}`
@@ -45,13 +56,11 @@ fn tables() -> &'static Tables {
 struct Tables {
     cudart: [*const c_void; 13],
     tools_hooks: [*const c_void; 7],
+    tools_tls: [*const c_void; 4],
     context_local: [*const c_void; 4],
+    context_checks: [*const c_void; 4],
+    integrity_check: [*const c_void; 3],
     hybrid_cudart: [*const c_void; 3],
-    /// Oversized null stub for GUIDs we have not reverse-engineered yet.
-    /// Slot 0 is the byte size of the table; remaining slots stay null so a
-    /// probing cudart neither sees a missing export-table mechanism nor
-    /// indexes off the end of a size-only vector.
-    unknown_stub: [*const c_void; 16],
 }
 
 // Function-pointer tables are immutable after init; raw pointers are Sync/Send by contract.
@@ -73,9 +82,12 @@ impl Tables {
 
         let mut tools_hooks = [std::ptr::null(); 7];
         tools_hooks[0] = (7 * PTR_SIZE) as *const c_void;
-        // ZLUDA layout: slot 2 → 512×usize scratch; slot 6 → 2-byte scratch.
+        // The counts returned by slots 2 and 6 are in u32 elements.
         tools_hooks[2] = tools_hook_fn2 as *const c_void;
         tools_hooks[6] = tools_hook_fn6 as *const c_void;
+
+        let mut tools_tls = [std::ptr::null(); 4];
+        tools_tls[0] = (4 * PTR_SIZE) as *const c_void;
 
         let mut context_local = [std::ptr::null(); 4];
         // Slot 0 size is not used the same way; provide put/get/delete stubs.
@@ -83,21 +95,122 @@ impl Tables {
         context_local[1] = context_local_storage_delete as *const c_void;
         context_local[2] = context_local_storage_get as *const c_void;
 
+        let mut context_checks = [std::ptr::null(); 4];
+        context_checks[0] = (4 * PTR_SIZE) as *const c_void;
+        context_checks[2] = context_check as *const c_void;
+        context_checks[3] = context_check_mode as *const c_void;
+
+        let mut integrity_check = [std::ptr::null(); 3];
+        integrity_check[0] = (3 * PTR_SIZE) as *const c_void;
+        integrity_check[1] = runtime_integrity_check as *const c_void;
+
         let mut hybrid_cudart = [std::ptr::null(); 3];
         hybrid_cudart[0] = (3 * PTR_SIZE) as *const c_void;
         hybrid_cudart[1] = hybrid_runtime_load_get_proc_address as *const c_void;
         hybrid_cudart[2] = hybrid_runtime_free as *const c_void;
 
-        let mut unknown_stub = [std::ptr::null(); 16];
-        unknown_stub[0] = (16 * PTR_SIZE) as *const c_void;
-
         Self {
             cudart,
             tools_hooks,
+            tools_tls,
             context_local,
+            context_checks,
+            integrity_check,
             hybrid_cudart,
-            unknown_stub,
         }
+    }
+}
+
+unsafe extern "system" fn context_check_mode() -> u32 {
+    // The driver has no special context checking mode enabled.
+    0
+}
+
+unsafe extern "system" fn context_check(
+    context: Opaque,
+    mode: *mut u32,
+    alternate: *mut Opaque,
+) -> CuResult {
+    if mode.is_null() || alternate.is_null() {
+        return InvalidValue;
+    }
+    status(state(|state| {
+        if !context.is_null() {
+            state
+                .contexts
+                .get(&context.addr())
+                .ok_or(InvalidContext)?
+                .check_live()?;
+        }
+        // All contexts on this driver use ordinary synchronization.
+        unsafe {
+            mode.write(0);
+            alternate.write(std::ptr::null_mut());
+        }
+        Ok(())
+    }))
+}
+
+unsafe extern "system" fn runtime_integrity_check(
+    version: u32,
+    unix_seconds: u64,
+    out: *mut [u64; 2],
+) -> CuResult {
+    if out.is_null() {
+        return InvalidValue;
+    }
+    super::export_log(format!("runtime_integrity_check version={version}"));
+    #[cfg(windows)]
+    {
+        let result = match version {
+            13000 => [0x3341181C03CB675C, 0x8ED383AA1F4CD1E8],
+            13001 => [0x1841181C03CB675C, 0x8ED383AA1F4CD1E8],
+            13002 => {
+                #[link(name = "kernel32")]
+                unsafe extern "system" {
+                    fn GetCurrentThreadId() -> u32;
+                }
+                let tables = tables();
+                let mut inputs = [0; 48];
+                inputs[..4].copy_from_slice(&discovery::DRIVER_ABI.to_le_bytes());
+                inputs[4..8].copy_from_slice(&version.to_le_bytes());
+                inputs[8..12].copy_from_slice(&std::process::id().to_le_bytes());
+                inputs[12..16].copy_from_slice(&unsafe { GetCurrentThreadId() }.to_le_bytes());
+                inputs[16..24].copy_from_slice(&(tables.cudart.as_ptr() as u64).to_le_bytes());
+                inputs[24..32]
+                    .copy_from_slice(&(tables.integrity_check.as_ptr() as u64).to_le_bytes());
+                inputs[32..40].copy_from_slice(&(tables.integrity_check[1] as u64).to_le_bytes());
+                inputs[40..].copy_from_slice(&unix_seconds.to_le_bytes());
+                match runtime(|runtime| {
+                    let devices = runtime
+                        .devices
+                        .iter()
+                        .map(|device| {
+                            let info = &device.info;
+                            let [domain, bus, slot, _] = info.pci_address.ok_or(NotSupported)?;
+                            let mut identity = [0; 28];
+                            identity[..16].copy_from_slice(&info.uuid);
+                            identity[16..20].copy_from_slice(&domain.to_le_bytes());
+                            identity[20..24].copy_from_slice(&bus.to_le_bytes());
+                            identity[24..].copy_from_slice(&slot.to_le_bytes());
+                            Ok(identity)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(integrity::digest(&inputs, devices))
+                }) {
+                    Ok(digest) => digest,
+                    Err(error) => return error,
+                }
+            }
+            _ => return NotSupported,
+        };
+        unsafe { out.write(result) };
+        Success
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = unix_seconds;
+        NotSupported
     }
 }
 
@@ -107,34 +220,33 @@ unsafe extern "system" fn load_compilers() -> CuResult {
     Success
 }
 
-/// Scratch space for TOOLS_RUNTIME_CALLBACK_HOOKS slot 2 (ZLUDA: 512 usizes).
-static mut TOOLS_HOOK_FN2_SPACE: [usize; 512] = [0; 512];
-/// Scratch space for TOOLS_RUNTIME_CALLBACK_HOOKS slot 6 (ZLUDA: 2 bytes).
-static mut TOOLS_HOOK_FN6_SPACE: [u8; 2] = [0; 2];
+const TOOLS_HOOK_FN2_COUNT: usize = 1024;
+const TOOLS_HOOK_FN6_COUNT: usize = 14;
+static mut TOOLS_HOOK_FN2_SPACE: [u32; TOOLS_HOOK_FN2_COUNT] = [0; TOOLS_HOOK_FN2_COUNT];
+static mut TOOLS_HOOK_FN6_SPACE: [u32; TOOLS_HOOK_FN6_COUNT] = [0; TOOLS_HOOK_FN6_COUNT];
 
-unsafe extern "system" fn tools_hook_fn2(ptr: *mut *mut usize, size: *mut usize) {
+unsafe extern "system" fn tools_hook_fn2(ptr: *mut *mut u32, count: *mut usize) {
     super::export_log("tools_hook_fn2");
     unsafe {
         if !ptr.is_null() {
             *ptr = std::ptr::addr_of_mut!(TOOLS_HOOK_FN2_SPACE).cast();
         }
-        if !size.is_null() {
-            *size = 512;
+        if !count.is_null() {
+            *count = TOOLS_HOOK_FN2_COUNT;
         }
     }
 }
 
-unsafe extern "system" fn tools_hook_fn6(ptr: *mut *mut u8, size: *mut usize) -> *mut u8 {
+unsafe extern "system" fn tools_hook_fn6(ptr: *mut *mut u32, count: *mut usize) {
     super::export_log("tools_hook_fn6");
     unsafe {
         let space = std::ptr::addr_of_mut!(TOOLS_HOOK_FN6_SPACE).cast();
         if !ptr.is_null() {
             *ptr = space;
         }
-        if !size.is_null() {
-            *size = 2;
+        if !count.is_null() {
+            *count = TOOLS_HOOK_FN6_COUNT;
         }
-        space
     }
 }
 
@@ -179,119 +291,71 @@ unsafe extern "system" fn context_local_storage_get(
     Success
 }
 
-fn ptr_desc(p: *const c_void) -> String {
-    let addr = p as usize;
-    if p.is_null() {
-        return "<null>".into();
-    }
-    if !(0x10000..0x0000_7FFF_FFFF_FFFF).contains(&addr) {
-        return format!("<ptr:{addr:#x}>");
-    }
-    // Hex + ASCII preview so we can reverse the hybrid calling convention.
-    let bytes = unsafe { std::slice::from_raw_parts(p.cast::<u8>(), 32) };
-    let hex: String = bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let ascii: String = bytes
-        .iter()
-        .map(|b| {
-            if b.is_ascii_graphic() || *b == b' ' {
-                *b as char
-            } else {
-                '.'
-            }
-        })
-        .collect();
-    if let Ok(s) = unsafe { CStr::from_ptr(p.cast()) }.to_str() {
-        if s.chars().all(|c| c.is_ascii_graphic() || c == '_') && !s.is_empty() {
-            return format!("{s} | {hex}");
-        }
-    }
-    format!("<ptr:{addr:#x} [{hex}] '{ascii}'>")
-}
+#[cfg(windows)]
+type HybridResolver = unsafe extern "system" fn(*const c_void) -> *const c_void;
 
-/// Request blob observed from CUDA 13 static cudart → `__cudaGetProcAddress`.
-///
-/// Layout (little-endian), `size` field is 0x18:
-///   u64 size;
-///   u64 ordinal;       // small integer, not a pointer
-///   u32 cuda_version;  // e.g. 13000
-///   u32 flags;         // often 0xffffffff
-#[repr(C)]
-struct HybridGetProcRequest {
-    size: u64,
-    ordinal: u64,
-    cuda_version: u32,
-    flags: u32,
-}
-
-/// Hybrid-cudart resolver.
-///
-/// Empirically (Iris / Ollama cuda_v13) the first argument points at a
-/// `HybridGetProcRequest` and the second is an optional output pointer for the
-/// resolved function (may be `u64::MAX` when unused). Unknown ordinals report
-/// "missing" without crashing so cudart can continue probing.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn __cudaGetProcAddress(
-    a0: *mut c_void,
-    a1: *mut c_void,
-    a2: *mut c_void,
-    a3: u64,
-    a4: *mut c_int,
-) -> CuResult {
-    let d0 = ptr_desc(a0);
-    let d1 = ptr_desc(a1);
-    super::export_log(format!(
-        "__cudaGetProcAddress raw a0={d0} a1={d1} a2={a2:?} a3={a3:#x} a4={a4:?}"
-    ));
-
-    // Fast path: public-style (symbol string, out, version, flags, query).
-    if d0.starts_with("cu") || d0.starts_with("__") {
-        let version = a2 as usize as c_int;
-        return unsafe { cuGetProcAddress_v2(a0.cast(), a1.cast(), version, a3, a4) };
-    }
-
-    if a0.is_null() {
-        return InvalidValue;
-    }
-    let req = unsafe { &*(a0 as *const HybridGetProcRequest) };
-    if req.size < size_of::<HybridGetProcRequest>() as u64 {
-        super::export_log(format!(
-            "__cudaGetProcAddress bad size {} (want >= {})",
-            req.size,
-            size_of::<HybridGetProcRequest>()
-        ));
-        return InvalidValue;
-    }
-    super::export_log(format!(
-        "__cudaGetProcAddress ordinal={} ver={} flags={:#x}",
-        req.ordinal, req.cuda_version, req.flags
-    ));
-
-    // Resolve a handful of ordinals that static cudart needs during
-    // `cudaDriverGetVersion` / device enumeration. Unknown ordinals → missing.
-    // Ordinals were observed on Iris with Ollama 0.12.6 cuda_v13; extend as logs grow.
-    let pfn: *const c_void = match req.ordinal {
-        // Conservative: always expose the public versioned resolver and init.
-        // Specific ordinal→symbol maps will replace these once captured from a
-        // reference NVIDIA hybrid DLL.
-        _ => std::ptr::null(),
+#[cfg(windows)]
+fn hybrid_resolver(name: &str) -> Result<HybridResolver, CuResult> {
+    use libloading::os::windows::{
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, Library,
     };
+    use std::{cell::Cell, path::PathBuf};
 
-    let out_addr = a1 as usize;
-    // Only write when a1 looks like a real user-space pointer. Observed junk
-    // values include u64::MAX, 0x1, and other low sentinels — writing those AVs.
-    if (0x10000..0x0000_7FFF_FFFF_FFFF).contains(&out_addr) {
-        unsafe { (a1 as *mut *const c_void).write(pfn) };
+    struct HybridRuntime {
+        _library: Library,
+        resolver: HybridResolver,
     }
-    let query_addr = a4 as usize;
-    if (0x10000..0x0000_7FFF_FFFF_FFFF).contains(&query_addr) {
-        // query result: 0 found, 1 missing (cuGetProcAddress_v2 convention)
-        unsafe { a4.write(if pfn.is_null() { 1 } else { 0 }) };
+
+    static HYBRID64: OnceLock<HybridRuntime> = OnceLock::new();
+    static HYBRID64A: OnceLock<HybridRuntime> = OnceLock::new();
+    thread_local! { static LOADING: Cell<bool> = const { Cell::new(false) }; }
+
+    let slot = match name {
+        "nvcudart_hybrid64.dll" => &HYBRID64,
+        "nvcudart_hybrid64a.dll" => &HYBRID64A,
+        _ => return Err(InvalidValue),
+    };
+    if let Some(runtime) = slot.get() {
+        return Ok(runtime.resolver);
     }
-    Success
+    let directory = std::env::var_os("CUDA_FOR_INTEL_HYBRID_DIR").ok_or(FileNotFound)?;
+    let path = PathBuf::from(directory).join(name);
+    if !path.is_absolute() {
+        return Err(InvalidValue);
+    }
+
+    // Load outside the OnceLock initializer. A DLL can call back into the
+    // driver during process attach, when waiting on its own load would deadlock.
+    LOADING.with(|loading| {
+        if loading.replace(true) {
+            return Err(OperatingSystem);
+        }
+        let result = (|| {
+            let library = unsafe {
+                Library::load_with_flags(
+                    &path,
+                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+                )
+            }
+            .map_err(|error| {
+                super::export_log(format!("hybrid load {name}: {error}"));
+                FileNotFound
+            })?;
+            let resolver = *unsafe { library.get::<HybridResolver>(b"__cudaGetProcAddress") }
+                .map_err(|error| {
+                    super::export_log(format!("hybrid resolver {name}: {error}"));
+                    OperatingSystem
+                })?;
+            // Keep the module mapped for the lifetime of any returned pointer.
+            let runtime = slot.get_or_init(|| HybridRuntime {
+                _library: library,
+                resolver,
+            });
+            Ok(runtime.resolver)
+        })();
+        loading.set(false);
+        result
+    })
 }
 
 unsafe extern "system" fn hybrid_runtime_load_get_proc_address(
@@ -302,21 +366,30 @@ unsafe extern "system" fn hybrid_runtime_load_get_proc_address(
     if name.is_null() || fn_ptr.is_null() || token.is_null() {
         return InvalidValue;
     }
-    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
-    super::export_log(format!("hybrid_runtime_load_get_proc_address name={name}"));
-    if name != "nvcudart_hybrid64.dll" && name != "nvcudart_hybrid64a.dll" {
-        return InvalidValue;
-    }
-    // Serve the in-process ordinal-aware resolver. Loading NVIDIA's
-    // cudart64_13.dll / nvcudart_hybrid64.dll from here re-enters
-    // cuGetExportTable(HYBRID) during DllMain and deadlocks. A real driver
-    // hybrid DLL (when available beside nvcuda) can be wired later with a
-    // non-reentrant load protocol.
     unsafe {
-        fn_ptr.write(__cudaGetProcAddress as *const c_void);
-        token.write(HYBRID_RUNTIME_TOKEN);
+        fn_ptr.write(std::ptr::null());
+        token.write(0);
     }
-    Success
+    let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+        return InvalidValue;
+    };
+    super::export_log(format!("hybrid_runtime_load_get_proc_address name={name}"));
+    #[cfg(windows)]
+    {
+        let resolver = match hybrid_resolver(name) {
+            Ok(resolver) => resolver,
+            Err(error) => return error,
+        };
+        unsafe {
+            fn_ptr.write(resolver as *const c_void);
+            token.write(HYBRID_RUNTIME_TOKEN);
+        }
+        Success
+    }
+    #[cfg(not(windows))]
+    {
+        NotSupported
+    }
 }
 
 unsafe extern "system" fn hybrid_runtime_free(token: usize) -> CuResult {
@@ -341,8 +414,14 @@ pub unsafe extern "system" fn cuGetExportTable(
             "CUDART_INTERFACE"
         } else if guid == TOOLS_RUNTIME_CALLBACK_HOOKS {
             "TOOLS_RUNTIME_CALLBACK_HOOKS"
+        } else if guid == TOOLS_TLS {
+            "TOOLS_TLS"
         } else if guid == CONTEXT_LOCAL_STORAGE {
             "CONTEXT_LOCAL_STORAGE"
+        } else if guid == CONTEXT_CHECKS {
+            "CONTEXT_CHECKS"
+        } else if guid == INTEGRITY_CHECK {
+            "INTEGRITY_CHECK"
         } else if guid == HYBRID_CUDART {
             "HYBRID_CUDART"
         } else {
@@ -367,18 +446,63 @@ pub unsafe extern "system" fn cuGetExportTable(
             tables.cudart.as_ptr().cast()
         } else if guid == TOOLS_RUNTIME_CALLBACK_HOOKS {
             tables.tools_hooks.as_ptr().cast()
+        } else if guid == TOOLS_TLS {
+            tables.tools_tls.as_ptr().cast()
         } else if guid == CONTEXT_LOCAL_STORAGE {
             tables.context_local.as_ptr().cast()
+        } else if guid == CONTEXT_CHECKS {
+            tables.context_checks.as_ptr().cast()
+        } else if guid == INTEGRITY_CHECK {
+            tables.integrity_check.as_ptr().cast()
         } else if guid == HYBRID_CUDART {
             tables.hybrid_cudart.as_ptr().cast()
         } else {
-            // Present a sized null stub. Returning NotFound here made cudart 12
-            // report cudaErrorInsufficientDriver (35); a 1-slot stub let it
-            // index off the end into cudaErrorInitializationError (3).
-            unsafe { table.write(tables.unknown_stub.as_ptr().cast()) };
-            return Success;
+            unsafe { table.write(std::ptr::null()) };
+            return NotFound;
         };
         unsafe { table.write(ptr) };
         Success
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tools_callbacks_return_u32_buffers_with_cuda13_counts() {
+        type ToolsBuffer = unsafe extern "system" fn(*mut *mut u32, *mut usize);
+        let mut table = std::ptr::null();
+        assert_eq!(
+            unsafe { cuGetExportTable(&mut table, &TOOLS_RUNTIME_CALLBACK_HOOKS) },
+            Success
+        );
+        let slots = table.cast::<*const c_void>();
+        for (index, expected) in [(2, 1024), (6, 14)] {
+            let callback: ToolsBuffer = unsafe { std::mem::transmute(*slots.add(index)) };
+            let mut buffer = std::ptr::null_mut();
+            let mut count = 0;
+            unsafe { callback(&mut buffer, &mut count) };
+            assert_eq!(count, expected);
+            assert!(!buffer.is_null() && buffer.is_aligned());
+            assert_eq!(unsafe { buffer.add(count - 1).read() }, 0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn invalid_hybrid_library_name_clears_outputs() {
+        let mut resolver = std::ptr::dangling::<u8>().cast();
+        let mut token = usize::MAX;
+        let status = unsafe {
+            hybrid_runtime_load_get_proc_address(
+                c"cudart64_13.dll".as_ptr(),
+                &mut resolver,
+                &mut token,
+            )
+        };
+        assert_eq!(status, InvalidValue);
+        assert!(resolver.is_null());
+        assert_eq!(token, 0);
+    }
 }

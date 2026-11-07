@@ -25,8 +25,17 @@ const CUBLAS_OP_N: c_int = 0;
 const CUBLAS_OP_T: c_int = 1;
 const CUBLAS_OP_C: c_int = 2;
 
+// Load the shim's driver dependency with the DLL on Windows. The NVIDIA
+// Runtime can then find the same driver during static CUDA registration.
+#[cfg(windows)]
+#[link(name = "nvcuda", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn cuCtxGetCurrent(context: *mut *mut c_void) -> CuResult;
+}
+
 struct Driver {
     _lib: Library,
+    cuCtxGetCurrent: unsafe extern "system" fn(*mut *mut c_void) -> CuResult,
     cuModuleLoadData: unsafe extern "system" fn(*mut CUmodule, *const c_void) -> CuResult,
     cuModuleGetFunction:
         unsafe extern "system" fn(*mut CUfunction, CUmodule, *const c_char) -> CuResult,
@@ -65,6 +74,10 @@ fn load_driver() -> Result<Driver, c_int> {
             };
         }
         Ok(Driver {
+            #[cfg(windows)]
+            cuCtxGetCurrent,
+            #[cfg(not(windows))]
+            cuCtxGetCurrent: sym!("cuCtxGetCurrent"),
             cuModuleLoadData: sym!("cuModuleLoadData"),
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
@@ -171,9 +184,13 @@ pub unsafe extern "system" fn cublasCreate_v2(handle: *mut *mut c_void) -> c_int
     if handle.is_null() {
         return INVALID_VALUE;
     }
-    let Ok(_) = driver() else {
+    let Ok(driver) = driver() else {
         return NOT_INITIALIZED;
     };
+    let mut context = std::ptr::null_mut();
+    if unsafe { (driver.cuCtxGetCurrent)(&mut context) } != SUCCESS || context.is_null() {
+        return NOT_INITIALIZED;
+    }
     let ptr = Box::into_raw(Box::new(Handle {
         stream: std::ptr::null_mut(),
     })) as *mut c_void;
