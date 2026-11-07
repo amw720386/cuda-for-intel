@@ -338,6 +338,18 @@ impl<'a> Emitter<'a> {
             if kind == Kind::B64 && matches!(value.kind, Kind::Address(_)) {
                 return Ok(self.builder.bitcast(self.u64_type, None, value.id)?);
             }
+            // A raw 64-bit integer reused where a pointer is expected (and pointer to pointer).
+            if let Kind::Address(_) = kind
+                && matches!(value.kind, Kind::B64 | Kind::Address(_))
+            {
+                let integer = if value.kind == Kind::B64 {
+                    value.id
+                } else {
+                    self.builder.convert_ptr_to_u(self.u64_type, None, value.id)?
+                };
+                let pointer_type = self.value_type(kind);
+                return Ok(self.builder.convert_u_to_ptr(pointer_type, None, integer)?);
+            }
             return Ok(value.require(kind, operand)?);
         }
         match kind {
