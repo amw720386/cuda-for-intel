@@ -1,0 +1,161 @@
+   Compiling cfi-fatbin v0.1.0 (C:\Users\USER\cfi-work\integ\crates\fatbin)
+   Compiling cublas_shim v0.1.0 (C:\Users\USER\cfi-work\integ\crates\cublas_shim)
+   Compiling cuda-for-intel v0.1.0 (C:\Users\USER\cfi-work\integ)
+   Compiling cudart_shim v0.1.0 (C:\Users\USER\cfi-work\integ\crates\cudart_shim)
+warning: variable does not need to be mutable
+   --> crates\cudart_shim\src\lib.rs:388:13
+    |
+388 |         let mut attr = |code: c_int, out: &mut c_int| {
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `Dim3` is more private than the item `cudaLaunchKernel`
+    --> crates\cudart_shim\src\lib.rs:1020:1
+     |
+1020 | / pub unsafe extern "system" fn cudaLaunchKernel(
+1021 | |     func: *const c_void,
+1022 | |     grid: Dim3,
+1023 | |     block: Dim3,
+...    |
+1026 | |     stream: CUstream,
+1027 | | ) -> c_int {
+     | |__________^ function `cudaLaunchKernel` is reachable at visibility `pub`
+     |
+note: but type `Dim3` is only usable at visibility `pub(crate)`
+    --> crates\cudart_shim\src\lib.rs:1013:1
+     |
+1013 | struct Dim3 {
+     | ^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `Dim3` is more private than the item `cudaLaunchCooperativeKernel`
+    --> crates\cudart_shim\src\lib.rs:1230:1
+     |
+1230 | / pub unsafe extern "system" fn cudaLaunchCooperativeKernel(
+1231 | |     func: *const c_void,
+1232 | |     grid: Dim3,
+1233 | |     block: Dim3,
+...    |
+1236 | |     stream: CUstream,
+1237 | | ) -> c_int {
+     | |__________^ function `cudaLaunchCooperativeKernel` is reachable at visibility `pub`
+     |
+note: but type `Dim3` is only usable at visibility `pub(crate)`
+    --> crates\cudart_shim\src\lib.rs:1013:1
+     |
+1013 | struct Dim3 {
+     | ^^^^^^^^^^^
+
+warning: type `Dim3` is more private than the item `__cudaPushCallConfiguration`
+    --> crates\cudart_shim\src\lib.rs:1248:1
+     |
+1248 | / pub unsafe extern "system" fn __cudaPushCallConfiguration(
+1249 | |     grid: Dim3,
+1250 | |     block: Dim3,
+1251 | |     shared: usize,
+1252 | |     stream: CUstream,
+1253 | | ) -> c_int {
+     | |__________^ function `__cudaPushCallConfiguration` is reachable at visibility `pub`
+     |
+note: but type `Dim3` is only usable at visibility `pub(crate)`
+    --> crates\cudart_shim\src\lib.rs:1013:1
+     |
+1013 | struct Dim3 {
+     | ^^^^^^^^^^^
+
+warning: type `Dim3` is more private than the item `__cudaPopCallConfiguration`
+    --> crates\cudart_shim\src\lib.rs:1259:1
+     |
+1259 | / pub unsafe extern "system" fn __cudaPopCallConfiguration(
+1260 | |     grid: *mut Dim3,
+1261 | |     block: *mut Dim3,
+1262 | |     shared: *mut usize,
+1263 | |     stream: *mut CUstream,
+1264 | | ) -> c_int {
+     | |__________^ function `__cudaPopCallConfiguration` is reachable at visibility `pub`
+     |
+note: but type `Dim3` is only usable at visibility `pub(crate)`
+    --> crates\cudart_shim\src\lib.rs:1013:1
+     |
+1013 | struct Dim3 {
+     | ^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> crates\cudart_shim\src\lib.rs:48:5
+   |
+46 | struct Driver {
+   |        ------ fields in this struct
+47 |     _lib: Library,
+48 |     cuInit: unsafe extern "system" fn(c_uint) -> CuResult,
+   |     ^^^^^^
+49 |     cuDeviceGetCount: unsafe extern "system" fn(*mut c_int) -> CuResult,
+50 |     cuDeviceGet: unsafe extern "system" fn(*mut CUdevice, c_int) -> CuResult,
+   |     ^^^^^^^^^^^
+...
+56 |     cuCtxGetCurrent: unsafe extern "system" fn(*mut CUcontext) -> CuResult,
+   |     ^^^^^^^^^^^^^^^
+...
+62 |     cuMemcpyHtoD: unsafe extern "system" fn(CUdeviceptr, *const c_void, usize) -> CuResult,
+   |     ^^^^^^^^^^^^
+63 |     cuMemcpyDtoH: unsafe extern "system" fn(*mut c_void, CUdeviceptr, usize) -> CuResult,
+   |     ^^^^^^^^^^^^
+...
+70 |     cuMemcpyDtoD: unsafe extern "system" fn(CUdeviceptr, CUdeviceptr, usize) -> CuResult,
+   |     ^^^^^^^^^^^^
+...
+98 |     cuGetErrorString: unsafe extern "system" fn(CuResult, *mut *const c_char) -> CuResult,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cudart_shim` (lib) generated 6 warnings (run `cargo fix --lib -p cudart_shim` to apply 1 suggestion)
+warning: unreachable pattern
+   --> src\ptx\parse.rs:821:13
+    |
+531 |             ["cvt.u32.u16" | "cvt.u16.u16", dst, ",", src] => {
+    |             ---------------------------------------------- matches all the relevant values
+...
+821 |             ["cvt.u32.u16", dst, ",", src] => {
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\ptx\spirv.rs:2408:25
+     |
+2408 |                     let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
+     |                         ----^^^^
+     |                         |
+     |                         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `PeerAccessAlreadyEnabled` is never constructed
+  --> src\cuda.rs:56:5
+   |
+39 | pub(crate) enum CuResult {
+   |                 -------- variant in this enum
+...
+56 |     PeerAccessAlreadyEnabled = 704,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `CuResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `global_half_ptr` and `global_qword_ptr` are never read
+  --> src\ptx\spirv.rs:70:5
+   |
+59 | struct Emitter<'a> {
+   |        ------- fields in this struct
+...
+70 |     global_half_ptr: Word,
+   |     ^^^^^^^^^^^^^^^
+71 |     global_word_ptr: Word,
+72 |     global_qword_ptr: Word,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: `cuda-for-intel` (lib) generated 4 warnings (run `cargo fix --lib -p cuda-for-intel` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.51s

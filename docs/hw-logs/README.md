@@ -1,0 +1,10 @@
+# Hardware test logs (Arc B390, driver 32.0.101.9033, Windows)
+
+Round 1 on the integration branch (all feature branches merged). Paths scrubbed.
+
+- build.log: `cargo build --locked -j 2 --workspace`
+- test-unit.log: `cargo test --locked --workspace` (129 lib tests pass)
+- test-gpu.log: `cargo test --test gpu -- --ignored --test-threads=1` (40/40 pass, incl. graph_capture)
+- test-lib-ignored.log: ignored lib tests except `gated_forge_copy_queue_timestamps`; 24 pass,
+  `ptx::tests::validate_opencl_spirv` fails (emitter now produces SPIR-V 1.3, validator targets opencl2.2 = 1.2)
+- test-lib-ignored-hang.log: `gated_forge_copy_queue_timestamps` spins at full CPU without finishing; killed after ~8 min
