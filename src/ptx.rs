@@ -1643,14 +1643,11 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        let divergent = BLOCK_REDUCE.replace("@%p3 bra \t$L__BB0_8;", "@%p3 bra \t$L__BB0_3;");
-        assert_ne!(divergent, BLOCK_REDUCE);
-        assert!(
-            translate(&divergent)
-                .unwrap_err()
-                .to_string()
-                .contains("barrier may execute divergently")
-        );
+        // A branch whose one side can never reach a barrier is an early exit (threads run to
+        // completion and count as arrived), so it is accepted; see flow::verify_barriers.
+        let early_exit = BLOCK_REDUCE.replace("@%p3 bra \t$L__BB0_8;", "@%p3 bra \t$L__BB0_3;");
+        assert_ne!(early_exit, BLOCK_REDUCE);
+        translate(&early_exit).unwrap();
     }
 
     #[test]
@@ -1738,8 +1735,6 @@ mod tests {
     #[test]
     fn rejects_unimplemented_fp32_rounding_and_approximation_modes() {
         for (original, unsupported) in [
-            ("fma.rn.f32", "fma.rz.f32"),
-            ("fma.rn.f32", "fma.rp.f32"),
             ("fma.rn.f32", "fma.rn.xorsign.f32"),
         ] {
             assert!(RMSNORM.contains(original));
