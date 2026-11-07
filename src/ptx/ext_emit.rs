@@ -529,6 +529,7 @@ impl<'a> Emitter<'a> {
                 // is a plain subgroup xor-shuffle that the Intel compiler can lower directly
                 // instead of an indirect, per-lane computed shuffle.
                 if mode == ShflMode::Bfly
+                    && crate::ptx::xor_shuffle_enabled()
                     && let (Some(delta), Some(control)) = (self.known_u32(src[1]), self.known_u32(src[2]))
                     && delta < 32
                     && control == 31
