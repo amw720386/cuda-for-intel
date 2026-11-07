@@ -963,7 +963,10 @@ mod tests {
             return;
         };
         let t = std::time::Instant::now();
-        let rewritten = parse::rewrite_half_scopes(&source);
+        let rewritten = prepare(&source).unwrap();
+        if let Some(out) = std::env::var_os("CFI_PTX_PREPARED_OUT") {
+            let _ = std::fs::write(out, &rewritten);
+        }
         eprintln!("rewrite: {:?}", t.elapsed());
         let entry = parse::parse_named(&rewritten, &name).unwrap();
         eprintln!("parse: {:?} blocks={}", t.elapsed(), entry.blocks.len());
