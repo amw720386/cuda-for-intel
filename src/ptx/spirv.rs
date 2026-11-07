@@ -234,8 +234,26 @@ impl<'a> Emitter<'a> {
                 "missing or mismatched PTX declaration for {dst}"
             )));
         }
+        let mut value = value;
         let slot = if let Some(slot) = self.registers.get(dst).copied() {
-            slot.require(value.kind, dst)?
+            // PTX registers are untyped 64-bit values: nvcc reuses one `%rd` for a raw
+            // integer and for a pointer. Coerce between the slot's kind and the new value.
+            if slot.kind != value.kind {
+                let wide = |kind: Kind| matches!(kind, Kind::B64 | Kind::Address(_));
+                if !(wide(slot.kind) && wide(value.kind)) {
+                    slot.require(value.kind, dst)?;
+                }
+                let mut id = value.id;
+                if let Kind::Address(_) = value.kind {
+                    id = self.builder.convert_ptr_to_u(self.u64_type, None, id)?;
+                }
+                if let Kind::Address(_) = slot.kind {
+                    let pointer_type = self.value_type(slot.kind);
+                    id = self.builder.convert_u_to_ptr(pointer_type, None, id)?;
+                }
+                value = Value { id, kind: slot.kind };
+            }
+            slot.id
         } else {
             let pointer = self.builder.type_pointer(
                 None,
