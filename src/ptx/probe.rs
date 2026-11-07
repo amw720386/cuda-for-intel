@@ -23,7 +23,16 @@ pub(super) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), Str
         let device = vars.device.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spirv::emit(vec![entry], device)))
             .map_err(|_| "panic".to_string())
-            .and_then(|r| r.map(|_| ()).map_err(|e| e.to_string()));
+            .and_then(|r| {
+                r.map(|t| {
+                    // PROBE_SPV=<dir>: keep each translated kernel for `spirv-val`.
+                    if let Some(dir) = std::env::var_os("PROBE_SPV") {
+                        let bytes: Vec<u8> = t.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("k{}.spv", out.len())), bytes);
+                    }
+                })
+                .map_err(|e| e.to_string())
+            });
         out.push((name, result));
     }
     Ok(out)
