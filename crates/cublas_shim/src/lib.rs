@@ -5,6 +5,23 @@
 //! real GPU kernel launched through our Driver API `nvcuda.dll`.
 #![allow(non_snake_case)]
 
+/// Verbose per-call diagnostics, enabled with `CFI_LOG=1` (read once).
+#[allow(unused_macros)]
+macro_rules! info_log {
+    ($($arg:tt)*) => {
+        if $crate::log_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+pub(crate) fn log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("CFI_LOG").is_some_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
 use libloading::Library;
 use std::ffi::{c_char, c_float, c_int, c_void};
 use std::sync::OnceLock;
@@ -195,7 +212,7 @@ pub unsafe extern "system" fn cublasCreate_v2(handle: *mut *mut c_void) -> c_int
         stream: std::ptr::null_mut(),
     })) as *mut c_void;
     unsafe { handle.write(ptr) };
-    eprintln!("CUDA for Intel cublasCreate_v2 ok");
+    info_log!("CUDA for Intel cublasCreate_v2 ok");
     SUCCESS
 }
 
@@ -318,7 +335,7 @@ pub unsafe extern "system" fn cublasSgemm_v2(
     const TILE: u32 = 16;
     let grid_x = m_u.div_ceil(TILE).max(1);
     let grid_y = n_u.div_ceil(TILE).max(1);
-    eprintln!(
+    info_log!(
         "CUDA for Intel cublasSgemm_v2 TN m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} alpha={alpha_v} beta={beta_v} grid=({grid_x},{grid_y})"
     );
     let err = unsafe {
@@ -348,10 +365,13 @@ pub unsafe extern "system" fn cublasSgemm_v2(
     } else {
         h.stream
     };
-    let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
-    if err != SUCCESS {
-        eprintln!("CUDA for Intel cublasSgemm sync failed err={err}");
-        return STATUS_MAPPING_ERROR;
+    // Opt-in (CFI_SYNC=1): same-stream ordering already covers follow-up copies.
+    if sync_enabled() {
+        let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
+        if err != SUCCESS {
+            eprintln!("CUDA for Intel cublasSgemm sync failed err={err}");
+            return STATUS_MAPPING_ERROR;
+        }
     }
     SUCCESS
 }
@@ -503,7 +523,7 @@ unsafe fn cublasHgemm_tn(
     const TILE: u32 = 16;
     let grid_x = m_u.div_ceil(TILE).max(1);
     let grid_y = n_u.div_ceil(TILE).max(1);
-    eprintln!(
+    info_log!(
         "CUDA for Intel cublasHgemm_tn m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} alpha={alpha_v} beta={beta_v} grid=({grid_x},{grid_y})"
     );
     let err = unsafe {
@@ -530,10 +550,13 @@ unsafe fn cublasHgemm_tn(
     } else {
         h.stream
     };
-    let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
-    if err != SUCCESS {
-        eprintln!("CUDA for Intel cublasHgemm sync failed err={err}");
-        return STATUS_MAPPING_ERROR;
+    // Opt-in (CFI_SYNC=1): same-stream ordering already covers follow-up copies.
+    if sync_enabled() {
+        let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
+        if err != SUCCESS {
+            eprintln!("CUDA for Intel cublasHgemm sync failed err={err}");
+            return STATUS_MAPPING_ERROR;
+        }
     }
     SUCCESS
 }
@@ -590,7 +613,7 @@ pub unsafe extern "system" fn cublasGemmStridedBatchedEx(
         CUDA_R_16F => 2usize,
         _ => return NOT_SUPPORTED,
     };
-    eprintln!(
+    info_log!(
         "CUDA for Intel cublasGemmStridedBatchedEx batch={batch} m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} strideA={stride_a} strideB={stride_b} strideC={stride_c} a_type={a_type} compute={compute_type}"
     );
     for i in 0..batch as i64 {
@@ -717,7 +740,7 @@ pub unsafe extern "system" fn cublasGemmBatchedEx(
         );
         return INVALID_VALUE;
     }
-    eprintln!(
+    info_log!(
         "CUDA for Intel cublasGemmBatchedEx batch={batch} m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} transa={transa} transb={transb} a_type={a_type} c_type={c_type} compute={compute_type} a0={:#x} b0={:#x} c0={:#x}",
         a_ptrs[0], b_ptrs[0], c_ptrs[0]
     );
@@ -824,4 +847,9 @@ pub unsafe extern "system" fn cublasStrsmBatched(
 #[allow(dead_code)]
 fn _op_docs() {
     let _ = (CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C);
+}
+
+fn sync_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CFI_SYNC").is_some_and(|v| !v.is_empty() && v != "0"))
 }
