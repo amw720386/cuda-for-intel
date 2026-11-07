@@ -86,6 +86,7 @@ fn probe(path: &str) {
     for (n, e) in ptx::skipped_entries() { skipped.entry(e).or_default().push(n) }
     for (e, v) in &skipped { println!("SKIP {:5}  {}\n         e.g. {}", v.len(), e, v[0]); }
     for (e, v) in &by_error { println!("{:5}  {}\n         e.g. {}", v.len(), e, v[0]); }
+    if std::env::var_os("PROBE_ALL").is_some() { for (e, v) in &by_error { for n in v { println!("FAIL\t{e}\t{n}"); } } }
 }
 
 fn main() {

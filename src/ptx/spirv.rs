@@ -298,6 +298,10 @@ impl<'a> Emitter<'a> {
             if kind == Kind::B64 && matches!(value.kind, Kind::Address(_)) {
                 return Ok(self.builder.bitcast(self.u64_type, None, value.id)?);
             }
+            // Sub-word consumers (st.u8, cvt.*16 ...) of a 64-bit register use its low bits.
+            if kind == Kind::B32 && value.kind == Kind::B64 {
+                return Ok(self.builder.u_convert(self.u32_type, None, value.id)?);
+            }
             return Ok(value.require(kind, operand)?);
         }
         match kind {
