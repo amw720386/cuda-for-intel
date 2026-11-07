@@ -963,9 +963,11 @@ fn load_ptx(
     context: &mut CudaContext,
     next: &mut usize,
     image: &[u8],
+    lenient: bool,
 ) -> Result<usize, CuResult> {
     let ptx = std::str::from_utf8(image).map_err(|_| InvalidImage)?;
-    let translated = ptx::translate(ptx).map_err(|error| {
+    let translate = if lenient { ptx::translate_lenient } else { ptx::translate };
+    let translated = translate(ptx).map_err(|error| {
         if trace::enabled() {
             let preview: String = ptx.chars().take(120).collect();
             trace::record(format_args!("PTX translation rejected: {error}; preview={preview:?}"));
@@ -1043,7 +1045,7 @@ pub unsafe extern "system" fn cuModuleLoad(out: *mut Opaque, path: *const c_char
                 std::io::ErrorKind::NotFound => FileNotFound,
                 _ => OperatingSystem,
             })?;
-            let key = load_ptx(runtime, context, next, &image)?;
+            let key = load_ptx(runtime, context, next, &image, false)?;
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))
@@ -1062,7 +1064,7 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
                 return Err(InvalidImage);
             }
             let image = unsafe { CStr::from_ptr(image.cast()) }.to_bytes();
-            let key = load_ptx(runtime, context, next, image)?;
+            let key = load_ptx(runtime, context, next, image, false)?;
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))

@@ -39,6 +39,7 @@ pub(super) fn module_for_library(state: &mut State, library: usize) -> Result<(u
         context,
         &mut state.next_handle,
         &library_image.ptx,
+        true,
     )?;
     context.library_modules.insert(library, module);
     Ok((context_key, module))

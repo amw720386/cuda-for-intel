@@ -820,9 +820,19 @@ fn prepare(source: &str) -> Result<String, Error> {
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
+    translate_with(source, false)
+}
+
+/// Like [`translate`], but drops entries that fail to translate as long as at least one
+/// survives. Used for fatbin libraries, where a lookup of a dropped kernel fails alone.
+pub(crate) fn translate_lenient(source: &str) -> Result<Translation, Error> {
+    translate_with(source, true)
+}
+
+fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
     let rewritten = prepare(source)?;
     let (entries, vars) = parse::parse_module(&rewritten)?;
-    let first = if entries.len() > 1 {
+    let first = if lenient && entries.len() > 1 {
         spirv::emit(entries.clone(), vars.device.clone())
     } else {
         return spirv::emit(entries, vars.device);
