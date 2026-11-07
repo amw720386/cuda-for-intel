@@ -89,3 +89,35 @@ fn substitution_is_off_by_default_and_on_when_selected() {
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
     assert_baseline();
 }
+
+/// Host-side launch overhead of the substitution hook on the fake backend (ignored: timing only).
+/// Compares per-launch cost with substitution off, on-but-not-applicable (plain kernel) and
+/// on-but-falling-back (recognised kernel, unexpected block shape).
+#[test]
+#[ignore = "timing only"]
+fn launch_overhead_with_and_without_substitution() {
+    let _fixture = Fixture::new();
+    let ctx = context(None);
+    let (a, _) = allocations();
+    let (b, _) = allocations();
+    let n = 20_000;
+    let mut time = |label: &str, f: Opaque, block: u32, full: bool| {
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            assert_eq!(launch_quantize(f, block, a, b, full), Success);
+        }
+        assert_eq!(cuCtxSynchronize(), Success);
+        println!("{label}: {:.0} ns/launch", start.elapsed().as_nanos() as f64 / n as f64);
+    };
+    unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
+    let off = load(QUANTIZE);
+    time("subst none, quantize stub", off, 256, true);
+    unsafe { std::env::set_var("CUDA_FOR_INTEL_SUBST", "all") };
+    let on = load(QUANTIZE);
+    time("subst all, recognised kernel, native path", on, 256, true);
+    time("subst all, recognised kernel, geometry fallback", on, 128, true);
+    let plain = load(QUANTIZE_WRONG_ABI);
+    time("subst all, layout mismatch (plain PTX)", plain, 256, false);
+    unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+}

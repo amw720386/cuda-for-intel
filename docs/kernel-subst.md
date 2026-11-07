@@ -2,7 +2,7 @@
 
 Opt-in layer that replaces recognised ggml-cuda kernels with hand-written Intel-native SPIR-V.
 
-* Switch: `CUDA_FOR_INTEL_SUBST=none|all|<list>` (default `none`). List items: `mmvq`, `mmvq:q8_0|q4_0|q4_k|q6_k`, `quantize_q8_1`.
+* Switch: `CUDA_FOR_INTEL_SUBST=none|auto|all|<list>` (default `none`; `auto` = per-kernel policy from the first Arc measurements: mmvq ncols 1 for all types, Q4_K at every ncols, Q6_K ncols<=2, quantize_q8_1; mmq stays off). List items: `mmvq`, `mmvq:q8_0|q4_0|q4_k|q6_k`, `quantize_q8_1`.
   `CUDA_FOR_INTEL_SUBST_NWARPS=<pow2>` (mmvq experiment, changes only the cross-warp add order), `CUDA_FOR_INTEL_SUBST_PROBE=0` skips the first-use check.
 * Recognition (`src/subst/mod.rs`): Itanium name (template args included) plus exact parameter layout. Any mismatch keeps the PTX and logs why.
   Launch shape must also match (mmvq block `32 x stock nwarps`, quantize block 256).

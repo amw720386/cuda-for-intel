@@ -1336,7 +1336,6 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let entry = module.entries.get(name).ok_or(InvalidHandle)?;
             let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
             let subst_plan = entry.subst.clone();
-            let name = name.clone();
             // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
             // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
             // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
@@ -1446,7 +1445,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 // GPU time plus a constant submission latency; use it to rank kernels only.
                 launch_result?;
                 context.streams.wait_stream(&runtime.api, stream, u64::MAX)?;
-                trace::kernel_record(&name.to_string_lossy(), started.elapsed().as_nanos() as u64, grid, block);
+                trace::kernel_record(&launched, started.elapsed().as_nanos() as u64, grid, block);
                 return Ok(());
             }
             launch_result

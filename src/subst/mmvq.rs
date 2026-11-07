@@ -41,12 +41,18 @@ fn fastdiv(kb: &mut Kb, n: V, mp: V, l: V) -> V {
 }
 
 struct Row {
-    /// Runtime-opaque 0x01010101 and 0x20202020 (never constants in dot operands).
-    ones: V,
-    bias: V,
     /// u64 address of the x block, and of the first aligned q8_1 block.
     x: V,
     y: V,
+    /// Runtime-opaque 0x01010101 and 0x20202020 (never constants in dot operands).
+    ones: V,
+    bias: V,
+}
+
+/// Weight-side values of one block, loaded once per (thread, row, k step) and reused for every
+/// activation column.
+struct XData {
+    v: Vec<V>,
 }
 
 fn fneg4(kb: &mut Kb, v: V) -> V {
@@ -54,64 +60,35 @@ fn fneg4(kb: &mut Kb, v: V) -> V {
     kb.fmul(v, k)
 }
 
-fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
-    let (x, y) = (r.x, r.y);
-    let (ones_op, bias_op) = (r.ones, r.bias);
+fn load_x(kb: &mut Kb, ty: u32, r: &Row, kqs: V) -> XData {
+    let x = r.x;
+    let mut v = Vec::new();
     match ty {
         Q8_0 => {
-            let d0 = kb.ld_f16(x);
+            v.push(kb.ld_f16(x));
             let off = kb.mulc(kqs, 4);
             let xo = kb.addr(x, off, 1);
-            let yo = kb.addr(y, off, 1);
-            let mut sumi = kb.c32(0);
             for i in 0..2u32 {
                 let xa = kb.addr_off(xo, 2 + 4 * i);
-                let ya = kb.addr_off(yo, 4 + 4 * i);
-                let v = kb.ld_b2(xa);
-                let u = kb.ld_b4(ya);
-                sumi = kb.dp4a(v, u, sumi);
+                v.push(kb.ld_b2(xa));
             }
-            let d1 = kb.ld_f16(y);
-            let prod = kb.fmul(d0, d1);
-            let sf = kb.s2f(sumi);
-            kb.fma(prod, sf, acc)
         }
         Q4_0 => {
-            let d4 = kb.ld_f16(x);
+            v.push(kb.ld_f16(x));
             let off = kb.mulc(kqs, 4);
             let xo = kb.addr(x, off, 1);
-            let yo = kb.addr(y, off, 1);
-            let mut sumi = kb.c32(0);
             for i in 0..2u32 {
                 let xa = kb.addr_off(xo, 2 + 4 * i);
-                let v = kb.ld_b2(xa);
-                let u0 = {
-                    let a = kb.addr_off(yo, 4 + 4 * i);
-                    kb.ld_b4(a)
-                };
-                let u1 = {
-                    let a = kb.addr_off(yo, 4 + 4 * i + 16);
-                    kb.ld_b4(a)
-                };
-                let vi0 = kb.andc(v, 0x0F0F_0F0F);
-                let sh = kb.shrc(v, 4);
-                let vi1 = kb.andc(sh, 0x0F0F_0F0F);
-                sumi = kb.dp4a(vi0, u0, sumi);
-                sumi = kb.dp4a(vi1, u1, sumi);
+                let w = kb.ld_b2(xa);
+                v.push(kb.andc(w, 0x0F0F_0F0F));
+                let sh = kb.shrc(w, 4);
+                v.push(kb.andc(sh, 0x0F0F_0F0F));
             }
-            let dsx = kb.ld_f16(y);
-            let ys = kb.addr_off(y, 2);
-            let dsy = kb.ld_f16(ys);
-            let m4 = fneg4(kb, dsy);
-            let sf = kb.s2f(sumi);
-            let inner = kb.fma(dsx, sf, m4);
-            kb.fma(d4, inner, acc)
         }
         Q4_K => {
-            // kqs = 2 * (tid % 16); half = kqs / 2
             let half = kb.shrc(kqs, 1);
             let hw = kb.andc(half, 3);
-            let g = kb.shrc(half, 2); // = j = bq8_offset / 2
+            let g = kb.shrc(half, 2); // j = bq8_offset / 2
             let bq8 = kb.shlc(g, 1);
             let qoff = {
                 let a = kb.mulc(bq8, 16);
@@ -123,7 +100,6 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
             let v0 = kb.ld_b4(qa);
             let qa1 = kb.addr_off(qa, 16);
             let v1 = kb.ld_b4(qa1);
-            // 6-bit scales/mins: aux0 (scales), aux1 (mins)
             let sc16 = |kb: &mut Kb, idx: V| -> V {
                 let a = {
                     let o = kb.mulc(idx, 2);
@@ -166,54 +142,24 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
             };
             let aux0 = kb.select(Ty::U32, ge2, hi0, lo0);
             let aux1 = kb.select(Ty::U32, ge2, hi1, lo1);
-            let sc = [kb.andc(aux0, 0xff), {
-                let t = kb.shrc(aux0, 8);
-                kb.andc(t, 0xff)
-            }];
-            let mn = [kb.andc(aux1, 0xff), {
-                let t = kb.shrc(aux1, 8);
-                kb.andc(t, 0xff)
-            }];
-            let zero_f = kb.cf(0.0);
-            let mut sumf_d = zero_f;
-            let mut sumf_m = zero_f;
-            let ones = ones_op;
-            for i in 0..2u32 {
-                let blk = kb.addc(bq8, i);
-                let yb = kb.addr(y, blk, 36);
-                let d8 = kb.ld_f16(yb);
-                let uo = kb.mulc(hw, 4);
-                let ua = kb.addr(yb, uo, 1);
-                let ua0 = kb.addr_off(ua, 4);
-                let ua1 = kb.addr_off(ua, 4 + 16);
-                let u0 = kb.ld_b4(ua0);
-                let u1 = kb.ld_b4(ua1);
-                let (v0i, v1i) = if i == 0 {
-                    (kb.andc(v0, 0x0F0F_0F0F), kb.andc(v1, 0x0F0F_0F0F))
-                } else {
-                    let a = kb.shrc(v0, 4);
-                    let b = kb.shrc(v1, 4);
-                    (kb.andc(a, 0x0F0F_0F0F), kb.andc(b, 0x0F0F_0F0F))
-                };
-                let z = kb.c32(0);
-                let t = kb.dp4a(v0i, u0, z);
-                let dot1 = kb.dp4a(v1i, u1, t);
-                let t = kb.dp4a(ones, u0, z);
-                let dot2 = kb.dp4a(ones, u1, t);
-                let a = kb.mul(dot1, sc[i as usize]);
-                let a = kb.s2f(a);
-                sumf_d = kb.fma(d8, a, sumf_d);
-                let b = kb.mul(dot2, mn[i as usize]);
-                let b = kb.s2f(b);
-                sumf_m = kb.fma(d8, b, sumf_m);
-            }
-            let dm0 = kb.ld_f16(x);
+            // v = [v0 nib0, v1 nib0, v0 nib1, v1 nib1, sc0, sc1, m0, m1, dm0, dm1, bq8, hw]
+            v.push(kb.andc(v0, 0x0F0F_0F0F));
+            v.push(kb.andc(v1, 0x0F0F_0F0F));
+            let a = kb.shrc(v0, 4);
+            v.push(kb.andc(a, 0x0F0F_0F0F));
+            let b = kb.shrc(v1, 4);
+            v.push(kb.andc(b, 0x0F0F_0F0F));
+            v.push(kb.andc(aux0, 0xff));
+            let t = kb.shrc(aux0, 8);
+            v.push(kb.andc(t, 0xff));
+            v.push(kb.andc(aux1, 0xff));
+            let t = kb.shrc(aux1, 8);
+            v.push(kb.andc(t, 0xff));
+            v.push(kb.ld_f16(x));
             let xa2 = kb.addr_off(x, 2);
-            let dm1 = kb.ld_f16(xa2);
-            let p = kb.fmul(sumf_d, dm0);
-            let q = kb.fmul(sumf_m, dm1);
-            let diff = kb.fsub(p, q);
-            kb.fadd(acc, diff)
+            v.push(kb.ld_f16(xa2));
+            v.push(bq8);
+            v.push(hw);
         }
         Q6_K => {
             let hi = kb.shrc(kqs, 4);
@@ -245,12 +191,8 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
             let vha = kb.addr_off(vha, 128);
             let vh = kb.ld_b2(vha);
             let vh = kb.shr(vh, vh_shift);
-            let d = {
-                let a = kb.addr_off(x, 208);
-                kb.ld_f16(a)
-            };
-            let mut sumf = kb.cf(0.0);
-            let u_idx = kb.andc(kqs, 7);
+            // v = [vi0, vi1, sc0, sc1, d, bq8, u_idx]: weights repacked once, bias is runtime-opaque
+            let mut sc = Vec::new();
             for i in 0..2u32 {
                 let sa = {
                     let a = kb.addr(x, scale_off, 1);
@@ -258,7 +200,7 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
                 };
                 let s = kb.ld_u8(sa);
                 let s = kb.shlc(s, 24);
-                let sc = kb.sarc(s, 24);
+                sc.push(kb.sarc(s, 24));
                 let vil = {
                     let t = if i == 0 { vl } else { kb.shrc(vl, 4) };
                     kb.andc(t, 0x0F0F_0F0F)
@@ -269,12 +211,102 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
                     kb.andc(t, 0x3030_3030)
                 };
                 let comb = kb.or(vil, vih);
-                let c20 = bias_op;
-                let vi = kb.vsub4(comb, c20);
-                let blk = {
-                    let b = kb.addc(bq8, 2 * i);
-                    b
+                v.push(kb.vsub4(comb, r.bias));
+            }
+            v.extend(sc);
+            let d = {
+                let a = kb.addr_off(x, 208);
+                kb.ld_f16(a)
+            };
+            v.push(d);
+            v.push(bq8);
+            v.push(kb.andc(kqs, 7));
+        }
+        _ => unreachable!(),
+    }
+    XData { v }
+}
+
+/// `acc + vec_dot(x block, y column block)` with the weight side already loaded.
+fn dot_y(kb: &mut Kb, ty: u32, r: &Row, xd: &XData, kqs: V, acc: V) -> V {
+    let (y, v) = (r.y, &xd.v);
+    match ty {
+        Q8_0 => {
+            let off = kb.mulc(kqs, 4);
+            let yo = kb.addr(y, off, 1);
+            let mut sumi = kb.c32(0);
+            for i in 0..2usize {
+                let ya = kb.addr_off(yo, 4 + 4 * i as u32);
+                let u = kb.ld_b4(ya);
+                sumi = kb.dp4a(v[1 + i], u, sumi);
+            }
+            let d1 = kb.ld_f16(y);
+            let prod = kb.fmul(v[0], d1);
+            let sf = kb.s2f(sumi);
+            kb.fma(prod, sf, acc)
+        }
+        Q4_0 => {
+            let off = kb.mulc(kqs, 4);
+            let yo = kb.addr(y, off, 1);
+            let mut sumi = kb.c32(0);
+            for i in 0..2usize {
+                let u0 = {
+                    let a = kb.addr_off(yo, 4 + 4 * i as u32);
+                    kb.ld_b4(a)
                 };
+                let u1 = {
+                    let a = kb.addr_off(yo, 4 + 4 * i as u32 + 16);
+                    kb.ld_b4(a)
+                };
+                sumi = kb.dp4a(v[1 + 2 * i], u0, sumi);
+                sumi = kb.dp4a(v[2 + 2 * i], u1, sumi);
+            }
+            let dsx = kb.ld_f16(y);
+            let ys = kb.addr_off(y, 2);
+            let dsy = kb.ld_f16(ys);
+            let m4 = fneg4(kb, dsy);
+            let sf = kb.s2f(sumi);
+            let inner = kb.fma(dsx, sf, m4);
+            kb.fma(v[0], inner, acc)
+        }
+        Q4_K => {
+            let (bq8, hw) = (v[10], v[11]);
+            let zero_f = kb.cf(0.0);
+            let mut sumf_d = zero_f;
+            let mut sumf_m = zero_f;
+            let ones = r.ones;
+            for i in 0..2usize {
+                let blk = kb.addc(bq8, i as u32);
+                let yb = kb.addr(y, blk, 36);
+                let d8 = kb.ld_f16(yb);
+                let uo = kb.mulc(hw, 4);
+                let ua = kb.addr(yb, uo, 1);
+                let ua0 = kb.addr_off(ua, 4);
+                let ua1 = kb.addr_off(ua, 4 + 16);
+                let u0 = kb.ld_b4(ua0);
+                let u1 = kb.ld_b4(ua1);
+                let z = kb.c32(0);
+                let t = kb.dp4a(v[2 * i], u0, z);
+                let dot1 = kb.dp4a(v[2 * i + 1], u1, t);
+                let t = kb.dp4a(ones, u0, z);
+                let dot2 = kb.dp4a(ones, u1, t);
+                let a = kb.mul(dot1, v[4 + i]);
+                let a = kb.s2f(a);
+                sumf_d = kb.fma(d8, a, sumf_d);
+                let b = kb.mul(dot2, v[6 + i]);
+                let b = kb.s2f(b);
+                sumf_m = kb.fma(d8, b, sumf_m);
+            }
+            let p = kb.fmul(sumf_d, v[8]);
+            let q = kb.fmul(sumf_m, v[9]);
+            let diff = kb.fsub(p, q);
+            kb.fadd(acc, diff)
+        }
+        Q6_K => {
+            let (bq8, u_idx) = (v[5], v[6]);
+            let mut sumf = kb.cf(0.0);
+            for i in 0..2usize {
+                let blk = kb.addc(bq8, 2 * i as u32);
                 let yb = kb.addr(y, blk, 36);
                 let uo = kb.mulc(u_idx, 4);
                 let ua = kb.addr(yb, uo, 1);
@@ -282,12 +314,12 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
                 let u = kb.ld_b4(ua);
                 let d8 = kb.ld_f16(yb);
                 let z = kb.c32(0);
-                let dot = kb.dp4a(vi, u, z);
-                let prod = kb.mul(dot, sc);
+                let dot = kb.dp4a(v[i], u, z);
+                let prod = kb.mul(dot, v[2 + i]);
                 let pf = kb.s2f(prod);
                 sumf = kb.fma(d8, pf, sumf);
             }
-            kb.fma(d, sumf, acc)
+            kb.fma(v[4], sumf, acc)
         }
         _ => unreachable!(),
     }
@@ -387,29 +419,37 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
         |kb| {
             let k = kb.get(kbx);
             let kby = kb.mulc(k, (t.qk / 32) as u32);
-            for j in 0..ncols {
-                let jy = kb.mulc(scy, j);
-                let yidx = kb.add(jy, kby);
-                let ya = kb.addr(y_base, yidx, 36);
-                for i in 0..rpb {
-                    let ri = kb.mulc(srx, i);
-                    let xi = kb.add(kbx_offset, ri);
-                    let xi = kb.add(xi, k);
-                    let xa = kb.addr(vx, xi, t.block_bytes as u32);
-                    let slot = tmp[(j * rpb + i) as usize];
-                    let body = |kb: &mut Kb| {
+            let yas: Vec<V> = (0..ncols)
+                .map(|j| {
+                    let jy = kb.mulc(scy, j);
+                    let yidx = kb.add(jy, kby);
+                    kb.addr(y_base, yidx, 36)
+                })
+                .collect();
+            for i in 0..rpb {
+                let ri = kb.mulc(srx, i);
+                let xi = kb.add(kbx_offset, ri);
+                let xi = kb.add(xi, k);
+                let xa = kb.addr(vx, xi, t.block_bytes as u32);
+                let tmp = &tmp;
+                let yas = &yas;
+                let body = |kb: &mut Kb| {
+                    // weights are loaded once and reused for every activation column
+                    let xd = load_x(kb, cfg.ty, &Row { x: xa, y: xa, ones, bias }, kqs);
+                    for j in 0..ncols {
+                        let slot = tmp[(j * rpb + i) as usize];
                         let acc = kb.get(slot);
-                        let r = vec_dot(kb, cfg.ty, &Row { x: xa, y: ya, ones, bias }, kqs, acc);
+                        let r = dot_y(kb, cfg.ty, &Row { x: xa, y: yas[j as usize], ones, bias }, &xd, kqs, acc);
                         kb.set(slot, r);
-                    };
-                    if i == 0 {
-                        body(kb);
-                    } else {
-                        // The second row of a tile may lie past the matrix; never read it.
-                        let r = kb.addc(row0, i);
-                        let inb = kb.ult(r, scd);
-                        kb.if_(inb, body);
                     }
+                };
+                if i == 0 {
+                    body(kb);
+                } else {
+                    // The second row of a tile may lie past the matrix; never read it.
+                    let r = kb.addc(row0, i);
+                    let inb = kb.ult(r, scd);
+                    kb.if_(inb, body);
                 }
             }
             let n = kb.addc(k, blocks_per_iter);

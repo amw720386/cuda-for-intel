@@ -359,3 +359,22 @@ fn translated_stock_mmq_q8_0_matches_native_on_the_interpreter() {
     println!("mmq q8_0 native vs translated stock: nmse {nmse}, {bad} bitwise differences");
     assert!(nmse < 1e-9);
 }
+
+#[test]
+fn auto_policy_follows_the_measurements() {
+    use super::{Decision, Switch, decide, mmq_layout, mmvq_layout, quantize_layout};
+    let auto = Switch::parse("auto");
+    assert!(!auto.is_none());
+    let name = |ty: u32, n: u32| format!("_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{n}EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj");
+    let yes = |ty, n| matches!(decide(&name(ty, n), &mmvq_layout(), &auto), Decision::Substitute(_));
+    for ty in [2, 8, 12, 14] {
+        assert!(yes(ty, 1), "ncols 1 native for type {ty}");
+    }
+    assert!(!yes(8, 2) && !yes(2, 4) && !yes(8, 8));
+    assert!(yes(12, 8) && yes(14, 2) && !yes(14, 4));
+    assert!(matches!(decide("_Z13quantize_q8_1PKfPvxxxxxj5uint3", &quantize_layout(), &auto), Decision::Substitute(_)));
+    let mmq = "_Z9mul_mat_qIL9ggml_type8ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
+    assert_eq!(decide(mmq, &mmq_layout(), &auto), Decision::NotApplicable);
+    // explicit list items still force a kernel in addition to auto
+    assert!(matches!(decide(mmq, &mmq_layout(), &Switch::parse("auto,mmq")), Decision::Substitute(_)));
+}

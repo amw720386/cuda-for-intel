@@ -5,7 +5,7 @@
 //! (`cuda/subst_hook.rs`) builds the native module lazily, validates it once against a host
 //! reference on the real device, and falls back to the translated kernel on any failure.
 //!
-//! Selection: `CUDA_FOR_INTEL_SUBST=none|all|<comma list>` (default `none`). List items are a
+//! Selection: `CUDA_FOR_INTEL_SUBST=none|auto|all|<comma list>` (default `none`; `auto` = measured per-kernel policy). List items are a
 //! family (`mmvq`, `quantize_q8_1`) optionally narrowed to a type (`mmvq:q8_0`, `mmvq:q4_k`).
 use crate::ptx::Param;
 
@@ -26,6 +26,8 @@ mod tests;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Switch {
     all: bool,
+    /// `auto`: the per-kernel policy measured on hardware (see `auto_ok`).
+    auto: bool,
     items: Vec<String>,
 }
 
@@ -36,9 +38,11 @@ impl Switch {
             match item.as_str() {
                 "none" | "0" | "off" => {
                     s.all = false;
+                    s.auto = false;
                     s.items.clear();
                 }
                 "all" | "1" | "on" => s.all = true,
+                "auto" => s.auto = true,
                 _ => s.items.push(item),
             }
         }
@@ -59,7 +63,7 @@ impl Switch {
     }
 
     pub(crate) fn is_none(&self) -> bool {
-        !self.all && self.items.is_empty()
+        !self.all && !self.auto && self.items.is_empty()
     }
 }
 
@@ -138,6 +142,17 @@ fn ptr() -> Param {
 }
 fn u3() -> Param {
     Param::Words { words: 3, align: 4 }
+}
+
+/// The measured default: native only where it beat the translated PTX on the Arc
+/// (mmvq ncols 1 for all types, Q4_K at every ncols, Q6_K up to 2 columns; quantize_q8_1
+/// is byte-exact and cheap). `mmq` is unmeasured and stays off in `auto`.
+pub(crate) fn auto_ok(kernel: Kernel) -> bool {
+    match kernel {
+        Kernel::Mmvq { ty, ncols } => ncols == 1 || ty == refs::Q4_K || (ty == refs::Q6_K && ncols <= 2),
+        Kernel::QuantizeQ81 => true,
+        Kernel::MmqQ80 | Kernel::MmqFixupQ80 => false,
+    }
 }
 
 /// Parameter layout of `mul_mat_vec_q` (23 words once the `uint3`s are expanded).
@@ -244,7 +259,7 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
         ("quantize_q8_1", []) => (Kernel::QuantizeQ81, quantize_layout(), "quantize_q8_1", None),
         _ => return Decision::NotApplicable,
     };
-    if !switch.allows(family, ty) {
+    if !(switch.allows(family, ty) || (switch.auto && auto_ok(kernel))) {
         return Decision::NotApplicable;
     }
     if !layout_matches(kernel, params, &expected) {
