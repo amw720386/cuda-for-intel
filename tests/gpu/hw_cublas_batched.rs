@@ -230,6 +230,7 @@ fn hw_gqa_ptr_table_then_gemm_back_to_back_on_a_stream() {
             cuModuleLoadData(*mut Handle, *const c_void),
             cuModuleGetFunction(*mut Handle, Handle, *const std::ffi::c_char),
             cuMemAlloc_v2(*mut u64, usize),
+            cuMemGetInfo_v2(*mut usize, *mut usize),
             cuMemcpyHtoD_v2(u64, *const c_void, usize),
             cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
         );
@@ -263,22 +264,34 @@ fn hw_gqa_ptr_table_then_gemm_back_to_back_on_a_stream() {
             let zeros = vec![0u8; (ne12 * b_bytes) as usize];
             ok!(cuMemcpyHtoD_v2(db, zeros.as_ptr().cast(), zeros.len()));
             ok!(cuMemcpyHtoD_v2(da, zeros.as_ptr().cast(), (2 * a_bytes) as usize));
-            for iter in 0..100 {
+            let iters: usize = std::env::var("CFI_GQA_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+            let (skip_table, skip_gemm) = (std::env::var_os("CFI_GQA_SKIP_TABLE").is_some(), std::env::var_os("CFI_GQA_SKIP_GEMM").is_some());
+            for iter in 0..iters {
                 let mut vals: Vec<Vec<u8>> = [da, db, dc, p_src, p_dst].iter().map(|v| v.to_le_bytes().to_vec()).collect();
                 for v in [ne12, 1, ne12, a_bytes, 0, b_bytes, 0, c_bytes, 0, r2, 1] {
                     vals.push(v.to_le_bytes().to_vec());
                 }
                 let mut params: Vec<*mut c_void> = vals.iter_mut().map(|v| v.as_mut_ptr().cast()).collect();
-                ok!(cuLaunchKernel(kernel, 1, 1, 1, 16, 16, 1, 0, stream, params.as_mut_ptr(), null_mut()));
+                if !skip_table || iter == 0 {
+                    ok!(cuLaunchKernel(kernel, 1, 1, 1, 16, 16, 1, 0, stream, params.as_mut_ptr(), null_mut()));
+                }
+                if skip_gemm {
+                    continue;
+                }
                 let (alpha, beta) = (1.0f32, 0.0f32);
                 let status = unsafe {
                     gemm(handle, ta, 0, m, n, k, from_ref(&alpha), p_src as *const *const c_void, 2, if ta == 1 { k } else { m }, (p_src + ne12 as u64 * 8) as *const *const c_void, 2, k, from_ref(&beta), p_dst as *const *mut c_void, 0, m, ne12 as i32, 68, -1)
                 };
+                if iter < 12 || iter % 50 == 0 || status != 0 {
+                    let (mut free, mut total) = (0usize, 0usize);
+                    unsafe { cuMemGetInfo_v2(&mut free, &mut total) };
+                    println!("{name} iter {iter}: status {status}, device free {} MB of {} MB", free >> 20, total >> 20);
+                }
                 assert_eq!(status, 0, "{name} iter {iter}: gemm status");
             }
             let sync = unsafe { cuStreamSynchronize(stream) };
             assert_eq!(sync, 0, "{name}: 100 back-to-back table+gemm launches faulted on stream sync");
-            println!("{name}: 100 back-to-back table+gemm launches ok");
+            println!("{name}: {iters} back-to-back table+gemm launches ok");
         }
     });
 }
