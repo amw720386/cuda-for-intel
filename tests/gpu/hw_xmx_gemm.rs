@@ -364,7 +364,11 @@ fn table() -> Vec<Case> {
             for &k in &small {
                 let out = [Dt::F32, Dt::F16, Dt::Bf16][idx % 3];
                 let inp = if out == Dt::Bf16 || idx % 2 == 1 { Dt::Bf16 } else { Dt::F16 };
-                let out = if inp == Dt::F16 && out == Dt::Bf16 { Dt::F32 } else { out };
+                // cuBLAS pairs f16 inputs with f16/f32 and bf16 inputs with bf16/f32 only.
+                let out = match (inp, out) {
+                    (Dt::F16, Dt::Bf16) | (Dt::Bf16, Dt::F16) => Dt::F32,
+                    _ => out,
+                };
                 cases.push(Case {
                     m, n, k,
                     ta: idx % 4 >= 2,
