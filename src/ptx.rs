@@ -688,6 +688,24 @@ impl<'a> Instruction<'a> {
         )
     }
 
+    /// A load that is not an atomic read-modify-write.
+    fn is_plain_load(&self) -> bool {
+        self.is_memory_load() && !matches!(self, Self::AtomicAdd32(..) | Self::Atomic { .. })
+    }
+
+    fn loads_local_space(&self) -> bool {
+        matches!(
+            self,
+            Self::Load32(Space::Local, ..)
+                | Self::Load64(Space::Local, ..)
+                | Self::Load16(Space::Local, ..)
+                | Self::Load8(Space::Local, ..)
+                | Self::LoadSigned { space: Space::Local, .. }
+                | Self::LoadVec { space: Space::Local, .. }
+                | Self::LoadVecU16 { space: Space::Local, .. }
+        )
+    }
+
     fn is_convergent(&self) -> bool {
         // Only CTA `bar.sync` is rejected under divergent control. Warp ops
         // (`shfl.sync` / `redux.sync` with full masks) are routinely emitted by
