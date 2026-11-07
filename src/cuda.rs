@@ -256,6 +256,10 @@ pub(crate) fn export_log(message: impl std::fmt::Display) {
 #[unsafe(no_mangle)]
 pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
     export_log(format_args!("cuInit flags={flags} enter"));
+    if trace::enabled() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(trace::install_crash_logger);
+    }
     let result = trace::call("cuInit", || {
         if flags != 0 {
             return InvalidValue;
@@ -1012,6 +1016,27 @@ pub unsafe extern "system" fn cuModuleLoad(out: *mut Opaque, path: *const c_char
             Ok(())
         }))
     })
+}
+
+/// Load a module from a fatbin wrapper or frame (the private CUDART_INTERFACE
+/// path used by cudart 11.x): pick the PTX record and translate it.
+pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_void) -> CuResult {
+    if out.is_null() || image.is_null() {
+        return InvalidValue;
+    }
+    let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx(image.cast()) }) else {
+        if trace::enabled() {
+            trace::record(format_args!("fatbin module has no PTX: {}", unsafe {
+                cfi_fatbin::describe(image.cast())
+            }));
+        }
+        return NoBinaryForGpu;
+    };
+    status(with_context_handles(|runtime, context, next| {
+        let key = load_ptx(runtime, context, next, &ptx)?;
+        unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+        Ok(())
+    }))
 }
 
 #[unsafe(no_mangle)]

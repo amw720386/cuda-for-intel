@@ -804,6 +804,234 @@ pub extern "system" fn cublasLtDDDMatmulAlgoGetIds() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasLtDDDMatmulAlgoInit() -> i32 { 15 }
 #[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16Bf16Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16Bf16MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16Bf16MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16Bf16MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16Bf16MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16Bf16MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16E4m3Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16E4m3MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16E4m3MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16E4m3MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16E4m3MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Bf16E4m3MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16E4m3Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16E4m3MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16E4m3MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16E4m3MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16E4m3MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16E4m3MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16Fp16Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16Fp16MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16Fp16MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16Fp16MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16Fp16MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp16Fp16MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp32Fp32Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp32Fp32MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp32Fp32MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp32Fp32MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp32Fp32MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E4m3Fp32Fp32Fp32MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16Bf16Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16Bf16MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16Bf16MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16Bf16MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16Bf16MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16Bf16MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E4m3Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E4m3MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E4m3MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E4m3MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E4m3MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E4m3MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E5m2Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E5m2MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E5m2MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E5m2MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E5m2MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Bf16E5m2MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E4m3Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E4m3MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E4m3MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E4m3MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E4m3MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E4m3MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E5m2Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E5m2MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E5m2MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E5m2MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E5m2MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16E5m2MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16Fp16Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16Fp16MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16Fp16MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16Fp16MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16Fp16MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp16Fp16MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp32Fp32Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp32Fp32MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp32Fp32MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp32Fp32MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp32Fp32MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE4m3E5m2Fp32Fp32Fp32MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16Bf16Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16Bf16MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16Bf16MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16Bf16MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16Bf16MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16Bf16MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E4m3Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E4m3MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E4m3MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E4m3MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E4m3MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E4m3MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E5m2Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E5m2MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E5m2MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E5m2MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E5m2MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Bf16E5m2MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E4m3Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E4m3MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E4m3MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E4m3MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E4m3MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E4m3MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E5m2Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E5m2MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E5m2MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E5m2MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E5m2MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16E5m2MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16Fp16Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16Fp16MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16Fp16MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16Fp16MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16Fp16MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp16Fp16MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp32Fp32Matmul() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp32Fp32MatmulAlgoCapGetAttribute() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp32Fp32MatmulAlgoCheck() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp32Fp32MatmulAlgoGetHeuristic() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp32Fp32MatmulAlgoGetIds() -> i32 { 15 }
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasLtE5m2E4m3Fp32Fp32Fp32MatmulAlgoInit() -> i32 { 15 }
+#[unsafe(no_mangle)]
 pub extern "system" fn cublasLtGetStatusName() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasLtGetStatusString() -> i32 { 15 }
