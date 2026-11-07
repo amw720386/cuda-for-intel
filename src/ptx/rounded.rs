@@ -454,3 +454,77 @@ pub(super) fn directed(
 ) -> Result<Word, Error> {
     Math::new(builder, opencl).directed(kind, mode, a, b)
 }
+
+impl<'a> Math<'a> {
+    /// Directed-rounding fma: nearest result `s`, plus the sign of the exact residual
+    /// `a*b + c - s`, from TwoProduct (fma) and TwoSum error terms; step one ulp when the
+    /// nearest result landed on the wrong side. Cancellation edge cases and overflow to
+    /// infinity are not treated specially.
+    fn fma_directed(&mut self, mode: Mode, a: Word, b: Word, c: Word) -> Result<Word, Error> {
+        let f32t = self.b.type_float(32, None);
+        let (fa, fb, fc) = (
+            self.b.bitcast(f32t, None, a)?,
+            self.b.bitcast(f32t, None, b)?,
+            self.b.bitcast(f32t, None, c)?,
+        );
+        let fma = |this: &mut Self, x: Word, y: Word, z: Word| -> Result<Word, Error> {
+            Ok(this.b.ext_inst(f32t, None, this.opencl, OpenclStd100Op::fma as u32,
+                [x, y, z].map(Operand::IdRef))?)
+        };
+        let fs = fma(self, fa, fb, fc)?;
+        let p = self.b.f_mul(f32t, None, fa, fb)?;
+        let np = self.b.f_negate(f32t, None, p)?;
+        let pe = fma(self, fa, fb, np)?;
+        // Knuth TwoSum of p + c.
+        let t = self.b.f_add(f32t, None, p, fc)?;
+        let bb = self.b.f_sub(f32t, None, t, p)?;
+        let aa = self.b.f_sub(f32t, None, t, bb)?;
+        let db = self.b.f_sub(f32t, None, fc, bb)?;
+        let da = self.b.f_sub(f32t, None, p, aa)?;
+        let te = self.b.f_add(f32t, None, da, db)?;
+        let diff = self.b.f_sub(f32t, None, t, fs)?;
+        let fe0 = self.b.f_add(f32t, None, diff, te)?;
+        let fe = self.b.f_add(f32t, None, fe0, pe)?;
+        let s = self.b.bitcast(self.u32, None, fs)?;
+        let zero_f = self.b.constant_bit32(f32t, 0);
+        let e_pos = self.b.f_ord_greater_than(self.boolean, None, fe, zero_f)?;
+        let e_neg = self.b.f_ord_less_than(self.boolean, None, fe, zero_f)?;
+        let (sign_c, one, zero) = (self.c(SIGN), self.c(1), self.c(0));
+        let s_sign = self.and(s, sign_c)?;
+        let s_neg = self.eq(s_sign, sign_c)?;
+        let s_mag = self.magnitude(s)?;
+        let s_zero = self.eq(s_mag, zero)?;
+        let inc = self.add(s, one)?;
+        let dec = self.sub(s, one)?;
+        let min_pos = one;
+        let min_neg = self.c(SIGN | 1);
+        Ok(match mode {
+            Mode::Zero => {
+                let need = self.b.select(self.boolean, None, s_neg, e_pos, e_neg)?;
+                let need_nz = self.both_not(need, s_zero)?;
+                self.select(need_nz, dec, s)?
+            }
+            Mode::Down => {
+                let pos_next = self.select(s_zero, min_neg, dec)?;
+                let next = self.select(s_neg, inc, pos_next)?;
+                self.select(e_neg, next, s)?
+            }
+            Mode::Up => {
+                let neg_next = self.select(s_zero, min_pos, dec)?;
+                let next = self.select(s_neg, neg_next, inc)?;
+                self.select(e_pos, next, s)?
+            }
+        })
+    }
+}
+
+pub(super) fn fma_directed(
+    builder: &mut Builder,
+    opencl: Word,
+    mode: Mode,
+    a: Word,
+    b: Word,
+    c: Word,
+) -> Result<Word, Error> {
+    Math::new(builder, opencl).fma_directed(mode, a, b, c)
+}

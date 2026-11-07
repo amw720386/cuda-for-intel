@@ -30,6 +30,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Param {
     U8,
+    U16,
     U32,
     F32,
     U64,
@@ -42,6 +43,7 @@ impl Param {
     pub(crate) fn alignment(self) -> usize {
         match self {
             Self::U8 => 1,
+            Self::U16 => 2,
             Self::U64 | Self::GlobalPtr => 8,
             Self::Words { align, .. } => usize::from(align),
             Self::U32 | Self::F32 => 4,
@@ -51,6 +53,7 @@ impl Param {
     pub(crate) fn size(self) -> usize {
         match self {
             Self::U8 => 1,
+            Self::U16 => 2,
             Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
             Self::Words { words, .. } => usize::from(words) * 4,
@@ -237,6 +240,8 @@ enum FloatOp<'a> {
     Add([&'a str; 2]),
     /// add/sub/mul with rz/rm/rp rounding, emulated with error terms.
     Directed { kind: rounded::Arith, mode: rounded::Mode, src: [&'a str; 2] },
+    /// fma with rz/rm/rp rounding (error-term emulation; expf's magic-number rounding uses rm).
+    FmaDirected { mode: rounded::Mode, src: [&'a str; 3] },
     Sub([&'a str; 2]),
     Mul([&'a str; 2]),
     MinMax { min: bool, src: [&'a str; 2] },
@@ -275,6 +280,7 @@ impl<'a> FloatOp<'a> {
             Self::Add(inputs) | Self::Sub(inputs) | Self::Mul(inputs)
             | Self::Div(inputs) | Self::CopySign(inputs) => inputs,
             Self::Fma(inputs) => inputs,
+            Self::FmaDirected { src, .. } => src,
             Self::MinMax { src, .. } | Self::Directed { src, .. } => src,
             Self::FromUnsigned(inputs)
             | Self::FromSigned(inputs)

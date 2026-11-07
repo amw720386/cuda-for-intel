@@ -92,6 +92,20 @@ impl<'a> Parser<'a> {
     fn param(&mut self) -> Result<(&'a str, Param), Error> {
         self.expect(".param")?;
         let ty = match self.take()? {
+            ".align" if matches!(self.peek(), Some("1" | "2")) => {
+                // Sub-word by-value params (`__half`, `short`, `char`): `.align N .b8 x[N]`.
+                let align = self.take()?;
+                self.expect(".b8")?;
+                let name = self.identifier()?;
+                self.expect("[")?;
+                let bytes = self.take()?;
+                self.expect("]")?;
+                return match (align, bytes) {
+                    ("1", "1") => Ok((name, Param::U8)),
+                    ("2", "2") => Ok((name, Param::U16)),
+                    _ => Err(Error::new("unsupported PTX parameter aggregate size")),
+                };
+            }
             ".align" => {
                 let align = self
                     .take()?
@@ -120,6 +134,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             ".u8" | ".s8" => Param::U8,
+            ".u16" | ".s16" | ".b16" | ".f16" => Param::U16,
             ".u32" | ".b32" => Param::U32,
             ".f32" => Param::F32,
             ".u64" | ".b64" if self.eat(".ptr") => {
@@ -229,7 +244,7 @@ impl<'a> Parser<'a> {
         }
         let result = match body {
             [
-                op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32"),
+                op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32" | "ld.param.u16" | "ld.param.b16"),
                 dst,
                 ",",
                 "[",
@@ -1101,6 +1116,27 @@ impl<'a> Parser<'a> {
                 ",",
                 b,
             ] => Instruction::Float32(dst, FloatOp::Add([a, b])),
+            [
+                op @ ("fma.rz.f32" | "fma.rz.ftz.f32" | "fma.rm.f32" | "fma.rm.ftz.f32" | "fma.rp.f32"
+                | "fma.rp.ftz.f32"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+                ",",
+                c,
+            ] => {
+                use super::rounded::Mode;
+                let mode = if op.starts_with("fma.rz") {
+                    Mode::Zero
+                } else if op.starts_with("fma.rm") {
+                    Mode::Down
+                } else {
+                    Mode::Up
+                };
+                Instruction::Float32(dst, FloatOp::FmaDirected { mode, src: [a, b, c] })
+            }
             [op, dst, ",", a, ",", b] if directed_float(op).is_some() => {
                 let (kind, mode) = directed_float(op).unwrap();
                 Instruction::Float32(dst, FloatOp::Directed { kind, mode, src: [a, b] })
