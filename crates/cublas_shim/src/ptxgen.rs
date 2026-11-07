@@ -431,10 +431,10 @@ pub fn generate_trsm() -> String {
     let _ = writeln!(s, "cvta.to.global.u64 %rd5, %rd2;");
     let _ = writeln!(s, "add.s64 %rd6, %rd4, %rd3;");
     let _ = writeln!(s, "add.s64 %rd7, %rd5, %rd3;");
-    let _ = writeln!(s, "ld.global.u64 %rd8, [%rd6];");
-    let _ = writeln!(s, "ld.global.u64 %rd9, [%rd7];");
-    let _ = writeln!(s, "cvta.to.global.u64 %rd8, %rd8;");
-    let _ = writeln!(s, "cvta.to.global.u64 %rd9, %rd9;");
+    let _ = writeln!(s, "ld.global.u64 %rd20, [%rd6];");
+    let _ = writeln!(s, "ld.global.u64 %rd21, [%rd7];");
+    let _ = writeln!(s, "cvta.to.global.u64 %rd8, %rd20;");
+    let _ = writeln!(s, "cvta.to.global.u64 %rd9, %rd21;");
     let _ = writeln!(s, "mul.wide.u32 %rd10, %r12, %r5;");
     let _ = writeln!(s, "shl.b64 %rd10, %rd10, 2;");
     let _ = writeln!(s, "add.s64 %rd11, %rd9, %rd10;");
