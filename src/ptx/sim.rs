@@ -125,7 +125,9 @@ pub struct Sim {
     builtins: HashMap<u32, BuiltIn>,
     function_vars: Vec<(u32, u32)>,
     bound: usize,
+    global_vars: Vec<(u32, Vec<u8>)>,
     entry_label: u32,
+    placed: Vec<(u32, u64)>,
     pub shared_bytes: u64,
     pub opcode_counts: HashMap<String, u64>,
     pub count_ops: bool,
@@ -243,6 +245,8 @@ impl Sim {
         let mut array_bytes: HashMap<u32, u64> = HashMap::new();
         let mut const_val: HashMap<u32, u64> = HashMap::new();
         let mut ptr_pointee: HashMap<u32, u32> = HashMap::new();
+        let mut composites: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut global_vars: Vec<(u32, Vec<u8>)> = Vec::new();
         for inst in &module.types_global_values {
             let Some(rid) = inst.result_id else { continue };
             match inst.class.opcode {
@@ -275,9 +279,26 @@ impl Sim {
                     let ew = array_bytes.get(&elem).copied().unwrap_or_else(|| u64::from(type_w[&elem]) / 8);
                     array_bytes.insert(rid, ew * n);
                 }
+                Op::ConstantComposite => {
+                    composites.insert(rid, inst.operands.iter().map(id_of).collect());
+                }
                 Op::Variable => {
                     let t = inst.result_type.unwrap();
                     vw[rid as usize] = 64;
+                    if let Some(Operand::StorageClass(StorageClass::CrossWorkgroup)) = inst.operands.first() {
+                        let pointee = ptr_pointee[&t];
+                        let bytes = array_bytes.get(&pointee).copied().unwrap_or(4);
+                        let mut data = vec![0u8; bytes as usize];
+                        if let Some(init) = inst.operands.get(1).map(id_of)
+                            && let Some(words) = composites.get(&init)
+                        {
+                            for (i, w) in words.iter().enumerate() {
+                                let v = const_val.get(w).copied().unwrap_or(0) as u32;
+                                data[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+                            }
+                        }
+                        global_vars.push((rid, data));
+                    }
                     if let Some(Operand::StorageClass(StorageClass::Workgroup)) = inst.operands.first() {
                         let pointee = ptr_pointee[&t];
                         let bytes = array_bytes.get(&pointee).copied().unwrap_or_else(|| u64::from(type_w.get(&pointee).copied().unwrap_or(32)) / 8);
@@ -335,6 +356,8 @@ impl Sim {
             builtins,
             function_vars,
             bound,
+            global_vars,
+            placed: Vec::new(),
             entry_label: function.blocks[0].label.as_ref().unwrap().result_id.unwrap(),
             shared_bytes,
             opcode_counts: HashMap::new(),
@@ -376,6 +399,11 @@ impl Sim {
     /// Runs every workgroup of the launch; returns Err with a description on a simulation fault.
     pub fn run(&mut self, gpu: &mut Gpu, launch: &Launch) -> Result<(), String> {
         let mut steps = 0u64;
+        self.placed = self
+            .global_vars
+            .iter()
+            .map(|(id, data)| (*id, gpu.upload(data)))
+            .collect();
         for z in 0..launch.grid[2] {
             for y in 0..launch.grid[1] {
                 for x in 0..launch.grid[0] {
@@ -407,6 +435,9 @@ impl Sim {
             }
             for (i, &p) in self.params.iter().enumerate() {
                 vals[p as usize] = launch.args[i];
+            }
+            for &(id, addr) in &self.placed {
+                vals[id as usize] = addr;
             }
             for &(id, off) in &self.shared_vars {
                 vals[id as usize] = SHARED_BASE + off;

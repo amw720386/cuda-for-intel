@@ -45,6 +45,22 @@ fn prepared(path: &std::path::Path) -> std::sync::Arc<String> {
     p
 }
 
+/// Like `translate_entry` but keeps module-scope tables (`kvalues_iq4nl`, ...).
+fn translate_with_globals(prepared: &str, name: &str) -> Result<Translation, Error> {
+    let (entries, vars) = parse::parse_module(prepared)?;
+    let entry = entries.into_iter().find(|e| e.name == name).ok_or_else(|| Error::new("PTX entry is absent"))?;
+    let used: Vec<_> = vars.device.iter().filter(|v| prepared_mentions(prepared, name, &v.name)).cloned().collect();
+    spirv::emit(vec![entry], used)
+}
+
+/// Whether the entry body text mentions the global (keeps modules small).
+fn prepared_mentions(prepared: &str, entry: &str, var: &str) -> bool {
+    let start = prepared.find(&format!(".entry {entry}(")).unwrap_or(0);
+    let body = &prepared[start..];
+    let end = body.find("\n}\n").unwrap_or(body.len());
+    body[..end].contains(var)
+}
+
 static DP4A_LOCK: Mutex<()> = Mutex::new(());
 
 /// A translated kernel ready to run in the simulator.
@@ -62,7 +78,7 @@ pub(super) fn load_kernel(name: &str, dot: bool) -> Kernel {
     let _guard = DP4A_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let before = dot_product_enabled();
     set_dot_product(dot);
-    let translated = translate_entry(&src, name);
+    let translated = translate_with_globals(&src, name);
     set_dot_product(before);
     let t = translated.unwrap_or_else(|e| panic!("{name}: {e}"));
     coverage_tests::validate(&t.words);
@@ -246,4 +262,319 @@ fn dump_entry_spirv() {
     let t = translate_entry(&prepared, &entry).unwrap();
     let bytes: Vec<u8> = t.words.iter().flat_map(|w| w.to_le_bytes()).collect();
     std::fs::write(out, bytes).unwrap();
+}
+
+fn rand_floats(rng: &mut Rng, n: usize, scale: f32) -> Vec<f32> {
+    (0..n).map(|_| ((rng.unit() * 2.0 - 1.0) as f32) * scale).collect()
+}
+
+fn f32_bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// quantize_q8_1 over a [ne3][ne2][ne1][ne00] tensor, padded to `ne0` columns.
+fn check_quantize_q8_1(ne00: usize, ne0: usize, ne1: usize, ne2: usize, ne3: usize, seed: u64) {
+    let kern = load_kernel("_Z13quantize_q8_1PKfPvxxxxxj5uint3", false);
+    let mut rng = Rng(seed);
+    let mut x = rand_floats(&mut rng, ne00 * ne1 * ne2 * ne3, 3.0);
+    // exercise an all-zero group and a group with one large outlier
+    for v in &mut x[..32.min(ne00)] {
+        *v = 0.0;
+    }
+    if ne00 >= 64 {
+        x[40] = 100.0;
+    }
+    let mut gpu = Gpu::default();
+    let xp = gpu.upload(&f32_bytes(&x));
+    let out_bytes = ne0 / 32 * ne1 * ne2 * ne3 * Q8_1_BYTES;
+    let yp = gpu.alloc(out_bytes);
+    let args = vec![
+        Arg::P(xp),
+        Arg::P(yp),
+        Arg::P(ne00 as u64),
+        Arg::P(ne00 as u64),
+        Arg::P((ne00 * ne1) as u64),
+        Arg::P((ne00 * ne1 * ne2) as u64),
+        Arg::P(ne0 as u64),
+        Arg::U(ne1 as u32),
+        Arg::W(fastdiv(ne2 as u32)),
+    ];
+    kern.run(&mut gpu, [ne0.div_ceil(256) as u32, ne1 as u32, (ne2 * ne3) as u32], [256, 1, 1], &args).unwrap();
+    let got = gpu.download(yp, out_bytes);
+    for row in 0..ne1 * ne2 * ne3 {
+        for g in 0..ne0 / 32 {
+            let mut grp = [0f32; 32];
+            for (i, v) in grp.iter_mut().enumerate() {
+                let c = g * 32 + i;
+                *v = if c < ne00 { x[row * ne00 + c] } else { 0.0 };
+            }
+            let want = quantize_q8_1_group(&grp);
+            let off = (row * (ne0 / 32) + g) * Q8_1_BYTES;
+            assert_eq!(&got[off..off + Q8_1_BYTES], &want[..], "quantize_q8_1 row {row} group {g} (ne00={ne00} ne0={ne0})");
+        }
+    }
+}
+
+#[test]
+fn quantize_q8_1_matches_reference() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    check_quantize_q8_1(256, 256, 1, 1, 1, 3);
+    check_quantize_q8_1(96, 512, 3, 2, 1, 4);
+    check_quantize_q8_1(300, 512, 2, 2, 2, 5);
+}
+
+/// Random quantised rows, `nblk` blocks of `t` per row.
+fn gen_rows(t: Q, rows: usize, nblk: usize, seed: u64, pow2: bool) -> Vec<u8> {
+    let mut rng = Rng(seed | 1);
+    (0..rows * nblk).flat_map(|_| random_block(t, &mut rng, pow2)).collect()
+}
+
+fn compare_dequant(what: &str, got: &[f32], want: &[f32], pow2: bool, half_out: bool) {
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        let (g, w) = if half_out { (f16_val(f16_bits(*g)), f16_val(f16_bits(*w))) } else { (*g, *w) };
+        let tol = if pow2 { 0.0 } else if half_out { w.abs() * 1.2e-3 + 1e-7 } else { w.abs() * 1e-6 + 1e-9 };
+        assert!((g - w).abs() <= tol, "{what}: element {i} got {g} want {w}");
+    }
+}
+
+fn read_out(gpu: &Gpu, addr: u64, n: usize, half_out: bool) -> Vec<f32> {
+    if half_out {
+        (0..n as u64).map(|i| f16_val(gpu.mem.read(addr + 2 * i, 2) as u16)).collect()
+    } else {
+        gpu.download_f32(addr, n)
+    }
+}
+
+fn dequant_block_name(t: Q, half_out: bool) -> String {
+    let ty = if half_out { "I6__halfE" } else { "IfE" };
+    let n = t.name();
+    match t {
+        Q::Q4_0 | Q::Q4_1 => format!("_Z21dequantize_block_{n}{ty}vPKvPT_i"),
+        Q::Q2K | Q::Q3K | Q::Q4K | Q::Q5K | Q::Q6K => format!("_Z21dequantize_block_{n}{ty}vPKvPT_"),
+        Q::IQ4NL | Q::IQ4XS => format!("_Z23dequantize_block_{n}{ty}vPKvPT_"),
+        _ => unreachable!(),
+    }
+}
+
+fn check_dequant_block(t: Q, nblk: usize, half_out: bool, pow2: bool, seed: u64) {
+    let kern = load_kernel(&dequant_block_name(t, half_out), false);
+    let data = gen_rows(t, 1, nblk, seed, pow2);
+    let k = nblk * t.qk();
+    let mut gpu = Gpu::default();
+    let src = gpu.upload(&data);
+    let esz = if half_out { 2 } else { 4 };
+    let dst = gpu.alloc(k * esz);
+    let (grid, block, extra): (u32, u32, Option<u32>) = match t {
+        Q::Q2K | Q::Q3K | Q::Q5K | Q::Q6K => (nblk as u32, 64, None),
+        Q::Q4K | Q::IQ4XS => (nblk as u32, 32, None),
+        Q::IQ4NL => ((k / 256) as u32, 32, None),
+        Q::Q4_0 | Q::Q4_1 => (k.div_ceil(256) as u32, 32, Some(nblk as u32)),
+        _ => unreachable!(),
+    };
+    let mut args = vec![Arg::P(src), Arg::P(dst)];
+    args.extend(extra.map(Arg::U));
+    kern.run(&mut gpu, [grid, 1, 1], [block, 1, 1], &args).unwrap();
+    let got = read_out(&gpu, dst, k, half_out);
+    let want = dequant_row(t, &data);
+    compare_dequant(&format!("dequantize_block_{} half={half_out} pow2={pow2}", t.name()), &got, &want, pow2, half_out);
+}
+
+#[test]
+fn dequantize_block_kernels_match_reference() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    for t in [Q::Q6K, Q::Q5K, Q::Q4K, Q::Q3K, Q::Q2K, Q::IQ4NL, Q::IQ4XS, Q::Q4_0, Q::Q4_1] {
+        let nblk = if t.qk() == 256 { 3 } else { 24 };
+        for half_out in [false, true] {
+            for (pow2, seed) in [(true, 7u64), (false, 8)] {
+                check_dequant_block(t, nblk, half_out, pow2, seed);
+            }
+        }
+    }
+}
+
+/// Finds the single entry whose name starts with `prefix` and contains every `needle`.
+fn find_entry(prefix: &str, needles: &[&str], suffix: &str) -> String {
+    let hits: Vec<&String> = index()
+        .keys()
+        .filter(|k| k.starts_with(prefix) && k.ends_with(suffix) && needles.iter().all(|n| k.contains(n)))
+        .collect();
+    assert_eq!(hits.len(), 1, "entries for {prefix} {needles:?} {suffix}: {hits:?}");
+    hits[0].clone()
+}
+
+fn to_half_bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| f16_bits(*x).to_le_bytes()).collect()
+}
+
+/// dequantize_block<32,2,...> (convert.cu): generic path for q4_0/q4_1/q5_0/q5_1/q8_0.
+fn check_dequantize_block_generic(t: Q, half_out: bool, pow2: bool, seed: u64) {
+    let name = find_entry(
+        "_Z16dequantize_blockILi32ELi",
+        &[&format!("dequantize_{}E", t.name())],
+        if half_out { "6__halfEvS2_PT2_xxxxxx" } else { "EfEvS2_PT2_xxxxxx" },
+    );
+    let kern = load_kernel(&name, false);
+    let (ne00, ne01, ne02, ne03) = (96usize, 3usize, 2usize, 1usize);
+    let bpr = ne00 / t.qk();
+    let rows = ne01 * ne02 * ne03;
+    let data = gen_rows(t, rows, bpr, seed, pow2);
+    let mut gpu = Gpu::default();
+    let src = gpu.upload(&data);
+    let esz = if half_out { 2 } else { 4 };
+    let n = ne00 * rows;
+    let dst = gpu.alloc(n * esz);
+    let args = vec![
+        Arg::P(src),
+        Arg::P(dst),
+        Arg::P(ne00 as u64),
+        Arg::P(ne01 as u64),
+        Arg::P(ne02 as u64),
+        Arg::P(bpr as u64),
+        Arg::P((bpr * ne01) as u64),
+        Arg::P((bpr * ne01 * ne02) as u64),
+    ];
+    kern.run(&mut gpu, [ne00.div_ceil(512) as u32, ne01 as u32, (ne02 * ne03) as u32], [256, 1, 1], &args).unwrap();
+    let got = read_out(&gpu, dst, n, half_out);
+    compare_dequant(&format!("dequantize_block<{}> half={half_out}", t.name()), &got, &dequant_row(t, &data), pow2, half_out);
+}
+
+#[test]
+fn dequantize_block_generic_matches_reference() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    for t in [Q::Q4_0, Q::Q4_1, Q::Q5_0, Q::Q5_1, Q::Q8_0] {
+        for half_out in [false, true] {
+            for (pow2, seed) in [(true, 5u64), (false, 6)] {
+                check_dequantize_block_generic(t, half_out, pow2, seed);
+            }
+        }
+    }
+}
+
+/// get_rows over [ne12][ne11][ne10] row ids; `rows_src` is bytes of ne01 rows per (i11,i12).
+#[allow(clippy::too_many_arguments)]
+fn run_get_rows(
+    kern: &Kernel,
+    src_bytes: &[u8],
+    row_bytes: usize,
+    ne00: usize,
+    ne01: usize,
+    ne10: usize,
+    ne11: usize,
+    ne12: usize,
+    ids: &[i32],
+    dst_elem: usize,
+) -> Vec<u8> {
+    let mut gpu = Gpu::default();
+    let src = gpu.upload(src_bytes);
+    let idp = gpu.upload(&ids.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+    let n = ne00 * ne10 * ne11 * ne12;
+    let dst = gpu.alloc(n * dst_elem);
+    let args = vec![
+        Arg::P(src),
+        Arg::P(idp),
+        Arg::P(dst),
+        Arg::P(ne00 as u64),
+        Arg::P(ne11 as u64),
+        Arg::P(ne12 as u64),
+        Arg::P(ne00 as u64),                         // s1
+        Arg::P((ne00 * ne10) as u64),                // s2
+        Arg::P((ne00 * ne10 * ne11) as u64),         // s3
+        Arg::P(row_bytes as u64),                    // nb01
+        Arg::P((row_bytes * ne01) as u64),           // nb02
+        Arg::P((row_bytes * ne01 * ne11) as u64),    // nb03
+        Arg::P(1),                                   // s10
+        Arg::P(ne10 as u64),                         // s11
+        Arg::P((ne10 * ne11) as u64),                // s12
+    ];
+    let by = ne00.div_ceil(2 * 256).max(1) as u32;
+    kern.run(&mut gpu, [ne10 as u32, by, (ne11 * ne12) as u32], [256, 1, 1], &args).unwrap();
+    gpu.download(dst, n * dst_elem)
+}
+
+fn gen_ids(rng: &mut Rng, count: usize, ne01: usize) -> Vec<i32> {
+    (0..count).map(|_| rng.below(ne01 as u64) as i32).collect()
+}
+
+#[test]
+fn get_rows_quantized_matches_reference() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    let (ne00, ne01, ne10, ne11, ne12) = (96usize, 5usize, 3usize, 2usize, 2usize);
+    for t in [Q::Q4_0, Q::Q4_1, Q::Q5_0, Q::Q5_1, Q::Q8_0] {
+        for half_out in [false, true] {
+            for (pow2, seed) in [(true, 9u64), (false, 10)] {
+                let name = find_entry(
+                    "_Z10k_get_rowsILi32ELi",
+                    &[&format!("dequantize_{}E", t.name())],
+                    if half_out { "6__halfEvS2_PKiPT2_xxxyyyyyyyyy" } else { "EfEvS2_PKiPT2_xxxyyyyyyyyy" },
+                );
+                let kern = load_kernel(&name, false);
+                let bpr = ne00 / t.qk();
+                let data = gen_rows(t, ne01 * ne11 * ne12, bpr, seed, pow2);
+                let ids = gen_ids(&mut Rng(seed ^ 77), ne10 * ne11 * ne12, ne01);
+                let got = run_get_rows(&kern, &data, bpr * t.block_bytes(), ne00, ne01, ne10, ne11, ne12, &ids, if half_out { 2 } else { 4 });
+                let got: Vec<f32> = if half_out {
+                    got.chunks(2).map(|c| f16_val(u16::from_le_bytes([c[0], c[1]]))).collect()
+                } else {
+                    got.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+                };
+                let mut want = Vec::new();
+                for i12 in 0..ne12 {
+                    for i11 in 0..ne11 {
+                        for i10 in 0..ne10 {
+                            let id = ids[i12 * ne10 * ne11 + i11 * ne10 + i10] as usize;
+                            let rb = bpr * t.block_bytes();
+                            let off = ((i12 * ne11 + i11) * ne01 + id) * rb;
+                            want.extend(dequant_row(t, &data[off..off + rb]));
+                        }
+                    }
+                }
+                compare_dequant(&format!("k_get_rows {} half={half_out}", t.name()), &got, &want, pow2, half_out);
+            }
+        }
+    }
+}
+
+#[test]
+fn get_rows_float_matches_reference() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    let (ne00, ne01, ne10, ne11, ne12) = (300usize, 7usize, 3usize, 2usize, 2usize);
+    let mut rng = Rng(99);
+    let vals = rand_floats(&mut rng, ne00 * ne01 * ne11 * ne12, 5.0);
+    let ids = gen_ids(&mut rng, ne10 * ne11 * ne12, ne01);
+    // (kernel suffix, source encoding, destination f16?)
+    for (tag, src_half, dst_half) in [("IffE", false, false), ("I6__halffE", true, false), ("If6__halfE", false, true), ("I6__halfS0_E", true, true)] {
+        let name = format!("_Z16k_get_rows_float{tag}vPKT_PKiPT0_xxxyyyyyyyyy");
+        let kern = load_kernel(&name, false);
+        let src_bytes = if src_half { to_half_bytes(&vals) } else { f32_bytes(&vals) };
+        let esz = if src_half { 2 } else { 4 };
+        let src_vals: Vec<f32> = if src_half { vals.iter().map(|v| f16_val(f16_bits(*v))).collect() } else { vals.clone() };
+        let got = run_get_rows(&kern, &src_bytes, ne00 * esz, ne00, ne01, ne10, ne11, ne12, &ids, if dst_half { 2 } else { 4 });
+        let got: Vec<f32> = if dst_half {
+            got.chunks(2).map(|c| f16_val(u16::from_le_bytes([c[0], c[1]]))).collect()
+        } else {
+            got.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+        };
+        let mut want = Vec::new();
+        for i12 in 0..ne12 {
+            for i11 in 0..ne11 {
+                for i10 in 0..ne10 {
+                    let id = ids[i12 * ne10 * ne11 + i11 * ne10 + i10] as usize;
+                    let off = ((i12 * ne11 + i11) * ne01 + id) * ne00;
+                    want.extend(src_vals[off..off + ne00].iter().map(|&v| if dst_half { f16_val(f16_bits(v)) } else { v }));
+                }
+            }
+        }
+        compare_dequant(&format!("k_get_rows_float{tag}"), &got, &want, true, dst_half);
+    }
 }

@@ -411,3 +411,26 @@ pub fn dot_ref(q: Q, row: &[u8], y: &[u8]) -> (f64, f64) {
     }
     (total, abs)
 }
+
+/// `quantize_q8_1` of ggml-cuda for one group of 32 floats: returns the 36-byte block.
+/// The warp sum is an xor butterfly in f32 (order matters for the bits of `ds.y`).
+pub fn quantize_q8_1_group(x: &[f32; 32]) -> Vec<u8> {
+    let amax = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let mut sum = *x;
+    for off in [16usize, 8, 4, 2, 1] {
+        let prev = sum;
+        for l in 0..32 {
+            sum[l] = prev[l] + prev[l ^ off];
+        }
+    }
+    let d = amax / 127.0;
+    let mut qs = [0i8; 32];
+    if amax != 0.0 {
+        for (q, v) in qs.iter_mut().zip(x) {
+            let t = v / d;
+            // roundf via add.rz(t, copysign(0.5, t)) then cvt.rzi: truncation of t +- 0.5
+            *q = (f64::from(t) + 0.5f64.copysign(f64::from(t))).trunc() as i32 as i8;
+        }
+    }
+    make_q8_1(d, &qs, sum[0])
+}
