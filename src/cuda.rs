@@ -100,12 +100,12 @@ struct CudaContext {
 }
 
 /// A PTX module whose kernels are translated one at a time on first lookup.
-struct LazyModule {
-    context: usize,
-    prepared: String,
-    names: std::collections::HashSet<CString>,
+pub(crate) struct LazyModule {
+    pub(crate) context: usize,
+    pub(crate) prepared: String,
+    pub(crate) names: std::collections::HashSet<CString>,
     /// kernel name -> (hidden child module, function handle)
-    children: HashMap<CString, (usize, usize)>,
+    pub(crate) children: HashMap<CString, (usize, usize)>,
 }
 
 struct CudaModule {
@@ -1208,7 +1208,7 @@ fn diagnose_reject(ptx: &str, error: &ptx::Error) {
 }
 
 /// Translate one kernel of a lazy module and return its function handle.
-fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
+pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
     let lazy = state.lazy_modules.get(&module).ok_or(InvalidHandle)?;
     if let Some(&(_, function)) = lazy.children.get(name) {
         return Ok(function);

@@ -20,6 +20,31 @@ struct Library {
     unloading: bool,
 }
 
+/// Register the library as a lazy PTX module (keyed by the library handle).
+pub(super) fn ensure_lazy_library(state: &mut State, library: usize) -> Result<(), CuResult> {
+    if state.lazy_modules.contains_key(&library) {
+        return Ok(());
+    }
+    let image = state.libraries.images.get(&library).ok_or(InvalidHandle)?;
+    if image.unloading {
+        return Err(InvalidHandle);
+    }
+    let context_key = current().ok_or(InvalidContext)?;
+    state.contexts.get(&context_key).ok_or(ContextIsDestroyed)?.check_live()?;
+    let source = std::str::from_utf8(&image.ptx).map_err(|_| InvalidPtx)?;
+    let prepared = ptx::prepare_module(source).map_err(|_| InvalidPtx)?;
+    let names = ptx::entry_names(&prepared)
+        .map_err(|_| InvalidPtx)?
+        .into_iter()
+        .filter_map(|n| CString::new(n).ok())
+        .collect();
+    state.lazy_modules.insert(
+        library,
+        super::LazyModule { context: context_key, prepared, names, children: HashMap::new() },
+    );
+    Ok(())
+}
+
 pub(super) fn module_for_library(state: &mut State, library: usize) -> Result<(usize, usize), CuResult> {
     let library_image = state.libraries.images.get(&library).ok_or(InvalidHandle)?;
     if library_image.unloading {
@@ -177,8 +202,9 @@ pub unsafe extern "system" fn cuLibraryGetModule(out: *mut Opaque, library: Opaq
             return InvalidValue;
         }
         status(state(|state| {
-            let (_, module) = module_for_library(state, library.addr())?;
-            unsafe { out.write(std::ptr::without_provenance_mut(module)) };
+            // Lazy module: kernels translate one at a time on cuModuleGetFunction.
+            ensure_lazy_library(state, library.addr())?;
+            unsafe { out.write(std::ptr::without_provenance_mut(library.addr())) };
             Ok(())
         }))
     })
@@ -207,15 +233,8 @@ pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize,
             name.to_string_lossy()
         ));
     }
-    let result = module_for_library(state, library).and_then(|(context, module)| {
-        module_function(
-            &state.runtime.api,
-            state.contexts.get_mut(&context).ok_or(ContextIsDestroyed)?,
-            &mut state.next_handle,
-            module,
-            &name,
-        )
-    });
+    let result = ensure_lazy_library(state, library)
+        .and_then(|()| super::lazy_module_function(state, library, &name));
     if matches!(result, Err(NotFound | InvalidPtx)) {
         if trace::enabled()
             && let Ok(source) = std::str::from_utf8(&state.libraries.images[&library].ptx)
@@ -248,6 +267,14 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
     trace::call("cuLibraryUnload", || {
         status(state(|state| {
             let key = library.addr();
+            if let Some(lazy) = state.lazy_modules.remove(&key)
+                && let Some(context) = state.contexts.get_mut(&lazy.context)
+            {
+                for (child, _) in lazy.children.values() {
+                    context.streams.wait_all(&state.runtime.api)?;
+                    context.unload(&state.runtime.api, *child)?;
+                }
+            }
             let library = state.libraries.images.get_mut(&key).ok_or(InvalidHandle)?;
             library.unloading = true;
             for context in state.contexts.values_mut() {
