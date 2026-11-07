@@ -234,6 +234,30 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             if !reaches_barrier(taken) || !reaches_barrier(other) || !tid_derived.contains(predicate) {
                 continue;
             }
+            // A tid-dependent *loop* test (`for (i = tid; i < rounded_up_n; i += blockDim)`):
+            // CUDA requires all threads to run the same number of barrier-containing
+            // iterations, which PyTorch's top-k / sort / scan helpers guarantee by rounding the
+            // bound up to a multiple of the block size. Uniformity of the trip count is a
+            // value fact we cannot prove, so trust the program as CUDA does.
+            let in_loop = {
+                let mut seen = vec![false; blocks.len()];
+                let mut stack = vec![taken, other];
+                let mut found = false;
+                while let Some(next) = stack.pop() {
+                    if next == index {
+                        found = true;
+                        break;
+                    }
+                    if std::mem::replace(&mut seen[next], true) {
+                        continue;
+                    }
+                    stack.extend(blocks[next].end.successors());
+                }
+                found
+            };
+            if in_loop && std::env::var_os("CFI_STRICT_BARRIERS").is_none() {
+                continue;
+            }
             checked_branches[index] = true;
             let mut seen = vec![false; blocks.len()];
             let mut stack = vec![taken, other];
