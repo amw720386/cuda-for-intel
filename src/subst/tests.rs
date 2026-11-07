@@ -1,106 +1,53 @@
 use super::interp::{self, ArgVal, Dev};
+use super::probe::{self, MmvqCase, PArg};
 use super::{mmvq, quantize};
-use super::refs::{self, Mmvq, Rng};
+use super::refs::{self, Mmvq};
 
-struct Problem {
-    p: Mmvq,
-    x: Vec<u8>,
-    y: Vec<u8>,
-    ids: Vec<i32>,
+struct Sim<'a> {
+    dev: Dev,
+    words: &'a [u32],
 }
 
-fn problem(ty: u32, ncols_dst: usize, nrows: usize, ncols_x: usize, nch: usize, ratio: u32, nsamples: usize, use_ids: bool, seed: u64) -> Problem {
-    let t = refs::traits(ty).unwrap();
-    let mut rng = Rng(seed);
-    let bpr = ncols_x / t.qk;
-    let nchannels_x = nch / ratio as usize;
-    let nsamples_x = nsamples; // sample ratio 1
-    let ystride_col = (ncols_x / 32) as u32;
-    let nch_y = if use_ids { 3 } else { nch };
-    let p = Mmvq {
-        ty,
-        ncols_dst,
-        nwarps: Mmvq::ggml_nwarps(ncols_dst),
-        nrows_x: nrows,
-        ncols_x,
-        nchannels_dst: nch,
-        nsamples_dst: nsamples,
-        channel_ratio: ratio,
-        sample_ratio: 1,
-        nchannels_y: nch_y as u32,
-        use_ids,
-        stride_row_x: bpr as u32,
-        stride_col_y: ystride_col,
-        stride_col_dst: nrows as u32,
-        stride_channel_x: (nrows * bpr) as u32,
-        stride_channel_y: ystride_col * ncols_dst as u32,
-        stride_channel_dst: (nrows * ncols_dst) as u32,
-        stride_sample_x: (nrows * bpr * nchannels_x.max(if use_ids { 4 } else { 1 })) as u32,
-        stride_sample_y: ystride_col * ncols_dst as u32 * nch_y as u32,
-        stride_sample_dst: (nrows * ncols_dst * nch) as u32,
-    };
-    let nx_ch = nchannels_x.max(if use_ids { 4 } else { 1 });
-    let x = refs::random_blocks(ty, nrows * bpr * nx_ch * nsamples_x, &mut rng);
-    let acts: Vec<f32> = (0..ncols_x * ncols_dst * nch_y * nsamples).map(|_| rng.unit() * 3.0).collect();
-    let y = refs::quantize_q8_1(&acts);
-    let ids = (0..nch).map(|i| ((i * 3 + 1) % 4) as i32).collect();
-    Problem { p, x, y, ids }
-}
-
-fn run_native(pr: &Problem, cfg: mmvq::Cfg) -> Vec<f32> {
-    let p = &pr.p;
-    let words = mmvq::build(cfg, true);
-    let mut dev = Dev::default();
-    let xa = dev.put(&pr.x);
-    let ya = dev.put(&pr.y);
-    let ia = if p.use_ids { dev.put(&pr.ids.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()) } else { 0 };
-    let n_dst = p.nsamples_dst * p.stride_sample_dst as usize;
-    let da = dev.alloc(n_dst * 4);
-    let chr = if p.use_ids { [0; 3] } else { refs::fastdiv_values(p.channel_ratio) };
-    let nchy = if p.use_ids { refs::fastdiv_values(p.nchannels_y) } else { [0; 3] };
-    let smr = refs::fastdiv_values(p.sample_ratio);
-    let u = ArgVal::U32;
-    let args = [
-        ArgVal::Ptr(xa),
-        ArgVal::Ptr(ya),
-        ArgVal::Ptr(ia),
-        ArgVal::Ptr(da),
-        u(p.ncols_x as u32),
-        u(nchy[0]),
-        u(nchy[1]),
-        u(nchy[2]),
-        u(p.stride_row_x),
-        u(p.stride_col_y),
-        u(p.stride_col_dst),
-        u(chr[0]),
-        u(chr[1]),
-        u(chr[2]),
-        u(p.stride_channel_x),
-        u(p.stride_channel_y),
-        u(p.stride_channel_dst),
-        u(smr[0]),
-        u(smr[1]),
-        u(smr[2]),
-        u(p.stride_sample_x),
-        u(p.stride_sample_y),
-        u(p.stride_sample_dst),
-    ];
-    let mut q = p.clone();
-    q.nwarps = cfg.nwarps as usize;
-    interp::run(&mut dev, &words, &args, q.grid(), q.block());
-    dev.download(da, n_dst * 4).chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
-}
-
-fn check(pr: &Problem, nwarps: Option<usize>) {
-    let p = &pr.p;
-    let n_dst = p.nsamples_dst * p.stride_sample_dst as usize;
-    let mut want = vec![0f32; n_dst];
-    let mut q = p.clone();
-    if let Some(w) = nwarps {
-        q.nwarps = w;
+impl probe::Device for Sim<'_> {
+    fn alloc(&mut self, bytes: usize) -> Result<u64, String> {
+        Ok(self.dev.alloc(bytes))
     }
-    refs::mmvq(&q, &pr.x, &pr.y, p.use_ids.then_some(&pr.ids[..]), &mut want);
-    let cfg = mmvq::Cfg { ty: p.ty, ncols: p.ncols_dst as u32, nwarps: q.nwarps as u32 };
+    fn upload(&mut self, addr: u64, data: &[u8]) -> Result<(), String> {
+        self.dev.upload(addr, data);
+        Ok(())
+    }
+    fn download(&mut self, addr: u64, len: usize) -> Result<Vec<u8>, String> {
+        Ok(self.dev.download(addr, len))
+    }
+    fn run(&mut self, grid: [u32; 3], block: [u32; 3], args: &[PArg]) -> Result<(), String> {
+        let a: Vec<ArgVal> = args
+            .iter()
+            .map(|a| match *a {
+                PArg::Ptr(p) => ArgVal::Ptr(p),
+                PArg::U32(v) => ArgVal::U32(v),
+                PArg::U64(v) => ArgVal::U64(v),
+            })
+            .collect();
+        interp::run(&mut self.dev, self.words, &a, grid, block);
+        Ok(())
+    }
+}
+
+fn problem(ty: u32, ncols_dst: usize, nrows: usize, ncols_x: usize, nch: usize, ratio: u32, nsamples: usize, use_ids: bool, seed: u64) -> MmvqCase {
+    probe::mmvq_case(ty, ncols_dst, nrows, ncols_x, nch, ratio, nsamples, use_ids, seed)
+}
+
+fn run_native(pr: &MmvqCase, cfg: mmvq::Cfg) -> Vec<f32> {
+    let words = mmvq::build(cfg, true);
+    let mut sim = Sim { dev: Dev::default(), words: &words };
+    pr.run(&mut sim, cfg.nwarps as usize).unwrap()
+}
+
+fn check(pr: &MmvqCase, nwarps: Option<usize>) {
+    let p = &pr.p;
+    let nw = nwarps.unwrap_or(p.nwarps);
+    let want = pr.reference(nw);
+    let cfg = mmvq::Cfg { ty: p.ty, ncols: p.ncols_dst as u32, nwarps: nw as u32 };
     let got = run_native(pr, cfg);
     let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
     let nmse = refs::nmse(&got, &want);
@@ -109,7 +56,7 @@ fn check(pr: &Problem, nwarps: Option<usize>) {
         "type {} ncols {} nwarps {}: {bad}/{} outputs differ bitwise, nmse {nmse}",
         p.ty,
         p.ncols_dst,
-        q.nwarps,
+        nw,
         got.len()
     );
     assert!(want.iter().any(|v| *v != 0.0), "reference all zero");
@@ -142,9 +89,7 @@ fn mmvq_channels_samples_and_ids() {
 #[test]
 fn mmvq_nwarps_override_is_numerically_close() {
     let pr = problem(refs::Q8_0, 1, 4, 1024, 1, 1, 1, false, 5);
-    let n_dst = pr.p.stride_sample_dst as usize;
-    let mut want = vec![0f32; n_dst];
-    refs::mmvq(&pr.p, &pr.x, &pr.y, None, &mut want);
+    let want = pr.reference(4);
     let got = run_native(&pr, mmvq::Cfg { ty: refs::Q8_0, ncols: 1, nwarps: 8 });
     assert!(refs::nmse(&got, &want) < 1e-5);
 }
@@ -190,42 +135,86 @@ fn every_mmvq_variant_validates() {
 
 #[test]
 fn quantize_q8_1_matches_reference() {
-    let (ne00, ne0, ne1, ne2, ne3) = (96usize, 128usize, 3usize, 2usize, 2usize);
-    let mut rng = Rng(42);
-    let total = ne00 * ne1 * ne2 * ne3;
-    let mut x: Vec<f32> = (0..total).map(|_| rng.unit() * 5.0).collect();
-    // exercise an all-zero block and a tiny-magnitude block
-    for v in x.iter_mut().take(32) {
-        *v = 0.0;
-    }
-    for v in x.iter_mut().skip(32).take(32) {
-        *v *= 1e-6;
-    }
-    let mut want = Vec::new();
-    for r in 0..ne1 * ne2 * ne3 {
-        let mut row = x[r * ne00..(r + 1) * ne00].to_vec();
-        row.resize(ne0, 0.0);
-        want.extend(refs::quantize_q8_1(&row));
-    }
+    let case = probe::quantize_case(96, 128, 3, 2, 2, 42);
     let words = quantize::build(true);
     validate(&words);
-    let mut dev = Dev::default();
-    let xa = dev.put(&x.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
-    let ya = dev.alloc(want.len());
-    let fd = refs::fastdiv_values(ne2 as u32);
-    let args = [
-        ArgVal::Ptr(xa),
-        ArgVal::Ptr(ya),
-        ArgVal::U64(ne00 as u64),
-        ArgVal::U64(ne00 as u64),
-        ArgVal::U64((ne00 * ne1) as u64),
-        ArgVal::U64((ne00 * ne1 * ne2) as u64),
-        ArgVal::U64(ne0 as u64),
-        ArgVal::U32(ne1 as u32),
-        ArgVal::U32(fd[0]),
-        ArgVal::U32(fd[1]),
-        ArgVal::U32(fd[2]),
-    ];
-    interp::run(&mut dev, &words, &args, [ne0.div_ceil(256) as u32, ne1 as u32, (ne2 * ne3) as u32], [256, 1, 1]);
-    assert_eq!(dev.download(ya, want.len()), want);
+    let mut sim = Sim { dev: Dev::default(), words: &words };
+    assert_eq!(case.run(&mut sim).unwrap(), case.reference());
 }
+
+#[test]
+fn device_probe_accepts_native_kernels_and_rejects_corrupt_ones() {
+    use super::{Kernel, Plan, Switch, decide};
+    let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0 };
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
+        let p = plan(Kernel::Mmvq { ty, ncols: 3 }, "m");
+        let words = p.build(true).unwrap();
+        let mut sim = Sim { dev: Dev::default(), words: &words };
+        probe::validate(&p, &mut sim).unwrap();
+    }
+    let p = plan(Kernel::QuantizeQ81, "q");
+    let words = p.build(true).unwrap();
+    probe::validate(&p, &mut Sim { dev: Dev::default(), words: &words }).unwrap();
+    // a different kernel's code must fail the check
+    let wrong = plan(Kernel::Mmvq { ty: refs::Q8_0, ncols: 1 }, "m").build(true).unwrap();
+    let p = plan(Kernel::Mmvq { ty: refs::Q4_0, ncols: 1 }, "m");
+    assert!(probe::validate(&p, &mut Sim { dev: Dev::default(), words: &wrong }).is_err());
+    let _ = (decide, Switch::default());
+}
+
+#[test]
+fn demangles_ggml_kernel_names() {
+    use super::{Mangled, TArg, demangle};
+    let m = demangle("_Z13mul_mat_vec_qIL9ggml_type2ELi1EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj").unwrap();
+    assert_eq!(
+        m,
+        Mangled { base: "mul_mat_vec_q".into(), targs: vec![TArg::Enum("ggml_type".into(), 2), TArg::Int(1)] }
+    );
+    let m = demangle("_Z13quantize_q8_1PKfPvxxxxxj5uint3").unwrap();
+    assert_eq!((m.base.as_str(), m.targs.len()), ("quantize_q8_1", 0));
+    let m = demangle("_Z9mul_mat_qIL9ggml_type12ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii").unwrap();
+    assert_eq!(m.targs, vec![TArg::Enum("ggml_type".into(), 12), TArg::Int(8), TArg::Int(1)]);
+    // expression template arguments are not understood
+    assert!(demangle("_Z11k_bin_bcastIXadL_Z6op_addEEEvv").is_none());
+    assert!(demangle("plain_name").is_none());
+}
+
+#[test]
+fn switch_parsing_and_decisions() {
+    use super::{Decision, Switch, decide, layout_hash, mmvq_layout, quantize_layout};
+    assert!(Switch::parse("").is_none());
+    assert!(Switch::parse("none").is_none());
+    assert!(Switch::parse("mmvq,none").is_none());
+    let s = Switch::parse("MMVQ:Q8_0, quantize_q8_1");
+    assert!(s.allows("mmvq", Some("q8_0")) && !s.allows("mmvq", Some("q4_0")) && s.allows("quantize_q8_1", None));
+    assert!(Switch::parse("all").allows("mmvq", Some("q6_k")));
+    let name = "_Z13mul_mat_vec_qIL9ggml_type8ELi4EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj";
+    let layout = mmvq_layout();
+    match decide(name, &layout, &Switch::parse("mmvq")) {
+        Decision::Substitute(p) => assert_eq!(p.kernel, super::Kernel::Mmvq { ty: 8, ncols: 4 }),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(decide(name, &layout, &Switch::parse("mmvq:q4_0")), Decision::NotApplicable);
+    assert_eq!(decide(name, &layout, &Switch::default()), Decision::NotApplicable);
+    // wrong layout -> mismatch, never a substitution
+    let mut bad = layout.clone();
+    bad.pop();
+    assert!(matches!(decide(name, &bad, &Switch::parse("all")), Decision::Mismatch(_)));
+    // unsupported type or too many columns
+    let q5 = "_Z13mul_mat_vec_qIL9ggml_type6ELi1EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj";
+    assert_eq!(decide(q5, &layout, &Switch::parse("all")), Decision::NotApplicable);
+    let q = "_Z13quantize_q8_1PKfPvxxxxxj5uint3";
+    assert!(matches!(decide(q, &quantize_layout(), &Switch::parse("quantize_q8_1")), Decision::Substitute(_)));
+    assert_ne!(layout_hash(&mmvq_layout()), layout_hash(&quantize_layout()));
+}
+
+#[test]
+fn geometry_mapping_rejects_unexpected_launches() {
+    use super::{Kernel, Plan};
+    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0 };
+    assert_eq!(p.map_geometry([10, 1, 1], [32, 4, 1]), Some(([10, 1, 1], [32, 4, 1])));
+    assert_eq!(p.map_geometry([10, 1, 1], [32, 2, 1]), None);
+    let wide = Plan { nwarps: Some(8), ..p };
+    assert_eq!(wide.map_geometry([10, 1, 1], [32, 4, 1]), Some(([10, 1, 1], [32, 8, 1])));
+}
+
