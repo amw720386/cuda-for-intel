@@ -1,0 +1,24 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+.visible .entry prmt_ecl(
+	.param .u64 out
+)
+{
+	.reg .pred %p<8>;
+	.reg .b16 %h<8>;
+	.reg .b32 %r<32>;
+	.reg .b64 %rd<16>;
+	.reg .f32 %f<16>;
+	ld.param.u64 %rd1, [out];
+	cvta.to.global.u64 %rd2, %rd1;
+	mov.u32 %r1, 1;
+	mov.u32 %r2, 1;
+	mov.u32 %r3, 1;
+	mov.u32 %r4, 1;
+	mov.u32 %r31, 1;
+	prmt.b32.ecl %r1, %r2, %r3, %r4;
+	st.global.u32 [%rd2], %r1;
+	ret;
+}

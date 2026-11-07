@@ -1,0 +1,12 @@
+// Derived from ZLUDA (https://github.com/vosen/ZLUDA), ptx/src/test/spirv_run/noreturn.ptx
+// Licensed under MIT OR Apache-2.0. Copyright (c) ZLUDA contributors.
+// See LICENSE-ZLUDA-MIT and LICENSE-ZLUDA-APACHE in this directory.
+.version 6.4
+.target sm_70
+.address_size 64
+
+.visible .entry noreturn(
+) .noreturn
+{
+    trap;
+}

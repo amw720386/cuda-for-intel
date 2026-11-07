@@ -1,0 +1,8 @@
+// Derived from ZLUDA (https://github.com/vosen/ZLUDA), ptx/src/test/spirv_build/global_extern_array.ptx
+// Licensed under MIT OR Apache-2.0. Copyright (c) ZLUDA contributors.
+// See LICENSE-ZLUDA-MIT and LICENSE-ZLUDA-APACHE in this directory.
+.version 6.5
+.target sm_30
+.address_size 64
+
+.extern .global .b32 foobar [1];
