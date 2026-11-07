@@ -967,3 +967,108 @@ fn half2_atomic_add_translates_and_validates() {
     st.global.u32 [%rd15+12], %r2;"#,
     ));
 }
+
+fn run_wmma(a_row: bool, b_row: bool, shared_staging: bool) -> Vec<f32> {
+    let (a_at, b_at) = (
+        |r: usize, c: usize| ((r * 3 + c * 5 + 1) % 7) as f32 - 3.0,
+        |r: usize, c: usize| ((r * 2 + c * 7 + 3) % 5) as f32 - 2.0,
+    );
+    let (al, bl) = (if a_row { "row" } else { "col" }, if b_row { "row" } else { "col" });
+    let regs = "    .reg .b32 %wa<8>;\n    .reg .b32 %wb<8>;\n    .reg .f32 %wc<8>;\n    .reg .f32 %wd<8>;";
+    let list = |p: &str| (0..8).map(|i| format!("%{p}{i}")).collect::<Vec<_>>().join(", ");
+    let zero: String = (0..8).map(|i| format!("    mov.b32 %wc{i}, 0;\n")).collect();
+    let body = if shared_staging {
+        // Copy the inputs through shared memory and load the fragments from there.
+        format!(
+            r#"    add.s64 %rd1, %rd15, 65536;
+    mov.u32 %r1, sbuf;
+    mov.u32 %r2, %tid.x;
+    mov.u32 %r10, 0;
+$copy:
+    mul.wide.u32 %rd3, %r10, 4;
+    add.s64 %rd4, %rd1, %rd3;
+    ld.global.u32 %r11, [%rd4];
+    shl.b32 %r12, %r10, 2;
+    add.u32 %r13, %r1, %r12;
+    st.shared.u32 [%r13], %r11;
+    add.u32 %r10, %r10, 1;
+    setp.lt.u32 %p2, %r10, 256;
+    @%p2 bra $copy;
+    bar.sync 0;
+    add.u32 %r3, %r1, 512;
+    wmma.load.a.sync.aligned.{al}.m16n16k16.shared.f16 {{{a}}}, [%r1], 16;
+    wmma.load.b.sync.aligned.{bl}.m16n16k16.shared.f16 {{{b}}}, [%r3], 16;
+{zero}    wmma.mma.sync.aligned.{al}.{bl}.m16n16k16.f32.f32 {{{d}}}, {{{a}}}, {{{b}}}, {{{c}}};
+    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd15], {{{d}}}, 16;"#,
+            a = list("wa"),
+            b = list("wb"),
+            c = list("wc"),
+            d = list("wd"),
+        )
+    } else {
+        format!(
+            r#"    add.s64 %rd1, %rd15, 65536;
+    add.s64 %rd2, %rd1, 512;
+    wmma.load.a.sync.aligned.{al}.m16n16k16.global.f16 {{{a}}}, [%rd1], 16;
+    wmma.load.b.sync.aligned.{bl}.m16n16k16.global.f16 {{{b}}}, [%rd2], 16;
+{zero}    wmma.mma.sync.aligned.{al}.{bl}.m16n16k16.f32.f32 {{{d}}}, {{{a}}}, {{{b}}}, {{{c}}};
+    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd15], {{{d}}}, 16;"#,
+            a = list("wa"),
+            b = list("wb"),
+            c = list("wc"),
+            d = list("wd"),
+        )
+    };
+    let shared = if shared_staging { ".shared .align 16 .b8 sbuf[1024];" } else { "" };
+    let source = super::coverage_tests::kernel_with_shared(regs, shared, &body);
+    let module = lower(&source);
+    let mut machine = interp::Machine {
+        params: vec![interp::GLOBAL, 0],
+        ..Default::default()
+    };
+    let input = interp::GLOBAL + 0x10000;
+    for r in 0..16 {
+        for c in 0..16 {
+            let a_addr = if a_row { r * 16 + c } else { c * 16 + r };
+            let b_addr = if b_row { r * 16 + c } else { c * 16 + r };
+            machine.write(input + 2 * a_addr as u64, 2, u64::from(f2h(a_at(r, c))));
+            machine.write(input + 512 + 2 * b_addr as u64, 2, u64::from(f2h(b_at(r, c))));
+        }
+    }
+    interp::run_lanes(&module, &mut machine, 32);
+    let mut expected = Vec::new();
+    for r in 0..16 {
+        for c in 0..16 {
+            let want: f32 = (0..16).map(|k| a_at(r, k) * b_at(k, c)).sum();
+            expected.push(want);
+            let got = f32::from_bits(machine.read(interp::GLOBAL + 4 * (r * 16 + c) as u64, 4) as u32);
+            assert_eq!(got, want, "D[{r}][{c}] (a_row={a_row}, b_row={b_row})");
+        }
+    }
+    expected
+}
+
+#[test]
+fn wmma_m16n16k16_f16_is_emulated_on_top_of_mma() {
+    run_wmma(true, false, false);
+    // Layouts that need element-wise 16-bit gathers.
+    run_wmma(false, true, false);
+    run_wmma(true, true, false);
+}
+
+#[test]
+fn wmma_loads_from_shared_memory() {
+    run_wmma(true, false, true);
+}
+
+#[test]
+fn wmma_with_half_accumulators_translates_and_validates() {
+    let regs = "    .reg .b32 %wa<8>;\n    .reg .b32 %wb<8>;\n    .reg .b32 %wc<4>;\n    .reg .b32 %wd<4>;";
+    let body = r#"    add.s64 %rd1, %rd15, 65536;
+    wmma.load.a.sync.aligned.row.m16n16k16.global.f16 {%wa0, %wa1, %wa2, %wa3, %wa4, %wa5, %wa6, %wa7}, [%rd1], 16;
+    wmma.load.b.sync.aligned.col.m16n16k16.global.f16 {%wb0, %wb1, %wb2, %wb3, %wb4, %wb5, %wb6, %wb7}, [%rd1+512], 16;
+    wmma.load.c.sync.aligned.row.m16n16k16.global.f16 {%wc0, %wc1, %wc2, %wc3}, [%rd1+1024], 16;
+    wmma.mma.sync.aligned.row.col.m16n16k16.f16.f16 {%wd0, %wd1, %wd2, %wd3}, {%wa0, %wa1, %wa2, %wa3, %wa4, %wa5, %wa6, %wa7}, {%wb0, %wb1, %wb2, %wb3, %wb4, %wb5, %wb6, %wb7}, {%wc0, %wc1, %wc2, %wc3};
+    wmma.store.d.sync.aligned.row.m16n16k16.global.f16 [%rd15], {%wd0, %wd1, %wd2, %wd3}, 16;"#;
+    lower(&super::coverage_tests::kernel_with_shared(regs, "", body));
+}

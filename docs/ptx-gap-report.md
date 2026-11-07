@@ -93,3 +93,16 @@ Counts are rough instantiation counts for llama.cpp `ggml/src/ggml-cuda` (mmq.cu
 4. f16/bf16/f16x2 register types (rank 6), then atomics (rank 14).
 5. `mma.sync` + `ldmatrix` + `cp.async` as one project (ranks 7, 8, 17); begin with scalar emulation to get correctness, then Intel subgroup-matrix extensions.
 6. f64 (rank 5) gated on device capability.
+
+## 5. Tier-2 update (branch `ptx-tier2`)
+
+Corpus pass count: 94 in the original report, 203 on `integration` (ptx-coverage and audit-leftovers merged) and 438 after the tier-2 work (of 623; the remainder is dominated by texture/surface, Hopper/Blackwell, fp8/fp4, video SIMD instructions, module-scope `.global`/`.const` data, named barriers with partial thread counts and ZLUDA fixtures that use bare register names).
+
+New files (kept apart from the hand-written parser to limit merge conflicts):
+
+- `src/ptx/normalize.rs`: token-level canonicalisation before parsing: `sm_90a`/`sm_100a`/`sm_120` targets and any `.version`, `::` qualifiers (`L2::128B`, `shared::cta`, `cache_hint`), cache and memory-order qualifiers on `ld`/`st` (acquire/release add a fence), float-typed `mov`/`ld`/`st`/`selp`, `barrier.sync`/`bar.sync` with register or named ids (a thread count is accepted only when it equals `.reqntid`/`.maxntid`), legacy `vote`/`shfl`, special registers, `exit`/`trap`/`brkpt` as `ret`, `prefetch`/`discard`/`createpolicy` and cluster/PDL no-ops, `cp.async` as a synchronous copy (zero-fill form supported) with no-op commit/wait, 64-bit vector accesses split into scalars, dynamic `.extern .shared` aliasing, `mad.f32`/`rcp.rn`/`div.full` aliases, and `wmma` m16n16k16 (f16 inputs, f32 or f16 accumulators) lowered onto the `mma.sync.m16n8k16` emulation with its own fragment layout.
+- `src/ptx/inline.rs`: `.func` definitions are inlined at call sites (registers and labels renamed per site, `.param` frames turned into moves, recursion rejected). `__assertfail` and `free` calls are dropped, `vprintf` returns 0.
+- `src/ptx/ext.rs`, `ext_emit.rs`, `ext_float.rs`: new `Instruction::Ext`: brev, bmsk, fns, szext, mul24/mad24, sad, cnot, bfind, clz.b64, mad.hi, mul.hi.u64, bfe/bfi.b64, all `prmt` modes, dp4a/dp2a combinations, shf, slct, `setp` with bool combine, `mov.b64`/`mov.b32` pack/unpack, `%warpid`/`%nwarpid`/`%clock*`, `redux.sync` (add/min/max/and/or/xor), `match.any/all.sync`, `vote.sync.uni`, `elect.sync`, `shfl.sync` with register control, 64-bit atomics (add/min/max/and/or/xor/exch/cas), `atom.inc/dec`, f32/f64 min/max/add atomics and `f16x2`/`bf16x2` add (CAS loops), f64 arithmetic and compares, f16/bf16 scalar and packed arithmetic, saturating and NaN-propagating f32, unordered f32 compares, `testp`, and a generic `cvt` (f64, bf16, packed halves, tf32, directed rounding, saturating integer narrowing).
+- `src/ptx/tier2_tests.rs`: executable tests on the SPIR-V interpreter (extended with float arithmetic, compares, conversions and OpenCL.std math) plus `spirv-val` validation.
+
+Known limits: f16/bf16 `fma` rounds twice (via f32); f64 only supports round-to-nearest; `bar.sync` with a partial thread count, `bar.red`, `bar.arrive`, mbarrier, TMA, tex/surf, wgmma/tcgen05, fp8/fp4 conversions, video SIMD ops and carry-chain `add.cc`/`addc` remain unsupported; `%clock` needs `SPV_KHR_shader_clock` on the device.

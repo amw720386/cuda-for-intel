@@ -388,9 +388,9 @@ handwritten/vote/vote_sync_any.ptx	pass	strict-pass
 handwritten/vote/vote_sync_ballot.ptx	pass	strict-pass	
 handwritten/vote/vote_sync_ballot_member.ptx	pass	strict-pass	
 handwritten/vote/vote_sync_uni.ptx	pass	strict-pass	
-handwritten/wmma/wmma_load_a_m16n16k16_f16.ptx	unsupported	strict-fail	unsupported PTX instruction: wmma.load.a.sync.aligned.row.m16n16k16.global.f16 { %r1 , %r2 , %r3 , %r4 , %r5 , %r6 , %r7 , %r8 } , [ %rd2 ] , 16
-handwritten/wmma/wmma_mma_m16n16k16_f16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 { %f1 , %f2 , %f3 , %f4 , %f5 , %f6 , %f7 , %f8 } , { %r1 , %r2 , %r3 , %r4 , %r5 , %r6 , %r7 , %r8 } , { %r9 , %r10 , %r11 , %r12 , %r13 , %r14 , %r15 , %r16 } , { %f1 , %f2 , %f3 , %f4 , %f5 , %f6 , %f7 , %f8 }
-handwritten/wmma/wmma_store_d_m16n16k16_f32.ptx	unsupported	strict-fail	unsupported PTX instruction: wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [ %rd2 ] , { %f1 , %f2 , %f3 , %f4 , %f5 , %f6 , %f7 , %f8 } , 16
+handwritten/wmma/wmma_load_a_m16n16k16_f16.ptx	pass	strict-pass	
+handwritten/wmma/wmma_mma_m16n16k16_f16_f32.ptx	pass	strict-pass	
+handwritten/wmma/wmma_store_d_m16n16k16_f32.ptx	pass	strict-pass	
 zluda/atomics/atom_add.ptx	pass	strict-fail	
 zluda/atomics/atom_add_float.ptx	pass	strict-fail	
 zluda/atomics/atom_cas.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.cas.b32 %temp1 , [ %in_addr+4 ] , %temp1 , 100

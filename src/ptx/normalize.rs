@@ -54,6 +54,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
             }
         }
         if is_entry_header(&stmt) {
+            ctx.widths.clear();
             ctx.block_threads = block_threads(&stmt);
             let text = fix_entry_header(&stmt);
             out.push(text);
@@ -368,6 +369,10 @@ struct Ctx {
     t32: u32,
     t64: u32,
     tp: u32,
+    /// Declared register widths of the current entry: exact names and range prefixes.
+    widths: Vec<(String, bool, u32)>,
+    /// Number of wmma statements seen, used to give each its own 64-bit address register.
+    wmma_seq: u32,
 }
 
 impl Ctx {
@@ -387,6 +392,42 @@ impl Ctx {
         self.tp = 0;
         decls
     }
+    /// Width in bits (32 or 64) of a declared register, if known.
+    fn width_of(&self, name: &str) -> Option<u32> {
+        if let Some((_, _, width)) = self.widths.iter().find(|(n, range, _)| !range && n == name) {
+            return Some(*width);
+        }
+        let prefix = name.trim_end_matches(|c: char| c.is_ascii_digit());
+        self.widths
+            .iter()
+            .find(|(n, range, _)| *range && n == prefix)
+            .map(|(_, _, width)| *width)
+    }
+
+    fn note_register_declaration(&mut self, stmt: &[String]) {
+        let Some(ty) = stmt.get(1) else { return };
+        let width = match ty.as_str() {
+            ".b64" | ".u64" | ".s64" | ".f64" => 64,
+            ".pred" => return,
+            _ => 32,
+        };
+        let mut i = 2;
+        while i < stmt.len() {
+            let name = &stmt[i];
+            if name == ";" || name == "," {
+                i += 1;
+                continue;
+            }
+            if stmt.get(i + 1).is_some_and(|t| t == "<") {
+                self.widths.push((name.clone(), true, width));
+                i += 4;
+            } else {
+                self.widths.push((name.clone(), false, width));
+                i += 1;
+            }
+        }
+    }
+
     fn need32(&mut self, n: u32) {
         self.t32 = self.t32.max(n);
     }
@@ -521,7 +562,10 @@ fn rewrite(ctx: &mut Ctx, stmt: &[String]) -> Vec<String> {
             return vec![format!(".target sm_{}", if digits.is_empty() { "80" } else { &digits })];
         }
         ".pragma" => return Vec::new(),
-        ".reg" => return vec![rewrite_reg(stmt)],
+        ".reg" => {
+            ctx.note_register_declaration(stmt);
+            return vec![rewrite_reg(stmt)];
+        }
         _ => {}
     }
     let Some(inst) = Inst::parse(stmt) else {
@@ -622,6 +666,7 @@ fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             return Some(vec![render(&inst.guard, "membar.gl", &[])]);
         }
         "bar" | "barrier" => return rewrite_barrier(ctx, inst),
+        "wmma" => return rewrite_wmma(ctx, inst),
         "cp" => return rewrite_cp_async(ctx, inst),
         "vote" => {
             let mut parts: Vec<&str> = op.split('.').collect();
@@ -1063,4 +1108,260 @@ pub(super) fn finish(text: &str) -> Result<String, Error> {
         out.push('\n');
     }
     Ok(out)
+}
+
+// ---- wmma ---------------------------------------------------------------
+//
+// `wmma` fragments are opaque, so they are given the register layout of the
+// existing `mma.sync.m16n8k16` emulation: the A fragment lives in the first four
+// registers, B in the first four, and a 16x16 accumulator is two 16x8 halves.
+// Only the m16n16k16 f16-input shape is supported.
+
+struct WmmaShape {
+    row: bool,
+    space: &'static str,
+    f16: bool,
+}
+
+fn wmma_shape(parts: &[&str]) -> Option<WmmaShape> {
+    if !parts.contains(&"m16n16k16") {
+        return None;
+    }
+    let row = if parts.contains(&"row") {
+        true
+    } else if parts.contains(&"col") {
+        false
+    } else {
+        return None;
+    };
+    let space = if parts.contains(&"shared") || parts.contains(&"shared::cta") { "shared" } else { "global" };
+    let f16 = parts.last() == Some(&"f16");
+    Some(WmmaShape { row, space, f16 })
+}
+
+/// Registers holding `g`, `g+8`, `2t`, `2t+1`, `2t+8`, `2t+9` for the calling lane.
+const G: &str = "%__t32_1";
+const G8: &str = "%__t32_2";
+const C0: &str = "%__t32_3";
+const C1: &str = "%__t32_4";
+const C8: &str = "%__t32_5";
+const C9: &str = "%__t32_6";
+const IDX: &str = "%__t32_7";
+const A32: &str = "%__t32_8";
+const LO: &str = "%__t32_9";
+const HI: &str = "%__t32_10";
+const A64: &str = "%__t64_0";
+
+fn wmma_prologue(ctx: &mut Ctx) -> Vec<String> {
+    ctx.need32(11);
+    ctx.need64(1);
+    vec![
+        format!("mov.u32 {LO} , %laneid ;"),
+        format!("shr.u32 {G} , {LO} , 2 ;"),
+        format!("add.u32 {G8} , {G} , 8 ;"),
+        format!("and.b32 {HI} , {LO} , 3 ;"),
+        format!("shl.b32 {C0} , {HI} , 1 ;"),
+        format!("add.u32 {C1} , {C0} , 1 ;"),
+        format!("add.u32 {C8} , {C0} , 8 ;"),
+        format!("add.u32 {C9} , {C0} , 9 ;"),
+    ]
+}
+
+/// Emits address arithmetic for element (`row`, `col`); returns the register to use.
+fn wmma_address(
+    ctx: &Ctx,
+    sum: &str,
+    lines: &mut Vec<String>,
+    shape: &WmmaShape,
+    base: &str,
+    stride: &str,
+    row: &str,
+    col: &str,
+    elem: u32,
+) -> String {
+    let (base, offset) = match base.split_once('+') {
+        Some((reg, off)) => (reg.trim(), immediate(off).unwrap_or(0)),
+        None => (base, 0),
+    };
+    if shape.row {
+        lines.push(format!("mad.lo.u32 {IDX} , {row} , {stride} , {col} ;"));
+    } else {
+        lines.push(format!("mad.lo.u32 {IDX} , {col} , {stride} , {row} ;"));
+    }
+    if ctx.width_of(base).unwrap_or(64) == 64 {
+        lines.push(format!("mul.wide.u32 {A64} , {IDX} , {elem} ;"));
+        if offset != 0 {
+            lines.push(format!("add.s64 {A64} , {A64} , {offset} ;"));
+        }
+        lines.push(format!("add.s64 {sum} , {base} , {A64} ;"));
+        sum.to_owned()
+    } else {
+        lines.push(format!("mul.lo.u32 {A32} , {IDX} , {elem} ;"));
+        if offset != 0 {
+            lines.push(format!("add.u32 {A32} , {A32} , {offset} ;"));
+        }
+        lines.push(format!("add.u32 {A32} , {base} , {A32} ;"));
+        A32.to_owned()
+    }
+}
+
+fn parse_regs(text: &str) -> Vec<String> {
+    text.trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .split(',')
+        .map(|r| r.trim().to_owned())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+fn rewrite_wmma(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    let shape = wmma_shape(&parts)?;
+    let kind = *parts.get(1)?;
+    let mut lines = wmma_prologue(ctx);
+    ctx.wmma_seq += 1;
+    ctx.need64(1 + ctx.wmma_seq);
+    let sum = format!("%__t64_{}", ctx.wmma_seq);
+    let guard = inst.guard.clone();
+    let space = shape.space;
+    match kind {
+        "load" => {
+            let which = *parts.get(2)?;
+            let regs = parse_regs(inst.operand(0));
+            let base = inst.operand(1).trim().trim_start_matches('[').trim_end_matches(']').trim().to_owned();
+            let stride = inst.operands.get(2).cloned().unwrap_or_else(|| "16".into());
+            match which {
+                "a" | "b" if shape.f16 && regs.len() == 8 => {
+                    // (row, col) element coordinates of the two halves of each register.
+                    let a_coords = [
+                        ((G, C0), (G, C1)),
+                        ((G8, C0), (G8, C1)),
+                        ((G, C8), (G, C9)),
+                        ((G8, C8), (G8, C9)),
+                    ];
+                    // B(k, n): registers hold k pairs for n = g (left half) then n = g+8.
+                    let b_coords = [
+                        ((C0, G), (C1, G)),
+                        ((C8, G), (C9, G)),
+                        ((C0, G8), (C1, G8)),
+                        ((C8, G8), (C9, G8)),
+                    ];
+                    let coords = if which == "a" { a_coords } else { b_coords };
+                    // The pair is contiguous when it varies along the fast memory axis.
+                    let pair_varies_col = which == "a";
+                    let contiguous = pair_varies_col == shape.row;
+                    for (reg, ((r0, c0), (r1, c1))) in regs.iter().zip(coords) {
+                        if contiguous {
+                            let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r0, c0, 2);
+                            lines.push(render(&guard, &format!("ld.{space}.u32"), &[reg.clone(), format!("[ {addr} ]")]));
+                        } else {
+                            let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r0, c0, 2);
+                            lines.push(render(&guard, &format!("ld.{space}.u16"), &[LO.into(), format!("[ {addr} ]")]));
+                            let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r1, c1, 2);
+                            lines.push(render(&guard, &format!("ld.{space}.u16"), &[HI.into(), format!("[ {addr} ]")]));
+                            lines.push(format!("mov.b32 {reg} , {{ {LO} , {HI} }} ;"));
+                        }
+                    }
+                    for reg in &regs[4..] {
+                        lines.push(format!("mov.b32 {reg} , 0 ;"));
+                    }
+                    Some(lines)
+                }
+                "c" => {
+                    let coords = [(G, C0, G, C1), (G8, C0, G8, C1), (G, C8, G, C9), (G8, C8, G8, C9)];
+                    if regs.len() == 8 {
+                        // f32 accumulator: left half regs 0-3, right half regs 4-7.
+                        let order = [(G, C0), (G, C1), (G8, C0), (G8, C1), (G, C8), (G, C9), (G8, C8), (G8, C9)];
+                        for (reg, (r, c)) in regs.iter().zip(order) {
+                            let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r, c, 4);
+                            lines.push(render(&guard, &format!("ld.{space}.u32"), &[reg.clone(), format!("[ {addr} ]")]));
+                        }
+                        Some(lines)
+                    } else if regs.len() == 4 {
+                        // f16 accumulator: register k packs (row, c0) and (row, c1).
+                        let order = [(G, C0, G, C1), (G8, C0, G8, C1), (G, C8, G, C9), (G8, C8, G8, C9)];
+                        let _ = coords;
+                        for (reg, (r0, c0, r1, c1)) in regs.iter().zip(order) {
+                            let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r0, c0, 2);
+                            lines.push(render(&guard, &format!("ld.{space}.u16"), &[LO.into(), format!("[ {addr} ]")]));
+                            let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r1, c1, 2);
+                            lines.push(render(&guard, &format!("ld.{space}.u16"), &[HI.into(), format!("[ {addr} ]")]));
+                            lines.push(format!("mov.b32 {reg} , {{ {LO} , {HI} }} ;"));
+                        }
+                        Some(lines)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        "store" => {
+            let base = inst.operand(0).trim().trim_start_matches('[').trim_end_matches(']').trim().to_owned();
+            let regs = parse_regs(inst.operand(1));
+            let stride = inst.operands.get(2).cloned().unwrap_or_else(|| "16".into());
+            if regs.len() == 8 {
+                let order = [(G, C0), (G, C1), (G8, C0), (G8, C1), (G, C8), (G, C9), (G8, C8), (G8, C9)];
+                for (reg, (r, c)) in regs.iter().zip(order) {
+                    let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r, c, 4);
+                    lines.push(render(&guard, &format!("st.{space}.u32"), &[format!("[ {addr} ]"), reg.clone()]));
+                }
+                Some(lines)
+            } else if regs.len() == 4 {
+                let order = [(G, C0, G, C1), (G8, C0, G8, C1), (G, C8, G, C9), (G8, C8, G8, C9)];
+                for (reg, (r0, c0, r1, c1)) in regs.iter().zip(order) {
+                    let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r0, c0, 2);
+                    lines.push(render(&guard, &format!("st.{space}.u16"), &[format!("[ {addr} ]"), reg.clone()]));
+                    lines.push(format!("shr.u32 {HI} , {reg} , 16 ;"));
+                    let addr = wmma_address(ctx, &sum, &mut lines, &shape, &base, &stride, r1, c1, 2);
+                    lines.push(render(&guard, &format!("st.{space}.u16"), &[format!("[ {addr} ]"), HI.into()]));
+                }
+                Some(lines)
+            } else {
+                None
+            }
+        }
+        "mma" => {
+            // wmma.mma.sync.aligned.ALAYOUT.BLAYOUT.m16n16k16.DTYPE.CTYPE {d}, {a}, {b}, {c}
+            let d = parse_regs(inst.operand(0));
+            let a = parse_regs(inst.operand(1));
+            let b = parse_regs(inst.operand(2));
+            let c = parse_regs(inst.operand(3));
+            if a.len() != 8 || b.len() != 8 || d.len() != c.len() || !matches!(d.len(), 4 | 8) {
+                return None;
+            }
+            let mut out = Vec::new();
+            let wide = d.len() == 8;
+            let c_f16 = !parts.ends_with(&["f32"]) && !wide;
+            let _ = c_f16;
+            ctx.need32(8);
+            for half in 0..2usize {
+                let af = format!("{{ {} , {} , {} , {} }}", a[0], a[1], a[2], a[3]);
+                let bf = format!("{{ {} , {} }}", b[2 * half], b[2 * half + 1]);
+                if wide {
+                    let cf = format!("{{ {} }}", c[4 * half..4 * half + 4].join(" , "));
+                    let df = format!("{{ {} }}", d[4 * half..4 * half + 4].join(" , "));
+                    out.push(format!("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {df} , {af} , {bf} , {cf} ;"));
+                } else {
+                    // f16 accumulators: widen to f32 around the mma.
+                    let t = |k: usize| format!("%__t32_{}", k);
+                    let src = [&c[2 * half], &c[2 * half + 1]];
+                    for (k, reg) in src.iter().enumerate() {
+                        out.push(format!("and.b32 {} , {reg} , 65535 ;", t(2 * k)));
+                        out.push(format!("shr.u32 {} , {reg} , 16 ;", t(2 * k + 1)));
+                        out.push(format!("cvt.f32.f16 {} , {} ;", t(2 * k), t(2 * k)));
+                        out.push(format!("cvt.f32.f16 {} , {} ;", t(2 * k + 1), t(2 * k + 1)));
+                    }
+                    let cf = format!("{{ {} , {} , {} , {} }}", t(0), t(1), t(2), t(3));
+                    let df = format!("{{ {} , {} , {} , {} }}", t(4), t(5), t(6), t(7));
+                    out.push(format!("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {df} , {af} , {bf} , {cf} ;"));
+                    out.push(format!("cvt.rn.f16x2.f32 {} , {} , {} ;", d[2 * half + 1], t(7), t(6)));
+                    out.push(format!("cvt.rn.f16x2.f32 {} , {} , {} ;", d[2 * half], t(5), t(4)));
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
 }
