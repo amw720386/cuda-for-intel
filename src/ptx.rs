@@ -853,13 +853,23 @@ mod tests {
     #[test]
     #[ignore = "reads a PTX dump named by CFI_PTX_FILE"]
     fn time_translation_of_dumped_entry() {
-        let (Some(path), Some(name)) = (
-            std::env::var_os("CFI_PTX_FILE"),
-            std::env::var("CFI_PTX_ENTRY").ok(),
-        ) else {
+        let Some(path) = std::env::var_os("CFI_PTX_FILE") else {
             return;
         };
         let source = std::fs::read_to_string(path).unwrap();
+        let Some(name) = std::env::var("CFI_PTX_ENTRY").ok() else {
+            // No entry named: report which entries translate and the first error of each failure.
+            let mut failures = std::collections::BTreeMap::<String, usize>::new();
+            let names = entry_names(&source).unwrap();
+            for name in &names {
+                if let Err(error) = diagnose_entry(&source, name) {
+                    *failures.entry(error.to_string()).or_default() += 1;
+                    eprintln!("ENTRY_FAIL {name}: {error}");
+                }
+            }
+            eprintln!("entries={} distinct_failures={failures:#?}", names.len());
+            return;
+        };
         let t = std::time::Instant::now();
         let rewritten = parse::rewrite_half_scopes(&source);
         eprintln!("rewrite: {:?}", t.elapsed());
