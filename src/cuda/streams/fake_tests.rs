@@ -41,6 +41,7 @@ impl Fixture {
                 .replace(State {
                     runtime: fake::start(),
                     next_handle: 3,
+                    stream_owners: HashMap::new(),
                     contexts: HashMap::new(),
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),

@@ -93,6 +93,9 @@ struct State {
     runtime: Runtime,
     next_handle: usize,
     contexts: HashMap<usize, CudaContext>,
+    /// Explicit stream handle -> owning context key. Entries can go stale after a
+    /// stream or context is destroyed, so every hit is re-validated.
+    stream_owners: HashMap<usize, usize>,
     incomplete_contexts: Vec<Context>,
     primary: HashMap<c_int, primary::Primary>,
     libraries: library::Libraries,
@@ -239,6 +242,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
                     runtime: rt,
                     next_handle: 3, // CUDA reserves stream values 0, 1 and 2.
                     contexts: HashMap::new(),
+                    stream_owners: HashMap::new(),
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),
@@ -580,6 +584,9 @@ pub unsafe extern "system" fn cuMemAlloc_v2(out: *mut u64, size: usize) -> CuRes
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
     trace::call("cuMemFree_v2", || {
+        if address != 0 {
+            streams::drain_unlocked(None);
+        }
         status(with_context(|runtime, context| {
             if address == 0 {
                 return Ok(());
@@ -625,6 +632,7 @@ pub unsafe extern "system" fn cuMemHostAlloc(
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemFreeHost(host: Opaque) -> CuResult {
     trace::call("cuMemFreeHost", || {
+        streams::drain_unlocked(None);
         status(with_context(|runtime, context| {
             if !context.host_allocations.contains_key(&host.addr()) {
                 return Err(InvalidValue);
@@ -642,6 +650,17 @@ unsafe fn copy_async(
     stream: Opaque,
     to_device: bool,
 ) -> CuResult {
+    // Pageable fallback waits on the stream; do that wait without the lock.
+    if size != 0
+        && !host.is_null()
+        && let Ok(key) = streams::stream_key(stream)
+        && with_context(|_, context| {
+            Ok(!contains_range(&context.host_allocations, host.addr(), size))
+        })
+        .unwrap_or(false)
+    {
+        streams::drain_unlocked(Some(key));
+    }
     status(with_context(|runtime, context| {
         let key = context.streams.launch_key(stream)?;
         if size == 0 {
@@ -709,6 +728,9 @@ pub unsafe extern "system" fn cuMemcpyDtoHAsync_v2(
 }
 
 unsafe fn copy(host: Opaque, device: u64, size: usize, to_device: bool) -> CuResult {
+    if size != 0 {
+        streams::drain_unlocked(Some(0));
+    }
     status(with_context(|runtime, context| {
         if size == 0 {
             return Ok(());
@@ -749,6 +771,9 @@ pub unsafe extern "system" fn cuMemcpyDtoH_v2(dst: Opaque, src: u64, size: usize
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemcpyDtoD_v2(dst: u64, src: u64, size: usize) -> CuResult {
     trace::call("cuMemcpyDtoD_v2", || {
+        if size != 0 {
+            streams::drain_unlocked(Some(0));
+        }
         status(with_context(|runtime, context| {
             if size == 0 {
                 return Ok(());
@@ -936,6 +961,7 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
 #[unsafe(no_mangle)]
 pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
     trace::call("cuModuleUnload", || {
+        streams::drain_unlocked(None);
         status(with_context(|runtime, context| {
             if !context.modules.contains_key(&module.addr())
                 || context.library_modules.values().any(|&key| key == module.addr())

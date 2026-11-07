@@ -2,7 +2,7 @@ use super::CuResult::*;
 use super::graphs::Capture;
 use super::{
     Api, Context, CuResult, Opaque, State, backend_error, context_key, current, reserve_handle,
-    state, status, with_context_handles,
+    state, status,
 };
 use crate::cuda::trace;
 use crate::level_zero::KernelArg;
@@ -30,7 +30,7 @@ mod recovery_tests;
 const LEGACY: usize = 1;
 const PER_THREAD: usize = 2;
 
-fn stream_key(handle: Opaque) -> Result<usize, CuResult> {
+pub(super) fn stream_key(handle: Opaque) -> Result<usize, CuResult> {
     match handle.addr() {
         // CUDA special stream handles:
         //   0 / cudaStreamLegacy (1) → legacy default stream
@@ -370,12 +370,18 @@ impl Streams {
             .collect())
     }
 
-    fn snapshot(&mut self, api: &Api, key: Option<usize>) -> Result<Vec<Completion>, CuResult> {
+    fn snapshot(
+        &mut self,
+        api: &Api,
+        key: Option<usize>,
+        skip_capture: bool,
+    ) -> Result<Vec<Completion>, CuResult> {
         self.selected(key)?
             .into_iter()
             .filter_map(|stream| {
                 if let Some(capture) = &mut stream.capture {
-                    return Some(Err(capture.invalidate()));
+                    // Best-effort pre-drains must not invalidate a capture.
+                    return (!skip_capture).then(|| Err(capture.invalidate()));
                 }
                 match stream.flush(api) {
                     Ok(()) => stream.snapshot().map(Ok),
@@ -649,7 +655,12 @@ impl Streams {
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> CuResult {
     trace::call("cuStreamCreate", || {
-        status(with_context_handles(|runtime, context, next| {
+        status(state(|state| {
+            let owner = current().ok_or(InvalidContext)?;
+            let runtime = &state.runtime;
+            let next = &mut state.next_handle;
+            let context = state.contexts.get_mut(&owner).ok_or(ContextIsDestroyed)?;
+            context.check_live()?;
             if out.is_null() || flags > 1 {
                 return Err(InvalidValue);
             }
@@ -669,6 +680,7 @@ pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> Cu
                 &streams.wake,
             )?;
             streams.live.insert(key, stream);
+            state.stream_owners.insert(key, owner);
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))
@@ -682,12 +694,17 @@ fn stream_owner(state: &State, handle: Opaque) -> Result<(usize, usize), CuResul
     let owner = if key == 0 {
         current().ok_or(InvalidContext)?
     } else {
-        state
-            .contexts
-            .iter()
-            .find(|(_, context)| context.streams.live.contains_key(&key))
-            .map(|(&owner, _)| owner)
-            .ok_or(InvalidHandle)?
+        match state.stream_owners.get(&key) {
+            Some(&owner)
+                if state
+                    .contexts
+                    .get(&owner)
+                    .is_some_and(|context| context.streams.live.contains_key(&key)) =>
+            {
+                owner
+            }
+            _ => return Err(InvalidHandle),
+        }
     };
     Ok((owner, key))
 }
@@ -707,7 +724,7 @@ fn with_stream(
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
     trace::call("cuStreamDestroy_v2", || {
-        status(with_stream(handle, |api, streams, key| {
+        let result = status(with_stream(handle, |api, streams, key| {
             if key == 0 {
                 return Err(InvalidHandle);
             }
@@ -733,12 +750,34 @@ pub extern "system" fn cuStreamDestroy_v2(handle: Opaque) -> CuResult {
             } else {
                 cleanup
             }
-        }))
+        }));
+        // Drop the owner entry once the stream has left its context's live set.
+        if let Ok(key) = stream_key(handle) {
+            let _ = state(|state| {
+                if let Some(&owner) = state.stream_owners.get(&key)
+                    && !state
+                        .contexts
+                        .get(&owner)
+                        .is_some_and(|context| context.streams.live.contains_key(&key))
+                {
+                    state.stream_owners.remove(&key);
+                }
+                Ok(())
+            });
+        }
+        result
     })
 }
 
 fn synchronize(
     target: impl FnOnce(&State) -> Result<(usize, Option<usize>), CuResult>,
+) -> Result<(), CuResult> {
+    synchronize_with(target, false)
+}
+
+fn synchronize_with(
+    target: impl FnOnce(&State) -> Result<(usize, Option<usize>), CuResult>,
+    skip_capture: bool,
 ) -> Result<(), CuResult> {
     let (owner, lists, immediate_wait, fence_wait, health) = state(|state| {
         let (owner, key) = target(state)?;
@@ -747,7 +786,7 @@ fn synchronize(
         context.streams.collect_retired(&state.runtime.api)?;
         Ok((
             owner,
-            context.streams.snapshot(&state.runtime.api, key)?,
+            context.streams.snapshot(&state.runtime.api, key, skip_capture)?,
             state.runtime.api.stream_wait_fn(),
             state.runtime.api.fence_wait_fn(),
             Arc::clone(&context.backend.health),
@@ -784,6 +823,18 @@ fn synchronize(
         context.streams.collect_retired(&state.runtime.api)?;
         Ok(())
     })
+}
+
+/// Wait for the current context's streams (`None` = all, `Some(0)` = blocking
+/// streams, `Some(key)` = one stream) with the runtime lock released, so other
+/// threads are not stalled behind a GPU wait. Best effort and capture-safe:
+/// callers still perform their own in-lock wait afterwards, which is then a
+/// no-op for work this call drained and still covers work enqueued meanwhile.
+pub(super) fn drain_unlocked(key: Option<usize>) {
+    let _ = synchronize_with(
+        |_| Ok((current().ok_or(InvalidContext)?, key)),
+        true,
+    );
 }
 
 pub(super) fn synchronize_context(handle: Opaque) -> CuResult {
