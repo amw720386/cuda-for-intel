@@ -1125,6 +1125,16 @@ pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_v
             .ok_or(ContextIsDestroyed)?
             .check_live()?;
         let source = std::str::from_utf8(&ptx).map_err(|_| InvalidImage)?;
+        if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {
+            // Raw (unprepared) PTX as the application's fatbin carried it.
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            source.hash(&mut hasher);
+            let path = std::path::Path::new(&dir).join(format!("raw_{:016x}.ptx", hasher.finish()));
+            if !path.exists() {
+                let _ = std::fs::write(path, source);
+            }
+        }
         let prepared = ptx::prepare_module(source).map_err(|error| {
             diagnose_reject(source, &error);
             InvalidPtx
