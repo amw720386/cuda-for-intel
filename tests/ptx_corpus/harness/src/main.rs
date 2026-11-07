@@ -71,7 +71,25 @@ fn prefix_regs(src: &str) -> String {
     out
 }
 
+fn probe(path: &str) {
+    std::panic::set_hook(Box::new(|_| {}));
+    let raw = fs::read_to_string(path).unwrap();
+    let prepared = ptx::prepare_module(&raw).unwrap_or_else(|e| { println!("prepare failed: {e}"); std::process::exit(1) });
+    let names = ptx::entry_names(&prepared).map(|n| n.len()).unwrap_or(0);
+    let results = ptx::probe_module(&prepared).unwrap_or_else(|e| { println!("parse failed: {e}"); std::process::exit(1) });
+    let mut by_error: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut ok = 0;
+    for (name, r) in &results { match r { Ok(()) => ok += 1, Err(e) => by_error.entry(e.clone()).or_default().push(name.clone()) } }
+    println!("entries {names}, parsed {}, emitted ok {ok}", results.len());
+    println!("parse-skipped: {}", names.saturating_sub(results.len()));
+    let mut skipped: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (n, e) in ptx::skipped_entries() { skipped.entry(e).or_default().push(n) }
+    for (e, v) in &skipped { println!("SKIP {:5}  {}\n         e.g. {}", v.len(), e, v[0]); }
+    for (e, v) in &by_error { println!("{:5}  {}\n         e.g. {}", v.len(), e, v[0]); }
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--probe") { probe(&std::env::args().nth(2).expect("ptx file")); return; }
     let root = PathBuf::from(std::env::args().nth(1).expect("corpus dir"));
     let mut files = Vec::new();
     walk(&root, &mut files);

@@ -74,6 +74,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
         }
         if is_entry_header(&stmt) {
             ctx.widths.clear();
+            ctx.param_alias.clear();
             tier3::begin_entry(&mut ctx.t3, entry_locals.next().unwrap_or_default(), dynamic.as_ref().map(|(name, _)| name.as_str()));
             ctx.block_threads = block_threads(&stmt);
             let text = fix_entry_header(&stmt);
@@ -397,6 +398,8 @@ struct Ctx {
     widths: Vec<(String, bool, u32)>,
     /// Number of wmma statements seen, used to give each its own 64-bit address register.
     wmma_seq: u32,
+    /// Registers holding the address of a kernel parameter (`mov.b64 %rd, name_param_N`).
+    param_alias: std::collections::HashMap<String, String>,
     t3: tier3::State,
 }
 
@@ -641,6 +644,9 @@ fn bit_type(part: &str) -> &str {
 }
 
 fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    if let Some(lines) = param_and_byte_vectors(ctx, inst) {
+        return Some(lines);
+    }
     if let Some(lines) = tier3::rewrite(ctx, inst) {
         return Some(lines);
     }
@@ -1400,5 +1406,127 @@ fn rewrite_wmma(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             Some(out)
         }
         _ => None,
+    }
+}
+
+// ---- parameter addresses, sub-word parameter loads, byte vectors -------------
+
+/// ATen lambdas are passed by value as `.b8` aggregates and read through the
+/// parameter's address (`mov.b64 %rd, k_param_1` then `ld.param.v2.u32 [%rd+8]`),
+/// with sub-word fields loaded as `ld.param.u8`. Resolve the address aliases to
+/// symbolic parameter operands and lower sub-word loads to word loads, and split
+/// `ld/st.global.v2/v4.u8` into scalar byte accesses.
+fn param_and_byte_vectors(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let op = inst.op.as_str();
+    // Alias tracking.
+    if matches!(op, "mov.b64" | "mov.u64") && inst.operands.len() == 2 && inst.guard.is_empty() {
+        let (dst, src) = (inst.operand(0).trim(), inst.operand(1).trim());
+        if dst.starts_with('%') && !src.starts_with('%') && src.contains("_param_") {
+            ctx.param_alias.insert(dst.to_owned(), src.to_owned());
+            return Some(Vec::new());
+        }
+        if dst.starts_with('%') {
+            if let Some(name) = ctx.param_alias.get(src).cloned() {
+                ctx.param_alias.insert(dst.to_owned(), name);
+                return Some(Vec::new());
+            }
+            ctx.param_alias.remove(dst);
+        }
+    }
+    if op.starts_with("cvta.param") && inst.operands.len() == 2 {
+        if let Some(name) = ctx.param_alias.get(inst.operand(1).trim()).cloned() {
+            ctx.param_alias.insert(inst.operand(0).trim().to_owned(), name);
+            return Some(Vec::new());
+        }
+    }
+    // ld.param through an aliased register, or a sub-word load.
+    if op.starts_with("ld.param.") {
+        let parts: Vec<&str> = op.split('.').collect();
+        let ty = *parts.last()?;
+        let (name, offset) = param_operand(ctx, inst.operand(inst.operands.len() - 1))?;
+        let aliased = !inst.operand(inst.operands.len() - 1).replace(' ', "").starts_with(&format!("[{name}"));
+        let vector = parts.iter().any(|p| matches!(*p, "v2" | "v4"));
+        if !vector && matches!(ty, "u8" | "u16" | "b8" | "b16") {
+            let (bits, mask) = if matches!(ty, "u8" | "b8") { (8, 255) } else { (16, 65535) };
+            let word = offset & !3;
+            let shift = (offset & 3) * 8;
+            let (dst,) = (inst.operand(0).trim(),);
+            ctx.need32(1);
+            let mut lines = vec![render(&inst.guard, "ld.param.u32", &["%__t32_0".to_owned(), format!("[{name}+{word}]")])];
+            let _ = bits;
+            if shift != 0 {
+                lines.push(render(&inst.guard, "shr.u32", &["%__t32_0".into(), "%__t32_0".into(), shift.to_string()]));
+            }
+            lines.push(render(&inst.guard, "and.b32", &["%__t32_0".into(), "%__t32_0".into(), mask.to_string()]));
+            lines.push(render(&inst.guard, "cvt.u16.u32", &[dst.to_owned(), "%__t32_0".into()]));
+            return Some(lines);
+        }
+        if aliased {
+            let mut operands = inst.operands.clone();
+            let last = operands.len() - 1;
+            operands[last] = format!("[{name}+{offset}]");
+            let copy = Inst { guard: inst.guard.clone(), op: inst.op.clone(), operands };
+            return Some(rewrite_inst(ctx, &copy).unwrap_or_else(|| vec![copy.render()]));
+        }
+    }
+    // Byte vectors in global memory.
+    if (op.starts_with("ld.global.v2.u8") || op.starts_with("ld.global.v4.u8") || op.starts_with("ld.global.nc.v2.u8") || op.starts_with("ld.global.nc.v4.u8"))
+        && inst.operands.len() == 2
+    {
+        let regs = reg_list(inst.operand(0));
+        let (base, off) = address_parts(inst.operand(1))?;
+        let nc = op.contains(".nc");
+        return Some(
+            regs.iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    render(&inst.guard, if nc { "ld.global.nc.u8" } else { "ld.global.u8" }, &[r.clone(), format!("[{base}+{}]", off + i as i64)])
+                })
+                .collect(),
+        );
+    }
+    if (op.starts_with("st.global.v2.u8") || op.starts_with("st.global.v4.u8")) && inst.operands.len() == 2 {
+        let regs = reg_list(inst.operand(1));
+        let (base, off) = address_parts(inst.operand(0))?;
+        return Some(
+            regs.iter()
+                .enumerate()
+                .map(|(i, r)| render(&inst.guard, "st.global.u8", &[format!("[{base}+{}]", off + i as i64), r.clone()]))
+                .collect(),
+        );
+    }
+    None
+}
+
+fn reg_list(operand: &str) -> Vec<String> {
+    operand
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .split(',')
+        .map(|r| r.trim().to_owned())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+/// `[%rd5+16]` / `[%rd5]` -> ("%rd5", 16)
+fn address_parts(operand: &str) -> Option<(String, i64)> {
+    let inner = operand.trim().strip_prefix('[')?.strip_suffix(']')?.replace(' ', "");
+    match inner.find(['+', '-']) {
+        Some(at) => Some((inner[..at].to_owned(), inner[at..].replace('+', "").parse().ok()?)),
+        None => Some((inner, 0)),
+    }
+}
+
+/// Parameter symbol and byte offset named by a `[...]` operand, directly or via an alias register.
+fn param_operand(ctx: &Ctx, operand: &str) -> Option<(String, i64)> {
+    let (base, offset) = address_parts(operand)?;
+    if base.starts_with('%') {
+        let name = ctx.param_alias.get(&base)?.clone();
+        Some((name, offset))
+    } else if base.contains("_param_") {
+        Some((base, offset))
+    } else {
+        None
     }
 }

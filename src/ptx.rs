@@ -832,6 +832,30 @@ pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Tra
     spirv::emit(vec![entry])
 }
 
+#[allow(dead_code)]
+pub(crate) fn skipped_entries() -> Vec<(String, String)> {
+    parse::SKIPPED.with(|s| s.borrow().clone())
+}
+
+/// Translate every supported entry of a prepared module on its own and report
+/// the outcome per kernel (bring-up tooling for large ATen modules).
+#[allow(dead_code)]
+pub(crate) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), String>)>, Error> {
+    let mut out = Vec::new();
+    for mut entry in parse::parse(prepared)? {
+        let name = entry.name.to_string();
+        let body = format!("{:?}", entry.blocks);
+        entry
+            .globals
+            .retain(|data| body.contains(&format!("{:?}", data.name)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spirv::emit(vec![entry])))
+            .map_err(|_| "panic".to_string())
+            .and_then(|r| r.map(|_| ()).map_err(|e| e.to_string()));
+        out.push((name, result));
+    }
+    Ok(out)
+}
+
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
     let rewritten = prepare(source)?;
     spirv::emit(vec![parse::parse_named(&rewritten, name)?]).map(|_| ())

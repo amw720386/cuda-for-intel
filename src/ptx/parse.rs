@@ -96,7 +96,7 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<u16>()
                     .ok()
-                    .filter(|n| matches!(n, 4 | 8 | 16))
+                    .filter(|n| matches!(n, 1 | 2 | 4 | 8 | 16))
                     .ok_or_else(|| Error::new("unsupported PTX parameter alignment"))?;
                 self.expect(".b8")?;
                 let name = self.identifier()?;
@@ -105,16 +105,17 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<u16>()
                     .ok()
-                    .filter(|n| {
-                        (4..=4096).contains(n) && n.is_multiple_of(4) && n.is_multiple_of(align)
-                    })
+                    .filter(|n| (1..=4096).contains(n) && n.is_multiple_of(align))
                     .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
                 self.expect("]")?;
+                // Small or byte-aligned aggregates (empty lambdas, bool functors) are
+                // widened to whole words; the launch reads at most three bytes of
+                // padding from the caller's argument.
                 return Ok((
                     name,
                     Param::Words {
-                        words: bytes / 4,
-                        align,
+                        words: bytes.div_ceil(4),
+                        align: align.max(4),
                     },
                 ));
             }
@@ -2049,7 +2050,13 @@ fn rename_identifiers(text: &str, renames: &[(String, String, bool)]) -> String 
     out
 }
 
+thread_local! {
+    /// Entries skipped by the last `parse` on this thread: (name, reason).
+    pub(in crate::ptx) static SKIPPED: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
+    SKIPPED.with(|s| s.borrow_mut().clear());
     let mut parser = Parser {
         tokens: tokens(source)?.into_iter(),
         globals: Vec::new(),
@@ -2098,7 +2105,8 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
                 // Consume optional `.visible` then `.entry name … { … }`.
                 parser.eat(".visible");
                 if parser.eat(".entry") {
-                    let _ = parser.identifier();
+                    let skipped_name = parser.identifier().unwrap_or("?").to_string();
+                    SKIPPED.with(|s| s.borrow_mut().push((skipped_name, error.to_string())));
                     skip_failed_entry(&mut parser)?;
                 } else {
                     return Err(error);
