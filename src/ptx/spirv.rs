@@ -98,6 +98,8 @@ struct Emitter<'a> {
     initialized: HashSet<&'a str>,
     /// Registers assigned somewhere in the entry; others read as zero (undefined in PTX).
     ever_defined: HashSet<&'a str>,
+    /// Registers with a single definition, `mov.u32 %r, <immediate>`: their value is known.
+    const_regs: HashMap<&'a str, u32>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
     device_atomics: bool,
@@ -178,6 +180,7 @@ impl<'a> Emitter<'a> {
             registers: HashMap::new(),
             initialized: HashSet::new(),
             ever_defined: HashSet::new(),
+            const_regs: HashMap::new(),
             locals: Vec::new(),
             params: HashMap::new(),
             device_atomics: false,
@@ -298,6 +301,11 @@ impl<'a> Emitter<'a> {
             // PTX often writes all-ones as `-1`.
             operand.parse::<i32>().ok().map(|n| n as u32)
         }
+    }
+
+    /// Value of an immediate or of a register whose only definition is `mov.u32 %r, imm`.
+    fn known_u32(&self, operand: &str) -> Option<u32> {
+        Self::parse_u32(operand).or_else(|| self.const_regs.get(operand).copied())
     }
 
     fn parse_u64(operand: &str) -> Option<u64> {
@@ -3150,12 +3158,28 @@ impl<'a> Emitter<'a> {
             self.params.insert((name, 0), Value { id, kind });
         }
         self.ever_defined.clear();
+        self.const_regs.clear();
         let mut scratch = Vec::new();
+        let mut definitions: HashMap<&str, u32> = HashMap::new();
+        let mut constants: HashMap<&str, u32> = HashMap::new();
         for block in &entry.blocks {
             for inst in &block.instructions {
                 if inst.collect_definitions(&mut scratch).is_some() {
                     self.ever_defined.extend(scratch.iter().copied());
+                    for name in scratch.iter() {
+                        *definitions.entry(*name).or_default() += 1;
+                    }
                 }
+                if let Instruction::Move32(dst, src) = inst
+                    && let Some(value) = Self::parse_u32(src)
+                {
+                    constants.insert(*dst, value);
+                }
+            }
+        }
+        for (name, value) in constants {
+            if definitions.get(name) == Some(&1) {
+                self.const_regs.insert(name, value);
             }
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
