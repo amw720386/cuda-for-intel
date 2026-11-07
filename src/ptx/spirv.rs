@@ -56,6 +56,9 @@ impl Value {
     }
 }
 
+#[path = "ext_emit.rs"]
+mod ext_emit;
+
 struct Emitter<'a> {
     builder: Builder,
     bool_type: Word,
@@ -1599,6 +1602,10 @@ impl<'a> Emitter<'a> {
                 self.emit_vote(mode, dst, src)?;
                 return Ok(());
             }
+            Instruction::Ext { op, dst, src } => {
+                self.emit_ext(op, dst, src)?;
+                return Ok(());
+            }
             Instruction::Fence => {
                 let ty = self.u32_type;
                 let scope = self.builder.constant_bit32(ty, Scope::Device as u32);
@@ -2758,7 +2765,7 @@ impl<'a> Emitter<'a> {
                         | Instruction::LaneId(..)
                         | Instruction::Shuffle { .. }
                         | Instruction::Vote { .. }
-                )
+                ) || matches!(inst, Instruction::Ext { op, .. } if op.uses_subgroup())
             })
         });
         if self.warp_ops {

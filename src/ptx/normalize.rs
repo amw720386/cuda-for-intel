@@ -520,15 +520,30 @@ fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         "bar" | "barrier" => return rewrite_barrier(ctx, inst),
         "cp" => return rewrite_cp_async(ctx, inst),
         "vote" => {
-            let parts: Vec<&str> = op.split('.').collect();
-            if parts.get(1) != Some(&"sync") && inst.operands.len() == 2 {
-                let mut parts = parts.clone();
+            let mut parts: Vec<&str> = op.split('.').collect();
+            let mut operands = inst.operands.clone();
+            let mut changed = false;
+            if parts.get(1) != Some(&"sync") && operands.len() == 2 {
                 parts.insert(1, "sync");
-                let mut operands = inst.operands.clone();
                 operands.push("0xffffffff".into());
-                return Some(vec![render(&inst.guard, &parts.join("."), &operands)]);
+                changed = true;
             }
-            return None;
+            // A negated predicate source (`!%p`) needs its own register.
+            let mut lines = Vec::new();
+            if let Some(source) = operands.get(1).cloned() {
+                if let Some(name) = source.strip_prefix('!') {
+                    let name = name.trim().to_owned();
+                    ctx.needp(3);
+                    lines.push(format!("not.pred %__tp_2 , {name} ;"));
+                    operands[1] = "%__tp_2".into();
+                    changed = true;
+                }
+            }
+            if !changed {
+                return None;
+            }
+            lines.push(render(&inst.guard, &parts.join("."), &operands));
+            return Some(lines);
         }
         "shfl" => {
             let parts: Vec<&str> = op.split('.').collect();

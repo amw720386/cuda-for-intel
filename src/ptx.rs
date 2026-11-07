@@ -509,6 +509,13 @@ enum Instruction<'a> {
         membermask: &'a str,
     },
     Barrier,
+    /// Instructions parsed and lowered by `ext.rs` / `ext_emit.rs`. Unused
+    /// sources are `"0"`, unused destinations are `""`.
+    Ext {
+        op: ext::ExtOp,
+        dst: [&'a str; 2],
+        src: [&'a str; 4],
+    },
 }
 
 impl<'a> Instruction<'a> {
@@ -661,6 +668,10 @@ impl<'a> Instruction<'a> {
                 }
                 src
             }
+            Ext { dst, src, .. } => {
+                out.extend(dst.iter().copied().filter(|d| !d.is_empty()));
+                src
+            }
             Store32(..)
             | Store8(..)
             | Store16(..)
@@ -688,6 +699,10 @@ impl<'a> Instruction<'a> {
                 | Self::LoadVecU16 { .. }
                 | Self::AtomicAdd32(..)
                 | Self::Atomic { .. }
+                | Self::Ext {
+                    op: ext::ExtOp::Atom { .. } | ext::ExtOp::AtomIncDec { .. },
+                    ..
+                }
         )
     }
 
@@ -1223,9 +1238,10 @@ mod tests {
                 .to_string()
                 .contains("membermask")
         );
+        // A register clamp/segment operand is lowered with run-time arithmetic.
         assert!(
             translate(&SHFL.replace("shfl.sync.bfly.b32", "shfl.sync.up.b32"))
-                .is_err()
+                .is_ok()
         );
     }
 
