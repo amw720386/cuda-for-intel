@@ -288,7 +288,7 @@ fn compiled_ptx_vector_add() {
     };
     assert_eq!(launch(kernel, 1, 0, args.as_mut_ptr()), 1);
     assert_eq!(launch(kernel, 1, 32, null_mut()), 1);
-    let mut bad_pointer = 0u64;
+    let mut bad_pointer = 0xdead_0000u64; // unknown non-null address
     let mut invalid_args = args;
     invalid_args[0] = (&mut bad_pointer as *mut u64).cast();
     assert_eq!(launch(kernel, 1, 32, invalid_args.as_mut_ptr()), 1);
@@ -654,7 +654,7 @@ fn compiled_ptx_rmsnorm() {
         ];
         assert_eq!(launch(129, args.as_mut_ptr()), 1);
         assert_eq!(launch(32, null_mut()), 1);
-        let mut null_pointer = 0u64;
+        let mut null_pointer = 0xdead_0000u64; // unknown non-null address
         let mut bad_args = args;
         bad_args[2] = (&mut null_pointer as *mut u64).cast();
         assert_eq!(launch(32, bad_args.as_mut_ptr()), 1);
