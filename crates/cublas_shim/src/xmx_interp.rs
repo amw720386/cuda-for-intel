@@ -633,8 +633,23 @@ mod tests {
         }
     }
 
-    /// Returns the Cfg actually used (for coverage assertions).
-    fn check(c: Case, seed: u64) -> Cfg {
+    /// Inputs, options and the CPU-reference result of one case.
+    struct Prep {
+        c: Case,
+        d: GemmDesc,
+        opts: crate::ptxgen::Opts,
+        abytes: Vec<u8>,
+        bbytes: Vec<u8>,
+        cbytes: Vec<u8>,
+        bias_bytes: Vec<u8>,
+        want: Vec<u8>,
+        ea: usize,
+        eb: usize,
+        ec: usize,
+        ldc: usize,
+    }
+
+    fn prepare(c: Case, seed: u64) -> Prep {
         let mut rng = Rng(seed | 1);
         let in_dt = if c.input == Input::F16 { DType::F16 } else { DType::Bf16 };
         let out_dt = dt_of(c.out);
@@ -709,10 +724,6 @@ mod tests {
                 }
             }
         }
-        // Device memory.
-        let mut mem = Mem::new();
-        let (da, db, dc) = (mem.alloc(&abytes), mem.alloc(&bbytes), mem.alloc(&cbytes));
-        let dbias = if c.bias.is_some() { mem.alloc(&bias_bytes) } else { 0 };
         let opts = crate::ptxgen::Opts {
             epilogue: match (c.act, c.bias.is_some()) {
                 (Act::None, false) => crate::ptxgen::Epilogue::None,
@@ -729,36 +740,22 @@ mod tests {
             },
             acc16: false,
         };
-        let (sa, sb, sc) = (ea as i64, eb as i64, ec as i64);
-        let call = Call { d, pointer_arrays: c.ptrs, beta: c.beta, opts, a: da, b: db, sa, sb };
-        let cfg = xmx_host::qualify(&call, Mode::Force, c.tile, c.flags).expect("shape qualifies");
-        let words = xmx::build(&cfg).unwrap();
-        let (gx, gy) = xmx_host::grid(&d, &cfg);
-        let args = if c.ptrs {
-            let tab = |mem: &mut Mem, base: u64, per: u64| -> u64 {
-                let b: Vec<u8> = (0..c.batch as u64).flat_map(|z| (base + z * per).to_le_bytes()).collect();
-                mem.alloc(&b)
-            };
-            let ta = tab(&mut mem, da, 0); // broadcast A
-            let tb = tab(&mut mem, db, (eb * in_dt.size()) as u64);
-            let tc = tab(&mut mem, dc, (ec * out_dt.size()) as u64);
-            xmx_host::kernel_args(&d, ta, tb, tc, c.alpha, c.beta, (0, 0, 0), dbias)
-        } else {
-            xmx_host::kernel_args(&d, da, db, dc, c.alpha, c.beta, (sa as u64, sb as u64, sc as u64), dbias)
-        };
-        run(&words, &args, (gx, gy, c.batch as u32), &mut mem);
-        let got = mem.read(dc, cbytes.len());
-        // Padding rows (i >= m) must be untouched; valid entries within rounding tolerance.
+        Prep { c, d, opts, abytes, bbytes, cbytes, bias_bytes, want, ea, eb, ec, ldc }
+    }
+
+    /// Padding rows of C must be untouched; valid entries within rounding tolerance.
+    fn verify(p: &Prep, got: &[u8]) {
+        let (c, out_dt) = (p.c, p.d.c);
         for z in 0..c.batch {
             for j in 0..c.n {
-                for i in 0..ldc {
-                    let ci = z * ec + i + j * ldc;
+                for i in 0..p.ldc {
+                    let ci = z * p.ec + i + j * p.ldc;
                     let sz = out_dt.size();
                     if i >= c.m {
-                        assert_eq!(&got[ci * sz..(ci + 1) * sz], &cbytes[ci * sz..(ci + 1) * sz], "padding clobbered {c:?} z={z} i={i} j={j}");
+                        assert_eq!(&got[ci * sz..(ci + 1) * sz], &p.cbytes[ci * sz..(ci + 1) * sz], "padding clobbered {c:?} z={z} i={i} j={j}");
                         continue;
                     }
-                    let (g, w) = (decode(out_dt, got, ci), decode(out_dt, &want, ci));
+                    let (g, w) = (decode(out_dt, got, ci), decode(out_dt, &p.want, ci));
                     let tol = match out_dt {
                         DType::F32 => 2e-4 * (1.0 + w.abs()),
                         DType::F16 => 2e-3 * w.abs() + 2e-3,
@@ -768,7 +765,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Returns the Cfg actually used (for coverage assertions).
+    fn check(c: Case, seed: u64) -> Cfg {
+        let p = prepare(c, seed);
+        let (d, in_dt, out_dt) = (p.d, p.d.a, p.d.c);
+        let mut mem = Mem::new();
+        let (da, db, dc) = (mem.alloc(&p.abytes), mem.alloc(&p.bbytes), mem.alloc(&p.cbytes));
+        let dbias = if c.bias.is_some() { mem.alloc(&p.bias_bytes) } else { 0 };
+        let (sa, sb, sc) = (p.ea as i64, p.eb as i64, p.ec as i64);
+        let call = Call { d, pointer_arrays: c.ptrs, beta: c.beta, opts: p.opts, a: da, b: db, sa, sb };
+        let cfg = xmx_host::qualify(&call, Mode::Force, c.tile, c.flags).expect("shape qualifies");
+        let words = xmx::build(&cfg).unwrap();
+        let (gx, gy) = xmx_host::grid(&d, &cfg);
+        let args = if c.ptrs {
+            let tab = |mem: &mut Mem, base: u64, per: u64| -> u64 {
+                let b: Vec<u8> = (0..c.batch as u64).flat_map(|z| (base + z * per).to_le_bytes()).collect();
+                mem.alloc(&b)
+            };
+            let ta = tab(&mut mem, da, 0); // broadcast A
+            let tb = tab(&mut mem, db, (p.eb * in_dt.size()) as u64);
+            let tc = tab(&mut mem, dc, (p.ec * out_dt.size()) as u64);
+            xmx_host::kernel_args(&d, ta, tb, tc, c.alpha, c.beta, (0, 0, 0), dbias)
+        } else {
+            xmx_host::kernel_args(&d, da, db, dc, c.alpha, c.beta, (sa as u64, sb as u64, sc as u64), dbias)
+        };
+        run(&words, &args, (gx, gy, c.batch as u32), &mut mem);
+        verify(&p, mem.read(dc, p.cbytes.len()));
         cfg
+    }
+
+    /// Hardware: the same oracle, but the GEMM runs through `run_gemm_ex` on the GPU
+    /// (so the probe, kernel cache, launcher and every epilogue are exercised).
+    /// Run with `cargo test -p cublas_shim -- --ignored gpu_xmx`.
+    #[test]
+    #[ignore = "requires nvcuda with an Intel GPU (Xe2/Xe3) and a current CUDA context"]
+    fn gpu_xmx_epilogues_and_edges_match_cpu_reference() {
+        use crate::{Handle, driver, run_gemm_ex};
+        use std::ffi::c_void;
+        unsafe { std::env::set_var("CFI_XMX", "2") };
+        let drv = driver().expect("driver");
+        let lib = &drv._lib;
+        type Init = unsafe extern "system" fn(u32) -> i32;
+        type Create = unsafe extern "system" fn(*mut *mut c_void, u32, i32) -> i32;
+        type Alloc = unsafe extern "system" fn(*mut u64, usize) -> i32;
+        type HtoD = unsafe extern "system" fn(u64, *const c_void, usize) -> i32;
+        type DtoH = unsafe extern "system" fn(*mut c_void, u64, usize) -> i32;
+        unsafe {
+            let init: libloading::Symbol<Init> = lib.get(b"cuInit\0").unwrap();
+            let create: libloading::Symbol<Create> = lib.get(b"cuCtxCreate_v2\0").unwrap();
+            let alloc: libloading::Symbol<Alloc> = lib.get(b"cuMemAlloc_v2\0").unwrap();
+            let htod: libloading::Symbol<HtoD> = lib.get(b"cuMemcpyHtoD_v2\0").unwrap();
+            let dtoh: libloading::Symbol<DtoH> = lib.get(b"cuMemcpyDtoH_v2\0").unwrap();
+            assert_eq!(init(0), 0);
+            let mut ctx = std::ptr::null_mut();
+            assert_eq!(create(&mut ctx, 0, 0), 0);
+            let up = |b: &[u8]| -> u64 {
+                let mut p = 0u64;
+                assert_eq!(alloc(&mut p, b.len().max(8)), 0);
+                assert_eq!(htod(p, b.as_ptr().cast(), b.len()), 0);
+                p
+            };
+            let mut h = Handle {
+                stream: std::ptr::null_mut(),
+                math_mode: 0,
+                pointer_mode: POINTER_MODE_HOST,
+                workspace: (0, 0),
+            };
+            let mut seed = 31;
+            let mut n_cases = 0;
+            let before = crate::xmx_host::cfiXmxLaunchCount();
+            for input in [Input::F16, Input::Bf16] {
+                for out in [Ty::F32, if input == Input::F16 { Ty::F16 } else { Ty::Bf16 }] {
+                    for act in [Act::None, Act::Relu, Act::Gelu] {
+                        for bias in [None, Some(Ty::F32), Some(Ty::F16), Some(Ty::Bf16)] {
+                            for (ta, tb, m, n, k, beta) in [(true, false, 37usize, 19usize, 45usize, 0.0f32), (false, true, 64, 64, 64, 0.5), (true, true, 17, 33, 20, 0.0)] {
+                                seed += 1;
+                                let c = Case { m, n, k, ta, tb, input, out, batch: 2, ptrs: false, alpha: 1.0, beta, bias, act, tile: (2, 4), pad: 1, flags: Flags::Packed };
+                                let pr = prepare(c, seed);
+                                let (da, db, dc) = (up(&pr.abytes), up(&pr.bbytes), up(&pr.cbytes));
+                                let dbias = if bias.is_some() { up(&pr.bias_bytes) } else { 0 };
+                                let (alpha, beta) = (c.alpha, c.beta);
+                                let batching = crate::Batching::Strided { a: da, b: db, c: dc, sa: pr.ea as i64, sb: pr.eb as i64, sc: pr.ec as i64 };
+                                let st = run_gemm_ex(&mut h, &pr.d, std::ptr::from_ref(&alpha).cast(), std::ptr::from_ref(&beta).cast(), 2, batching, &pr.opts, dbias);
+                                assert_eq!(st, 0, "{c:?}");
+                                let mut got = vec![0u8; pr.cbytes.len()];
+                                assert_eq!(dtoh(got.as_mut_ptr().cast(), dc, got.len()), 0);
+                                verify(&pr, &got);
+                                n_cases += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let launched = crate::xmx_host::cfiXmxLaunchCount() - before;
+            println!("gpu_xmx: {n_cases} cases, {launched} XMX launches, probe status {:#06b}", crate::xmx_host::cfiXmxProbeStatus());
+            assert!(launched >= n_cases, "XMX path was not taken for every case");
+        }
     }
 
     fn base() -> Case {

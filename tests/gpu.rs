@@ -89,6 +89,8 @@ mod hw_tier2;
 mod hw_ggml_stock;
 #[path = "gpu/hw_cublas_batched.rs"]
 mod hw_cublas_batched;
+#[path = "gpu/hw_xmx_gemm.rs"]
+mod hw_xmx_gemm;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

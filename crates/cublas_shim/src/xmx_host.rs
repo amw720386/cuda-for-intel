@@ -360,11 +360,33 @@ fn selftest(drv: &Driver, input: Input, flags: Flags) -> bool {
     }
 }
 
+static F16: OnceLock<Option<Flags>> = OnceLock::new();
+static BF16: OnceLock<Option<Flags>> = OnceLock::new();
+static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Diagnostics for the hardware test: number of XMX kernel launches so far.
+#[unsafe(no_mangle)]
+pub extern "system" fn cfiXmxLaunchCount() -> u64 {
+    LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Diagnostics: probe outcome, 2 bits per input type (bits 0-1 f16, 2-3 bf16):
+/// 0 not probed, 1 probe passed with the packed operand flags, 2 passed with no
+/// flags, 3 probe failed (XMX unusable, calls fall back to the PTX kernels).
+#[unsafe(no_mangle)]
+pub extern "system" fn cfiXmxProbeStatus() -> u32 {
+    let code = |c: &OnceLock<Option<Flags>>| match c.get() {
+        None => 0,
+        Some(Some(Flags::Packed)) => 1,
+        Some(Some(Flags::Bare)) => 2,
+        Some(None) => 3,
+    };
+    code(&F16) | code(&BF16) << 2
+}
+
 /// Probe once per input type: the first operand-flag spelling whose module loads
 /// and whose self-test GEMM is numerically exact. `None` = XMX unusable.
 fn probed_flags(drv: &Driver, input: Input) -> Option<Flags> {
-    static F16: OnceLock<Option<Flags>> = OnceLock::new();
-    static BF16: OnceLock<Option<Flags>> = OnceLock::new();
     let cell = match input {
         Input::F16 => &F16,
         Input::Bf16 => &BF16,
@@ -436,10 +458,81 @@ pub(crate) unsafe fn try_gemm(
         };
         let args = kernel_args(d, pa, pb, pc, alpha, beta, (sa_e, sb_e, sc_e), bias);
         let err = unsafe { launch(drv, kern, (gx, gy, count), stream, &args) };
+        LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if err != 0 {
             eprintln!("CUDA for Intel cublas: xmx launch failed err={err}");
             return Some(EXECUTION_FAILED);
         }
     }
     Some(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(m: u32, n: u32, k: u32, ta: bool, tb: bool, a: DType, c: DType) -> Call {
+        let (ra, rb) = (if ta { k } else { m }, if tb { n } else { k });
+        Call {
+            d: GemmDesc {
+                trans_a: ta, trans_b: tb, m, n, k, lda: ra, ldb: rb, ldc: m, a, b: a, c,
+                scalar: ScalarKind::F32,
+            },
+            pointer_arrays: false,
+            beta: 0.0,
+            opts: Opts::default(),
+            a: 0x1000,
+            b: 0x2000,
+            sa: 0,
+            sb: 0,
+        }
+    }
+
+    #[test]
+    fn default_is_off_and_f32_never_qualifies() {
+        if std::env::var_os("CFI_XMX").is_none() {
+            assert_eq!(mode(), Mode::Off);
+        }
+        let c = call(64, 64, 64, true, false, DType::F16, DType::F32);
+        assert!(qualify(&c, Mode::Off, (2, 4), Flags::Packed).is_none());
+        assert!(qualify(&c, Mode::Auto, (2, 4), Flags::Packed).is_some());
+        let f = call(64, 64, 64, true, false, DType::F32, DType::F32);
+        assert!(qualify(&f, Mode::Force, (2, 4), Flags::Packed).is_none());
+    }
+
+    #[test]
+    fn auto_skips_skinny_shapes_force_does_not() {
+        let c = call(4096, 1, 4096, true, false, DType::Bf16, DType::Bf16);
+        assert!(qualify(&c, Mode::Auto, (2, 4), Flags::Packed).is_none());
+        let cfg = qualify(&c, Mode::Force, (2, 4), Flags::Packed).unwrap();
+        assert_eq!((cfg.input, cfg.out), (Input::Bf16, Ty::Bf16));
+        assert!(cfg.beta0 && !cfg.vec_b);
+    }
+
+    #[test]
+    fn fast_load_variants_need_proven_alignment() {
+        let mut c = call(64, 64, 64, true, true, DType::F16, DType::F32);
+        let cfg = qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap();
+        assert!(cfg.pair_a && cfg.vec_b);
+        c.a = 0x1002; // not 4-byte aligned
+        c.b = 0x2008; // not 16-byte aligned
+        let cfg = qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap();
+        assert!(!cfg.pair_a && !cfg.vec_b);
+        let mut c = call(64, 60, 64, true, true, DType::F16, DType::F32);
+        c.d.ldb = 64;
+        assert!(!qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap().vec_b); // n % 8 != 0
+        c.pointer_arrays = true;
+        let cfg = qualify(&c, Mode::Auto, (2, 4), Flags::Packed).unwrap();
+        assert!(cfg.ptrs && !cfg.pair_a && !cfg.vec_b);
+    }
+
+    #[test]
+    fn acc16_and_f16_scalars_decline() {
+        let mut c = call(64, 64, 64, true, false, DType::F16, DType::F16);
+        c.opts.acc16 = true;
+        assert!(qualify(&c, Mode::Force, (2, 4), Flags::Packed).is_none());
+        c.opts.acc16 = false;
+        c.d.scalar = ScalarKind::F16;
+        assert!(qualify(&c, Mode::Force, (2, 4), Flags::Packed).is_none());
+    }
 }
