@@ -56,7 +56,7 @@ impl Context {
         call("zeCommandListCreate", || unsafe {
             (api.zeCommandListCreate)(self.handle.0, self.device.0, &desc, &mut list)
         })?;
-        Ok(CommandList(Handle(list)))
+        Ok(CommandList(Handle(list), false))
     }
 }
 

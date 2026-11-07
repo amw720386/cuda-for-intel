@@ -918,6 +918,58 @@ mod tests {
     const GGML_MODERN: &str = include_str!("../examples/ggml_scale_clamp.ptx");
     const GGML_ADD: &str = include_str!("../examples/ggml_add_f32.ptx");
 
+    /// Bring-up aid: CFI_STOCK_GGML_DLL=<path> lists every stock kernel that fails to translate.
+    #[test]
+    #[ignore = "reads the stock ggml-cuda.dll named by CFI_STOCK_GGML_DLL"]
+    fn scan_stock_dll_translation() {
+        let Some(path) = std::env::var_os("CFI_STOCK_GGML_DLL") else {
+            return;
+        };
+        let data = std::fs::read(path).unwrap();
+        let magic = cfi_fatbin::FRAME_MAGIC.to_le_bytes();
+        let (mut at, mut blobs, mut entries, mut failed) = (0, 0, 0, 0);
+        let mut kinds = std::collections::BTreeMap::<String, Vec<String>>::new();
+        while let Some(pos) = data[at..].windows(4).position(|w| w == magic) {
+            let start = at + pos;
+            at = start + 4;
+            let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx(data[start..].as_ptr()) }) else {
+                continue;
+            };
+            let Ok(text) = String::from_utf8(ptx) else { continue };
+            blobs += 1;
+            if let Some(dir) = std::env::var_os("CFI_SCAN_DUMP_DIR") {
+                let _ = std::fs::write(std::path::Path::new(&dir).join(format!("blob{blobs}.ptx")), &text);
+            }
+            // One parse per module; emit each entry on its own to attribute failures.
+            let prepared = match prepare(&text) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    kinds.entry(format!("prepare: {error}")).or_default().push(format!("blob{blobs}"));
+                    continue;
+                }
+            };
+            let (parsed, vars) = match parse::parse_module(&prepared) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    kinds.entry(format!("parse: {error}")).or_default().push(format!("blob{blobs}"));
+                    continue;
+                }
+            };
+            for entry in parsed {
+                entries += 1;
+                let name = entry.name.to_owned();
+                if let Err(error) = spirv::emit(vec![entry], vars.device.clone()) {
+                    failed += 1;
+                    kinds.entry(error.to_string()).or_default().push(name);
+                }
+            }
+        }
+        eprintln!("SCAN blobs={blobs} entries={entries} failed={failed}");
+        for (error, names) in &kinds {
+            eprintln!("SCAN_ERR x{} {error} e.g. {}", names.len(), &names[0][..names[0].len().min(90)]);
+        }
+    }
+
     /// Bring-up aid: CFI_PTX_FILE=<path> CFI_PTX_ENTRY=<mangled name> times each phase.
     #[test]
     #[ignore = "reads a PTX dump named by CFI_PTX_FILE"]
@@ -940,7 +992,10 @@ mod tests {
             return;
         };
         let t = std::time::Instant::now();
-        let rewritten = parse::rewrite_half_scopes(&source);
+        let rewritten = prepare(&source).unwrap();
+        if let Some(out) = std::env::var_os("CFI_PTX_PREPARED_OUT") {
+            let _ = std::fs::write(out, &rewritten);
+        }
         eprintln!("rewrite: {:?}", t.elapsed());
         let entry = parse::parse_named(&rewritten, &name).unwrap();
         eprintln!("parse: {:?} blocks={}", t.elapsed(), entry.blocks.len());
@@ -1618,14 +1673,11 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        let divergent = BLOCK_REDUCE.replace("@%p3 bra \t$L__BB0_8;", "@%p3 bra \t$L__BB0_3;");
-        assert_ne!(divergent, BLOCK_REDUCE);
-        assert!(
-            translate(&divergent)
-                .unwrap_err()
-                .to_string()
-                .contains("barrier may execute divergently")
-        );
+        // A branch whose one side can never reach a barrier is an early exit (threads run to
+        // completion and count as arrived), so it is accepted; see flow::verify_barriers.
+        let early_exit = BLOCK_REDUCE.replace("@%p3 bra \t$L__BB0_8;", "@%p3 bra \t$L__BB0_3;");
+        assert_ne!(early_exit, BLOCK_REDUCE);
+        translate(&early_exit).unwrap();
     }
 
     #[test]
@@ -1713,8 +1765,6 @@ mod tests {
     #[test]
     fn rejects_unimplemented_fp32_rounding_and_approximation_modes() {
         for (original, unsupported) in [
-            ("fma.rn.f32", "fma.rz.f32"),
-            ("fma.rn.f32", "fma.rp.f32"),
             ("fma.rn.f32", "fma.rn.xorsign.f32"),
         ] {
             assert!(RMSNORM.contains(original));

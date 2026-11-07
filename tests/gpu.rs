@@ -85,6 +85,8 @@ mod hw_round2;
 mod hw_ggml;
 #[path = "gpu/hw_tier2.rs"]
 mod hw_tier2;
+#[path = "gpu/hw_ggml_stock.rs"]
+mod hw_ggml_stock;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

@@ -767,7 +767,8 @@ fn rewrite_mov(inst: &Inst) -> Option<Vec<String>> {
         return None;
     }
     if ty == "pred" {
-        return Some(match immediate(&src) {
+        let value = immediate(&src).or_else(|| src.parse::<i64>().ok().map(|v| v as u64));
+        return Some(match value {
             Some(0) => vec![render(&inst.guard, "setp.ne.u32", &[dst.into(), "0".into(), "0".into()])],
             Some(_) => vec![render(&inst.guard, "setp.eq.u32", &[dst.into(), "0".into(), "0".into()])],
             None => vec![render(&inst.guard, "and.pred", &[dst.into(), src.clone(), src])],

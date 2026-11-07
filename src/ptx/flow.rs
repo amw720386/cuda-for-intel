@@ -193,8 +193,24 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             if exit_only(taken) || exit_only(other) {
                 continue;
             }
-            if !tid_derived.contains(predicate) {
-                // Not provably divergent: lower the barriers under it as reached by all threads.
+            // Generalised early exit: if no barrier is reachable from one side, the threads
+            // taking it only run to completion and exit, which the hardware barrier counts
+            // as arrived (GGML's `if (col >= ncols) { ...no barrier...; return; }`).
+            let reaches_barrier = |start: usize| {
+                let mut seen = vec![false; blocks.len()];
+                let mut stack = vec![start];
+                while let Some(next) = stack.pop() {
+                    if std::mem::replace(&mut seen[next], true) {
+                        continue;
+                    }
+                    if blocks[next].instructions.iter().any(|inst| inst.is_convergent()) {
+                        return true;
+                    }
+                    stack.extend(blocks[next].end.successors());
+                }
+                false
+            };
+            if !reaches_barrier(taken) || !reaches_barrier(other) || !tid_derived.contains(predicate) {
                 continue;
             }
             checked_branches[index] = true;
@@ -208,7 +224,9 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                 }
                 for inst in &blocks[next].instructions {
                     if inst.is_convergent() {
-                        return Err(Error::new("barrier may execute divergently"));
+                        return Err(Error::new(format!(
+                            "barrier may execute divergently (branch on {predicate} in block {index})"
+                        )));
                     }
                     let mut defined = Vec::new();
                     if inst.collect_definitions(&mut defined).is_some() {

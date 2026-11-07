@@ -578,3 +578,65 @@ fn gated_timestamp_storage_survives_stream_retirement() {
         assert_eq!(cuCtxDestroy_v2(context), Success);
     }
 }
+
+/// Runs `work` on a thread and fails (instead of hanging the harness) if it
+/// does not finish within `secs`.
+fn finish_within(secs: u64, name: &'static str, work: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        work();
+        let _ = tx.send(());
+    });
+    if rx.recv_timeout(Duration::from_secs(secs)).is_err() {
+        println!("{name}: still running after {secs} s");
+        std::process::exit(3);
+    }
+}
+
+#[test]
+#[ignore = "requires an Intel Level Zero copy-only queue"]
+fn gated_copy_queue_async_copies_complete() {
+    finish_within(60, "copy queue async copies", || {
+        let devices = crate::intel_devices().unwrap();
+        let info = &devices[test_device() as usize];
+        if !info.queue_groups.iter().any(|g| g.queues != 0 && g.copy_only()) {
+            println!("SKIP: no copy-only queue");
+            return;
+        }
+        super::batch::TEST_POLICY.set(Some(None));
+        assert_eq!(cuInit(0), Success);
+        let mut context = std::ptr::null_mut();
+        linked_ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
+        let [copy, compute, copy2] =
+            copy_queue_streams([std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()]);
+        let (mut dev, mut host) = (0u64, std::ptr::null_mut());
+        linked_ok!(cuMemAlloc_v2(&mut dev, 4096));
+        linked_ok!(cuMemHostAlloc(&mut host, 4096, 0));
+        let words = host.cast::<u32>();
+        // A copy-only queue cannot run the ranges barrier that normally
+        // carries the completion signal, so the signal rides on the copy.
+        for i in 0..1024 {
+            unsafe { words.add(i).write(0xa5a5_0000 + i as u32) };
+        }
+        linked_ok!(cuMemcpyHtoDAsync_v2(dev, host, 4096, copy));
+        linked_ok!(cuStreamSynchronize(copy));
+        unsafe { host.cast::<u8>().write_bytes(0, 4096) };
+        linked_ok!(cuMemcpyDtoHAsync_v2(host, dev, 4096, copy2));
+        linked_ok!(cuStreamSynchronize(copy2));
+        for i in 0..1024 {
+            assert_eq!(unsafe { words.add(i).read() }, 0xa5a5_0000 + i as u32);
+        }
+        let mut event = std::ptr::null_mut();
+        linked_ok!(cuEventCreate(&mut event, 2));
+        linked_ok!(cuMemcpyHtoDAsync_v2(dev, host, 4096, copy));
+        linked_ok!(cuEventRecord(event, copy));
+        linked_ok!(cuStreamWaitEvent(compute, event, 0));
+        let mut event2 = std::ptr::null_mut();
+        linked_ok!(cuEventCreate(&mut event2, 2));
+        linked_ok!(cuEventRecord(event2, compute));
+        linked_ok!(cuStreamWaitEvent(copy2, event2, 0));
+        linked_ok!(cuMemcpyDtoHAsync_v2(host, dev, 4096, copy2));
+        linked_ok!(cuStreamSynchronize(copy2));
+        let _ = context;
+    });
+}

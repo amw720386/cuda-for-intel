@@ -98,6 +98,8 @@ struct Emitter<'a> {
     declarations: HashMap<String, Width>,
     registers: HashMap<&'a str, Value>,
     initialized: HashSet<&'a str>,
+    /// Registers assigned somewhere in the entry; others read as zero (undefined in PTX).
+    ever_defined: HashSet<&'a str>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
     /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
@@ -188,6 +190,7 @@ impl<'a> Emitter<'a> {
             declarations: HashMap::new(),
             registers: HashMap::new(),
             initialized: HashSet::new(),
+            ever_defined: HashSet::new(),
             locals: Vec::new(),
             params: HashMap::new(),
             param_array: None,
@@ -293,16 +296,24 @@ impl<'a> Emitter<'a> {
         let known = self.registers.get(dst).or_else(|| self.undef_slots.get(dst)).copied();
         let slot = if let Some(slot) = known {
             self.registers.insert(dst, slot);
-            if slot.kind == Kind::B64 && matches!(value.kind, Kind::Address(_)) {
-                let id = self.builder.bitcast(self.u64_type, None, value.id)?;
-                value = Value { id, kind: Kind::B64 };
-            }
-            if slot.kind != value.kind && self.undef_slots.contains_key(dst) && slot.kind.width() == value.kind.width() {
-                // The slot was created by a read before any write (typed by its declaration).
-                let id = self.builder.bitcast(self.value_type(slot.kind), None, value.id)?;
+            // PTX registers are untyped 64-bit values: nvcc reuses one `%rd` for a raw
+            // integer and for a pointer. Coerce between the slot's kind and the new value.
+            if slot.kind != value.kind {
+                let wide = |kind: Kind| matches!(kind, Kind::B64 | Kind::Address(_));
+                if !(wide(slot.kind) && wide(value.kind)) {
+                    slot.require(value.kind, dst)?;
+                }
+                let mut id = value.id;
+                if let Kind::Address(_) = value.kind {
+                    id = self.builder.convert_ptr_to_u(self.u64_type, None, id)?;
+                }
+                if let Kind::Address(_) = slot.kind {
+                    let pointer_type = self.value_type(slot.kind);
+                    id = self.builder.convert_u_to_ptr(pointer_type, None, id)?;
+                }
                 value = Value { id, kind: slot.kind };
             }
-            slot.require(value.kind, dst)?
+            slot.id
         } else {
             let pointer = self.builder.type_pointer(
                 None,
@@ -359,6 +370,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn parse_u32(operand: &str) -> Option<u32> {
+        // `0fXXXXXXXX` float literal used where the translator wants raw 32-bit bits (selp.f32, mov.f32).
+        if let Some(bits) = operand.strip_prefix("0f").or_else(|| operand.strip_prefix("0F")).filter(|h| h.len() == 8) {
+            return u32::from_str_radix(bits, 16).ok();
+        }
         if let Some(hex) = operand
             .strip_prefix("0x")
             .or_else(|| operand.strip_prefix("0X"))
@@ -386,6 +401,21 @@ impl<'a> Emitter<'a> {
     }
 
     fn integer(&mut self, operand: &str, kind: Kind) -> Result<Word, Error> {
+        if operand.starts_with('%')
+            && !self.registers.contains_key(operand)
+            && !self.ever_defined.contains(operand)
+            && !self.params.contains_key(&(operand, 0))
+            && matches!(kind, Kind::B32 | Kind::B64)
+            && !operand.contains('.')
+        {
+            // A register that is never assigned holds an undefined value (nvcc emits
+            // such operands for dead lanes of packed moves); read it as zero.
+            return Ok(if kind == Kind::B32 {
+                self.u32_const(0)
+            } else {
+                self.builder.constant_bit64(self.u64_type, 0)
+            });
+        }
         if operand.starts_with('%') {
             let value = self.read(operand)?;
             if value.kind == kind {
@@ -398,6 +428,18 @@ impl<'a> Emitter<'a> {
             // Sub-word consumers (st.u8, cvt.*16 ...) of a 64-bit register use its low bits.
             if kind == Kind::B32 && value.kind == Kind::B64 {
                 return Ok(self.builder.u_convert(self.u32_type, None, value.id)?);
+            }
+            // A raw 64-bit integer reused where a pointer is expected (and pointer to pointer).
+            if let Kind::Address(_) = kind
+                && matches!(value.kind, Kind::B64 | Kind::Address(_))
+            {
+                let integer = if value.kind == Kind::B64 {
+                    value.id
+                } else {
+                    self.builder.convert_ptr_to_u(self.u64_type, None, value.id)?
+                };
+                let pointer_type = self.value_type(kind);
+                return Ok(self.builder.convert_u_to_ptr(pointer_type, None, integer)?);
             }
             return Ok(value.require(kind, operand)?);
         }
@@ -3230,6 +3272,15 @@ impl<'a> Emitter<'a> {
         }
         if self.param_array.is_some() {
             self.setup_param_array(&entry.params)?;
+        }
+        self.ever_defined.clear();
+        let mut scratch = Vec::new();
+        for block in &entry.blocks {
+            for inst in &block.instructions {
+                if inst.collect_definitions(&mut scratch).is_some() {
+                    self.ever_defined.extend(scratch.iter().copied());
+                }
+            }
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
         self.builder.branch(labels[0])?;
