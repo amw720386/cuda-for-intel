@@ -72,6 +72,8 @@ enum Width {
 enum Space {
     Global,
     Shared,
+    /// CUDA `.local` — per-thread private memory (`__local_depot`).
+    Local,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +130,10 @@ enum FloatOp<'a> {
     Lg2Approx([&'a str; 1]),
     Ex2Approx([&'a str; 1]),
     Abs([&'a str; 1]),
+    /// `neg.f32` / `neg.ftz.f32` — floating-point negation.
+    Neg([&'a str; 1]),
+    /// `tanh.approx.f32` — hyperbolic tangent.
+    TanhApprox([&'a str; 1]),
     /// `cvt.rzi.f32.f32` — truncate toward zero, stay in f32.
     Trunc([&'a str; 1]),
 }
@@ -152,6 +158,8 @@ impl<'a> FloatOp<'a> {
             | Self::Lg2Approx(inputs)
             | Self::Ex2Approx(inputs)
             | Self::Abs(inputs)
+            | Self::Neg(inputs)
+            | Self::TanhApprox(inputs)
             | Self::Trunc(inputs) => inputs,
         }
     }
@@ -173,6 +181,8 @@ enum Instruction<'a> {
     SharedAddress(&'a str, &'a str),
     /// `mov.u32 %r, shared_symbol` — 32-bit address of a (possibly dynamic) shared array.
     SharedSymbol32(&'a str, &'a str),
+    /// `mov.u64 %rd, local_symbol` — 64-bit address of a `.local` depot.
+    LocalSymbol64(&'a str, &'a str),
     Builtin(&'a str, &'a str),
     Mad32(&'a str, [&'a str; 3]),
     /// CUDA `dp4a.s32.s32` — signed 4×8-bit dot-product accumulate.
@@ -211,7 +221,11 @@ enum Instruction<'a> {
     NotPred(&'a str, &'a str),
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
     Not32(&'a str, &'a str),
+    /// `not.b64` — bitwise complement of a 64-bit register.
+    Not64(&'a str, &'a str),
     Move32(&'a str, &'a str),
+    /// `mov.u64` / `mov.b64` between registers or from an immediate.
+    Move64(&'a str, &'a str),
     /// `mov.b32 %r, { %rs_lo, %rs_hi }` — pack two 16-bit lanes into a 32-bit register.
     PackB16(&'a str, [&'a str; 2]),
     MulWide32 {
@@ -264,6 +278,8 @@ enum Instruction<'a> {
     Store8(Space, &'a str, &'a str),
     /// `st.global.u16` — store the low 16 bits of a b32 register.
     Store16(Space, &'a str, &'a str),
+    /// `st.global.u64` / `st.global.b64`.
+    Store64(Space, &'a str, &'a str),
     StoreVec {
         space: Space,
         count: u8,
@@ -272,6 +288,17 @@ enum Instruction<'a> {
     },
     /// `st.global.v2.u16` — pack two low-16 values into one 32-bit global store.
     StoreVecU16(Space, &'a str, [&'a str; 2]),
+    /// `st.global.v4.u16` — four packed IEEE half stores.
+    StoreVec4U16(Space, &'a str, [&'a str; 4]),
+    /// `ld.global.u8` — zero-extend a byte into a 32-bit slot.
+    Load8(Space, &'a str, &'a str),
+    /// `ld.global.v2/v4.u16` — packed IEEE half / u16 vector load.
+    LoadVecU16 {
+        space: Space,
+        count: u8,
+        dst: [&'a str; 4],
+        addr: &'a str,
+    },
     AtomicAdd32(&'a str, &'a str, &'a str),
     /// CUDA `shfl.sync.bfly.b32` — warp butterfly exchange with an active mask.
     /// Sources are `[value, xor_mask, clamp, membermask]`.
@@ -300,6 +327,7 @@ impl<'a> Instruction<'a> {
             | ParamS8(dst, _)
             | SharedAddress(dst, _)
             | SharedSymbol32(dst, _)
+            | LocalSymbol64(dst, _)
             | AtomicAdd32(dst, ..) => {
                 out.push(*dst);
                 &[]
@@ -312,11 +340,17 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 src
             }
-            Load32(_, dst, addr) | Load64(_, dst, addr) | Load16(_, dst, addr) => {
+            Load32(_, dst, addr)
+            | Load64(_, dst, addr)
+            | Load16(_, dst, addr)
+            | Load8(_, dst, addr) => {
                 out.push(*dst);
                 std::slice::from_ref(addr)
             }
             LoadVec {
+                count, dst, addr, ..
+            }
+            | LoadVecU16 {
                 count, dst, addr, ..
             } => {
                 out.extend_from_slice(&dst[..usize::from(*count)]);
@@ -325,7 +359,9 @@ impl<'a> Instruction<'a> {
             ToGlobal(dst, src)
             | Builtin(dst, src)
             | Move32(dst, src)
+            | Move64(dst, src)
             | Not32(dst, src)
+            | Not64(dst, src)
             | NotPred(dst, src) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
@@ -389,7 +425,14 @@ impl<'a> Instruction<'a> {
                 }
                 src
             }
-            Store32(..) | Store8(..) | Store16(..) | StoreVec { .. } | StoreVecU16(..) | Barrier => {
+            Store32(..)
+            | Store8(..)
+            | Store16(..)
+            | Store64(..)
+            | StoreVec { .. }
+            | StoreVecU16(..)
+            | StoreVec4U16(..)
+            | Barrier => {
                 return None
             }
         })
@@ -401,7 +444,9 @@ impl<'a> Instruction<'a> {
             Self::Load32(..)
                 | Self::Load64(..)
                 | Self::Load16(..)
+                | Self::Load8(..)
                 | Self::LoadVec { .. }
+                | Self::LoadVecU16 { .. }
                 | Self::AtomicAdd32(..)
         )
     }
@@ -449,7 +494,10 @@ struct Entry<'a> {
     name: &'a str,
     params: Vec<(&'a str, Param)>,
     registers: HashMap<String, Width>,
-    shared: Option<(&'a str, u32)>,
+    /// Static `.shared` arrays as `(symbol, size_bytes)` in declaration order.
+    /// Byte offsets for 32-bit shared addressing are the exclusive prefix sums.
+    shared: Vec<(&'a str, u32)>,
+    local: Option<(&'a str, u32)>,
     max_threads: Option<u32>,
     blocks: Vec<Block<'a>>,
 }
@@ -617,6 +665,13 @@ mod tests {
     }
 
     #[test]
+    fn translates_cublas_hgemm_tn_kernel() {
+        let translated = translate(include_str!("../crates/cublas_shim/src/hgemm_tn.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(translated.kernels[0].name, "cfi_hgemm_tn");
+    }
+
+    #[test]
     fn translates_cublas_sgemm_tn_kernel() {
         let translated = translate(include_str!("../crates/cublas_shim/src/sgemm_tn.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));
@@ -675,6 +730,82 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(translated.kernels[0].name.contains("k_bin_bcast"));
         assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn translates_local_depot_load_store() {
+        const SOURCE: &str = r#"
+.version 8.8
+.target sm_80
+.address_size 64
+.visible .entry local_depot_kernel(
+    .param .u64 out
+)
+{
+    .local .align 8 .b8 __local_depot0[8];
+    .reg .b64 %SPL;
+    .reg .b64 %rd<4>;
+    .reg .f32 %f<4>;
+    mov.u64 %SPL, __local_depot0;
+    add.u64 %rd1, %SPL, 0;
+    mov.f32 %f1, 0f3F800000;
+    mov.f32 %f2, 0f40000000;
+    st.local.v2.f32 [%rd1], {%f1, %f2};
+    st.local.f32 [%rd1+4], %f2;
+    add.s64 %rd2, %rd1, 4;
+    ld.local.f32 %f3, [%rd2];
+    ld.param.u64 %rd0, [out];
+    cvta.to.global.u64 %rd3, %rd0;
+    st.global.f32 [%rd3], %f3;
+    ret;
+}
+"#;
+        let translated = translate(SOURCE).expect("local depot translate");
+        assert_eq!(translated.kernels[0].name, "local_depot_kernel");
+    }
+
+    #[test]
+    fn translates_mul_mat_vec_f16_dump() {
+        let translated = translate(include_str!("../examples/mul_mat_vec_f16_dump.ptx"))
+            .expect("mul_mat_vec_f16 dump");
+        assert!(translated.kernels[0].name.contains("mul_mat_vec_f"));
+    }
+
+    #[test]
+    fn translates_k_get_rows_float_dump() {
+        let translated = translate(include_str!("../examples/k_get_rows_float_dump.ptx"))
+            .expect("k_get_rows_float dump");
+        assert!(translated.kernels[0].name.contains("k_get_rows_float"));
+    }
+
+    #[test]
+    fn translates_mul_mat_vec_q_gated_dump() {
+        let translated = translate(include_str!("../examples/mul_mat_vec_q_gated_dump.ptx"))
+            .expect("mul_mat_vec_q gated dump");
+        assert!(translated.kernels[0].name.contains("mul_mat_vec_q"));
+        assert_eq!(translated.kernels[0].shared_bytes, 3072);
+    }
+
+    #[test]
+    fn translates_convert_unary_half_dump() {
+        let translated = translate(include_str!("../examples/convert_unary_half_dump.ptx"))
+            .expect("convert_unary half dump");
+        assert!(translated.kernels[0].name.contains("convert_unary"));
+    }
+
+    #[test]
+    fn translates_convert_unary_half_to_f32_dump() {
+        let translated =
+            translate(include_str!("../examples/convert_unary_half_to_f32_dump.ptx"))
+                .expect("convert_unary half→f32 dump");
+        assert!(translated.kernels[0].name.contains("convert_unary"));
+    }
+
+    #[test]
+    fn translates_k_compute_batched_ptrs_dump() {
+        let translated = translate(include_str!("../examples/k_compute_batched_ptrs_dump.ptx"))
+            .expect("k_compute_batched_ptrs dump");
+        assert!(translated.kernels[0].name.contains("k_compute_batched_ptrs"));
     }
 
     #[test]

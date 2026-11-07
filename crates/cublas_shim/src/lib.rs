@@ -44,6 +44,7 @@ struct Driver {
         *mut *mut c_void,
     ) -> CuResult,
     cuStreamSynchronize: unsafe extern "system" fn(CUstream) -> CuResult,
+    cuMemcpyDtoH_v2: unsafe extern "system" fn(*mut c_void, u64, usize) -> CuResult,
 }
 
 fn driver() -> Result<&'static Driver, c_int> {
@@ -68,49 +69,90 @@ fn load_driver() -> Result<Driver, c_int> {
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
             cuStreamSynchronize: sym!("cuStreamSynchronize"),
+            cuMemcpyDtoH_v2: sym!("cuMemcpyDtoH_v2"),
             _lib: lib,
         })
     }
 }
 
-struct SgemmModule {
+struct GemmModule {
     _module: CUmodule,
     tn: CUfunction,
 }
 
 // CUDA driver handles are process-wide opaque pointers; guarded by OnceLock init.
-unsafe impl Send for SgemmModule {}
-unsafe impl Sync for SgemmModule {}
+unsafe impl Send for GemmModule {}
+unsafe impl Sync for GemmModule {}
 
-fn sgemm_module() -> Result<&'static SgemmModule, c_int> {
-    static MODULE: OnceLock<Result<SgemmModule, c_int>> = OnceLock::new();
-    match MODULE.get_or_init(load_sgemm) {
+fn sgemm_module() -> Result<&'static GemmModule, c_int> {
+    static MODULE: OnceLock<Result<GemmModule, c_int>> = OnceLock::new();
+    match MODULE.get_or_init(|| load_gemm_module("sgemm_tn.ptx", include_str!("sgemm_tn.ptx"), c"cfi_sgemm_tn")) {
         Ok(m) => Ok(m),
         Err(code) => Err(*code),
     }
 }
 
-fn load_sgemm() -> Result<SgemmModule, c_int> {
+fn hgemm_module() -> Result<&'static GemmModule, c_int> {
+    static MODULE: OnceLock<Result<GemmModule, c_int>> = OnceLock::new();
+    match MODULE.get_or_init(|| load_gemm_module("hgemm_tn.ptx", include_str!("hgemm_tn.ptx"), c"cfi_hgemm_tn")) {
+        Ok(m) => Ok(m),
+        Err(code) => Err(*code),
+    }
+}
+
+fn load_gemm_module(
+    label: &str,
+    ptx_src: &'static str,
+    entry: &'static std::ffi::CStr,
+) -> Result<GemmModule, c_int> {
     let drv = driver()?;
-    let ptx = concat!(include_str!("sgemm_tn.ptx"), "\0");
+    let ptx = format!("{ptx_src}\0");
     let mut module: CUmodule = std::ptr::null_mut();
     let err = unsafe { (drv.cuModuleLoadData)(&mut module, ptx.as_ptr().cast()) };
     if err != SUCCESS {
-        eprintln!("CUDA for Intel cublas: ModuleLoadData failed err={err}");
+        eprintln!("CUDA for Intel cublas: ModuleLoadData {label} failed err={err}");
         return Err(STATUS_MAPPING_ERROR);
     }
     let mut tn: CUfunction = std::ptr::null_mut();
-    let err = unsafe {
-        (drv.cuModuleGetFunction)(&mut tn, module, c"cfi_sgemm_tn".as_ptr())
-    };
+    let err = unsafe { (drv.cuModuleGetFunction)(&mut tn, module, entry.as_ptr()) };
     if err != SUCCESS || tn.is_null() {
-        eprintln!("CUDA for Intel cublas: GetFunction cfi_sgemm_tn failed err={err}");
+        eprintln!(
+            "CUDA for Intel cublas: GetFunction {} failed err={err}",
+            entry.to_string_lossy()
+        );
         return Err(STATUS_MAPPING_ERROR);
     }
-    Ok(SgemmModule {
+    Ok(GemmModule {
         _module: module,
         tn,
     })
+}
+
+/// IEEE754 binary16 → f32 (host-side alpha/beta for CUBLAS_COMPUTE_16F).
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits >> 15) & 1) as u32;
+    let exp = ((bits >> 10) & 0x1f) as u32;
+    let mant = (bits & 0x3ff) as u32;
+    let out = if exp == 0 {
+        if mant == 0 {
+            sign << 31
+        } else {
+            // subnormal
+            let mut m = mant;
+            let mut e = 127 - 15 + 1;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            m &= 0x3ff;
+            (sign << 31) | ((e as u32) << 23) | (m << 13)
+        }
+    } else if exp == 0x1f {
+        (sign << 31) | 0x7f80_0000 | (mant << 13)
+    } else {
+        (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13)
+    };
+    f32::from_bits(out)
 }
 
 struct Handle {
@@ -319,12 +361,16 @@ pub unsafe extern "system" fn cublasGemmEx(
     compute_type: c_int,
     _algo: c_int,
 ) -> c_int {
-    // CUDA_R_32F == 0
+    // cudaDataType_t / cublasComputeType_t
     const CUDA_R_32F: c_int = 0;
+    const CUDA_R_16F: c_int = 2;
+    const CUBLAS_COMPUTE_16F: c_int = 64;
+    const CUBLAS_COMPUTE_32F: c_int = 68;
+    const CUBLAS_COMPUTE_32F_FAST_16F: c_int = 74;
     if a_type == CUDA_R_32F
         && b_type == CUDA_R_32F
         && c_type == CUDA_R_32F
-        && (compute_type == CUDA_R_32F || compute_type == 68 || compute_type == 67)
+        && (compute_type == CUDA_R_32F || compute_type == CUBLAS_COMPUTE_32F || compute_type == 67)
     {
         return unsafe {
             cublasSgemm_v2(
@@ -345,10 +391,134 @@ pub unsafe extern "system" fn cublasGemmEx(
             )
         };
     }
+    if a_type == CUDA_R_16F
+        && b_type == CUDA_R_16F
+        && c_type == CUDA_R_16F
+        && (compute_type == CUBLAS_COMPUTE_16F
+            || compute_type == CUBLAS_COMPUTE_32F
+            || compute_type == CUBLAS_COMPUTE_32F_FAST_16F
+            || compute_type == CUDA_R_16F)
+    {
+        return unsafe { cublasHgemm_tn(handle, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc, compute_type) };
+    }
     eprintln!(
         "CUDA for Intel cublasGemmEx unsupported types a={a_type} b={b_type} c={c_type} compute={compute_type}"
     );
     NOT_SUPPORTED
+}
+
+unsafe fn cublasHgemm_tn(
+    handle: *mut c_void,
+    transa: c_int,
+    transb: c_int,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: *const c_void,
+    lda: c_int,
+    b: *const c_void,
+    ldb: c_int,
+    beta: *const c_void,
+    c: *mut c_void,
+    ldc: c_int,
+    compute_type: c_int,
+) -> c_int {
+    if handle.is_null() || alpha.is_null() || beta.is_null() || a.is_null() || b.is_null() || c.is_null()
+    {
+        return INVALID_VALUE;
+    }
+    if m < 0 || n < 0 || k < 0 || lda < 1 || ldb < 1 || ldc < 1 {
+        return INVALID_VALUE;
+    }
+    if transa != CUBLAS_OP_T || transb != CUBLAS_OP_N {
+        eprintln!(
+            "CUDA for Intel cublasHgemm: unsupported transa={transa} transb={transb} (need T,N)"
+        );
+        return NOT_SUPPORTED;
+    }
+    let Ok(h) = handle_mut(handle) else {
+        return INVALID_VALUE;
+    };
+    let Ok(module) = hgemm_module() else {
+        return STATUS_MAPPING_ERROR;
+    };
+    let Ok(drv) = driver() else {
+        return NOT_INITIALIZED;
+    };
+
+    // CUBLAS_COMPUTE_16F passes half alpha/beta; 32F compute modes pass float.
+    const CUBLAS_COMPUTE_16F: c_int = 64;
+    let (alpha_v, beta_v) = if compute_type == CUBLAS_COMPUTE_16F || compute_type == 2 {
+        let a_bits = unsafe { alpha.cast::<u16>().read() };
+        let b_bits = unsafe { beta.cast::<u16>().read() };
+        (f16_bits_to_f32(a_bits), f16_bits_to_f32(b_bits))
+    } else {
+        (unsafe { alpha.cast::<f32>().read() }, unsafe { beta.cast::<f32>().read() })
+    };
+
+    let mut a_ptr = a as u64;
+    let mut b_ptr = b as u64;
+    let mut c_ptr = c as u64;
+    let mut alpha_mut = alpha_v;
+    let mut beta_mut = beta_v;
+    let mut m_u = m as u32;
+    let mut n_u = n as u32;
+    let mut k_u = k as u32;
+    let mut lda_u = lda as u32;
+    let mut ldb_u = ldb as u32;
+    let mut ldc_u = ldc as u32;
+
+    let mut args: [*mut c_void; 11] = [
+        (&mut a_ptr as *mut u64).cast(),
+        (&mut b_ptr as *mut u64).cast(),
+        (&mut c_ptr as *mut u64).cast(),
+        (&mut alpha_mut as *mut f32).cast(),
+        (&mut beta_mut as *mut f32).cast(),
+        (&mut m_u as *mut u32).cast(),
+        (&mut n_u as *mut u32).cast(),
+        (&mut k_u as *mut u32).cast(),
+        (&mut lda_u as *mut u32).cast(),
+        (&mut ldb_u as *mut u32).cast(),
+        (&mut ldc_u as *mut u32).cast(),
+    ];
+
+    const TILE: u32 = 16;
+    let grid_x = m_u.div_ceil(TILE).max(1);
+    let grid_y = n_u.div_ceil(TILE).max(1);
+    eprintln!(
+        "CUDA for Intel cublasHgemm_tn m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} alpha={alpha_v} beta={beta_v} grid=({grid_x},{grid_y})"
+    );
+    let err = unsafe {
+        (drv.cuLaunchKernel)(
+            module.tn,
+            grid_x,
+            grid_y,
+            1,
+            TILE,
+            TILE,
+            1,
+            0,
+            h.stream,
+            args.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    };
+    if err != SUCCESS {
+        eprintln!("CUDA for Intel cublasHgemm launch failed err={err}");
+        return STATUS_MAPPING_ERROR;
+    }
+    let sync_stream = if h.stream.is_null() {
+        std::ptr::null_mut()
+    } else {
+        h.stream
+    };
+    let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
+    if err != SUCCESS {
+        eprintln!("CUDA for Intel cublasHgemm sync failed err={err}");
+        return STATUS_MAPPING_ERROR;
+    }
+    SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -383,29 +553,94 @@ pub unsafe extern "system" fn cublasGemmStridedBatchedEx(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cublasGemmBatchedEx(
-    _handle: *mut c_void,
-    _transa: c_int,
-    _transb: c_int,
-    _m: c_int,
-    _n: c_int,
-    _k: c_int,
-    _alpha: *const c_void,
-    _a: *const *const c_void,
-    _a_type: c_int,
-    _lda: c_int,
-    _b: *const *const c_void,
-    _b_type: c_int,
-    _ldb: c_int,
-    _beta: *const c_void,
-    _c: *const *mut c_void,
-    _c_type: c_int,
-    _ldc: c_int,
-    _batch: c_int,
-    _compute_type: c_int,
+    handle: *mut c_void,
+    transa: c_int,
+    transb: c_int,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: *const *const c_void,
+    a_type: c_int,
+    lda: c_int,
+    b: *const *const c_void,
+    b_type: c_int,
+    ldb: c_int,
+    beta: *const c_void,
+    c: *const *mut c_void,
+    c_type: c_int,
+    ldc: c_int,
+    batch: c_int,
+    compute_type: c_int,
     _algo: c_int,
 ) -> c_int {
-    eprintln!("CUDA for Intel cublasGemmBatchedEx not implemented yet");
-    NOT_SUPPORTED
+    // GGML builds device-side pointer tables then passes the device address of
+    // those tables cast to `const void**`. Pull them to the host and loop.
+    if batch <= 0 {
+        return INVALID_VALUE;
+    }
+    let Ok(drv) = driver() else {
+        return NOT_INITIALIZED;
+    };
+    let batch_n = batch as usize;
+    let bytes = batch_n * std::mem::size_of::<u64>();
+    let mut a_ptrs = vec![0u64; batch_n];
+    let mut b_ptrs = vec![0u64; batch_n];
+    let mut c_ptrs = vec![0u64; batch_n];
+    let err = unsafe {
+        (drv.cuMemcpyDtoH_v2)(a_ptrs.as_mut_ptr().cast(), a as u64, bytes)
+    };
+    if err != SUCCESS {
+        eprintln!("CUDA for Intel cublasGemmBatchedEx DtoH A failed err={err}");
+        return STATUS_MAPPING_ERROR;
+    }
+    let err = unsafe {
+        (drv.cuMemcpyDtoH_v2)(b_ptrs.as_mut_ptr().cast(), b as u64, bytes)
+    };
+    if err != SUCCESS {
+        eprintln!("CUDA for Intel cublasGemmBatchedEx DtoH B failed err={err}");
+        return STATUS_MAPPING_ERROR;
+    }
+    let err = unsafe {
+        (drv.cuMemcpyDtoH_v2)(c_ptrs.as_mut_ptr().cast(), c as u64, bytes)
+    };
+    if err != SUCCESS {
+        eprintln!("CUDA for Intel cublasGemmBatchedEx DtoH C failed err={err}");
+        return STATUS_MAPPING_ERROR;
+    }
+    eprintln!(
+        "CUDA for Intel cublasGemmBatchedEx batch={batch} m={m} n={n} k={k} a_type={a_type} c_type={c_type} compute={compute_type}"
+    );
+    for i in 0..batch_n {
+        let status = unsafe {
+            cublasGemmEx(
+                handle,
+                transa,
+                transb,
+                m,
+                n,
+                k,
+                alpha,
+                a_ptrs[i] as *const c_void,
+                a_type,
+                lda,
+                b_ptrs[i] as *const c_void,
+                b_type,
+                ldb,
+                beta,
+                c_ptrs[i] as *mut c_void,
+                c_type,
+                ldc,
+                compute_type,
+                0,
+            )
+        };
+        if status != SUCCESS {
+            eprintln!("CUDA for Intel cublasGemmBatchedEx batch {i}/{batch} failed status={status}");
+            return status;
+        }
+    }
+    SUCCESS
 }
 
 #[unsafe(no_mangle)]

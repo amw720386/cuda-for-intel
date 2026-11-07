@@ -72,7 +72,13 @@ struct Emitter<'a> {
     global_qword_ptr: Word,
     shared_byte_ptr: Word,
     shared_word_ptr: Word,
-    shared: Option<(&'a str, Word)>,
+    local_byte_ptr: Word,
+    local_word_ptr: Word,
+    /// Unified workgroup array backing all `.shared` symbols.
+    shared_array: Option<Word>,
+    /// Byte offset of each `.shared` symbol within `shared_array`.
+    shared_offsets: HashMap<&'a str, u32>,
+    local: Option<(&'a str, Word)>,
     /// Set when the entry uses CUDA warp shuffles / redux (forces SubgroupSize 32).
     warp_ops: bool,
     builtin_type: Word,
@@ -119,6 +125,9 @@ impl<'a> Emitter<'a> {
         let global_qword_ptr = builder.type_pointer(None, StorageClass::CrossWorkgroup, u64_type);
         let shared_byte_ptr = builder.type_pointer(None, StorageClass::Workgroup, u8_type);
         let shared_word_ptr = builder.type_pointer(None, StorageClass::Workgroup, u32_type);
+        // CUDA `.local` → SPIR-V Function (per-invocation private).
+        let local_byte_ptr = builder.type_pointer(None, StorageClass::Function, u8_type);
+        let local_word_ptr = builder.type_pointer(None, StorageClass::Function, u32_type);
         // OpenCL's Physical64 environment uses size_t vectors for these built-ins.
         let builtin_type = builder.type_vector(u64_type, 3);
         let builtin_ptr = builder.type_pointer(None, StorageClass::Input, builtin_type);
@@ -143,7 +152,11 @@ impl<'a> Emitter<'a> {
             global_qword_ptr,
             shared_byte_ptr,
             shared_word_ptr,
-            shared: None,
+            local_byte_ptr,
+            local_word_ptr,
+            shared_array: None,
+            shared_offsets: HashMap::new(),
+            local: None,
             warp_ops: false,
             builtin_type,
             builtins,
@@ -176,6 +189,7 @@ impl<'a> Emitter<'a> {
             Kind::B64 => self.u64_type,
             Kind::Address(Space::Global) => self.global_byte_ptr,
             Kind::Address(Space::Shared) => self.shared_byte_ptr,
+            Kind::Address(Space::Local) => self.local_byte_ptr,
         }
     }
 
@@ -445,15 +459,48 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    fn shared_symbol_offset(&self, name: &str) -> Result<u32, Error> {
+        self.shared_offsets
+            .get(name)
+            .copied()
+            .ok_or_else(|| Error::new(format!("unknown PTX shared symbol {name}")))
+    }
+
+    fn shared_window_bytes(&mut self) -> Result<Word, Error> {
+        let array = self.shared_array.ok_or_else(|| {
+            Error::new("shared memory access without a shared declaration")
+        })?;
+        let zero = self.builder.constant_bit32(self.u32_type, 0);
+        let word_ptr = self
+            .builder
+            .access_chain(self.shared_word_ptr, None, array, [zero])?;
+        Ok(self.builder.bitcast(self.shared_byte_ptr, None, word_ptr)?)
+    }
+
     fn shared_base(&mut self, name: &str) -> Result<Word, Error> {
+        let offset = self.shared_symbol_offset(name)?;
+        let base = self.shared_window_bytes()?;
+        if offset == 0 {
+            // Return a word pointer at the window start (historical callers bitcast).
+            Ok(self.builder.bitcast(self.shared_word_ptr, None, base)?)
+        } else {
+            let bytes = self.builder.constant_bit64(self.u64_type, u64::from(offset));
+            let at = self
+                .builder
+                .ptr_access_chain(self.shared_byte_ptr, None, base, bytes, [])?;
+            Ok(self.builder.bitcast(self.shared_word_ptr, None, at)?)
+        }
+    }
+
+    fn local_base(&mut self, name: &str) -> Result<Word, Error> {
         let (_, array) = self
-            .shared
+            .local
             .filter(|(symbol, _)| *symbol == name)
-            .ok_or_else(|| Error::new(format!("unknown PTX shared symbol {name}")))?;
+            .ok_or_else(|| Error::new(format!("unknown PTX local symbol {name}")))?;
         let zero = self.builder.constant_bit32(self.u32_type, 0);
         Ok(self
             .builder
-            .access_chain(self.shared_word_ptr, None, array, [zero])?)
+            .access_chain(self.local_word_ptr, None, array, [zero])?)
     }
 
     fn parse_byte_offset(operand: &str) -> Option<i64> {
@@ -481,19 +528,14 @@ impl<'a> Emitter<'a> {
         let byte_ty = match space {
             Space::Global => self.global_byte_ptr,
             Space::Shared => self.shared_byte_ptr,
+            Space::Local => self.local_byte_ptr,
         };
         let value = self.read(base)?;
         let bytes_ptr = match (space, value.kind) {
             (Space::Shared, Kind::B32) => {
-                // 32-bit shared addressing: register holds a byte offset from the shared base.
-                let (_, array) = self.shared.ok_or_else(|| {
-                    Error::new("shared memory access without a shared declaration")
-                })?;
-                let zero = self.builder.constant_bit32(self.u32_type, 0);
-                let word_ptr =
-                    self.builder
-                        .access_chain(self.shared_word_ptr, None, array, [zero])?;
-                let base_bytes = self.builder.bitcast(byte_ty, None, word_ptr)?;
+                // 32-bit shared addressing: register holds a byte offset from the
+                // unified shared window (symbol mov.u32 contributes its prefix offset).
+                let base_bytes = self.shared_window_bytes()?;
                 let off32 = value.id;
                 let off64 = self.builder.u_convert(self.u64_type, None, off32)?;
                 self.builder
@@ -505,6 +547,8 @@ impl<'a> Emitter<'a> {
             // nvcc often keeps post-cvta pointers in .b64 via selp/mov; treat as
             // generic global addresses when used by ld.global/st.global.
             (Space::Global, Kind::B64) => self.builder.bitcast(byte_ty, None, value.id)?,
+            // Same for `.local` after integer address math that lost Address typing.
+            (Space::Local, Kind::B64) => self.builder.bitcast(byte_ty, None, value.id)?,
             _ => {
                 return Err(Error::new(format!(
                     "expected {:?} address for {base}, got {:?}",
@@ -533,6 +577,7 @@ impl<'a> Emitter<'a> {
         let ty = match space {
             Space::Global => self.global_word_ptr,
             Space::Shared => self.shared_word_ptr,
+            Space::Local => self.local_word_ptr,
         };
         Ok(self.builder.bitcast(ty, None, bytes_ptr)?)
     }
@@ -555,13 +600,14 @@ impl<'a> Emitter<'a> {
         let storage = match space {
             Space::Global => StorageClass::CrossWorkgroup,
             Space::Shared => StorageClass::Workgroup,
+            Space::Local => StorageClass::Function,
         };
         let pointer_type = self.builder.type_pointer(None, storage, vector);
         let byte_pointer = if space == Space::Shared && !address.starts_with('%') {
             let array = self.shared_base(address)?;
             self.builder.bitcast(self.shared_byte_ptr, None, array)?
         } else {
-            self.read(address)?.require(Kind::Address(space), address)?
+            self.addressed_byte_pointer(space, address)?
         };
         Ok((
             vector,
@@ -787,6 +833,20 @@ impl<'a> Emitter<'a> {
                     [Operand::IdRef(value)],
                 )?
             }
+            FloatOp::Neg([source]) => {
+                let value = self.float_value(source)?;
+                self.builder.f_negate(ty, None, value)?
+            }
+            FloatOp::TanhApprox([source]) => {
+                let value = self.float_value(source)?;
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::tanh as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
             FloatOp::Abs([source]) => {
                 let value = self.float_value(source)?;
                 self.builder.ext_inst(
@@ -923,6 +983,11 @@ impl<'a> Emitter<'a> {
                             "cannot cvta.to.global from shared pointer {src}"
                         )));
                     }
+                    Kind::Address(Space::Local) => {
+                        return Err(Error::new(format!(
+                            "cannot cvta.to.global from local pointer {src}"
+                        )));
+                    }
                     other => {
                         return Err(Error::new(format!(
                             "expected B64 or global pointer for {src}, got {other:?}"
@@ -937,10 +1002,15 @@ impl<'a> Emitter<'a> {
                 (dst, id, Kind::Address(Space::Shared))
             }
             Instruction::SharedSymbol32(dst, src) => {
-                // Validate the symbol exists; CUDA 32-bit shared addressing uses offset 0.
-                let _ = self.shared_base(src)?;
-                let id = self.builder.constant_bit32(self.u32_type, 0);
+                // CUDA 32-bit shared: symbol address is the byte offset in the window.
+                let offset = self.shared_symbol_offset(src)?;
+                let id = self.builder.constant_bit32(self.u32_type, offset);
                 (dst, id, Kind::B32)
+            }
+            Instruction::LocalSymbol64(dst, src) => {
+                let pointer = self.local_base(src)?;
+                let id = self.builder.bitcast(self.local_byte_ptr, None, pointer)?;
+                (dst, id, Kind::Address(Space::Local))
             }
             Instruction::Builtin(dst, src) => (dst, self.builtin(src)?, Kind::B32),
             Instruction::Mad32(dst, [a, b, c]) => {
@@ -1251,6 +1321,14 @@ impl<'a> Emitter<'a> {
                     Kind::B32,
                 )
             }
+            Instruction::Not64(dst, src) => {
+                let src = self.integer(src, Kind::B64)?;
+                (
+                    dst,
+                    self.builder.not(self.u64_type, None, src)?,
+                    Kind::B64,
+                )
+            }
             Instruction::Move32(dst, src) => {
                 let id = if let Some(hex) = src.strip_prefix("0f").filter(|s| s.len() == 8) {
                     let bits = u32::from_str_radix(hex, 16)
@@ -1260,6 +1338,23 @@ impl<'a> Emitter<'a> {
                     self.integer(src, Kind::B32)?
                 };
                 (dst, id, Kind::B32)
+            }
+            Instruction::Move64(dst, src) => {
+                // Preserve pointer typing across `mov.u64 %rdD, %rdS`.
+                if src.starts_with('%') {
+                    let value = self.read(src)?;
+                    match value.kind {
+                        Kind::Address(_) | Kind::B64 => (dst, value.id, value.kind),
+                        other => {
+                            return Err(Error::new(format!(
+                                "expected B64 or address for {src}, got {other:?}"
+                            )));
+                        }
+                    }
+                } else {
+                    let id = self.integer(src, Kind::B64)?;
+                    (dst, id, Kind::B64)
+                }
             }
             Instruction::PackB16(dst, [lo, hi]) => {
                 let lo = self.integer(lo, Kind::B32)?;
@@ -1483,6 +1578,49 @@ impl<'a> Emitter<'a> {
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits16)?;
                 (dst, bits32, Kind::B32)
             }
+            Instruction::Load8(space, dst, address) => {
+                let bytes = self.addressed_byte_pointer(space, address)?;
+                let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
+                let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
+                (dst, bits32, Kind::B32)
+            }
+            Instruction::LoadVecU16 {
+                space,
+                count,
+                dst,
+                addr,
+            } => {
+                let (base, base_off) = match addr.split_once('+') {
+                    Some((base, offset)) => (
+                        base,
+                        Self::parse_byte_offset(offset).ok_or_else(|| {
+                            Error::new(format!("unsupported PTX address offset {offset}"))
+                        })?,
+                    ),
+                    None => (addr, 0i64),
+                };
+                for index in 0..usize::from(count) {
+                    let off = base_off + (index as i64) * 2;
+                    let lane_addr = if off == 0 {
+                        base.to_string()
+                    } else {
+                        format!("{base}+{off}")
+                    };
+                    let pointer = self.half_pointer(space, &lane_addr)?;
+                    let bits16 = self
+                        .builder
+                        .load(self.u16_type, None, pointer, None, [])?;
+                    let bits32 = self.builder.u_convert(self.u32_type, None, bits16)?;
+                    self.write(
+                        dst[index],
+                        Value {
+                            id: bits32,
+                            kind: Kind::B32,
+                        },
+                    )?;
+                }
+                return Ok(());
+            }
             Instruction::LoadVec {
                 space,
                 count,
@@ -1536,6 +1674,15 @@ impl<'a> Emitter<'a> {
                 self.builder.store(half_ptr, bits16, None, [])?;
                 return Ok(());
             }
+            Instruction::Store64(space, address, src) => {
+                let bytes_ptr = self.addressed_byte_pointer(space, address)?;
+                let pointer = self
+                    .builder
+                    .bitcast(self.global_qword_ptr, None, bytes_ptr)?;
+                let value = self.integer(src, Kind::B64)?;
+                self.builder.store(pointer, value, None, [])?;
+                return Ok(());
+            }
             Instruction::StoreVec {
                 space,
                 count,
@@ -1558,6 +1705,34 @@ impl<'a> Emitter<'a> {
                 let packed = self.builder.bitwise_or(self.u32_type, None, lo, hi)?;
                 let pointer = self.word_pointer(space, addr)?;
                 self.builder.store(pointer, packed, None, [])?;
+                return Ok(());
+            }
+            Instruction::StoreVec4U16(space, addr, [a, b, c, d]) => {
+                // Two packed u32 stores: [a|b] at addr, [c|d] at addr+4.
+                let mut pack2 = |lo: &str, hi: &str| -> Result<Word, Error> {
+                    let lo = self.integer(lo, Kind::B32)?;
+                    let hi = self.integer(hi, Kind::B32)?;
+                    let mask = self.builder.constant_bit32(self.u32_type, 0xffff);
+                    let lo = self.builder.bitwise_and(self.u32_type, None, lo, mask)?;
+                    let hi = self.builder.bitwise_and(self.u32_type, None, hi, mask)?;
+                    let shift = self.builder.constant_bit32(self.u32_type, 16);
+                    let hi = self
+                        .builder
+                        .shift_left_logical(self.u32_type, None, hi, shift)?;
+                    Ok(self.builder.bitwise_or(self.u32_type, None, lo, hi)?)
+                };
+                let lo_word = pack2(a, b)?;
+                let hi_word = pack2(c, d)?;
+                let lo_ptr = self.word_pointer(space, addr)?;
+                self.builder.store(lo_ptr, lo_word, None, [])?;
+                let hi_addr = if let Some((base, off)) = addr.split_once('+') {
+                    let base_off = Self::parse_byte_offset(off).unwrap_or(0);
+                    format!("{base}+{}", base_off + 4)
+                } else {
+                    format!("{addr}+4")
+                };
+                let hi_ptr = self.word_pointer(space, &hi_addr)?;
+                self.builder.store(hi_ptr, hi_word, None, [])?;
                 return Ok(());
             }
             Instruction::ReduxSyncAdd {
@@ -1631,6 +1806,7 @@ impl<'a> Emitter<'a> {
         self.registers.clear();
         self.initialized.clear();
         self.params.clear();
+        self.local = None;
         self.device_atomics = false;
         self.fp32 = false;
         self.fp32_fma = false;
@@ -1652,9 +1828,17 @@ impl<'a> Emitter<'a> {
             self.builder
                 .capability(Capability::GroupNonUniformArithmetic);
         }
-        self.shared = entry.shared.map(|(name, bytes)| {
-            // Use a u32 array to retain the PTX declaration's four-byte alignment.
-            let length = self.builder.constant_bit32(self.u32_type, bytes / 4);
+        self.shared_offsets.clear();
+        self.shared_array = None;
+        let shared_total: u32 = entry.shared.iter().map(|(_, bytes)| bytes).sum();
+        if shared_total != 0 {
+            let mut offset = 0u32;
+            for &(name, bytes) in &entry.shared {
+                self.shared_offsets.insert(name, offset);
+                offset = offset.saturating_add(bytes);
+            }
+            // One workgroup array for the whole shared window (multi-symbol offsets).
+            let length = self.builder.constant_bit32(self.u32_type, shared_total / 4);
             let array = self.builder.type_array(self.u32_type, length);
             let pointer = self
                 .builder
@@ -1662,6 +1846,23 @@ impl<'a> Emitter<'a> {
             let variable = self
                 .builder
                 .variable(pointer, None, StorageClass::Workgroup, None);
+            self.shared_array = Some(variable);
+        }
+        // CUDA `.local` depot: Function-scope private array (spliced into block 0).
+        self.local = entry.local.map(|(name, bytes)| {
+            let words = bytes.div_ceil(4).max(1);
+            let length = self.builder.constant_bit32(self.u32_type, words);
+            let array = self.builder.type_array(self.u32_type, length);
+            let pointer = self
+                .builder
+                .type_pointer(None, StorageClass::Function, array);
+            let variable = self.builder.id();
+            self.locals.push(SpirvInstruction::new(
+                Op::Variable,
+                Some(pointer),
+                Some(variable),
+                vec![Operand::StorageClass(StorageClass::Function)],
+            ));
             (name, variable)
         });
         let types: Vec<_> = entry
@@ -1765,7 +1966,7 @@ impl<'a> Emitter<'a> {
         Ok(KernelMetadata {
             name: entry.name.to_owned(),
             params: entry.params.into_iter().map(|(_, param)| param).collect(),
-            shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
+            shared_bytes: shared_total,
             max_threads: entry.max_threads,
             device_atomics: self.device_atomics,
             fp32: self.fp32,

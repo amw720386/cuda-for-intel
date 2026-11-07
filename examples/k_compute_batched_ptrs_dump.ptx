@@ -1,0 +1,116 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.entry _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx(
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_0,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_1,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_2,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_3,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_4,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_5,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_6,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_7,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_8,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_9,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_10,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_11,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_12,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_13,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_14,
+.param .u64 _Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_15
+)
+{
+.reg .pred %p<6>;
+.reg .b32 %r<15>;
+.reg .b64 %rd<50>;
+
+
+ld.param.u64 %rd9, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_0];
+ld.param.u64 %rd10, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_1];
+ld.param.u64 %rd11, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_2];
+ld.param.u64 %rd12, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_3];
+ld.param.u64 %rd13, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_4];
+ld.param.u64 %rd14, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_5];
+ld.param.u64 %rd24, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_6];
+ld.param.u64 %rd15, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_7];
+ld.param.u64 %rd16, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_8];
+ld.param.u64 %rd17, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_9];
+ld.param.u64 %rd18, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_10];
+ld.param.u64 %rd19, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_11];
+ld.param.u64 %rd20, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_12];
+ld.param.u64 %rd21, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_13];
+ld.param.u64 %rd22, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_14];
+ld.param.u64 %rd23, [_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx_param_15];
+mov.u32 %r1, %ntid.x;
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %tid.x;
+mad.lo.s32 %r4, %r2, %r1, %r3;
+cvt.u64.u32 %rd1, %r4;
+mov.u32 %r5, %ntid.y;
+mov.u32 %r6, %ctaid.y;
+mov.u32 %r7, %tid.y;
+mad.lo.s32 %r8, %r6, %r5, %r7;
+cvt.u64.u32 %rd2, %r8;
+setp.ge.s64 %p1, %rd1, %rd24;
+setp.ge.s64 %p2, %rd2, %rd14;
+or.pred %p3, %p2, %p1;
+@%p3 bra $L__BB0_8;
+
+and.b64 %rd25, %rd23, -4294967296;
+setp.eq.s64 %p4, %rd25, 0;
+@%p4 bra $L__BB0_3;
+
+div.s64 %rd48, %rd1, %rd23;
+bra.uni $L__BB0_4;
+
+$L__BB0_3:
+cvt.u32.u64 %r9, %rd23;
+cvt.u32.u64 %r10, %rd1;
+div.u32 %r11, %r10, %r9;
+cvt.u64.u32 %rd48, %r11;
+
+$L__BB0_4:
+and.b64 %rd26, %rd22, -4294967296;
+setp.eq.s64 %p5, %rd26, 0;
+@%p5 bra $L__BB0_6;
+
+div.s64 %rd49, %rd2, %rd22;
+bra.uni $L__BB0_7;
+
+$L__BB0_6:
+cvt.u32.u64 %r12, %rd22;
+cvt.u32.u64 %r13, %rd2;
+div.u32 %r14, %r13, %r12;
+cvt.u64.u32 %rd49, %r14;
+
+$L__BB0_7:
+mul.lo.s64 %rd27, %rd48, %rd17;
+mul.lo.s64 %rd28, %rd49, %rd16;
+add.s64 %rd29, %rd28, %rd27;
+add.s64 %rd30, %rd9, %rd29;
+mul.lo.s64 %rd31, %rd1, %rd14;
+add.s64 %rd32, %rd31, %rd2;
+cvta.to.global.u64 %rd33, %rd12;
+shl.b64 %rd34, %rd32, 3;
+add.s64 %rd35, %rd33, %rd34;
+st.global.u64 [%rd35], %rd30;
+mul.lo.s64 %rd36, %rd1, %rd19;
+mul.lo.s64 %rd37, %rd2, %rd18;
+add.s64 %rd38, %rd36, %rd37;
+add.s64 %rd39, %rd10, %rd38;
+shl.b64 %rd40, %rd15, 3;
+add.s64 %rd41, %rd35, %rd40;
+st.global.u64 [%rd41], %rd39;
+mul.lo.s64 %rd42, %rd1, %rd21;
+mul.lo.s64 %rd43, %rd2, %rd20;
+add.s64 %rd44, %rd42, %rd43;
+add.s64 %rd45, %rd11, %rd44;
+cvta.to.global.u64 %rd46, %rd13;
+add.s64 %rd47, %rd46, %rd34;
+st.global.u64 [%rd47], %rd45;
+
+$L__BB0_8:
+ret;
+
+}

@@ -288,7 +288,15 @@ impl<'a> Parser<'a> {
                 }
             }
             ["cvta.to.global.u64", dst, ",", src] => Instruction::ToGlobal(dst, src),
-            ["mov.b64", dst, ",", src] => Instruction::SharedAddress(dst, src),
+            ["mov.b64", dst, ",", src]
+                if !src.starts_with('%')
+                    && !src.starts_with("0x")
+                    && !src.starts_with("0X")
+                    && src.parse::<i64>().is_err() =>
+            {
+                // `mov.b64 %rd, shared_symbol` — shared base address.
+                Instruction::SharedAddress(dst, src)
+            }
             ["bar.sync", "0"] => Instruction::Barrier,
             [
                 "shfl.sync.bfly.b32",
@@ -336,6 +344,16 @@ impl<'a> Parser<'a> {
                     Instruction::Move32(dst, src)
                 }
             }
+            ["mov.u64", dst, ",", src]
+                if !src.starts_with('%')
+                    && !src.starts_with("0x")
+                    && !src.starts_with("0X")
+                    && src.parse::<i64>().is_err() =>
+            {
+                // `mov.u64 %SPL, __local_depotN` — address of CUDA .local depot.
+                Instruction::LocalSymbol64(dst, src)
+            }
+            ["mov.u64" | "mov.b64", dst, ",", src] => Instruction::Move64(dst, src),
             ["mad.lo.s32" | "mad.lo.u32", dst, ",", a, ",", b, ",", c] => {
                 Instruction::Mad32(dst, [a, b, c])
             }
@@ -502,6 +520,7 @@ impl<'a> Parser<'a> {
                 Instruction::Integer32(IntegerOp::ShiftRightArithmetic16, dst, [a, b])
             }
             ["not.b32", dst, ",", src] => Instruction::Not32(dst, src),
+            ["not.b64" | "not.u64" | "not.s64", dst, ",", src] => Instruction::Not64(dst, src),
             ["mov.b32" | "mov.f32", dst, ",", src] => Instruction::Move32(dst, src),
             ["mov.b32", dst, ",", "{", lo, ",", hi, "}"] => Instruction::PackB16(dst, [lo, hi]),
             ["cvt.u64.u32", dst, ",", src] => Instruction::Widen {
@@ -550,7 +569,10 @@ impl<'a> Parser<'a> {
                 | "ld.global.nc.f32"
                 | "ld.shared.b32"
                 | "ld.shared.f32"
-                | "ld.shared.u32"),
+                | "ld.shared.u32"
+                | "ld.local.b32"
+                | "ld.local.u32"
+                | "ld.local.f32"),
                 dst,
                 ",",
                 "[",
@@ -559,6 +581,8 @@ impl<'a> Parser<'a> {
             ] => {
                 let space = if op.starts_with("ld.shared.") {
                     Space::Shared
+                } else if op.starts_with("ld.local.") {
+                    Space::Local
                 } else {
                     Space::Global
                 };
@@ -584,7 +608,67 @@ impl<'a> Parser<'a> {
                 Instruction::Load16(Space::Global, dst, addr)
             }
             [
-                op @ ("ld.global.v2.f32" | "ld.global.v4.f32" | "ld.shared.v2.f32"),
+                op @ ("ld.global.u8" | "ld.global.b8" | "ld.global.nc.u8" | "ld.global.nc.b8"),
+                dst,
+                ",",
+                "[",
+                addr,
+                "]",
+            ] => {
+                let _ = op;
+                Instruction::Load8(Space::Global, dst, addr)
+            }
+            [
+                op @ ("ld.global.v2.u16"
+                | "ld.global.nc.v2.u16"
+                | "ld.global.v2.b16"
+                | "ld.global.nc.v2.b16"
+                | "ld.global.v4.u16"
+                | "ld.global.nc.v4.u16"
+                | "ld.global.v4.b16"
+                | "ld.global.nc.v4.b16"),
+                "{",
+                a,
+                ",",
+                b,
+                rest @ ..,
+            ] => {
+                let count = if op.contains("v4") { 4u8 } else { 2 };
+                let (c, d, addr) = if count == 4 {
+                    match rest {
+                        [",", c, ",", d, "}", ",", "[", addr, "]"] => (*c, *d, *addr),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                } else {
+                    match rest {
+                        ["}", ",", "[", addr, "]"] => ("", "", *addr),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                };
+                Instruction::LoadVecU16 {
+                    space: Space::Global,
+                    count,
+                    dst: [a, b, c, d],
+                    addr,
+                }
+            }
+            [
+                op @ ("ld.global.v2.f32"
+                | "ld.global.nc.v2.f32"
+                | "ld.global.v4.f32"
+                | "ld.global.nc.v4.f32"
+                | "ld.shared.v2.f32"
+                | "ld.local.v2.f32"),
                 "{",
                 a,
                 ",",
@@ -592,8 +676,9 @@ impl<'a> Parser<'a> {
                 rest @ ..,
             ] => {
                 let (count, space) = match *op {
-                    "ld.global.v4.f32" => (4u8, Space::Global),
-                    "ld.global.v2.f32" => (2, Space::Global),
+                    "ld.global.v4.f32" | "ld.global.nc.v4.f32" => (4u8, Space::Global),
+                    "ld.global.v2.f32" | "ld.global.nc.v2.f32" => (2, Space::Global),
+                    "ld.local.v2.f32" => (2, Space::Local),
                     _ => (2, Space::Shared),
                 };
                 let (c, d, addr) = if count == 4 {
@@ -634,6 +719,12 @@ impl<'a> Parser<'a> {
             ] => Instruction::Float32(dst, FloatOp::Add([a, b])),
             ["abs.ftz.f32" | "abs.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Abs([src]))
+            }
+            ["neg.ftz.f32" | "neg.f32" | "neg.rn.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Neg([src]))
+            }
+            ["tanh.approx.f32" | "tanh.approx.ftz.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::TanhApprox([src]))
             }
             ["cvt.rzi.f32.f32" | "cvt.rzi.ftz.f32.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Trunc([src]))
@@ -730,6 +821,14 @@ impl<'a> Parser<'a> {
                 src,
             ] => Instruction::Store16(Space::Global, addr, src),
             [
+                "st.global.u64" | "st.global.b64",
+                "[",
+                addr,
+                "]",
+                ",",
+                src,
+            ] => Instruction::Store64(Space::Global, addr, src),
+            [
                 "st.global.v2.u16" | "st.global.v2.b16",
                 "[",
                 addr,
@@ -742,12 +841,31 @@ impl<'a> Parser<'a> {
                 "}",
             ] => Instruction::StoreVecU16(Space::Global, addr, [a, b]),
             [
+                "st.global.v4.u16" | "st.global.v4.b16",
+                "[",
+                addr,
+                "]",
+                ",",
+                "{",
+                a,
+                ",",
+                b,
+                ",",
+                c,
+                ",",
+                d,
+                "}",
+            ] => Instruction::StoreVec4U16(Space::Global, addr, [a, b, c, d]),
+            [
                 op @ ("st.global.b32"
                 | "st.global.u32"
                 | "st.global.f32"
                 | "st.shared.b32"
                 | "st.shared.f32"
-                | "st.shared.u32"),
+                | "st.shared.u32"
+                | "st.local.b32"
+                | "st.local.u32"
+                | "st.local.f32"),
                 "[",
                 addr,
                 "]",
@@ -756,6 +874,8 @@ impl<'a> Parser<'a> {
             ] => {
                 let space = if op.starts_with("st.shared.") {
                     Space::Shared
+                } else if op.starts_with("st.local.") {
+                    Space::Local
                 } else {
                     Space::Global
                 };
@@ -763,7 +883,8 @@ impl<'a> Parser<'a> {
             }
             [
                 op @ ("st.global.v2.f32" | "st.global.v2.u32" | "st.global.v4.f32"
-                | "st.shared.v2.f32"),
+                | "st.shared.v2.f32"
+                | "st.local.v2.f32"),
                 "[",
                 addr,
                 "]",
@@ -778,6 +899,7 @@ impl<'a> Parser<'a> {
                 let (count, space) = match *op {
                     "st.global.v4.f32" => (4u8, Space::Global),
                     "st.global.v2.f32" | "st.global.v2.u32" => (2, Space::Global),
+                    "st.local.v2.f32" => (2, Space::Local),
                     _ => (2, Space::Shared),
                 };
                 let (c, d) = if count == 4 {
@@ -1072,7 +1194,7 @@ impl HalfExtract {
         if !block.contains(".f16") {
             return None;
         }
-        // mov.b32 {low,high}, %rSRC;
+        // mov.b32 {low,high}, %rSRC;  (optional space after comma)
         let src = {
             let key = "mov.b32 {low,high},";
             let pos = block.find(key)?;
@@ -1083,11 +1205,10 @@ impl HalfExtract {
             }
             name.to_string()
         };
-        // mov.b16 %rsDST, low|high;
-        let (dst, lane) = {
-            let key = "mov.b16";
-            let pos = block.find(key)?;
-            let after = block[pos + key.len()..].trim_start();
+        // Pattern A: mov.b16 %rsDST, low|high;
+        // Pattern B: cvt.f32.f16 %fDST, low|high;  (extract + convert in one scope)
+        let replacement = if let Some(pos) = block.find("mov.b16") {
+            let after = block[pos + "mov.b16".len()..].trim_start();
             let mut parts = after.split(',');
             let dst = parts.next()?.trim().to_string();
             let lane = parts
@@ -1097,12 +1218,30 @@ impl HalfExtract {
             if !dst.starts_with('%') || !matches!(lane, "low" | "high") {
                 return None;
             }
-            (dst, lane)
-        };
-        let replacement = if lane == "low" {
-            format!("and.b32 {dst}, {src}, 65535;\n")
+            if lane == "low" {
+                format!("and.b32 {dst}, {src}, 65535;\n")
+            } else {
+                format!("shr.u32 {dst}, {src}, 16;\n")
+            }
+        } else if let Some(pos) = block.find("cvt.f32.f16") {
+            let after = block[pos + "cvt.f32.f16".len()..].trim_start();
+            let mut parts = after.split(',');
+            let dst = parts.next()?.trim().to_string();
+            let lane = parts
+                .next()?
+                .trim()
+                .trim_matches(|c: char| c == ';' || c == '}' || c.is_whitespace());
+            if !dst.starts_with('%') || !matches!(lane, "low" | "high") {
+                return None;
+            }
+            // Mask/shift into the f32 slot (B32 bits), then convert half→float in place.
+            if lane == "low" {
+                format!("and.b32 {dst}, {src}, 65535;\ncvt.f32.f16 {dst}, {dst};\n")
+            } else {
+                format!("shr.u32 {dst}, {src}, 16;\ncvt.f32.f16 {dst}, {dst};\n")
+            }
         } else {
-            format!("shr.u32 {dst}, {src}, 16;\n")
+            return None;
         };
         Some(Self {
             replacement,
@@ -1225,10 +1364,39 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
         break;
     }
     parser.expect("{")?;
-    let registers = parser.registers()?;
-    let mut shared = if parser.eat(".shared") {
+    // nvcc may emit `.local` depots before `.reg` declarations.
+    let local = if parser.eat(".local") {
         parser.expect(".align")?;
-        parser.expect("4")?;
+        let align = parser.take()?;
+        if !matches!(align, "4" | "8" | "16") {
+            return Err(Error::new("unsupported PTX .local alignment"));
+        }
+        parser.expect(".b8")?;
+        let name = parser.identifier()?;
+        if name.starts_with('%') {
+            return Err(Error::new("invalid PTX local symbol"));
+        }
+        parser.expect("[")?;
+        let size = parser
+            .take()?
+            .parse::<u32>()
+            .ok()
+            .filter(|&size| size != 0 && size.is_multiple_of(4))
+            .ok_or_else(|| Error::new("local array size must be a positive multiple of four"))?;
+        parser.expect("]")?;
+        parser.expect(";")?;
+        Some((name, size))
+    } else {
+        None
+    };
+    let registers = parser.registers()?;
+    let mut shared = Vec::new();
+    while parser.eat(".shared") {
+        parser.expect(".align")?;
+        let align = parser.take()?;
+        if !matches!(align, "4" | "8" | "16") {
+            return Err(Error::new("unsupported PTX .shared alignment"));
+        }
         parser.expect(".b8")?;
         let name = parser.identifier()?;
         if name.starts_with('%') {
@@ -1243,19 +1411,17 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
             .ok_or_else(|| Error::new("shared array size must be a positive multiple of four"))?;
         parser.expect("]")?;
         parser.expect(";")?;
-        Some((name, size))
-    } else {
-        None
-    };
+        shared.push((name, size));
+    }
     let blocks = parser.blocks()?;
     infer_direct_global_params(&mut params, &blocks);
     // Dynamic / extern shared: nvcc emits `mov.u32 %r, symbol` without a local .shared decl.
-    if shared.is_none() {
+    if shared.is_empty() {
         for inst in blocks.iter().flat_map(|block| &block.instructions) {
             if let Instruction::SharedSymbol32(_, name) = inst {
                 // Allocate a generous workgroup buffer; CUDA launch shared size selects the
                 // live prefix. Softmax and similar kernels index from symbol address 0.
-                shared = Some((*name, 48 * 1024));
+                shared.push((*name, 48 * 1024));
                 break;
             }
         }
@@ -1265,6 +1431,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
         params,
         registers,
         shared,
+        local,
         max_threads,
         blocks,
     })

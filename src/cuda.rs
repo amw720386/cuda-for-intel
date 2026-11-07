@@ -678,6 +678,61 @@ pub unsafe extern "system" fn cuMemcpyDtoH_v2(dst: Opaque, src: u64, size: usize
     trace::call("cuMemcpyDtoH_v2", || unsafe { copy(dst, src, size, false) })
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemcpyDtoD_v2(dst: u64, src: u64, size: usize) -> CuResult {
+    trace::call("cuMemcpyDtoD_v2", || {
+        status(with_context(|runtime, context| {
+            if size == 0 {
+                return Ok(());
+            }
+            let dst_addr = dst as usize;
+            let src_addr = src as usize;
+            if !contains_range(&context.allocations, dst_addr, size)
+                || !contains_range(&context.allocations, src_addr, size)
+            {
+                return Err(InvalidValue);
+            }
+            let dst_ptr = std::ptr::with_exposed_provenance_mut(dst_addr);
+            let src_ptr = std::ptr::with_exposed_provenance(src_addr);
+            context.streams.wait_legacy(&runtime.api, u64::MAX)?;
+            unsafe { context.backend.copy(&runtime.api, dst_ptr, src_ptr, size) }
+                .inspect_err(|error| context.backend.health.observe(error))
+                .map_err(backend_error)
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemcpyDtoDAsync_v2(
+    dst: u64,
+    src: u64,
+    size: usize,
+    stream: Opaque,
+) -> CuResult {
+    trace::call("cuMemcpyDtoDAsync_v2", || {
+        status(with_context(|runtime, context| {
+            let key = context.streams.launch_key(stream)?;
+            if size == 0 {
+                return Ok(());
+            }
+            let dst_addr = dst as usize;
+            let src_addr = src as usize;
+            if !contains_range(&context.allocations, dst_addr, size)
+                || !contains_range(&context.allocations, src_addr, size)
+            {
+                return Err(InvalidValue);
+            }
+            let dst_ptr = std::ptr::with_exposed_provenance_mut(dst_addr);
+            let src_ptr = std::ptr::with_exposed_provenance(src_addr);
+            unsafe {
+                context
+                    .streams
+                    .copy(&runtime.api, &context.backend, key, (dst_ptr, src_ptr), size)
+            }
+        }))
+    })
+}
+
 fn load_ptx(
     runtime: &Runtime,
     context: &mut CudaContext,
@@ -880,10 +935,9 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let entry = module.entries.get(name).ok_or(InvalidHandle)?;
             let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
             // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
-            if shared_bytes != 0 && entry.shared_bytes == 0 {
-                return Err(NotSupported);
-            }
-            if shared_bytes > entry.shared_bytes {
+            // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
+            // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
+            if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
                 return Err(InvalidValue);
             }
             let grid = [grid_x, grid_y, grid_z];

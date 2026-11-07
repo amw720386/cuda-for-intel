@@ -48,6 +48,9 @@ struct Driver {
         unsafe extern "system" fn(CUdeviceptr, *const c_void, usize, CUstream) -> CuResult,
     cuMemcpyDtoHAsync:
         unsafe extern "system" fn(*mut c_void, CUdeviceptr, usize, CUstream) -> CuResult,
+    cuMemcpyDtoDAsync:
+        unsafe extern "system" fn(CUdeviceptr, CUdeviceptr, usize, CUstream) -> CuResult,
+    cuMemcpyDtoD: unsafe extern "system" fn(CUdeviceptr, CUdeviceptr, usize) -> CuResult,
     cuModuleLoadData: unsafe extern "system" fn(*mut CUmodule, *const c_void) -> CuResult,
     cuModuleGetFunction:
         unsafe extern "system" fn(*mut CUfunction, CUmodule, *const c_char) -> CuResult,
@@ -117,6 +120,8 @@ fn load_driver() -> Result<Driver, c_int> {
             cuMemcpyDtoH: sym!("cuMemcpyDtoH_v2"),
             cuMemcpyHtoDAsync: sym!("cuMemcpyHtoDAsync_v2"),
             cuMemcpyDtoHAsync: sym!("cuMemcpyDtoHAsync_v2"),
+            cuMemcpyDtoDAsync: sym!("cuMemcpyDtoDAsync_v2"),
+            cuMemcpyDtoD: sym!("cuMemcpyDtoD_v2"),
             cuModuleLoadData: sym!("cuModuleLoadData"),
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
@@ -493,6 +498,7 @@ pub unsafe extern "system" fn cudaMemcpyAsync(
     let err = match kind {
         1 | 4 => unsafe { (drv.cuMemcpyHtoDAsync)(dst as u64, src, count, stream) },
         2 => unsafe { (drv.cuMemcpyDtoHAsync)(dst, src as u64, count, stream) },
+        3 => unsafe { (drv.cuMemcpyDtoDAsync)(dst as u64, src as u64, count, stream) },
         0 => {
             if count == 0 || dst.is_null() || src.is_null() {
                 SUCCESS
