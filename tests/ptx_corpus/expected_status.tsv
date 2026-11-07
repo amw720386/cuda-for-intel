@@ -282,7 +282,7 @@ handwritten/memory/ld_global_nc_u32.ptx	pass	strict-pass
 handwritten/memory/ld_global_nc_v4_u32.ptx	pass	strict-pass	
 handwritten/memory/ld_global_v2_u64.ptx	pass	strict-pass	
 handwritten/memory/ld_global_v4_f32.ptx	pass	strict-pass	
-handwritten/memory/ld_param_v2.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.param.v2.u32 { %r1 , %r2 } , [ out ]
+handwritten/memory/ld_param_v2.ptx	error	strict-fail	mismatched PTX parameter load for out
 handwritten/memory/ld_shared_cluster.ptx	error	strict-fail	invalid PTX identifier ld.global.shared
 handwritten/memory/ld_shared_v4.ptx	pass	strict-pass	
 handwritten/memory/ld_volatile_global.ptx	pass	strict-pass	
@@ -478,7 +478,7 @@ zluda/float_math/mul_ftz.ptx	pass	strict-fail
 zluda/float_math/mul_non_ftz.ptx	pass	strict-fail	
 zluda/float_math/neg.ptx	pass	strict-fail	
 zluda/float_math/rcp.ptx	pass	strict-fail	
-zluda/float_math/rcp_f64.ptx	unsupported	strict-fail	unsupported PTX instruction: rcp.rz.f64 %temp , %temp
+zluda/float_math/rcp_f64.ptx	pass	strict-fail	
 zluda/float_math/rsqrt.ptx	pass	strict-fail	
 zluda/float_math/set_f16.ptx	pass	strict-fail	
 zluda/float_math/set_gt_f16x2.ptx	pass	strict-fail	
@@ -562,9 +562,9 @@ zluda/memory/stateful_ld_st_ntid_chain.ptx	pass	strict-fail
 zluda/memory/stateful_ld_st_ntid_sub.ptx	pass	strict-fail	
 zluda/memory/stateful_ld_st_simple.ptx	pass	strict-fail	
 zluda/memory/stateful_neg_offset.ptx	unsupported	strict-fail	adding two PTX addresses is unsupported
-zluda/memory/test___Z9vectorAddPKfS0_Pfi.ptx	error	strict-fail	PTX block falls off the end of the entry
+zluda/memory/test___Z9vectorAddPKfS0_Pfi.ptx	pass	strict-pass	
 zluda/memory/test__vectorAdd_11.ptx	pass	strict-pass	
-zluda/memory/test__vectorAdd_kernel64.ptx	error	strict-fail	PTX block falls off the end of the entry
+zluda/memory/test__vectorAdd_kernel64.ptx	pass	strict-fail	
 zluda/memory/vector.ptx	unsupported	strict-fail	unsupported PTX register type .v2
 zluda/memory/vector4.ptx	unsupported	strict-fail	unsupported PTX register type .v4
 zluda/memory/vector8.ptx	unsupported	strict-fail	unsupported PTX instruction: ld.global.v8.u32 { %dst0 , %dst1 , %dst2 , %dst3 , %dst4 , %dst5 , %dst6 , %dst7 } , [ %in_addr ]

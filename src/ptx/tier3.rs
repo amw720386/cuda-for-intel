@@ -213,6 +213,30 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     }
     let st = &mut ctx.t3;
     match family {
+        "ld" if inst.op.split('.').any(|p| p == "param") && inst.op.split('.').any(|p| matches!(p, "v2" | "v4")) => {
+            // Vector parameter loads (byval structs) become one scalar load per element.
+            let parts: Vec<&str> = inst.op.split('.').collect();
+            let ty = *parts.last()?;
+            let size: i64 = match ty {
+                "u8" | "s8" | "b8" => 1,
+                "u16" | "s16" | "b16" | "f16" | "bf16" => 2,
+                "u32" | "s32" | "b32" | "f32" | "f16x2" | "bf16x2" => 4,
+                "u64" | "s64" | "b64" | "f64" => 8,
+                _ => return None,
+            };
+            let regs: Vec<String> = inst.operand(0).trim().trim_start_matches('{').trim_end_matches('}').split(',').map(|r| r.trim().to_owned()).filter(|r| !r.is_empty()).collect();
+            let (name, base) = bracket_symbol(inst.operand(1))?;
+            let mut lines = Vec::new();
+            for (i, reg) in regs.iter().enumerate() {
+                let copy = Inst {
+                    guard: inst.guard.clone(),
+                    op: format!("ld.param.{ty}"),
+                    operands: vec![reg.clone(), format!("[{name}+{}]", base + size * i as i64)],
+                };
+                lines.extend(again(ctx, &copy));
+            }
+            Some(lines)
+        }
         "ld" | "ldu" if inst.op.split('.').any(|p| p == "const") => {
             // Constant-bank loads read ordinary device memory.
             let parts: Vec<&str> = inst.op.split('.').filter(|p| *p != "const").collect();
@@ -234,6 +258,16 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         "shfl" => shfl_masks(ctx, inst),
         "vote" => vote_masks(ctx, inst),
         "cvt" => cvt_misc(ctx, inst),
+        "fma" if matches!(inst.op.rsplit('.').next(), Some("f16" | "bf16" | "f16x2" | "bf16x2"))
+            && !inst.op.split('.').any(|p| matches!(p, "relu" | "sat" | "rz" | "rm" | "rp")) =>
+        {
+            half_fma(st, inst)
+        }
+        "add" | "sub" | "mul" | "fma" | "div" | "sqrt" | "rcp"
+            if inst.op.ends_with(".f64") && inst.op.split('.').any(|p| matches!(p, "rz" | "rm" | "rp")) =>
+        {
+            f64_directed(st, inst)
+        }
         "add" | "sub" | "addc" | "subc" | "madc" | "mad" => carry(st, inst),
         "vadd" | "vsub" | "vabsdiff" | "vmin" | "vmax" | "vset" | "vshl" | "vshr" | "vmad" | "vavrg" => {
             video_scalar(st, inst)
@@ -1236,4 +1270,208 @@ fn atomic_forms(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     op.insert(1, "global");
     let copy = with_op(inst, op.join("."));
     Some(again(ctx, &copy))
+}
+
+// ---- f64 directed rounding ------------------------------------------------------
+
+/// `add/sub/mul/fma/div/sqrt/rcp.{rz,rm,rp}.f64`: compute the round-to-nearest result and
+/// the sign of its exact error (error-free transformations), then step one ulp when the
+/// requested direction disagrees with the nearest result.
+fn f64_directed(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    let name = parts[0];
+    let mode = *parts.iter().find(|p| matches!(**p, "rz" | "rm" | "rp"))?;
+    let want = match name {
+        "fma" => 4,
+        "add" | "sub" | "mul" | "div" => 3,
+        _ => 2,
+    };
+    if inst.operands.len() != want {
+        return None;
+    }
+    let mut b = B::new(st);
+    let (zero, one) = (b.t64(), b.t64());
+    b.p(format!("mov.b64 {zero} , 0 ;"));
+    b.p(format!("mov.b64 {one} , 0x3FF0000000000000 ;"));
+    let a = inst.operand(1).to_owned();
+    let neg = |b: &mut B, x: &str, zero: &str| {
+        let n = b.t64();
+        b.p(format!("sub.rn.f64 {n} , {zero} , {x} ;"));
+        n
+    };
+    let (r, e_pos, e_neg);
+    match name {
+        "add" | "sub" => {
+            let bb = if name == "sub" { neg(&mut b, inst.operand(2), &zero) } else { inst.operand(2).to_owned() };
+            r = b.t64();
+            let (t, u, v, w, e) = (b.t64(), b.t64(), b.t64(), b.t64(), b.t64());
+            b.p(format!("add.rn.f64 {r} , {a} , {bb} ;"));
+            b.p(format!("sub.rn.f64 {t} , {r} , {a} ;"));
+            b.p(format!("sub.rn.f64 {u} , {r} , {t} ;"));
+            b.p(format!("sub.rn.f64 {v} , {a} , {u} ;"));
+            b.p(format!("sub.rn.f64 {w} , {bb} , {t} ;"));
+            b.p(format!("add.rn.f64 {e} , {v} , {w} ;"));
+            let (p, n) = (b.tp(), b.tp());
+            b.p(format!("setp.gt.f64 {p} , {e} , {zero} ;"));
+            b.p(format!("setp.lt.f64 {n} , {e} , {zero} ;"));
+            e_pos = p;
+            e_neg = n;
+        }
+        "mul" => {
+            r = b.t64();
+            let e = b.t64();
+            b.p(format!("mul.rn.f64 {r} , {a} , {} ;", inst.operand(2)));
+            let nr = neg(&mut b, &r, &zero);
+            b.p(format!("fma.rn.f64 {e} , {a} , {} , {nr} ;", inst.operand(2)));
+            let (p, n) = (b.tp(), b.tp());
+            b.p(format!("setp.gt.f64 {p} , {e} , {zero} ;"));
+            b.p(format!("setp.lt.f64 {n} , {e} , {zero} ;"));
+            e_pos = p;
+            e_neg = n;
+        }
+        "fma" => {
+            let (bb, c) = (inst.operand(2).to_owned(), inst.operand(3).to_owned());
+            r = b.t64();
+            b.p(format!("fma.rn.f64 {r} , {a} , {bb} , {c} ;"));
+            let (pr, pe, u, t, ue1, ue2, ue, w, d, e) =
+                (b.t64(), b.t64(), b.t64(), b.t64(), b.t64(), b.t64(), b.t64(), b.t64(), b.t64(), b.t64());
+            b.p(format!("mul.rn.f64 {pr} , {a} , {bb} ;"));
+            let npr = neg(&mut b, &pr, &zero);
+            b.p(format!("fma.rn.f64 {pe} , {a} , {bb} , {npr} ;"));
+            b.p(format!("add.rn.f64 {u} , {pr} , {c} ;"));
+            b.p(format!("sub.rn.f64 {t} , {u} , {pr} ;"));
+            let ut = b.t64();
+            b.p(format!("sub.rn.f64 {ut} , {u} , {t} ;"));
+            b.p(format!("sub.rn.f64 {ue1} , {pr} , {ut} ;"));
+            b.p(format!("sub.rn.f64 {ue2} , {c} , {t} ;"));
+            b.p(format!("add.rn.f64 {ue} , {ue1} , {ue2} ;"));
+            b.p(format!("add.rn.f64 {w} , {ue} , {pe} ;"));
+            b.p(format!("sub.rn.f64 {d} , {u} , {r} ;"));
+            b.p(format!("add.rn.f64 {e} , {d} , {w} ;"));
+            let (p, n) = (b.tp(), b.tp());
+            b.p(format!("setp.gt.f64 {p} , {e} , {zero} ;"));
+            b.p(format!("setp.lt.f64 {n} , {e} , {zero} ;"));
+            e_pos = p;
+            e_neg = n;
+        }
+        "div" | "rcp" => {
+            let (num, den) = if name == "rcp" { (one.clone(), a.clone()) } else { (a.clone(), inst.operand(2).to_owned()) };
+            r = b.t64();
+            let rem = b.t64();
+            b.p(format!("div.rn.f64 {r} , {num} , {den} ;"));
+            let nq = neg(&mut b, &r, &zero);
+            b.p(format!("fma.rn.f64 {rem} , {nq} , {den} , {num} ;"));
+            let (rp, rn, bn, nbn, x1, x2, y1, y2, p, n) =
+                (b.tp(), b.tp(), b.tp(), b.tp(), b.tp(), b.tp(), b.tp(), b.tp(), b.tp(), b.tp());
+            b.p(format!("setp.gt.f64 {rp} , {rem} , {zero} ;"));
+            b.p(format!("setp.lt.f64 {rn} , {rem} , {zero} ;"));
+            b.p(format!("setp.lt.f64 {bn} , {den} , {zero} ;"));
+            b.p(format!("not.pred {nbn} , {bn} ;"));
+            b.p(format!("and.pred {x1} , {rp} , {nbn} ;"));
+            b.p(format!("and.pred {x2} , {rn} , {bn} ;"));
+            b.p(format!("or.pred {p} , {x1} , {x2} ;"));
+            b.p(format!("and.pred {y1} , {rn} , {nbn} ;"));
+            b.p(format!("and.pred {y2} , {rp} , {bn} ;"));
+            b.p(format!("or.pred {n} , {y1} , {y2} ;"));
+            e_pos = p;
+            e_neg = n;
+        }
+        _ => {
+            // sqrt
+            r = b.t64();
+            let rem = b.t64();
+            b.p(format!("sqrt.rn.f64 {r} , {a} ;"));
+            let ns = neg(&mut b, &r, &zero);
+            b.p(format!("fma.rn.f64 {rem} , {ns} , {r} , {a} ;"));
+            let (p, n) = (b.tp(), b.tp());
+            b.p(format!("setp.gt.f64 {p} , {rem} , {zero} ;"));
+            b.p(format!("setp.lt.f64 {n} , {rem} , {zero} ;"));
+            e_pos = p;
+            e_neg = n;
+        }
+    }
+    let (r_pos, r_neg, up, down, step, res) = (b.tp(), b.tp(), b.t64(), b.t64(), b.t64(), b.t64());
+    b.p(format!("setp.gt.f64 {r_pos} , {r} , {zero} ;"));
+    b.p(format!("setp.lt.f64 {r_neg} , {r} , {zero} ;"));
+    b.p(format!("add.s64 {up} , {r} , 1 ;"));
+    b.p(format!("sub.s64 {down} , {r} , 1 ;"));
+    let cond = b.tp();
+    match mode {
+        "rz" => {
+            let (x, y) = (b.tp(), b.tp());
+            b.p(format!("and.pred {x} , {r_pos} , {e_neg} ;"));
+            b.p(format!("and.pred {y} , {r_neg} , {e_pos} ;"));
+            b.p(format!("or.pred {cond} , {x} , {y} ;"));
+            b.p(format!("mov.b64 {step} , {down} ;"));
+        }
+        "rm" => {
+            b.p(format!("and.pred {cond} , {e_neg} , {e_neg} ;"));
+            let (tiny, t1) = (b.t64(), b.t64());
+            b.p(format!("mov.b64 {tiny} , 0x8000000000000001 ;"));
+            b.p(format!("selp.b64 {t1} , {up} , {tiny} , {r_neg} ;"));
+            b.p(format!("selp.b64 {step} , {down} , {t1} , {r_pos} ;"));
+        }
+        _ => {
+            b.p(format!("and.pred {cond} , {e_pos} , {e_pos} ;"));
+            let (tiny, t1) = (b.t64(), b.t64());
+            b.p(format!("mov.b64 {tiny} , 1 ;"));
+            b.p(format!("selp.b64 {t1} , {down} , {tiny} , {r_neg} ;"));
+            b.p(format!("selp.b64 {step} , {up} , {t1} , {r_pos} ;"));
+        }
+    }
+    b.p(format!("selp.b64 {res} , {step} , {r} , {cond} ;"));
+    b.p(render(&inst.guard, "mov.b64", &[inst.operand(0).to_owned(), res]));
+    Some(b.finish())
+}
+
+// ---- half-precision fma with a single rounding -------------------------------------
+
+/// `fma.rn.{f16,bf16,f16x2,bf16x2}`: the f16/bf16 product is exact in f64 and the f64
+/// sum keeps 42 more bits than the target, so rounding once from f64 matches the
+/// hardware except in double-rounding ties that need a >31-bit exponent gap.
+fn half_fma(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+    let ty = inst.op.rsplit('.').next()?;
+    if inst.operands.len() != 4 {
+        return None;
+    }
+    let packed = ty.ends_with("x2");
+    let h = if ty.starts_with("bf16") { "bf16" } else { "f16" };
+    let mut b = B::new(st);
+    let lanes = if packed { 2 } else { 1 };
+    let mut results = Vec::new();
+    for lane in 0..lanes {
+        let mut wide = Vec::new();
+        for k in 1..=3 {
+            let src = inst.operand(k);
+            let raw = if packed {
+                let t = b.t32();
+                if lane == 0 {
+                    b.p(format!("and.b32 {t} , {src} , 65535 ;"));
+                } else {
+                    b.p(format!("shr.u32 {t} , {src} , 16 ;"));
+                }
+                t
+            } else {
+                src.to_owned()
+            };
+            let w = b.t64();
+            b.p(format!("cvt.f64.{h} {w} , {raw} ;"));
+            wide.push(w);
+        }
+        let r = b.t64();
+        b.p(format!("fma.rn.f64 {r} , {} , {} , {} ;", wide[0], wide[1], wide[2]));
+        let n = b.t32();
+        b.p(format!("cvt.rn.{h}.f64 {n} , {r} ;"));
+        results.push(n);
+    }
+    if packed {
+        let (lo, hi) = (b.t32(), b.t32());
+        b.p(format!("and.b32 {lo} , {} , 65535 ;", results[0]));
+        b.p(format!("shl.b32 {hi} , {} , 16 ;", results[1]));
+        b.p(format!("or.b32 {lo} , {lo} , {hi} ;"));
+        b.p(render(&inst.guard, "mov.b32", &[inst.operand(0).to_owned(), lo]));
+    } else {
+        b.p(render(&inst.guard, "mov.b32", &[inst.operand(0).to_owned(), results[0].clone()]));
+    }
+    Some(b.finish())
 }

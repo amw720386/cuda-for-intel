@@ -350,3 +350,54 @@ fn stmatrix_places_fragments_like_hardware() {
         }
     }
 }
+
+#[test]
+fn f64_directed_rounding_matches_exact_arithmetic() {
+    let eps = f64::EPSILON; // 2^-52
+    let up = |x: f64| f64::from_bits(x.to_bits() + 1);
+    let down = |x: f64| f64::from_bits(x.to_bits() - 1);
+    let x = 1.0 + eps;
+    // (instruction, operands, expected result) with hand-derived exact results.
+    let cases: Vec<(&str, Vec<f64>, f64)> = vec![
+        ("add.rz.f64", vec![1.0, 2f64.powi(-60)], 1.0),
+        ("add.rp.f64", vec![1.0, 2f64.powi(-60)], up(1.0)),
+        ("add.rm.f64", vec![1.0, -(2f64.powi(-60))], down(1.0)),
+        ("add.rz.f64", vec![-1.0, 2f64.powi(-60)], -down(1.0)),
+        ("add.rp.f64", vec![-1.0, 2f64.powi(-60)], -down(1.0)),
+        ("add.rm.f64", vec![-1.0, 2f64.powi(-60)], -1.0),
+        ("sub.rp.f64", vec![1.0, -(2f64.powi(-60))], up(1.0)),
+        ("mul.rp.f64", vec![x, x], up(1.0 + 2.0 * eps)),
+        ("mul.rz.f64", vec![x, x], 1.0 + 2.0 * eps),
+        ("mul.rm.f64", vec![x, x], 1.0 + 2.0 * eps),
+        ("mul.rm.f64", vec![-x, x], -up(1.0 + 2.0 * eps)),
+        ("div.rp.f64", vec![1.0, 3.0], up(1.0 / 3.0)),
+        ("div.rz.f64", vec![1.0, 3.0], 1.0 / 3.0),
+        ("div.rm.f64", vec![-1.0, 3.0], -up(1.0 / 3.0)),
+        ("rcp.rm.f64", vec![3.0], 1.0 / 3.0),
+        ("rcp.rp.f64", vec![3.0], up(1.0 / 3.0)),
+        ("sqrt.rz.f64", vec![2.0], down(2f64.sqrt())),
+        ("sqrt.rm.f64", vec![2.0], down(2f64.sqrt())),
+        ("sqrt.rp.f64", vec![2.0], 2f64.sqrt()),
+        ("fma.rp.f64", vec![x, x, 2f64.powi(-60)], up(1.0 + 2.0 * eps)),
+        ("fma.rz.f64", vec![x, x, 2f64.powi(-60)], 1.0 + 2.0 * eps),
+    ];
+    let mut body = String::new();
+    for (i, (op, operands, _)) in cases.iter().enumerate() {
+        let regs: Vec<String> = operands
+            .iter()
+            .enumerate()
+            .map(|(j, v)| {
+                body.push_str(&format!("    mov.b64 %fd{}, 0x{:016x};\n", j + 1, v.to_bits()));
+                format!("%fd{}", j + 1)
+            })
+            .collect();
+        body.push_str(&format!("    {op} %fd7, {};\n    st.global.u64 [%rd15+{}], %fd7;\n", regs.join(", "), 8 * i));
+    }
+    let module = lower(&kernel("    .reg .b64 %fd<8>;", &body));
+    let mut machine = interp::Machine { params: vec![interp::GLOBAL, 0], ..Default::default() };
+    interp::run(&module, &mut machine);
+    for (i, (op, operands, want)) in cases.iter().enumerate() {
+        let got = f64::from_bits(machine.read(interp::GLOBAL + 8 * i as u64, 8));
+        assert_eq!(got.to_bits(), want.to_bits(), "{op} {operands:?}: got {got:e} want {want:e}");
+    }
+}

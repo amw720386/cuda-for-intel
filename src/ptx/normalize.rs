@@ -45,6 +45,17 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
         } else if stmt.first().is_some_and(|t| t == "}") {
             depth -= 1;
             if depth == 0 {
+                // Trailing labels (`func_end0:`) after the last `ret` form an empty block:
+                // drop the unreferenced ones, give a referenced one a `ret`.
+                while entry_open.is_some() && out.last().is_some_and(|l| l.ends_with(" :")) {
+                    let label = out.last().unwrap().trim_end_matches(" :").to_owned();
+                    let used = out[..out.len() - 1].iter().any(|l| !l.ends_with(" :") && l.split_whitespace().any(|t| t == label));
+                    if used {
+                        out.push("ret ;".into());
+                        break;
+                    }
+                    out.pop();
+                }
                 if let Some(open) = entry_open.take() {
                     let mut decls = ctx.take_decls();
                     if let (true, Some((name, align))) = (uses_dynamic, &dynamic) {
