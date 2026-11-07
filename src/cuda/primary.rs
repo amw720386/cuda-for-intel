@@ -21,7 +21,7 @@ pub unsafe extern "system" fn cuDevicePrimaryCtxRetain(
     out: *mut Opaque,
     ordinal: c_int,
 ) -> CuResult {
-    super::export_log(format!("cuDevicePrimaryCtxRetain ordinal={ordinal} enter"));
+    super::export_log(format_args!("cuDevicePrimaryCtxRetain ordinal={ordinal} enter"));
     let result = trace::call("cuDevicePrimaryCtxRetain", || {
         if out.is_null() {
             return InvalidValue;
@@ -47,7 +47,7 @@ pub unsafe extern "system" fn cuDevicePrimaryCtxRetain(
             Ok(())
         }))
     });
-    super::export_log(format!(
+    super::export_log(format_args!(
         "cuDevicePrimaryCtxRetain ordinal={ordinal} -> {}",
         result as i32
     ));

@@ -150,6 +150,11 @@ fn backend_error(error: Error) -> CuResult {
     }
 }
 
+fn dump_launch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_DUMP_LAUNCH").is_some())
+}
+
 fn diagnostic(error: &impl std::fmt::Display) {
     if std::env::var_os("CUDA_FOR_INTEL_LOG").as_deref() == Some(std::ffi::OsStr::new("1")) {
         use std::io::Write;
@@ -205,7 +210,22 @@ fn device(ordinal: c_int, action: impl FnOnce(&DeviceInfo) -> CuResult) -> CuRes
     .unwrap_or_else(|error| error)
 }
 
+/// Bring-up log file. Opening it costs a syscall per call, and the Runtime shim
+/// retains the primary context on every launch, so it is opt-in
+/// (`CUDA_FOR_INTEL_LOG=1`, `CUDA_FOR_INTEL_TRACE=1` or `CUDA_FOR_INTEL_EXPORT_LOG=1`).
+fn export_log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        ["CUDA_FOR_INTEL_LOG", "CUDA_FOR_INTEL_TRACE", "CUDA_FOR_INTEL_EXPORT_LOG"]
+            .iter()
+            .any(|name| std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1")))
+    })
+}
+
 pub(crate) fn export_log(message: impl std::fmt::Display) {
+    if !export_log_enabled() {
+        return;
+    }
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -218,7 +238,7 @@ pub(crate) fn export_log(message: impl std::fmt::Display) {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
-    export_log(format!("cuInit flags={flags} enter"));
+    export_log(format_args!("cuInit flags={flags} enter"));
     let result = trace::call("cuInit", || {
         if flags != 0 {
             return InvalidValue;
@@ -253,7 +273,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
             Err(error) => backend_error(error),
         }
     });
-    export_log(format!("cuInit flags={flags} -> {}", result as i32));
+    export_log(format_args!("cuInit flags={flags} -> {}", result as i32));
     result
 }
 
@@ -871,7 +891,7 @@ fn load_ptx(
         }
         diagnostic(&error);
         // Always persist a short reject breadcrumb for fatbin bring-up.
-        export_log(format!("PTX reject: {error}"));
+        export_log(format_args!("PTX reject: {error}"));
         InvalidPtx
     })?;
     let device = &runtime.devices[context.device as usize];
@@ -1097,7 +1117,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let args = match args {
                 Ok(args) => args,
                 Err(error) => {
-                    export_log(format!(
+                    export_log(format_args!(
                         "cuLaunchKernel args rejected for {} ({} params)",
                         name.to_string_lossy(),
                         entry.params.len()
@@ -1106,7 +1126,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 }
             };
             // Optional launch dump for soft_max bring-up (CUDA_FOR_INTEL_DUMP_LAUNCH=1).
-            if std::env::var_os("CUDA_FOR_INTEL_DUMP_LAUNCH").is_some()
+            if dump_launch_enabled()
                 && name.to_string_lossy().contains("soft_max")
             {
                 let mut summary = format!(
@@ -1170,7 +1190,7 @@ pub unsafe extern "system" fn cuDeviceGetCount(count: *mut c_int) -> CuResult {
         })
         .unwrap_or_else(|error| error)
     });
-    export_log(format!("cuDeviceGetCount -> {}", result as i32));
+    export_log(format_args!("cuDeviceGetCount -> {}", result as i32));
     result
 }
 

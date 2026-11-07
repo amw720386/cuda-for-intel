@@ -159,7 +159,7 @@ unsafe extern "system" fn runtime_integrity_check(
     if out.is_null() {
         return InvalidValue;
     }
-    super::export_log(format!("runtime_integrity_check version={version}"));
+    super::export_log(format_args!("runtime_integrity_check version={version}"));
     #[cfg(windows)]
     {
         let result = match version {
@@ -291,7 +291,7 @@ unsafe extern "system" fn context_local_storage_put(
     value: *mut c_void,
     destructor: ContextDtor,
 ) -> CuResult {
-    super::export_log(format!(
+    super::export_log(format_args!(
         "context_local_storage_put ctx={context:?} key={key:?} value={value:?}"
     ));
     with_local_storage(context, |storage| {
@@ -310,7 +310,7 @@ unsafe extern "system" fn context_local_storage_delete(
     context: Opaque,
     key: *mut c_void,
 ) -> CuResult {
-    super::export_log(format!(
+    super::export_log(format_args!(
         "context_local_storage_delete ctx={context:?} key={key:?}"
     ));
     with_local_storage(context, |storage| {
@@ -324,7 +324,7 @@ unsafe extern "system" fn context_local_storage_get(
     context: Opaque,
     key: *mut c_void,
 ) -> CuResult {
-    super::export_log(format!(
+    super::export_log(format_args!(
         "context_local_storage_get ctx={context:?} key={key:?}"
     ));
     if value.is_null() {
@@ -385,12 +385,12 @@ fn hybrid_resolver(name: &str) -> Result<HybridResolver, CuResult> {
                 )
             }
             .map_err(|error| {
-                super::export_log(format!("hybrid load {name}: {error}"));
+                super::export_log(format_args!("hybrid load {name}: {error}"));
                 FileNotFound
             })?;
             let resolver = *unsafe { library.get::<HybridResolver>(b"__cudaGetProcAddress") }
                 .map_err(|error| {
-                    super::export_log(format!("hybrid resolver {name}: {error}"));
+                    super::export_log(format_args!("hybrid resolver {name}: {error}"));
                     OperatingSystem
                 })?;
             // Keep the module mapped for the lifetime of any returned pointer.
@@ -420,7 +420,7 @@ unsafe extern "system" fn hybrid_runtime_load_get_proc_address(
     let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
         return InvalidValue;
     };
-    super::export_log(format!("hybrid_runtime_load_get_proc_address name={name}"));
+    super::export_log(format_args!("hybrid_runtime_load_get_proc_address name={name}"));
     #[cfg(windows)]
     {
         let resolver = match hybrid_resolver(name) {
@@ -440,7 +440,7 @@ unsafe extern "system" fn hybrid_runtime_load_get_proc_address(
 }
 
 unsafe extern "system" fn hybrid_runtime_free(token: usize) -> CuResult {
-    super::export_log(format!("hybrid_runtime_free token={token}"));
+    super::export_log(format_args!("hybrid_runtime_free token={token}"));
     if token != HYBRID_RUNTIME_TOKEN {
         return InvalidHandle;
     }
