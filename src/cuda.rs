@@ -245,7 +245,7 @@ fn device(ordinal: c_int, action: impl FnOnce(&DeviceInfo) -> CuResult) -> CuRes
 /// Bring-up log file. Opening it costs a syscall per call, and the Runtime shim
 /// retains the primary context on every launch, so it is opt-in
 /// (`CUDA_FOR_INTEL_LOG=1`, `CUDA_FOR_INTEL_TRACE=1` or `CUDA_FOR_INTEL_EXPORT_LOG=1`).
-fn export_log_enabled() -> bool {
+pub(crate) fn export_log_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         ["CUDA_FOR_INTEL_LOG", "CUDA_FOR_INTEL_TRACE", "CUDA_FOR_INTEL_EXPORT_LOG"]
