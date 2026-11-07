@@ -162,10 +162,13 @@ unsafe extern "system" fn runtime_integrity_check(
     super::export_log(format_args!("runtime_integrity_check version={version}"));
     #[cfg(windows)]
     {
-        let result = match version {
-            13000 => [0x3341181C03CB675C, 0x8ED383AA1F4CD1E8],
-            13001 => [0x1841181C03CB675C, 0x8ED383AA1F4CD1E8],
-            13002 => {
+        // The low decimal digit selects the scheme (ZLUDA dark_api): 0 and 1 are
+        // fixed digests (CUDA 12.x and 13.x runtimes report e.g. 12060, 13050),
+        // anything else is computed from process state.
+        let result = match version % 10 {
+            0 => [0x3341181C03CB675C, 0x8ED383AA1F4CD1E8],
+            1 => [0x1841181C03CB675C, 0x8ED383AA1F4CD1E8],
+            _ => {
                 #[link(name = "kernel32")]
                 unsafe extern "system" {
                     fn GetCurrentThreadId() -> u32;
@@ -202,7 +205,6 @@ unsafe extern "system" fn runtime_integrity_check(
                     Err(error) => return error,
                 }
             }
-            _ => return NotSupported,
         };
         unsafe { out.write(result) };
         Success

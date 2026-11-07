@@ -860,6 +860,37 @@ unsafe fn copy_3d(copy: *const Memcpy3D, stream: Option<Opaque>) -> CuResult {
     }
 }
 
+/// Pitched allocation: rows are padded to 512 bytes (the alignment real drivers report for
+/// cudaMallocPitch), then a plain allocation of `pitch * height` bytes is made.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemAllocPitch_v2(
+    out: *mut u64,
+    pitch: *mut usize,
+    width: usize,
+    height: usize,
+    element_size: u32,
+) -> CuResult {
+    trace::call("cuMemAllocPitch_v2", || {
+        if out.is_null() || pitch.is_null() || width == 0 || height == 0 {
+            return InvalidValue;
+        }
+        if !matches!(element_size, 4 | 8 | 16) {
+            return InvalidValue;
+        }
+        let Some(row) = width.checked_add(511).map(|w| w & !511) else {
+            return InvalidValue;
+        };
+        let Some(total) = row.checked_mul(height) else {
+            return OutOfMemory;
+        };
+        let result = unsafe { cuMemAlloc_v2(out, total) };
+        if result == Success {
+            unsafe { pitch.write(row) };
+        }
+        result
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemcpy2D_v2(copy: *const Memcpy2D) -> CuResult {
     trace::call("cuMemcpy2D_v2", || unsafe { copy_2d(copy, None) })

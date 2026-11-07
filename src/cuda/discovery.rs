@@ -216,6 +216,7 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuCtxSynchronize" if version >= 13000 => entry!(cuCtxSynchronize_v2, 13000),
         b"cuCtxSynchronize" => entry!(cuCtxSynchronize, 2000, 13000, false),
         b"cuMemAlloc" => entry!(cuMemAlloc_v2, 3020),
+        b"cuMemAllocPitch" => entry!(cuMemAllocPitch_v2, 3020),
         b"cuMemFree" => entry!(cuMemFree_v2, 3020),
         b"cuMemHostAlloc" => entry!(cuMemHostAlloc, 2020),
         b"cuMemFreeHost" => entry!(cuMemFreeHost, 2000),

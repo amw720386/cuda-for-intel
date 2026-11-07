@@ -187,6 +187,7 @@ impl<'a> Emitter<'a> {
     fn param_type(&self, param: Param) -> Word {
         match param {
             Param::U8 => self.u8_type,
+            Param::U16 => self.u16_type,
             Param::U32 | Param::Words { .. } => self.u32_type,
             Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
@@ -300,6 +301,11 @@ impl<'a> Emitter<'a> {
             return Ok(value.require(kind, operand)?);
         }
         match kind {
+            Kind::B32 if operand.len() == 10 && (operand.starts_with("0f") || operand.starts_with("0F")) => {
+                u32::from_str_radix(&operand[2..], 16)
+                    .ok()
+                    .map(|n| self.builder.constant_bit32(self.u32_type, n))
+            }
             Kind::B32 => Self::parse_u32(operand)
                 .map(|n| self.builder.constant_bit32(self.u32_type, n)),
             Kind::B64 => Self::parse_u64(operand)
@@ -726,6 +732,13 @@ impl<'a> Emitter<'a> {
             FloatOp::Sqrt([source]) => {
                 let value = self.float_bits(source)?;
                 return rounded::sqrt(&mut self.builder, self.opencl, value);
+            }
+            FloatOp::FmaDirected { mode, src: [a, b, c] } => {
+                let a = self.float_bits(a)?;
+                let b = self.float_bits(b)?;
+                let c = self.float_bits(c)?;
+                self.fp32_fma = true;
+                return rounded::fma_directed(&mut self.builder, self.opencl, mode, a, b, c);
             }
             FloatOp::Directed { kind, mode, src: [a, b] } => {
                 let a = self.float_bits(a)?;
@@ -1590,24 +1603,27 @@ impl<'a> Emitter<'a> {
         src: [&str; 4],
     ) -> Result<(), Error> {
         let ty = self.u32_type;
-        let control = Self::parse_u32(src[2]).ok_or_else(|| {
-            Error::new("shfl.sync requires an immediate clamp/segment-mask operand")
-        })?;
+        // The packed clamp/segment-mask operand is an immediate or a register nvcc filled
+        // with a constant; compute it from the operand at run time (constants fold).
         if Self::parse_u32(src[3]).is_some_and(|mask| mask != u32::MAX) {
             return Err(Error::new("only full-warp shfl.sync membermask 0xffffffff is supported"));
         }
-        let (clamp, segment) = (control & 31, (control >> 8) & 31);
+        let control = self.integer(src[2], Kind::B32)?;
+        let c31 = self.u32_const(31);
+        let c8 = self.u32_const(8);
+        let clamp = self.builder.bitwise_and(ty, None, control, c31)?;
+        let shifted = self.builder.shift_right_logical(ty, None, control, c8)?;
+        let segment = self.builder.bitwise_and(ty, None, shifted, c31)?;
+        let keep = self.builder.bitwise_xor(ty, None, segment, c31)?;
         let value = self.read(src[0])?.require(Kind::B32, src[0])?;
         let delta = self.integer(src[1], Kind::B32)?;
         let lane = self.lane_id()?;
-        let segment_mask = self.u32_const(segment);
-        let min_lane = self.builder.bitwise_and(ty, None, lane, segment_mask)?;
+        let min_lane = self.builder.bitwise_and(ty, None, lane, segment)?;
         let (source, valid) = match mode {
             ShuffleMode::Idx | ShuffleMode::Down => {
-                let upper = self.u32_const(clamp & !segment & 31);
+                let upper = self.builder.bitwise_and(ty, None, clamp, keep)?;
                 let max_lane = self.builder.bitwise_or(ty, None, min_lane, upper)?;
                 let j = if mode == ShuffleMode::Idx {
-                    let keep = self.u32_const(!segment & 31);
                     let low = self.builder.bitwise_and(ty, None, delta, keep)?;
                     self.builder.bitwise_or(ty, None, low, min_lane)?
                 } else {
@@ -3031,6 +3047,10 @@ impl<'a> Emitter<'a> {
             let kind = match param {
                 Param::U8 => {
                     // Promote byte params to B32 slots; ld.param.s8 sign-extends later.
+                    id = self.builder.u_convert(self.u32_type, None, id)?;
+                    Kind::B32
+                }
+                Param::U16 => {
                     id = self.builder.u_convert(self.u32_type, None, id)?;
                     Kind::B32
                 }
