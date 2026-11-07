@@ -585,14 +585,7 @@ fn compiled_ptx_rmsnorm() {
     let mut context = null_mut();
     ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
     let ptx = std::ffi::CString::new(include_str!("../examples/rmsnorm.ptx")).unwrap();
-    let unsupported = std::ffi::CString::new(
-        ptx.to_str()
-            .unwrap()
-            .replace("sqrt.rn.f32", "sqrt.approx.f32"),
-    )
-    .unwrap();
     let mut module = null_mut();
-    assert!(module.is_null());
     ok!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
     let mut kernel = null_mut();
     ok!(cuModuleGetFunction(
