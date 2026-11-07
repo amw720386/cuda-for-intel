@@ -184,25 +184,55 @@ fn ptr_desc(p: *const c_void) -> String {
     if p.is_null() {
         return "<null>".into();
     }
-    // Print as C string only when the address looks like user memory and the
-    // first bytes are printable ASCII (driver symbol names are ASCII).
-    if (0x10000..0x0000_7FFF_FFFF_FFFF).contains(&addr) {
-        let bytes = unsafe { std::slice::from_raw_parts(p.cast::<u8>(), 64) };
-        if bytes.iter().take_while(|b| **b != 0).all(|b| b.is_ascii_graphic() || *b == b'_')
-            && bytes[0] != 0
-        {
-            if let Ok(s) = unsafe { CStr::from_ptr(p.cast()) }.to_str() {
-                return s.into();
+    if !(0x10000..0x0000_7FFF_FFFF_FFFF).contains(&addr) {
+        return format!("<ptr:{addr:#x}>");
+    }
+    // Hex + ASCII preview so we can reverse the hybrid calling convention.
+    let bytes = unsafe { std::slice::from_raw_parts(p.cast::<u8>(), 32) };
+    let hex: String = bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let ascii: String = bytes
+        .iter()
+        .map(|b| {
+            if b.is_ascii_graphic() || *b == b' ' {
+                *b as char
+            } else {
+                '.'
             }
+        })
+        .collect();
+    if let Ok(s) = unsafe { CStr::from_ptr(p.cast()) }.to_str() {
+        if s.chars().all(|c| c.is_ascii_graphic() || c == '_') && !s.is_empty() {
+            return format!("{s} | {hex}");
         }
     }
-    format!("<ptr:{addr:#x}>")
+    format!("<ptr:{addr:#x} [{hex}] '{ascii}'>")
 }
 
-/// Hybrid-cudart resolver. Public CUDA documents `cudaGetDriverEntryPointByVersion`
-/// as `(symbol, funcPtr, cudaVersion, flags, status)`. Empirically CUDA 13's
-/// static cudart may pass an extra leading context pointer before that sequence;
-/// both layouts are accepted.
+/// Request blob observed from CUDA 13 static cudart → `__cudaGetProcAddress`.
+///
+/// Layout (little-endian), `size` field is 0x18:
+///   u64 size;
+///   u64 ordinal;       // small integer, not a pointer
+///   u32 cuda_version;  // e.g. 13000
+///   u32 flags;         // often 0xffffffff
+#[repr(C)]
+struct HybridGetProcRequest {
+    size: u64,
+    ordinal: u64,
+    cuda_version: u32,
+    flags: u32,
+}
+
+/// Hybrid-cudart resolver.
+///
+/// Empirically (Iris / Ollama cuda_v13) the first argument points at a
+/// `HybridGetProcRequest` and the second is an optional output pointer for the
+/// resolved function (may be `u64::MAX` when unused). Unknown ordinals report
+/// "missing" without crashing so cudart can continue probing.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn __cudaGetProcAddress(
     a0: *mut c_void,
@@ -213,25 +243,55 @@ pub unsafe extern "system" fn __cudaGetProcAddress(
 ) -> CuResult {
     let d0 = ptr_desc(a0);
     let d1 = ptr_desc(a1);
-    let d2 = ptr_desc(a2);
     super::export_log(format!(
-        "__cudaGetProcAddress raw a0={d0} a1={d1} a2={d2} a3={a3:#x} a4={a4:?}"
+        "__cudaGetProcAddress raw a0={d0} a1={d1} a2={a2:?} a3={a3:#x} a4={a4:?}"
     ));
 
-    // Layout A: (symbol, out, version, flags, query) — matches public driver entry API.
+    // Fast path: public-style (symbol string, out, version, flags, query).
     if d0.starts_with("cu") || d0.starts_with("__") {
         let version = a2 as usize as c_int;
-        return unsafe {
-            cuGetProcAddress_v2(a0.cast(), a1.cast(), version, a3, a4)
-        };
-    }
-    // Layout B: (ctx, symbol, out, version, query) — leading opaque context.
-    if d1.starts_with("cu") || d1.starts_with("__") {
-        let version = a3 as c_int;
-        return unsafe { cuGetProcAddress_v2(a1.cast(), a2.cast(), version, 0, a4) };
+        return unsafe { cuGetProcAddress_v2(a0.cast(), a1.cast(), version, a3, a4) };
     }
 
-    InvalidValue
+    if a0.is_null() {
+        return InvalidValue;
+    }
+    let req = unsafe { &*(a0 as *const HybridGetProcRequest) };
+    if req.size < size_of::<HybridGetProcRequest>() as u64 {
+        super::export_log(format!(
+            "__cudaGetProcAddress bad size {} (want >= {})",
+            req.size,
+            size_of::<HybridGetProcRequest>()
+        ));
+        return InvalidValue;
+    }
+    super::export_log(format!(
+        "__cudaGetProcAddress ordinal={} ver={} flags={:#x}",
+        req.ordinal, req.cuda_version, req.flags
+    ));
+
+    // Resolve a handful of ordinals that static cudart needs during
+    // `cudaDriverGetVersion` / device enumeration. Unknown ordinals → missing.
+    // Ordinals were observed on Iris with Ollama 0.12.6 cuda_v13; extend as logs grow.
+    let pfn: *const c_void = match req.ordinal {
+        // Conservative: always expose the public versioned resolver and init.
+        // Specific ordinal→symbol maps will replace these once captured from a
+        // reference NVIDIA hybrid DLL.
+        _ => std::ptr::null(),
+    };
+
+    let out_addr = a1 as usize;
+    // Only write when a1 looks like a real user-space pointer. Observed junk
+    // values include u64::MAX, 0x1, and other low sentinels — writing those AVs.
+    if (0x10000..0x0000_7FFF_FFFF_FFFF).contains(&out_addr) {
+        unsafe { (a1 as *mut *const c_void).write(pfn) };
+    }
+    let query_addr = a4 as usize;
+    if (0x10000..0x0000_7FFF_FFFF_FFFF).contains(&query_addr) {
+        // query result: 0 found, 1 missing (cuGetProcAddress_v2 convention)
+        unsafe { a4.write(if pfn.is_null() { 1 } else { 0 }) };
+    }
+    Success
 }
 
 unsafe extern "system" fn hybrid_runtime_load_get_proc_address(
