@@ -1045,3 +1045,67 @@ fn shfl_sync_idx_up_down_match_cuda_semantics() {
         assert_eq!(word(6), expected, "segmented down lane {lane}");
     }
 }
+
+#[test]
+fn sixty_four_bit_integer_ops() {
+    let machine = eval_warp(
+        "",
+        "",
+        r#"    mov.u64 %rd1, 0xfffffffffffffff0;
+    mov.u64 %rd2, 5;
+    xor.b64 %rd3, %rd1, %rd2;
+    max.s64 %rd4, %rd1, %rd2;
+    min.u64 %rd5, %rd1, %rd2;
+    max.u64 %rd6, %rd1, %rd2;
+    neg.s64 %rd7, %rd2;
+    abs.s64 %rd8, %rd1;
+    popc.b64 %r1, %rd1;
+    mad.lo.s64 %rd9, %rd2, %rd2, %rd1;
+    st.global.u64 [%rd15], %rd3;
+    st.global.u64 [%rd15+8], %rd4;
+    st.global.u64 [%rd15+16], %rd5;
+    st.global.u64 [%rd15+24], %rd6;
+    st.global.u64 [%rd15+32], %rd7;
+    st.global.u64 [%rd15+40], %rd8;
+    st.global.u32 [%rd15+48], %r1;
+    st.global.u64 [%rd15+56], %rd9;"#,
+        |_| {},
+    );
+    let q = |i: u64| machine.read(OUT + i * 8, 8);
+    assert_eq!(q(0), 0xffff_ffff_ffff_fff5);
+    assert_eq!(q(1), 5);
+    assert_eq!(q(2), 5);
+    assert_eq!(q(3), 0xffff_ffff_ffff_fff0);
+    assert_eq!(q(4), (-5i64) as u64);
+    assert_eq!(q(5), 16);
+    assert_eq!(machine.read(OUT + 48, 4), 60);
+    assert_eq!(q(7), 9);
+}
+
+#[test]
+fn float_rounding_and_integer_conversions_validate() {
+    let module = lower(&kernel(
+        "",
+        r#"    mov.f32 %f1, 0f40200000;
+    cvt.rni.f32.f32 %f2, %f1;
+    cvt.rmi.f32.f32 %f3, %f1;
+    cvt.rpi.f32.f32 %f4, %f1;
+    cvt.rni.s32.f32 %r1, %f1;
+    cvt.rzi.u32.f32 %r2, %f1;
+    cvt.rni.u32.f32 %r3, %f1;
+    mov.u32 %r4, 0xfedcba98;
+    cvt.s32.s16 %r5, %r4;
+    cvt.u32.u16 %r6, %r4;
+    cvt.u32.u8 %r7, %r4;"#,
+    ));
+    assert!(has_op(&module, Op::ConvertFToU));
+}
+
+#[test]
+fn accepts_ptx_isa_versions_emitted_by_cuda_11_to_13() {
+    for version in ["7.0", "7.8", "8.5", "9.1"] {
+        let source = kernel("", "").replace(".version 9.0", &format!(".version {version}"));
+        translate(&source).unwrap_or_else(|e| panic!("{version}: {e}"));
+    }
+    assert!(translate(&kernel("", "").replace(".version 9.0", ".version 3.0")).is_err());
+}

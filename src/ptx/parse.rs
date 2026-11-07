@@ -1064,6 +1064,24 @@ impl<'a> Parser<'a> {
             ["cvt.rzi.f32.f32" | "cvt.rzi.ftz.f32.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Trunc([src]))
             }
+            ["cvt.rni.f32.f32" | "cvt.rni.ftz.f32.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::RoundNearest([src]))
+            }
+            ["cvt.rmi.f32.f32" | "cvt.rmi.ftz.f32.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Floor([src]))
+            }
+            ["cvt.rpi.f32.f32" | "cvt.rpi.ftz.f32.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Ceil([src]))
+            }
+            ["cvt.rni.s32.f32" | "cvt.rni.ftz.s32.f32", dst, ",", src] => {
+                Instruction::CvtRniS32(dst, src)
+            }
+            ["cvt.rzi.u32.f32" | "cvt.rzi.ftz.u32.f32", dst, ",", src] => {
+                Instruction::CvtToU32 { nearest: false, dst, src }
+            }
+            ["cvt.rni.u32.f32" | "cvt.rni.ftz.u32.f32", dst, ",", src] => {
+                Instruction::CvtToU32 { nearest: true, dst, src }
+            }
             ["cvt.rzi.ftz.s32.f32" | "cvt.rzi.s32.f32", dst, ",", src] => {
                 Instruction::CvtRziS32(dst, src)
             }
@@ -1925,7 +1943,12 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
         tokens: tokens(source)?.into_iter(),
     };
     parser.expect(".version")?;
-    if !matches!(parser.take()?, "4.1" | "8.8" | "9.0") {
+    // Stock CUDA 11 through 13 toolchains emit PTX ISA 7.0 through 9.x.
+    let version = parser.take()?;
+    let supported = version.split_once('.').is_some_and(|(major, minor)| {
+        minor.parse::<u32>().is_ok() && major.parse::<u32>().is_ok_and(|m| (7..=9).contains(&m))
+    }) || version == "4.1";
+    if !supported {
         return Err(Error::new("unsupported PTX version"));
     }
     parser.expect(".target")?;

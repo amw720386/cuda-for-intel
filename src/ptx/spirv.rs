@@ -883,6 +883,21 @@ impl<'a> Emitter<'a> {
                 let magnitude = self.builder.bitwise_and(u32_type, None, magnitude, magnitude_mask)?;
                 return Ok(self.builder.bitwise_or(u32_type, None, sign, magnitude)?);
             }
+            FloatOp::RoundNearest([source]) | FloatOp::Floor([source]) | FloatOp::Ceil([source]) => {
+                let value = self.float_value(source)?;
+                let op = match op {
+                    FloatOp::RoundNearest(_) => OpenclStd100Op::rint,
+                    FloatOp::Floor(_) => OpenclStd100Op::floor,
+                    _ => OpenclStd100Op::ceil,
+                };
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    op as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
             FloatOp::Trunc([source]) => {
                 let value = self.float_value(source)?;
                 self.builder.ext_inst(
@@ -2484,6 +2499,48 @@ impl<'a> Emitter<'a> {
                     Decoration::FPRoundingMode,
                     [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
                 );
+                (dst, converted, Kind::B32)
+            }
+            Instruction::CvtRniS32(dst, src) => {
+                let value = self.float_value(src)?;
+                let rounded = self.builder.ext_inst(
+                    self.f32_type,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::rint as u32,
+                    [Operand::IdRef(value)],
+                )?;
+                let converted = self.builder.convert_f_to_s(self.u32_type, None, rounded)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
+                );
+                self.fp32 = true;
+                (dst, converted, Kind::B32)
+            }
+            Instruction::CvtToU32 { nearest, dst, src } => {
+                let mut value = self.float_value(src)?;
+                if nearest {
+                    value = self.builder.ext_inst(
+                        self.f32_type,
+                        None,
+                        self.opencl,
+                        OpenclStd100Op::rint as u32,
+                        [Operand::IdRef(value)],
+                    )?;
+                }
+                // PTX saturates: negatives (and NaN) give 0.
+                let zero = self.builder.constant_bit32(self.f32_type, 0);
+                let negative = self.builder.f_ord_less_than(self.bool_type, None, value, zero)?;
+                let clamped = self.builder.select(self.f32_type, None, negative, zero, value)?;
+                let converted = self.builder.convert_f_to_u(self.u32_type, None, clamped)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
+                );
+                self.fp32 = true;
                 (dst, converted, Kind::B32)
             }
             Instruction::CvtToHalf(dst, src) => {

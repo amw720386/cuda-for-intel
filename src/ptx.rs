@@ -250,6 +250,10 @@ enum FloatOp<'a> {
     TanhApprox([&'a str; 1]),
     /// `cvt.rzi.f32.f32` â€” truncate toward zero, stay in f32.
     Trunc([&'a str; 1]),
+    /// `cvt.rni.f32.f32` (round half to even), `cvt.rmi` (floor), `cvt.rpi` (ceil).
+    RoundNearest([&'a str; 1]),
+    Floor([&'a str; 1]),
+    Ceil([&'a str; 1]),
 }
 
 impl<'a> FloatOp<'a> {
@@ -273,6 +277,9 @@ impl<'a> FloatOp<'a> {
             | Self::Abs(inputs)
             | Self::Neg(inputs)
             | Self::TanhApprox(inputs)
+            | Self::RoundNearest(inputs)
+            | Self::Floor(inputs)
+            | Self::Ceil(inputs)
             | Self::Trunc(inputs) => inputs,
         }
     }
@@ -433,6 +440,10 @@ enum Instruction<'a> {
     Float32(&'a str, FloatOp<'a>),
     /// `cvt.rzi.ftz.s32.f32` â€” floatâ†’int32 toward zero.
     CvtRziS32(&'a str, &'a str),
+    /// `cvt.rni.s32.f32` — float to int32, ties to even.
+    CvtRniS32(&'a str, &'a str),
+    /// `cvt.rzi.u32.f32` / `cvt.rni.u32.f32` — float to uint32 (negative values clamp to 0).
+    CvtToU32 { nearest: bool, dst: &'a str, src: &'a str },
     /// `cvt.rn.f16.f32` â€” f32â†’f16 bits in the low 16 bits of a b32 register.
     CvtToHalf(&'a str, &'a str),
     Store32(Space, &'a str, &'a str),
@@ -617,7 +628,10 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 op.inputs()
             }
-            CvtRziS32(dst, src) | CvtToHalf(dst, src) => {
+            CvtRziS32(dst, src)
+            | CvtRniS32(dst, src)
+            | CvtToU32 { dst, src, .. }
+            | CvtToHalf(dst, src) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
