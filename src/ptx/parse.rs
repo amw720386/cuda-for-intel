@@ -617,13 +617,15 @@ impl<'a> Parser<'a> {
                     Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
                 };
                 let parts: Vec<&str> = op.split('.').collect();
+                // The `.shared` state space is optional: nvcc emits the generic form
+                // with a pointer produced by cvta.shared.
                 let (count, trans) = match parts[4..] {
-                    ["x1", "shared", "b16"] => (1u8, false),
-                    ["x2", "shared", "b16"] => (2, false),
-                    ["x4", "shared", "b16"] => (4, false),
-                    ["x1", "trans", "shared", "b16"] => (1, true),
-                    ["x2", "trans", "shared", "b16"] => (2, true),
-                    ["x4", "trans", "shared", "b16"] => (4, true),
+                    ["x1", "b16"] | ["x1", "shared", "b16"] => (1u8, false),
+                    ["x2", "b16"] | ["x2", "shared", "b16"] => (2, false),
+                    ["x4", "b16"] | ["x4", "shared", "b16"] => (4, false),
+                    ["x1", "trans", "b16"] | ["x1", "trans", "shared", "b16"] => (1, true),
+                    ["x2", "trans", "b16"] | ["x2", "trans", "shared", "b16"] => (2, true),
+                    ["x4", "trans", "b16"] | ["x4", "trans", "shared", "b16"] => (4, true),
                     _ => return Err(unsupported()),
                 };
                 let (regs, after) = rest_after_list_tokens(rest).ok_or_else(unsupported)?;
