@@ -1,4 +1,4 @@
-use super::{Block, Error, Instruction, Terminator};
+use super::{Block, Comparison, Error, Instruction, IntegerOp, Terminator};
 use std::collections::HashSet;
 
 pub(super) struct Flow<'a> {
@@ -135,11 +135,43 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
     let mut tid_defs: std::collections::HashMap<&str, (String, Vec<&str>)> = std::collections::HashMap::new();
     let mut local_derived: HashSet<&str> = HashSet::new();
     let mut checked_branches = vec![false; blocks.len()];
+    // Value facts for block-uniform bounds. `K = n - n % ntid.x` is a multiple of the block size,
+    // so `tid.x >= K` (or `<`) is the same for every thread of a block: all of them (K == 0) or
+    // none (K >= ntid.x > tid.x). PyTorch's top-k / kthvalue loops are built on this.
+    let mut tid_regs: HashSet<&str> = HashSet::new();
+    let mut ntid_regs: HashSet<&str> = HashSet::new();
+    let mut rem_of: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut multiple_of_ntid: HashSet<&str> = HashSet::new();
+    let mut uniform_compare: HashSet<&str> = HashSet::new();
     loop {
         let old_count = varying.len();
         for &index in order {
             let block = &blocks[index];
             for inst in &block.instructions {
+                match inst {
+                    Instruction::Builtin(dst, src) if src.starts_with("%tid.x") => {
+                        tid_regs.insert(*dst);
+                    }
+                    Instruction::Builtin(dst, src) if src.starts_with("%ntid.x") => {
+                        ntid_regs.insert(*dst);
+                    }
+                    Instruction::Integer32(IntegerOp::RemUnsigned | IntegerOp::Rem, dst, [a, b])
+                        if ntid_regs.contains(b) =>
+                    {
+                        rem_of.insert(*dst, *a);
+                    }
+                    Instruction::Integer32(IntegerOp::Sub, dst, [a, r]) if rem_of.get(r) == Some(a) => {
+                        multiple_of_ntid.insert(*dst);
+                    }
+                    Instruction::Compare { op, dst, src: [x, k], .. }
+                        if tid_regs.contains(x)
+                            && multiple_of_ntid.contains(k)
+                            && matches!(op, Comparison::GreaterEqual | Comparison::Less) =>
+                    {
+                        uniform_compare.insert(*dst);
+                    }
+                    _ => {}
+                }
                 let mut defined = Vec::new();
                 if let Some(inputs) = inst.collect_definitions(&mut defined) {
                     let base = |src: &&str| src.split('+').next().unwrap_or(src).to_string();
@@ -212,6 +244,9 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                     && matches!(blocks[block].end, Terminator::Return)
             };
             if exit_only(taken) || exit_only(other) {
+                continue;
+            }
+            if uniform_compare.contains(predicate) {
                 continue;
             }
             // Generalised early exit: if no barrier is reachable from one side, the threads
