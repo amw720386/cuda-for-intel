@@ -34,3 +34,22 @@ silently returned wrong results while the shim reported compute capability 7.5.
    GemmEx with a 32-bit accumulator.
    Alternative that keeps 7.5: `torch.backends.cuda.enable_mem_efficient_sdp(False)` and
    `enable_flash_sdp(False)` in the application.
+
+## conda cuda128 build (PTX compute_120)
+
+Same mechanism, different arch: at the default reported cc 7.5 PyTorch picks the
+`fmha_cutlassF_*_sm75` variant, whose sm_120 PTX is a `vprintf` stub. Until
+2026-11-07 the stub detector looked for the next `.entry` only, so in modules where
+every kernel is `.visible .entry` the stub was never recognised, loaded and silently
+produced wrong attention (transformer layer max error 1.77). Fixed (the detector now
+stops at the next `.visible/.weak/.func`); the call then fails with 209.
+Measured on the Arc B390 with torch 2.13 cuda128, default SDPA dispatch:
+
+| CFI_REPORT_CC | result |
+|---|---|
+| 7.5 (default) | sm75 stub selected: now a loud 209 (was silent wrong output) |
+| 8.0 | `fmha_cutlassF_*_sm80` selected, correct (all submodules equal CPU) |
+| 12.0 | `fmha_cutlassF_*_sm80` selected, correct |
+
+For the cuda128 build use `CFI_REPORT_CC=12.0` (or 8.0), or disable the fused SDP
+backends in the application.
