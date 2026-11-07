@@ -1143,7 +1143,7 @@ impl<'a> Emitter<'a> {
                 // PTX float setp uses ordered compares (NaN → false for eq/lt/…).
                 let id = match op {
                     Comparison::Equal => self.builder.f_ord_equal(ty, None, a, b),
-                    Comparison::NotEqual => self.builder.f_unord_not_equal(ty, None, a, b),
+                    Comparison::NotEqual => self.builder.f_ord_not_equal(ty, None, a, b),
                     Comparison::Less => self.builder.f_ord_less_than(ty, None, a, b),
                     Comparison::LessEqual => self.builder.f_ord_less_than_equal(ty, None, a, b),
                     Comparison::Greater => self.builder.f_ord_greater_than(ty, None, a, b),
@@ -1295,15 +1295,14 @@ impl<'a> Emitter<'a> {
                             self.builder
                                 .shift_right_arithmetic(ty, None, raised, shift16)?;
                         let bits = self.builder.constant_bit32(ty, 16);
-                        let zero = self.builder.constant_bit32(ty, 0);
+                        let max = self.builder.constant_bit32(ty, 15);
                         let in_range =
                             self.builder.u_less_than(self.bool_type, None, b, bits)?;
-                        let safe = self.builder.select(ty, None, in_range, b, zero)?;
-                        let shifted =
+                        // Counts of 16 or more fill with the sign bit (clamp to 15).
+                        let safe = self.builder.select(ty, None, in_range, b, max)?;
+                        let masked_shift =
                             self.builder
                                 .shift_right_arithmetic(ty, None, as_s32, safe)?;
-                        let masked_shift =
-                            self.builder.select(ty, None, in_range, shifted, zero)?;
                         // Re-pack as s16 in the low half for subsequent cvt.rn.f32.s16.
                         let raised = self
                             .builder
@@ -1321,17 +1320,21 @@ impl<'a> Emitter<'a> {
                         let bits = self.builder.constant_bit32(ty, 32);
                         let zero = self.builder.constant_bit32(ty, 0);
                         let in_range = self.builder.u_less_than(self.bool_type, None, b, bits)?;
-                        let safe = self.builder.select(ty, None, in_range, b, zero)?;
-                        let shifted = match op {
-                            IntegerOp::ShiftLeft => {
+                        if matches!(op, IntegerOp::ShiftRightArithmetic) {
+                            // `shr.s32` by 32 or more fills with the sign bit, so
+                            // clamp the count to 31 instead of producing zero.
+                            let max = self.builder.constant_bit32(ty, 31);
+                            let safe = self.builder.select(ty, None, in_range, b, max)?;
+                            self.builder.shift_right_arithmetic(ty, None, a, safe)
+                        } else {
+                            let safe = self.builder.select(ty, None, in_range, b, zero)?;
+                            let shifted = if matches!(op, IntegerOp::ShiftLeft) {
                                 self.builder.shift_left_logical(ty, None, a, safe)?
-                            }
-                            IntegerOp::ShiftRightArithmetic => {
-                                self.builder.shift_right_arithmetic(ty, None, a, safe)?
-                            }
-                            _ => self.builder.shift_right_logical(ty, None, a, safe)?,
-                        };
-                        self.builder.select(ty, None, in_range, shifted, zero)
+                            } else {
+                                self.builder.shift_right_logical(ty, None, a, safe)?
+                            };
+                            self.builder.select(ty, None, in_range, shifted, zero)
+                        }
                     }
                     IntegerOp::MulHighUnsigned => self.builder.ext_inst(
                         ty,
@@ -1482,19 +1485,17 @@ impl<'a> Emitter<'a> {
                 let value = self.integer(value, Kind::B64)?;
                 let shift = self.integer(shift, Kind::B64)?;
                 let bits = self.builder.constant_bit64(self.u64_type, 64);
-                let zero = self.builder.constant_bit64(self.u64_type, 0);
+                let max = self.builder.constant_bit64(self.u64_type, 63);
                 let in_range = self
                     .builder
                     .u_less_than(self.bool_type, None, shift, bits)?;
+                // Counts of 64 or more fill with the sign bit (clamp to 63).
                 let safe = self
                     .builder
-                    .select(self.u64_type, None, in_range, shift, zero)?;
-                let shifted = self
-                    .builder
-                    .shift_right_arithmetic(self.u64_type, None, value, safe)?;
+                    .select(self.u64_type, None, in_range, shift, max)?;
                 let id = self
                     .builder
-                    .select(self.u64_type, None, in_range, shifted, zero)?;
+                    .shift_right_arithmetic(self.u64_type, None, value, safe)?;
                 (dst, id, Kind::B64)
             }
             Instruction::ShiftLeft64(dst, [value, shift]) => {
@@ -1702,15 +1703,23 @@ impl<'a> Emitter<'a> {
                     Decoration::FPRoundingMode,
                     [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
                 );
+                // PTX float-to-int conversion saturates and maps NaN to zero.
+                self.builder
+                    .decorate(converted, Decoration::SaturatedConversion, []);
                 (dst, converted, Kind::B32)
             }
-            Instruction::CvtToHalf(dst, src) => {
+            Instruction::CvtToHalf(dst, src, toward_zero) => {
                 let value = self.float_value(src)?;
                 let half = self.builder.f_convert(self.f16_type, None, value)?;
+                let mode = if toward_zero {
+                    FPRoundingMode::RTZ
+                } else {
+                    FPRoundingMode::RTE
+                };
                 self.builder.decorate(
                     half,
                     Decoration::FPRoundingMode,
-                    [Operand::FPRoundingMode(FPRoundingMode::RTE)],
+                    [Operand::FPRoundingMode(mode)],
                 );
                 let bits16 = self.builder.bitcast(self.u16_type, None, half)?;
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits16)?;
@@ -1906,7 +1915,11 @@ impl<'a> Emitter<'a> {
         }
         self.shared_offsets.clear();
         self.shared_array = None;
-        let shared_total: u32 = entry.shared.iter().map(|(_, bytes)| bytes).sum();
+        let shared_total = entry
+            .shared
+            .iter()
+            .try_fold(0u32, |total, &(_, bytes)| total.checked_add(bytes))
+            .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?;
         if shared_total != 0 {
             let mut offset = 0u32;
             for &(name, bytes) in &entry.shared {

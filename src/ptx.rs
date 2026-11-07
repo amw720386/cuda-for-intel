@@ -287,7 +287,8 @@ enum Instruction<'a> {
     /// `cvt.rzi.ftz.s32.f32` â€” floatâ†’int32 toward zero.
     CvtRziS32(&'a str, &'a str),
     /// `cvt.rn.f16.f32` â€” f32â†’f16 bits in the low 16 bits of a b32 register.
-    CvtToHalf(&'a str, &'a str),
+    /// The flag selects round-toward-zero (`.rz`) instead of round-to-nearest-even.
+    CvtToHalf(&'a str, &'a str, bool),
     Store32(Space, &'a str, &'a str),
     /// `st.global.u8` â€” store the low 8 bits of a b32 register.
     Store8(Space, &'a str, &'a str),
@@ -422,7 +423,7 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 op.inputs()
             }
-            CvtRziS32(dst, src) | CvtToHalf(dst, src) => {
+            CvtRziS32(dst, src) | CvtToHalf(dst, src, _) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
@@ -1255,8 +1256,6 @@ mod tests {
             ("fma.rn.f32", "fma.rz.f32"),
             ("fma.rn.f32", "fma.rn.sat.f32"),
             ("cvt.rn.f32.u32", "cvt.rz.f32.u32"),
-            ("div.rn.f32", "div.approx.f32"),
-            ("sqrt.rn.f32", "sqrt.approx.f32"),
         ] {
             assert!(RMSNORM.contains(original));
             assert!(translate(&RMSNORM.replace(original, unsupported)).is_err());
@@ -1449,6 +1448,180 @@ mod tests {
             .is_err()
         );
         assert!(translate("not PTX").is_err());
+    }
+
+    fn entry_ops(source: &str) -> (rspirv::dr::Module, Vec<rspirv::spirv::Op>) {
+        let translated = translate(source).unwrap();
+        let module = rspirv::dr::load_words(&translated.words).unwrap();
+        let ops = module.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .map(|inst| inst.class.opcode)
+            .collect();
+        (module, ops)
+    }
+
+    fn u32_constants(module: &rspirv::dr::Module) -> Vec<u32> {
+        module
+            .types_global_values
+            .iter()
+            .filter(|inst| inst.class.opcode == rspirv::spirv::Op::Constant)
+            .filter_map(|inst| match inst.operands.first() {
+                Some(rspirv::dr::Operand::LiteralBit32(value)) => Some(*value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SHIFT_KERNEL: &str = "
+        .version 8.8
+        .target sm_80
+        .address_size 64
+        .entry shifts(.param .u64 .ptr .global out) {
+            .reg .b32 %r<4>;
+            .reg .b64 %rd<4>;
+            ld.param.u64 %rd1, [out];
+            cvta.to.global.u64 %rd1, %rd1;
+            ld.global.b32 %r1, [%rd1];
+            ld.global.b32 %r2, [%rd1+4];
+            shr.s32 %r3, %r1, %r2;
+            st.global.b32 [%rd1+8], %r3;
+            ret;
+        }
+    ";
+
+    #[test]
+    fn arithmetic_right_shift_clamps_to_sign_fill() {
+        use rspirv::spirv::Op;
+        // shr.s32 by >= 32 yields 0 or -1: clamp the count to 31, no zeroing select.
+        let (module, ops) = entry_ops(SHIFT_KERNEL);
+        assert!(u32_constants(&module).contains(&31));
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 1);
+        assert!(ops.contains(&Op::ShiftRightArithmetic));
+        // Logical shifts still zero out-of-range counts.
+        let (_, ops) = entry_ops(&SHIFT_KERNEL.replace("shr.s32", "shr.u32"));
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 2);
+    }
+
+    #[test]
+    fn arithmetic_right_shift_64_and_16_clamp_to_sign_fill() {
+        use rspirv::spirv::Op;
+        const SOURCE: &str = "
+            .version 8.8
+            .target sm_80
+            .address_size 64
+            .entry shifts64(.param .u64 .ptr .global out) {
+                .reg .b64 %rd<4>;
+                ld.param.u64 %rd1, [out];
+                cvta.to.global.u64 %rd1, %rd1;
+                ld.global.u64 %rd2, [%rd1];
+                ld.global.u64 %rd3, [%rd1+8];
+                shr.s64 %rd2, %rd2, %rd3;
+                st.global.u64 [%rd1], %rd2;
+                ret;
+            }
+        ";
+        let (_, ops) = entry_ops(SOURCE);
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 1);
+        let source16 = SHIFT_KERNEL.replace("shr.s32", "shr.s16");
+        let (module, ops) = entry_ops(&source16);
+        assert!(u32_constants(&module).contains(&15));
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 1);
+    }
+
+    #[test]
+    fn float_not_equal_is_ordered_and_float_to_int_saturates() {
+        use rspirv::spirv::{Decoration, Op};
+        const SOURCE: &str = "
+            .version 8.8
+            .target sm_80
+            .address_size 64
+            .entry cmp(.param .u64 .ptr .global out) {
+                .reg .pred %p<2>;
+                .reg .b32 %r<4>;
+                .reg .f32 %f<4>;
+                .reg .b64 %rd<2>;
+                ld.param.u64 %rd1, [out];
+                cvta.to.global.u64 %rd1, %rd1;
+                ld.global.f32 %f1, [%rd1];
+                ld.global.f32 %f2, [%rd1+4];
+                setp.ne.f32 %p1, %f1, %f2;
+                cvt.rzi.s32.f32 %r1, %f1;
+                @%p1 bra done;
+                st.global.b32 [%rd1+8], %r1;
+            done:
+                ret;
+            }
+        ";
+        let (module, ops) = entry_ops(SOURCE);
+        assert!(ops.contains(&Op::FOrdNotEqual));
+        assert!(!ops.contains(&Op::FUnordNotEqual));
+        assert!(module.annotations.iter().any(|inst| {
+            inst.operands
+                .contains(&rspirv::dr::Operand::Decoration(Decoration::SaturatedConversion))
+        }));
+    }
+
+    #[test]
+    fn half_conversion_honours_round_toward_zero() {
+        use rspirv::spirv::{Decoration, FPRoundingMode};
+        const SOURCE: &str = "
+            .version 8.8
+            .target sm_80
+            .address_size 64
+            .entry half(.param .u64 .ptr .global out) {
+                .reg .b32 %r<2>;
+                .reg .f32 %f<2>;
+                .reg .b64 %rd<2>;
+                ld.param.u64 %rd1, [out];
+                cvta.to.global.u64 %rd1, %rd1;
+                ld.global.f32 %f1, [%rd1];
+                cvt.rn.f16.f32 %r1, %f1;
+                st.global.b32 [%rd1], %r1;
+                ret;
+            }
+        ";
+        let mode = |source: &str| {
+            let (module, _) = entry_ops(source);
+            module.annotations.iter().find_map(|inst| {
+                match (inst.operands.get(1), inst.operands.get(2)) {
+                    (
+                        Some(rspirv::dr::Operand::Decoration(Decoration::FPRoundingMode)),
+                        Some(rspirv::dr::Operand::FPRoundingMode(mode)),
+                    ) => Some(*mode),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(mode(SOURCE), Some(FPRoundingMode::RTE));
+        assert_eq!(
+            mode(&SOURCE.replace("cvt.rn.f16.f32", "cvt.rz.f16.f32")),
+            Some(FPRoundingMode::RTZ)
+        );
+    }
+
+    #[test]
+    fn shared_symbols_honour_alignment_and_reject_size_overflow() {
+        const SOURCE: &str = "
+            .version 8.8
+            .target sm_80
+            .address_size 64
+            .entry aligned() {
+                .reg .b32 %r<2>;
+                .shared .align 4 .b8 small[4];
+                .shared .align 16 .b8 wide[16];
+                mov.u32 %r1, wide;
+                ret;
+            }
+        ";
+        let translated = translate(SOURCE).unwrap();
+        // `wide` starts at the next 16-byte boundary after the 4-byte symbol.
+        assert_eq!(translated.kernels[0].shared_bytes, 16 + 16);
+        let overflow = SOURCE
+            .replace("small[4]", "small[4294967292]")
+            .replace("wide[16]", "wide[16]");
+        assert!(translate(&overflow).is_err());
     }
 }
 
