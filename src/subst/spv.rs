@@ -48,6 +48,8 @@ pub(crate) struct Kb {
     terminated: bool,
     dot: bool,
     pub(crate) params: Vec<V>,
+    /// A runtime zero the compiler cannot fold (see `opaque_const`).
+    pub(crate) opaque_zero: Option<V>,
 }
 
 fn scope(s: Scope) -> Scope {
@@ -97,6 +99,7 @@ impl Kb {
             terminated: false,
             dot,
             params: Vec::new(),
+            opaque_zero: None,
         };
         if shared_words != 0 {
             let u32t = kb.t(Ty::U32);
@@ -294,6 +297,14 @@ impl Kb {
     pub(crate) fn ptr_to_u64(&mut self, p: V) -> V {
         let t = self.t(Ty::U64);
         self.b.convert_ptr_to_u(t, None, p).unwrap()
+    }
+
+    /// `value`, computed so the compiler cannot constant-fold it into a dot-product operand
+    /// (hardware showed OpSDot with a folded constant operand giving wrong results on Arc).
+    pub(crate) fn opaque_const(&mut self, value: u32) -> V {
+        let z = self.opaque_zero.expect("opaque_zero not set");
+        let c = self.c32(value);
+        self.or(c, z)
     }
 
     // ---- comparisons / select ----

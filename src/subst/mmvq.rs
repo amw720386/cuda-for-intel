@@ -41,6 +41,9 @@ fn fastdiv(kb: &mut Kb, n: V, mp: V, l: V) -> V {
 }
 
 struct Row {
+    /// Runtime-opaque 0x01010101 and 0x20202020 (never constants in dot operands).
+    ones: V,
+    bias: V,
     /// u64 address of the x block, and of the first aligned q8_1 block.
     x: V,
     y: V,
@@ -53,6 +56,7 @@ fn fneg4(kb: &mut Kb, v: V) -> V {
 
 fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
     let (x, y) = (r.x, r.y);
+    let (ones_op, bias_op) = (r.ones, r.bias);
     match ty {
         Q8_0 => {
             let d0 = kb.ld_f16(x);
@@ -173,7 +177,7 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
             let zero_f = kb.cf(0.0);
             let mut sumf_d = zero_f;
             let mut sumf_m = zero_f;
-            let ones = kb.c32(0x0101_0101);
+            let ones = ones_op;
             for i in 0..2u32 {
                 let blk = kb.addc(bq8, i);
                 let yb = kb.addr(y, blk, 36);
@@ -265,7 +269,7 @@ fn vec_dot(kb: &mut Kb, ty: u32, r: &Row, kqs: V, acc: V) -> V {
                     kb.andc(t, 0x3030_3030)
                 };
                 let comb = kb.or(vil, vih);
-                let c20 = kb.c32(0x2020_2020);
+                let c20 = bias_op;
                 let vi = kb.vsub4(comb, c20);
                 let blk = {
                     let b = kb.addc(bq8, 2 * i);
@@ -303,6 +307,11 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
     let (scx_, scy_, scd_) = (p[14], p[15], p[16]);
     let smr = [p[17], p[18], p[19]];
     let (ssx, ssy, ssd) = (p[20], p[21], p[22]);
+    // ncols_x is far below 2^31, so this is a zero only the device knows.
+    let oz = kb.shrc(ncols_x, 31);
+    kb.opaque_zero = Some(oz);
+    let ones = kb.opaque_const(0x0101_0101);
+    let bias = kb.opaque_const(0x2020_2020);
     let vx = kb.ptr_to_u64(vx);
     let vy = kb.ptr_to_u64(vy);
     let ids = kb.ptr_to_u64(ids);
@@ -390,7 +399,7 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
                     let slot = tmp[(j * rpb + i) as usize];
                     let body = |kb: &mut Kb| {
                         let acc = kb.get(slot);
-                        let r = vec_dot(kb, cfg.ty, &Row { x: xa, y: ya }, kqs, acc);
+                        let r = vec_dot(kb, cfg.ty, &Row { x: xa, y: ya, ones, bias }, kqs, acc);
                         kb.set(slot, r);
                     };
                     if i == 0 {
