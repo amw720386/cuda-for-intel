@@ -83,6 +83,10 @@ mod hw_ggml;
 mod hw_tier2;
 #[path = "gpu/hw_ggml_stock.rs"]
 mod hw_ggml_stock;
+#[path = "gpu/module_globals.rs"]
+mod module_globals;
+#[path = "gpu/event_timing.rs"]
+mod event_timing;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

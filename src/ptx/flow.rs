@@ -125,6 +125,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
     // Treat memory loads and all definitions under divergent control as potentially varying.
     // Repeat because a loop-carried definition can affect an earlier branch.
     let mut varying = HashSet::new();
+    let mut local_derived: HashSet<&str> = HashSet::new();
     let mut checked_branches = vec![false; blocks.len()];
     loop {
         let old_count = varying.len();
@@ -132,13 +133,27 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             let block = &blocks[index];
             for inst in &block.instructions {
                 let mut defined = Vec::new();
-                if let Some(inputs) = inst.collect_definitions(&mut defined)
-                    && (inst.is_memory_load()
-                        || inputs
-                            .iter()
-                            .any(|src| src.starts_with("%tid.") || varying.contains(src)))
-                {
-                    varying.extend(defined.iter().copied());
+                if let Some(inputs) = inst.collect_definitions(&mut defined) {
+                    let base = |src: &&str| src.split('+').next().unwrap_or(src).to_string();
+                    let thread_dependent = inputs.iter().any(|src| {
+                        let b = base(src);
+                        src.starts_with("%tid.") || varying.contains(src) || varying.contains(b.as_str())
+                    });
+                    let private = matches!(inst, super::Instruction::LocalSymbol64(..))
+                        || inputs.iter().any(|src| local_derived.contains(base(src).as_str()));
+                    if private {
+                        local_derived.extend(defined.iter().copied());
+                    }
+                    // A plain load from an address that is the same in every thread
+                    // (and not per-thread local memory) yields a block-uniform value.
+                    // Atomics return distinct values per thread.
+                    let uniform_load = inst.is_plain_load()
+                        && !thread_dependent
+                        && !private
+                        && !inst.loads_local_space();
+                    if thread_dependent || (inst.is_memory_load() && !uniform_load) {
+                        varying.extend(defined.iter().copied());
+                    }
                 }
             }
             let Terminator::Branch {

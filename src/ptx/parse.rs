@@ -2,6 +2,7 @@ use super::{
     Alu3Op, Alu64Op, AtomicOp, Block, MmaShape, ShuffleMode, VoteMode, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
     Width,
 };
+use super::globals::ModuleVars;
 use std::collections::HashMap;
 
 pub(super) fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
@@ -43,7 +44,12 @@ pub(super) fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
 
 struct Parser<'a> {
     tokens: std::vec::IntoIter<&'a str>,
+    /// Module-scope variables declared so far.
+    vars: ModuleVars<'a>,
 }
+
+/// Stock GGML MMQ kernels declare roughly 7000 registers.
+const MAX_PTX_REGISTERS: usize = 65536;
 
 impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&'a str> {
@@ -176,7 +182,7 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<usize>()
                     .ok()
-                    .filter(|&n| (1..=4096 - registers.len()).contains(&n))
+                    .filter(|&n| (1..=MAX_PTX_REGISTERS - registers.len()).contains(&n))
                     .ok_or_else(|| Error::new("unsupported PTX register range"))?;
                 self.expect(">")?;
                 for index in 0..count {
@@ -185,7 +191,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             } else {
-                if registers.len() == 4096 {
+                if registers.len() == MAX_PTX_REGISTERS {
                     return Err(Error::new("too many PTX registers"));
                 }
                 if registers.insert(name.to_owned(), width).is_some() {
@@ -314,6 +320,9 @@ impl<'a> Parser<'a> {
             }
             ["cvta.to.shared.u32", dst, ",", src] => {
                 Instruction::CvtaToShared { wide: false, dst, src }
+            }
+            ["mov.u64" | "mov.b64", dst, ",", src] if self.vars.contains_device(src) => {
+                Instruction::GlobalAddress(dst, src)
             }
             ["mov.b64", dst, ",", src]
                 if !src.starts_with('%')
@@ -1587,50 +1596,43 @@ fn special_constant(reg: &str) -> Option<&'static str> {
     })
 }
 
-fn skip_module_declaration(parser: &mut Parser<'_>) -> Result<(), Error> {
+/// Consume one module-scope declaration statement and record the variables
+/// this translator understands. Everything else is skipped as before.
+fn declare_module_variable<'a>(parser: &mut Parser<'a>) -> Result<(), Error> {
+    let mut statement = Vec::new();
     let mut depth = 0i32;
     loop {
         let token = parser.take()?;
         match token {
             "{" => depth += 1,
             "}" => depth -= 1,
-            ";" if depth == 0 => return Ok(()),
+            ";" if depth == 0 => break,
             _ => {}
         }
         if depth < 0 {
             return Err(Error::new("unbalanced braces in PTX module declaration"));
         }
+        statement.push(token);
     }
+    parser.vars.record(&statement);
+    Ok(())
 }
 
 /// Consume storage-class / linkage prefixes that are not `.entry`.
-fn skip_module_directives(parser: &mut Parser<'_>) -> Result<(), Error> {
+fn skip_module_directives<'a>(parser: &mut Parser<'a>) -> Result<(), Error> {
     loop {
         let Some(first) = parser.peek() else {
             return Ok(());
         };
         match first {
             ".entry" => return Ok(()),
-            ".visible" | ".weak" | ".extern" | ".common" => {
-                // `.visible .entry` begins a kernel — leave the attribute for
-                // `parse_entry`. Other `.visible .global` forms are skipped.
-                let rest = parser.tokens.as_slice();
-                if rest.get(1) == Some(&".entry") {
+            ".visible" | ".weak" | ".extern" | ".common" | ".global" | ".const" | ".shared"
+            | ".local" | ".tex" => {
+                // `.visible .entry` begins a kernel; leave the attribute for `parse_entry`.
+                if parser.tokens.as_slice().get(1) == Some(&".entry") {
                     return Ok(());
                 }
-                parser.take()?;
-                // Optional second linkage/storage token, then declaration body.
-                if matches!(
-                    parser.peek(),
-                    Some(".global" | ".const" | ".shared" | ".local" | ".tex")
-                ) {
-                    parser.take()?;
-                }
-                skip_module_declaration(parser)?;
-            }
-            ".global" | ".const" | ".shared" | ".local" | ".tex" => {
-                parser.take()?;
-                skip_module_declaration(parser)?;
+                declare_module_variable(parser)?;
             }
             // Fatbin PTX is padded with NUL and often ends with a Ctrl-Z (0x1a).
             other if other.chars().all(|c| c.is_control()) => {
@@ -2023,8 +2025,14 @@ fn rename_identifiers(text: &str, renames: &[(String, String, bool)]) -> String 
 }
 
 pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
+    parse_module(source).map(|(entries, _)| entries)
+}
+
+/// Parse every supported kernel together with the module-scope variables.
+pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'_>), Error> {
     let mut parser = Parser {
         tokens: tokens(source)?.into_iter(),
+        vars: ModuleVars::default(),
     };
     parser.expect(".version")?;
     // Stock CUDA 11 through 13 toolchains emit PTX ISA 7.0 through 9.x.
@@ -2086,7 +2094,7 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
             Error::new("PTX module contains no supported .entry kernels")
         }));
     }
-    Ok(entries)
+    Ok((entries, parser.vars))
 }
 
 pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, Error> {
@@ -2098,8 +2106,37 @@ pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, 
     tokens.drain(..start);
     let mut parser = Parser {
         tokens: tokens.into_iter(),
+        vars: ModuleVars::default(),
     };
     parse_entry(&mut parser)
+}
+
+/// Append a static shared array. Offsets are prefix sums, so pad the previous
+/// symbol to honour this symbol's declared alignment inside the unified window.
+fn push_shared<'a>(
+    shared: &mut Vec<(&'a str, u32)>,
+    name: &'a str,
+    size: u32,
+    align: u32,
+) -> Result<(), Error> {
+    let total = shared
+        .iter()
+        .try_fold(0u32, |total, &(_, bytes): &(&str, u32)| total.checked_add(bytes))
+        .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?;
+    let padding = total
+        .checked_next_multiple_of(align)
+        .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?
+        - total;
+    if padding != 0
+        && let Some(last) = shared.last_mut()
+    {
+        last.1 = last
+            .1
+            .checked_add(padding)
+            .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?;
+    }
+    shared.push((name, size));
+    Ok(())
 }
 
 fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
@@ -2199,39 +2236,59 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
             .ok_or_else(|| Error::new("shared array size must be a positive 32-bit byte count"))?;
         parser.expect("]")?;
         parser.expect(";")?;
-        // Offsets are prefix sums, so pad the previous symbol to honour this
-        // symbol's declared alignment inside the unified shared window.
-        let total = shared
-            .iter()
-            .try_fold(0u32, |total, &(_, bytes): &(&str, u32)| total.checked_add(bytes))
-            .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?;
         let align: u32 = align.parse().unwrap_or(4);
-        let padding = total
-            .checked_next_multiple_of(align)
-            .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?
-            - total;
-        if padding != 0
-            && let Some(last) = shared.last_mut()
-        {
-            last.1 = last
-                .1
-                .checked_add(padding)
-                .ok_or_else(|| Error::new("PTX shared memory size overflows 32 bits"))?;
-        }
-        shared.push((name, size));
+        push_shared(&mut shared, name, size, align)?;
     }
+    let snapshot = (!parser.vars.shared.is_empty()).then(|| parser.tokens.clone());
     let blocks = parser.blocks()?;
-    infer_direct_global_params(&mut params, &blocks);
-    // Dynamic / extern shared: nvcc emits `mov.u32 %r, symbol` without a local .shared decl.
-    if shared.is_empty() {
-        for inst in blocks.iter().flat_map(|block| &block.instructions) {
-            if let Instruction::SharedSymbol32(_, name) = inst {
-                // Allocate a generous workgroup buffer; CUDA launch shared size selects the
-                // live prefix. Softmax and similar kernels index from symbol address 0.
-                shared.push((*name, 48 * 1024));
-                break;
-            }
+    if let Some(snapshot) = snapshot {
+        // Module-scope `.shared` arrays are private to each kernel that names them.
+        let used_tokens = snapshot.len() - parser.tokens.len();
+        let consumed: Vec<&str> = snapshot.take(used_tokens).collect();
+        let used: Vec<_> = parser
+            .vars
+            .shared
+            .iter()
+            .filter(|var| {
+                !shared.iter().any(|(known, _)| *known == var.name)
+                    && consumed.iter().any(|token| {
+                        *token == var.name
+                            || token
+                                .strip_prefix(var.name)
+                                .is_some_and(|rest| rest.starts_with('+'))
+                    })
+            })
+            .cloned()
+            .collect();
+        for var in used {
+            push_shared(&mut shared, var.name, var.size, var.align)?;
         }
+    }
+    infer_direct_global_params(&mut params, &blocks);
+    // Dynamic / extern shared: nvcc emits `mov.u32 %r, symbol` or `mov.b64 %rd, symbol`
+    // for an `.extern .shared` array that has no local .shared declaration. CUDA places
+    // the dynamic block after all static shared arrays; the launch's shared size selects
+    // the live prefix, so reserve the remainder of a 64 KiB window (or 48 KiB when no
+    // static arrays exist, as before).
+    // Every `.extern .shared` array aliases the start of the dynamic block.
+    let mut dynamic: Vec<&str> = Vec::new();
+    for inst in blocks.iter().flat_map(|block| &block.instructions) {
+        if let Instruction::SharedSymbol32(_, name) | Instruction::SharedAddress(_, name) = inst
+            && !shared.iter().any(|(known, _)| known == name)
+            && !dynamic.contains(name)
+        {
+            dynamic.push(name);
+        }
+    }
+    if let Some((&first, aliases)) = dynamic.split_first() {
+        let total: u32 = shared.iter().map(|&(_, bytes): &(&str, u32)| bytes).sum();
+        let budget = if shared.is_empty() { 48 * 1024 } else { 64 * 1024 - total.next_multiple_of(16) };
+        if let Some(last) = shared.last_mut() {
+            last.1 += total.next_multiple_of(16) - total;
+        }
+        // Zero-sized aliases precede the real block so they share its offset.
+        shared.extend(aliases.iter().map(|&name| (name, 0)));
+        shared.push((first, budget));
     }
     Ok(Entry {
         name,

@@ -1,4 +1,5 @@
 use super::flow::Flow;
+use super::globals::GlobalVar;
 use super::rounded;
 use super::{
     Alu3Op, Alu64Op, AtomicOp, Comparison, MmaShape, ShuffleMode, VoteMode, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
@@ -7,7 +8,7 @@ use super::{
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Instruction as SpirvInstruction, Operand};
 use rspirv::spirv::{
-    AddressingModel, BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel,
+    LinkageType, AddressingModel, BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel,
     FPRoundingMode, FunctionControl, MemoryModel, MemorySemantics, Op,
     OpenclStd100Op, Scope, StorageClass, Word,
 };
@@ -83,6 +84,8 @@ struct Emitter<'a> {
     shared_array: Option<Word>,
     /// Byte offset of each `.shared` symbol within `shared_array`.
     shared_offsets: HashMap<&'a str, u32>,
+    /// Module-scope `.global`/`.const` variables by PTX name.
+    globals: HashMap<String, Word>,
     local: Option<(&'a str, Word)>,
     /// Set when the entry uses CUDA warp shuffles / redux (forces SubgroupSize 32).
     warp_ops: bool,
@@ -163,6 +166,7 @@ impl<'a> Emitter<'a> {
             local_word_ptr,
             shared_array: None,
             shared_offsets: HashMap::new(),
+            globals: HashMap::new(),
             local: None,
             warp_ops: false,
             declared: HashSet::new(),
@@ -544,6 +548,17 @@ impl<'a> Emitter<'a> {
             Space::Shared => self.shared_byte_ptr,
             Space::Local => self.local_byte_ptr,
         };
+        if space == Space::Global
+            && let Some(&variable) = self.globals.get(base)
+        {
+            // Module-scope variable named directly in the address operand.
+            let pointer = self.builder.bitcast(byte_ty, None, variable)?;
+            if offset == 0 {
+                return Ok(pointer);
+            }
+            let bytes = self.builder.constant_bit64(self.i64_type, offset as u64);
+            return Ok(self.builder.ptr_access_chain(byte_ty, None, pointer, bytes, [])?);
+        }
         let value = self.read(base)?;
         let bytes_ptr = match (space, value.kind) {
             (Space::Shared, Kind::B32) => {
@@ -1907,6 +1922,14 @@ impl<'a> Emitter<'a> {
                 let id = self.builder.constant_bit32(self.u32_type, offset);
                 (dst, id, Kind::B32)
             }
+            Instruction::GlobalAddress(dst, src) => {
+                let variable = *self
+                    .globals
+                    .get(src)
+                    .ok_or_else(|| Error::new(format!("unknown PTX global symbol {src}")))?;
+                let id = self.builder.bitcast(self.global_byte_ptr, None, variable)?;
+                (dst, id, Kind::Address(Space::Global))
+            }
             Instruction::LocalSymbol64(dst, src) => {
                 let pointer = self.local_base(src)?;
                 let id = self.builder.bitcast(self.local_byte_ptr, None, pointer)?;
@@ -2810,8 +2833,71 @@ impl<'a> Emitter<'a> {
     }
 }
 
-pub(super) fn emit(entries: Vec<Entry<'_>>) -> Result<Translation, Error> {
+impl<'a> Emitter<'a> {
+    /// Emit every module-scope `.global`/`.const` variable as an exported
+    /// `CrossWorkgroup` variable. Level Zero resolves the exported name with
+    /// `zeModuleGetGlobalPointer`.
+    fn declare_globals(&mut self, vars: &[GlobalVar]) {
+        if vars.is_empty() {
+            return;
+        }
+        self.builder.capability(Capability::Linkage);
+        let mut words: HashMap<u32, Word> = HashMap::new();
+        for var in vars {
+            let count = var.size.div_ceil(4);
+            let length = self.builder.constant_bit32(self.u32_type, count);
+            let array = self.builder.type_array(self.u32_type, length);
+            let pointer = self
+                .builder
+                .type_pointer(None, StorageClass::CrossWorkgroup, array);
+            let initializer = match &var.init {
+                None => self.builder.constant_null(array),
+                Some(bytes) => {
+                    let mut elements = Vec::with_capacity(count as usize);
+                    for chunk in bytes.chunks(4) {
+                        let mut word = [0u8; 4];
+                        word[..chunk.len()].copy_from_slice(chunk);
+                        let value = u32::from_le_bytes(word);
+                        let builder = &mut self.builder;
+                        let u32_type = self.u32_type;
+                        let id = *words
+                            .entry(value)
+                            .or_insert_with(|| builder.constant_bit32(u32_type, value));
+                        elements.push(id);
+                    }
+                    self.builder.constant_composite(array, elements)
+                }
+            };
+            let variable = self.builder.variable(
+                pointer,
+                None,
+                StorageClass::CrossWorkgroup,
+                Some(initializer),
+            );
+            self.builder.decorate(
+                variable,
+                Decoration::Alignment,
+                [Operand::LiteralBit32(var.align.max(4))],
+            );
+            self.builder.decorate(
+                variable,
+                Decoration::LinkageAttributes,
+                [
+                    Operand::LiteralString(var.name.clone()),
+                    Operand::LinkageType(LinkageType::Export),
+                ],
+            );
+            self.globals.insert(var.name.clone(), variable);
+        }
+    }
+}
+
+pub(super) fn emit(
+    entries: Vec<Entry<'_>>,
+    globals: Vec<GlobalVar>,
+) -> Result<Translation, Error> {
     let mut emitter = Emitter::new();
+    emitter.declare_globals(&globals);
     let kernels = entries
         .into_iter()
         .map(|entry| emitter.emit_entry(entry))
@@ -2819,6 +2905,7 @@ pub(super) fn emit(entries: Vec<Entry<'_>>) -> Result<Translation, Error> {
     Ok(Translation {
         words: emitter.builder.module().assemble(),
         kernels,
+        globals,
     })
 }
 

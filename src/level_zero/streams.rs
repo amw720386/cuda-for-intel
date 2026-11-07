@@ -154,6 +154,27 @@ impl CommandList {
         })
     }
 
+    /// Write the device global timestamp to `dst` (host-visible memory) once
+    /// `waits` have signalled, then signal `signal`.
+    pub(crate) fn write_timestamp(
+        &self,
+        api: &Api,
+        dst: *mut u64,
+        signal: &Fence,
+        waits: &[Arc<Fence>],
+    ) -> Result<(), Error> {
+        let mut events = WaitEvents::new(waits)?;
+        call("zeCommandListAppendWriteGlobalTimestamp", || unsafe {
+            (api.zeCommandListAppendWriteGlobalTimestamp)(
+                self.0.0,
+                dst,
+                signal.handle.0,
+                events.count,
+                events.ptr(),
+            )
+        })
+    }
+
     pub(crate) fn queue_barrier(&self, api: &Api) -> Result<(), Error> {
         call("zeCommandListAppendBarrier", || unsafe {
             (api.zeCommandListAppendBarrier)(self.0.0, null_mut(), 0, null_mut())

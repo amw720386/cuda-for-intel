@@ -20,7 +20,7 @@ struct Library {
     unloading: bool,
 }
 
-fn module_for_library(state: &mut State, library: usize) -> Result<(usize, usize), CuResult> {
+pub(super) fn module_for_library(state: &mut State, library: usize) -> Result<(usize, usize), CuResult> {
     let library_image = state.libraries.images.get(&library).ok_or(InvalidHandle)?;
     if library_image.unloading {
         return Err(InvalidHandle);

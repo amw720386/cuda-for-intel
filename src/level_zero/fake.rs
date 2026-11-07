@@ -11,6 +11,8 @@ const UNKNOWN: Status = 0x7fff_fffe;
 const NOT_READY: Status = 1;
 // Distinct drivers, device handles and compute queue ordinals.
 const DEVICES: [(Id, Id, u32); 2] = [(1, 2, 7), (3, 4, 11)];
+/// Device timer frequency advertised by the fake devices.
+pub(crate) const FAKE_TIMER_HZ: u64 = 10_000_000;
 const WAIT_LIMIT: Duration = Duration::from_secs(3);
 static DRIVER: Mutex<Option<Driver>> = Mutex::new(None);
 static CHANGED: Condvar = Condvar::new();
@@ -38,6 +40,8 @@ struct Command {
     resources: Vec<Id>,
     waits: Vec<Id>,
     signal: Id,
+    /// Host address that receives the fake device clock when the command completes.
+    stamp: usize,
 }
 
 impl Command {
@@ -96,6 +100,12 @@ struct Driver {
     paused: bool,
     waiters: usize,
     execute_result: Option<Status>,
+    /// Fake device timestamp counter and its increment per timestamp write.
+    clock: u64,
+    clock_step: u64,
+    /// Module variables handed out by `zeModuleGetGlobalPointer`.
+    globals: BTreeMap<(Id, String), Id>,
+    global_size: Option<usize>,
 }
 
 impl Driver {
@@ -241,6 +251,11 @@ impl Driver {
                 })
         }) {
             if let Some(command) = self.pending[index].commands.pop_front() {
+                if command.stamp != 0 {
+                    // The destination is host memory owned by the caller of the append.
+                    unsafe { (command.stamp as *mut u64).write_volatile(self.clock) };
+                    self.clock = self.clock.wrapping_add(self.clock_step);
+                }
                 self.signal(command.signal);
                 self.ledger.completed += 1;
             }
@@ -339,9 +354,10 @@ pub(crate) fn start() -> Runtime {
                         queues: 2,
                     },
                 ],
-                timestamp_frequency_hz: None,
-                timestamp_valid_bits: 0,
-                kernel_timestamp_valid_bits: 0,
+                // 10 MHz device timer with the 36-bit global counter of Intel GPUs.
+                timestamp_frequency_hz: Some(FAKE_TIMER_HZ),
+                timestamp_valid_bits: 36,
+                kernel_timestamp_valid_bits: 32,
             },
             driver: Handle(without_provenance_mut(driver)),
             handle: Handle(without_provenance_mut(handle)),
@@ -371,6 +387,19 @@ pub(crate) fn complete() {
         driver.complete_ready();
         Ok(0)
     });
+}
+
+/// Set the fake device clock and its advance (in ticks) per timestamp write.
+pub(crate) fn set_clock(start: u64, step: u64) {
+    let mut guard = lock();
+    let driver = guard.as_mut().unwrap();
+    driver.clock = start;
+    driver.clock_step = step;
+}
+
+/// Override the size reported for module variables (`None` restores the default).
+pub(crate) fn set_global_size(size: Option<usize>) {
+    lock().as_mut().unwrap().global_size = size;
 }
 
 pub(crate) fn fail_after_execute(status: Status) {
