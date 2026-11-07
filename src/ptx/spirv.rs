@@ -502,6 +502,9 @@ impl<'a> Emitter<'a> {
             (_, Kind::Address(actual)) if actual == space => {
                 self.builder.bitcast(byte_ty, None, value.id)?
             }
+            // nvcc often keeps post-cvta pointers in .b64 via selp/mov; treat as
+            // generic global addresses when used by ld.global/st.global.
+            (Space::Global, Kind::B64) => self.builder.bitcast(byte_ty, None, value.id)?,
             _ => {
                 return Err(Error::new(format!(
                     "expected {:?} address for {base}, got {:?}",
@@ -1086,18 +1089,48 @@ impl<'a> Emitter<'a> {
                 src: [a, b, pred],
             } => {
                 let cond = self.read(pred)?.require(Kind::Predicate, pred)?;
-                let value_kind = match kind {
-                    Width::B32 => Kind::B32,
-                    Width::B64 => Kind::B64,
-                    Width::Predicate => {
-                        return Err(Error::new("selp predicate destination is unsupported"));
-                    }
-                };
-                let a = self.integer(a, value_kind)?;
-                let b = self.integer(b, value_kind)?;
-                let ty = self.value_type(value_kind);
-                let id = self.builder.select(ty, None, cond, a, b)?;
-                (dst, id, value_kind)
+                let a_global = matches!(
+                    self.registers.get(a).map(|v| v.kind),
+                    Some(Kind::Address(Space::Global))
+                );
+                let b_global = matches!(
+                    self.registers.get(b).map(|v| v.kind),
+                    Some(Kind::Address(Space::Global))
+                );
+                // Preserve global pointers through `selp.b64` so later address
+                // arithmetic (`add.s64` + `ld.global`) keeps Address typing.
+                if kind == Width::B64 && (a_global || b_global) {
+                    let mut to_ptr = |name: &str, is_addr: bool| -> Result<Word, Error> {
+                        if is_addr {
+                            Ok(self.read(name)?.id)
+                        } else if Self::parse_u64(name) == Some(0) {
+                            let zero = self.builder.constant_bit64(self.u64_type, 0);
+                            Ok(self.builder.bitcast(self.global_byte_ptr, None, zero)?)
+                        } else {
+                            let bits = self.integer(name, Kind::B64)?;
+                            Ok(self.builder.bitcast(self.global_byte_ptr, None, bits)?)
+                        }
+                    };
+                    let a = to_ptr(a, a_global)?;
+                    let b = to_ptr(b, b_global)?;
+                    let id = self
+                        .builder
+                        .select(self.global_byte_ptr, None, cond, a, b)?;
+                    (dst, id, Kind::Address(Space::Global))
+                } else {
+                    let value_kind = match kind {
+                        Width::B32 => Kind::B32,
+                        Width::B64 => Kind::B64,
+                        Width::Predicate => {
+                            return Err(Error::new("selp predicate destination is unsupported"));
+                        }
+                    };
+                    let a = self.integer(a, value_kind)?;
+                    let b = self.integer(b, value_kind)?;
+                    let ty = self.value_type(value_kind);
+                    let id = self.builder.select(ty, None, cond, a, b)?;
+                    (dst, id, value_kind)
+                }
             }
             Instruction::PredicateLogic {
                 and,
@@ -1112,6 +1145,11 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.builder.logical_or(ty, None, a, b)?
                 };
+                (dst, id, Kind::Predicate)
+            }
+            Instruction::NotPred(dst, src) => {
+                let src = self.read(src)?.require(Kind::Predicate, src)?;
+                let id = self.builder.logical_not(self.bool_type, None, src)?;
                 (dst, id, Kind::Predicate)
             }
             Instruction::Integer32(op, dst, [a, b]) => {
@@ -1346,6 +1384,26 @@ impl<'a> Emitter<'a> {
                 let id = self.builder.bitwise_and(self.u64_type, None, a, b)?;
                 (dst, id, Kind::B64)
             }
+            Instruction::Or64(dst, [a, b]) => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
+                let id = self.builder.bitwise_or(self.u64_type, None, a, b)?;
+                (dst, id, Kind::B64)
+            }
+            Instruction::Div64 {
+                signed,
+                dst,
+                src: [a, b],
+            } => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
+                let id = if signed {
+                    self.builder.s_div(self.u64_type, None, a, b)?
+                } else {
+                    self.builder.u_div(self.u64_type, None, a, b)?
+                };
+                (dst, id, Kind::B64)
+            }
             Instruction::Rem64 {
                 signed,
                 dst,
@@ -1469,6 +1527,13 @@ impl<'a> Emitter<'a> {
                 let value = self.integer(src, Kind::B32)?;
                 let byte = self.builder.u_convert(self.u8_type, None, value)?;
                 self.builder.store(bytes, byte, None, [])?;
+                return Ok(());
+            }
+            Instruction::Store16(space, address, src) => {
+                let half_ptr = self.half_pointer(space, address)?;
+                let value = self.integer(src, Kind::B32)?;
+                let bits16 = self.builder.u_convert(self.u16_type, None, value)?;
+                self.builder.store(half_ptr, bits16, None, [])?;
                 return Ok(());
             }
             Instruction::StoreVec {

@@ -1,0 +1,181 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.entry _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3_(
+.param .u64 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_0,
+.param .u64 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_1,
+.param .u64 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_2,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_3,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_4,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_5,
+.param .align 4 .b8 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_6[12],
+.param .align 4 .b8 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_7[12],
+.param .align 4 .b8 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_8[12],
+.param .align 4 .b8 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_9[12],
+.param .align 4 .b8 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_10[12],
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_11,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_12,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_13,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_14,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_15,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_16,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_17,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_18,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_19,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_20,
+.param .u32 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_21,
+.param .u64 _Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_22
+)
+{
+.reg .pred %p<14>;
+.reg .f32 %f<7>;
+.reg .b32 %r<76>;
+.reg .b64 %rd<39>;
+
+
+ld.param.u64 %rd5, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_0];
+ld.param.u64 %rd6, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_2];
+ld.param.u32 %r12, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_3];
+ld.param.u32 %r36, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_4];
+ld.param.u32 %r37, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_5];
+ld.param.u32 %r25, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_11];
+ld.param.u32 %r26, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_12];
+ld.param.u32 %r27, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_13];
+ld.param.u32 %r28, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_14];
+ld.param.u32 %r29, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_15];
+ld.param.u32 %r30, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_16];
+ld.param.u32 %r31, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_17];
+ld.param.u32 %r32, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_18];
+ld.param.u32 %r33, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_19];
+ld.param.u32 %r34, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_20];
+ld.param.u32 %r35, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_21];
+ld.param.u64 %rd7, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_22];
+ld.param.u32 %r24, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_10+8];
+ld.param.u32 %r23, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_10+4];
+ld.param.u32 %r22, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_10];
+ld.param.u32 %r21, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_9+8];
+ld.param.u32 %r20, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_9+4];
+ld.param.u32 %r19, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_9];
+ld.param.u32 %r18, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_8+8];
+ld.param.u32 %r17, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_8+4];
+ld.param.u32 %r16, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_8];
+ld.param.u32 %r15, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_7+8];
+ld.param.u32 %r14, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_7+4];
+ld.param.u32 %r13, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_7];
+ld.param.u32 %r38, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_6+8];
+ld.param.u32 %r39, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_6+4];
+ld.param.u32 %r40, [_Z11k_bin_bcastIXadL_ZN42_INTERNAL_357674cd_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_jjj5uint3SB_SB_SB_SB_jjjjjjjjjjjDpT3__param_6];
+mov.u32 %r41, %ctaid.x;
+mov.u32 %r1, %ntid.x;
+mov.u32 %r42, %tid.x;
+mad.lo.s32 %r75, %r1, %r41, %r42;
+mov.u32 %r43, %ctaid.y;
+mov.u32 %r44, %ntid.y;
+mov.u32 %r45, %tid.y;
+mad.lo.s32 %r3, %r44, %r43, %r45;
+mov.u32 %r46, %ctaid.z;
+mov.u32 %r47, %ntid.z;
+mov.u32 %r48, %tid.z;
+mad.lo.s32 %r49, %r47, %r46, %r48;
+mul.hi.u32 %r50, %r49, %r40;
+add.s32 %r51, %r50, %r49;
+shr.u32 %r4, %r51, %r39;
+mul.lo.s32 %r52, %r4, %r38;
+sub.s32 %r5, %r49, %r52;
+setp.ge.u32 %p2, %r75, %r12;
+setp.ge.u32 %p3, %r3, %r36;
+or.pred %p4, %p2, %p3;
+setp.ge.u32 %p5, %r4, %r37;
+or.pred %p6, %p4, %p5;
+setp.ge.u32 %p7, %r5, %r38;
+or.pred %p8, %p6, %p7;
+@%p8 bra $L__BB13_6;
+
+cvta.to.global.u64 %rd8, %rd5;
+mul.hi.u32 %r53, %r3, %r16;
+add.s32 %r54, %r53, %r3;
+shr.u32 %r55, %r54, %r17;
+mul.lo.s32 %r56, %r55, %r18;
+sub.s32 %r57, %r3, %r56;
+mul.hi.u32 %r58, %r4, %r19;
+add.s32 %r59, %r58, %r4;
+shr.u32 %r60, %r59, %r20;
+mul.lo.s32 %r61, %r60, %r21;
+sub.s32 %r62, %r4, %r61;
+mul.hi.u32 %r63, %r5, %r22;
+add.s32 %r64, %r63, %r5;
+shr.u32 %r65, %r64, %r23;
+mul.lo.s32 %r66, %r65, %r24;
+sub.s32 %r67, %r5, %r66;
+mul.wide.u32 %rd9, %r5, %r31;
+mul.wide.u32 %rd10, %r4, %r30;
+mul.wide.u32 %rd11, %r29, %r3;
+add.s64 %rd12, %rd10, %rd11;
+add.s64 %rd13, %rd12, %rd9;
+mul.wide.u32 %rd14, %r67, %r35;
+mul.wide.u32 %rd15, %r62, %r34;
+mul.wide.u32 %rd16, %r57, %r33;
+mul.wide.u32 %rd17, %r5, %r27;
+mul.wide.u32 %rd18, %r4, %r26;
+mul.wide.u32 %rd19, %r25, %r3;
+shl.b64 %rd20, %rd13, 2;
+add.s64 %rd21, %rd8, %rd20;
+add.s64 %rd22, %rd5, %rd20;
+setp.eq.s64 %p9, %rd5, 0;
+selp.b64 %rd1, 0, %rd21, %p9;
+mov.u32 %r68, %nctaid.x;
+mul.lo.s32 %r6, %r1, %r68;
+setp.eq.s64 %p10, %rd22, 0;
+or.pred %p1, %p9, %p10;
+cvt.u64.u32 %rd2, %r32;
+add.s64 %rd23, %rd15, %rd16;
+add.s64 %rd3, %rd23, %rd14;
+add.s64 %rd24, %rd18, %rd19;
+add.s64 %rd4, %rd24, %rd17;
+cvta.to.global.u64 %rd31, %rd7;
+cvta.to.global.u64 %rd36, %rd6;
+
+$L__BB13_2:
+@%p1 bra $L__BB13_4;
+bra.uni $L__BB13_3;
+
+$L__BB13_4:
+mov.f32 %f6, 0f00000000;
+bra.uni $L__BB13_5;
+
+$L__BB13_3:
+mul.wide.u32 %rd25, %r75, %r28;
+shl.b64 %rd26, %rd25, 2;
+add.s64 %rd27, %rd1, %rd26;
+ld.global.f32 %f6, [%rd27];
+
+$L__BB13_5:
+mul.hi.u32 %r69, %r75, %r13;
+add.s32 %r70, %r69, %r75;
+shr.u32 %r71, %r70, %r14;
+mul.lo.s32 %r72, %r71, %r15;
+sub.s32 %r73, %r75, %r72;
+cvt.u64.u32 %rd28, %r73;
+mul.lo.s64 %rd29, %rd28, %rd2;
+add.s64 %rd30, %rd3, %rd29;
+shl.b64 %rd32, %rd30, 2;
+add.s64 %rd33, %rd31, %rd32;
+ld.global.f32 %f4, [%rd33];
+add.ftz.f32 %f5, %f6, %f4;
+cvt.u64.u32 %rd34, %r75;
+add.s64 %rd35, %rd4, %rd34;
+shl.b64 %rd37, %rd35, 2;
+add.s64 %rd38, %rd36, %rd37;
+st.global.f32 [%rd38], %f5;
+sub.s32 %r74, %r12, %r75;
+setp.gt.u32 %p11, %r74, %r6;
+add.s32 %r75, %r75, %r6;
+setp.lt.u32 %p12, %r75, %r12;
+and.pred %p13, %p11, %p12;
+@%p13 bra $L__BB13_2;
+
+$L__BB13_6:
+ret;
+
+}

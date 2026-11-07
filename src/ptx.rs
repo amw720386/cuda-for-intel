@@ -207,6 +207,8 @@ enum Instruction<'a> {
         dst: &'a str,
         src: [&'a str; 2],
     },
+    /// `not.pred %pD, %pA` — boolean negation.
+    NotPred(&'a str, &'a str),
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
     Not32(&'a str, &'a str),
     Move32(&'a str, &'a str),
@@ -227,6 +229,7 @@ enum Instruction<'a> {
     ShiftLeft64(&'a str, [&'a str; 2]),
     ShiftRightLogical64(&'a str, [&'a str; 2]),
     And64(&'a str, [&'a str; 2]),
+    Or64(&'a str, [&'a str; 2]),
     Rem64 {
         signed: bool,
         dst: &'a str,
@@ -235,6 +238,12 @@ enum Instruction<'a> {
     Add64(&'a str, [&'a str; 2]),
     Sub64(&'a str, [&'a str; 2]),
     Mul64(&'a str, [&'a str; 2]),
+    /// `div.s64` / `div.u64`.
+    Div64 {
+        signed: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
     ShiftRightArithmetic64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
     Load64(Space, &'a str, &'a str),
@@ -253,6 +262,8 @@ enum Instruction<'a> {
     Store32(Space, &'a str, &'a str),
     /// `st.global.u8` — store the low 8 bits of a b32 register.
     Store8(Space, &'a str, &'a str),
+    /// `st.global.u16` — store the low 16 bits of a b32 register.
+    Store16(Space, &'a str, &'a str),
     StoreVec {
         space: Space,
         count: u8,
@@ -311,7 +322,11 @@ impl<'a> Instruction<'a> {
                 out.extend_from_slice(&dst[..usize::from(*count)]);
                 std::slice::from_ref(addr)
             }
-            ToGlobal(dst, src) | Builtin(dst, src) | Move32(dst, src) | Not32(dst, src) => {
+            ToGlobal(dst, src)
+            | Builtin(dst, src)
+            | Move32(dst, src)
+            | Not32(dst, src)
+            | NotPred(dst, src) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
@@ -333,10 +348,15 @@ impl<'a> Instruction<'a> {
             | ShiftRightLogical64(dst, src)
             | ShiftRightArithmetic64(dst, src)
             | And64(dst, src)
+            | Or64(dst, src)
             | Rem64 { dst, src, .. }
             | Add64(dst, src)
             | Sub64(dst, src)
             | Mul64(dst, src) => {
+                out.push(*dst);
+                src
+            }
+            Div64 { dst, src, .. } => {
                 out.push(*dst);
                 src
             }
@@ -369,7 +389,9 @@ impl<'a> Instruction<'a> {
                 }
                 src
             }
-            Store32(..) | Store8(..) | StoreVec { .. } | StoreVecU16(..) | Barrier => return None,
+            Store32(..) | Store8(..) | Store16(..) | StoreVec { .. } | StoreVecU16(..) | Barrier => {
+                return None
+            }
         })
     }
 
@@ -636,6 +658,38 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(translated.kernels[0].name.contains("mul_mat_vec_q"));
         assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn translates_mul_mat_vec_q8_ncols2_dump() {
+        // Qwen token path uses ncols=2 (prompt batch / multi-token) mmvq.
+        let translated = translate(include_str!("../examples/mul_mat_vec_q8_ncols2_dump.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].name.contains("mul_mat_vec_q"));
+        assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn translates_k_bin_bcast_add_dump() {
+        let translated = translate(include_str!("../examples/k_bin_bcast_add_dump.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].name.contains("k_bin_bcast"));
+        assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn translates_rope_neox_half_dump() {
+        let translated = translate(include_str!("../examples/rope_neox_half_dump.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].name.contains("rope_neox"));
+        assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn translates_cpy_scalar_half_dump() {
+        let translated = translate(include_str!("../examples/cpy_scalar_half_dump.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].name.contains("cpy_scalar"));
     }
 
     #[test]

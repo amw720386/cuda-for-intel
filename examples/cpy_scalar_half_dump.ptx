@@ -1,0 +1,187 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.entry _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx(
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_0,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_1,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_2,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_3,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_4,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_5,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_6,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_7,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_8,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_9,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_10,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_11,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_12,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_13,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_14,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_15,
+.param .u64 _Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_16
+)
+{
+.reg .pred %p<8>;
+.reg .b16 %rs<2>;
+.reg .b32 %r<22>;
+.reg .b64 %rd<91>;
+
+
+ld.param.u64 %rd29, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_0];
+ld.param.u64 %rd30, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_1];
+ld.param.u64 %rd45, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_2];
+ld.param.u64 %rd31, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_3];
+ld.param.u64 %rd32, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_4];
+ld.param.u64 %rd33, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_5];
+ld.param.u64 %rd34, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_6];
+ld.param.u64 %rd35, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_7];
+ld.param.u64 %rd36, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_8];
+ld.param.u64 %rd37, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_9];
+ld.param.u64 %rd38, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_10];
+ld.param.u64 %rd39, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_11];
+ld.param.u64 %rd40, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_12];
+ld.param.u64 %rd41, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_13];
+ld.param.u64 %rd42, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_14];
+ld.param.u64 %rd43, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_15];
+ld.param.u64 %rd44, [_Z10cpy_scalarIXadL_ZN36_INTERNAL_334fa3cd_6_cpy_cu_bfba63e212cpy_1_scalarI6__halfS2_EEvPKcPcEEEvS4_S5_xxxxxxxxxxxxxxx_param_16];
+mov.u32 %r1, %ntid.x;
+mov.u32 %r2, %ctaid.x;
+mul.wide.u32 %rd46, %r1, %r2;
+mov.u32 %r3, %tid.x;
+cvt.u64.u32 %rd47, %r3;
+add.s64 %rd1, %rd46, %rd47;
+setp.ge.s64 %p1, %rd1, %rd45;
+@%p1 bra $L__BB19_20;
+
+mul.lo.s64 %rd2, %rd32, %rd31;
+mul.lo.s64 %rd3, %rd2, %rd33;
+or.b64 %rd48, %rd1, %rd3;
+and.b64 %rd49, %rd48, -4294967296;
+setp.eq.s64 %p2, %rd49, 0;
+@%p2 bra $L__BB19_3;
+
+div.s64 %rd85, %rd1, %rd3;
+bra.uni $L__BB19_4;
+
+$L__BB19_3:
+cvt.u32.u64 %r4, %rd3;
+cvt.u32.u64 %r5, %rd1;
+div.u32 %r6, %r5, %r4;
+cvt.u64.u32 %rd85, %r6;
+
+$L__BB19_4:
+mul.lo.s64 %rd50, %rd3, %rd85;
+sub.s64 %rd7, %rd1, %rd50;
+or.b64 %rd51, %rd7, %rd2;
+and.b64 %rd52, %rd51, -4294967296;
+setp.eq.s64 %p3, %rd52, 0;
+@%p3 bra $L__BB19_6;
+
+div.s64 %rd86, %rd7, %rd2;
+bra.uni $L__BB19_7;
+
+$L__BB19_6:
+cvt.u32.u64 %r7, %rd2;
+cvt.u32.u64 %r8, %rd7;
+div.u32 %r9, %r8, %r7;
+cvt.u64.u32 %rd86, %r9;
+
+$L__BB19_7:
+mul.lo.s64 %rd53, %rd2, %rd86;
+sub.s64 %rd11, %rd7, %rd53;
+or.b64 %rd54, %rd11, %rd31;
+and.b64 %rd55, %rd54, -4294967296;
+setp.eq.s64 %p4, %rd55, 0;
+@%p4 bra $L__BB19_9;
+
+div.s64 %rd87, %rd11, %rd31;
+bra.uni $L__BB19_10;
+
+$L__BB19_9:
+cvt.u32.u64 %r10, %rd31;
+cvt.u32.u64 %r11, %rd11;
+div.u32 %r12, %r11, %r10;
+cvt.u64.u32 %rd87, %r12;
+
+$L__BB19_10:
+mul.lo.s64 %rd56, %rd87, %rd31;
+sub.s64 %rd57, %rd11, %rd56;
+mul.lo.s64 %rd58, %rd57, %rd34;
+mul.lo.s64 %rd59, %rd85, %rd37;
+mul.lo.s64 %rd60, %rd86, %rd36;
+add.s64 %rd61, %rd60, %rd59;
+mul.lo.s64 %rd62, %rd87, %rd35;
+add.s64 %rd63, %rd61, %rd62;
+add.s64 %rd15, %rd63, %rd58;
+mul.lo.s64 %rd16, %rd39, %rd38;
+mul.lo.s64 %rd17, %rd16, %rd40;
+or.b64 %rd64, %rd1, %rd17;
+and.b64 %rd65, %rd64, -4294967296;
+setp.eq.s64 %p5, %rd65, 0;
+@%p5 bra $L__BB19_12;
+
+div.s64 %rd88, %rd1, %rd17;
+bra.uni $L__BB19_13;
+
+$L__BB19_12:
+cvt.u32.u64 %r13, %rd17;
+cvt.u32.u64 %r14, %rd1;
+div.u32 %r15, %r14, %r13;
+cvt.u64.u32 %rd88, %r15;
+
+$L__BB19_13:
+mul.lo.s64 %rd66, %rd17, %rd88;
+sub.s64 %rd21, %rd1, %rd66;
+or.b64 %rd67, %rd21, %rd16;
+and.b64 %rd68, %rd67, -4294967296;
+setp.eq.s64 %p6, %rd68, 0;
+@%p6 bra $L__BB19_15;
+
+div.s64 %rd89, %rd21, %rd16;
+bra.uni $L__BB19_16;
+
+$L__BB19_15:
+cvt.u32.u64 %r16, %rd16;
+cvt.u32.u64 %r17, %rd21;
+div.u32 %r18, %r17, %r16;
+cvt.u64.u32 %rd89, %r18;
+
+$L__BB19_16:
+mul.lo.s64 %rd69, %rd16, %rd89;
+sub.s64 %rd25, %rd21, %rd69;
+or.b64 %rd70, %rd25, %rd38;
+and.b64 %rd71, %rd70, -4294967296;
+setp.eq.s64 %p7, %rd71, 0;
+@%p7 bra $L__BB19_18;
+
+div.s64 %rd90, %rd25, %rd38;
+bra.uni $L__BB19_19;
+
+$L__BB19_18:
+cvt.u32.u64 %r19, %rd38;
+cvt.u32.u64 %r20, %rd25;
+div.u32 %r21, %r20, %r19;
+cvt.u64.u32 %rd90, %r21;
+
+$L__BB19_19:
+mul.lo.s64 %rd72, %rd90, %rd38;
+sub.s64 %rd73, %rd25, %rd72;
+mul.lo.s64 %rd74, %rd73, %rd41;
+mul.lo.s64 %rd75, %rd88, %rd44;
+mul.lo.s64 %rd76, %rd89, %rd43;
+add.s64 %rd77, %rd76, %rd75;
+mul.lo.s64 %rd78, %rd90, %rd42;
+add.s64 %rd79, %rd77, %rd78;
+add.s64 %rd80, %rd79, %rd74;
+cvta.to.global.u64 %rd81, %rd30;
+add.s64 %rd82, %rd81, %rd80;
+cvta.to.global.u64 %rd83, %rd29;
+add.s64 %rd84, %rd83, %rd15;
+ld.global.u16 %rs1, [%rd84];
+st.global.u16 [%rd82], %rs1;
+
+$L__BB19_20:
+ret;
+
+}

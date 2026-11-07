@@ -448,6 +448,7 @@ impl<'a> Parser<'a> {
                 dst,
                 src: [a, b],
             },
+            ["not.pred", dst, ",", src] => Instruction::NotPred(dst, src),
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
                 | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "div.u32"
@@ -476,6 +477,7 @@ impl<'a> Parser<'a> {
                 Instruction::Integer32(op, dst, [a, b])
             }
             ["and.b64", dst, ",", a, ",", b] => Instruction::And64(dst, [a, b]),
+            ["or.b64", dst, ",", a, ",", b] => Instruction::Or64(dst, [a, b]),
             ["shr.u64", dst, ",", a, ",", b] => Instruction::ShiftRightLogical64(dst, [a, b]),
             ["rem.s64", dst, ",", a, ",", b] => Instruction::Rem64 {
                 signed: true,
@@ -535,6 +537,11 @@ impl<'a> Parser<'a> {
             ["mul.lo.s64" | "mul.lo.u64", dst, ",", a, ",", b] => {
                 Instruction::Mul64(dst, [a, b])
             }
+            ["div.s64" | "div.u64", dst, ",", a, ",", b] => Instruction::Div64 {
+                signed: body[0] == "div.s64",
+                dst,
+                src: [a, b],
+            },
             [
                 op @ ("ld.global.b32"
                 | "ld.global.u32"
@@ -714,6 +721,14 @@ impl<'a> Parser<'a> {
                 };
                 Instruction::Store8(space, addr, src)
             }
+            [
+                "st.global.u16" | "st.global.b16",
+                "[",
+                addr,
+                "]",
+                ",",
+                src,
+            ] => Instruction::Store16(Space::Global, addr, src),
             [
                 "st.global.v2.u16" | "st.global.v2.b16",
                 "[",
