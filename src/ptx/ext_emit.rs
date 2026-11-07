@@ -17,6 +17,11 @@ type R<T> = Result<T, Error>;
 impl<'a> Emitter<'a> {
     pub(super) fn emit_ext(&mut self, op: ExtOp, dst: [&'a str; 2], src: [&'a str; 4]) -> R<()> {
         match op {
+            ExtOp::Float { .. }
+            | ExtOp::Cvt { .. }
+            | ExtOp::FSetp { .. }
+            | ExtOp::FSet { .. }
+            | ExtOp::Testp { .. } => self.emit_float_ext(op, dst, src),
             ExtOp::Brev { wide } => {
                 let kind = if wide { Kind::B64 } else { Kind::B32 };
                 let a = self.integer(src[0], kind)?;
@@ -565,7 +570,7 @@ impl<'a> Emitter<'a> {
         Ok(self.builder.i_mul(ty, None, xy, z)?)
     }
 
-    fn const_of(&mut self, wide: bool, value: u64) -> Word {
+    pub(super) fn const_of(&mut self, wide: bool, value: u64) -> Word {
         if wide {
             self.builder.constant_bit64(self.u64_type, value)
         } else {

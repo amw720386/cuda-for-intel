@@ -48,8 +48,160 @@ pub(super) enum ClockKind {
     Clock64,
 }
 
+/// Scalar numeric types of `cvt` and the floating-point instructions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NumTy {
+    S8,
+    U8,
+    S16,
+    U16,
+    S32,
+    U32,
+    S64,
+    U64,
+    F16,
+    Bf16,
+    F16x2,
+    Bf16x2,
+    F32,
+    F64,
+    Tf32,
+}
+
+impl NumTy {
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "s8" => Self::S8,
+            "u8" | "b8" => Self::U8,
+            "s16" => Self::S16,
+            "u16" | "b16" => Self::U16,
+            "s32" => Self::S32,
+            "u32" | "b32" => Self::U32,
+            "s64" => Self::S64,
+            "u64" | "b64" => Self::U64,
+            "f16" => Self::F16,
+            "bf16" => Self::Bf16,
+            "f16x2" => Self::F16x2,
+            "bf16x2" => Self::Bf16x2,
+            "f32" => Self::F32,
+            "f64" => Self::F64,
+            "tf32" => Self::Tf32,
+            _ => return None,
+        })
+    }
+
+    pub(super) fn is_float(self) -> bool {
+        matches!(
+            self,
+            Self::F16 | Self::Bf16 | Self::F16x2 | Self::Bf16x2 | Self::F32 | Self::F64 | Self::Tf32
+        )
+    }
+
+    pub(super) fn is_signed(self) -> bool {
+        matches!(self, Self::S8 | Self::S16 | Self::S32 | Self::S64)
+    }
+
+    pub(super) fn is_half(self) -> bool {
+        matches!(self, Self::F16 | Self::Bf16 | Self::F16x2 | Self::Bf16x2)
+    }
+
+    pub(super) fn is_packed(self) -> bool {
+        matches!(self, Self::F16x2 | Self::Bf16x2)
+    }
+
+    pub(super) fn is_bf16(self) -> bool {
+        matches!(self, Self::Bf16 | Self::Bf16x2)
+    }
+
+    /// Integer width in bits (floats report their storage width).
+    pub(super) fn bits(self) -> u32 {
+        match self {
+            Self::S8 | Self::U8 => 8,
+            Self::S16 | Self::U16 | Self::F16 | Self::Bf16 => 16,
+            Self::S64 | Self::U64 | Self::F64 => 64,
+            _ => 32,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Round {
+    None,
+    Rn,
+    Rz,
+    Rm,
+    Rp,
+    Rni,
+    Rzi,
+    Rmi,
+    Rpi,
+    Rna,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct Mods {
+    pub(super) sat: bool,
+    pub(super) relu: bool,
+    pub(super) nan: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FOp {
+    Add,
+    Sub,
+    Mul,
+    Fma,
+    Min,
+    Max,
+    Neg,
+    Abs,
+    Ex2,
+    Tanh,
+    Rcp,
+    Sqrt,
+    Rsqrt,
+    Div,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FCmp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Equ,
+    Neu,
+    Ltu,
+    Leu,
+    Gtu,
+    Geu,
+    Num,
+    Nan,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TestKind {
+    Finite,
+    Infinite,
+    Number,
+    NotANumber,
+    Normal,
+    Subnormal,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum ExtOp {
+    /// Floating-point arithmetic on f64, f16/bf16 (scalar or packed) and
+    /// saturating / NaN-propagating f32. Sources are `src[0..3]`.
+    Float { op: FOp, ty: NumTy, mods: Mods },
+    /// Generic `cvt`. Packed destinations take two sources (`src[0]` is the
+    /// upper lane).
+    Cvt { d: NumTy, s: NumTy, round: Round, mods: Mods },
+    FSetp { cmp: FCmp, ty: NumTy },
+    FSet { cmp: FCmp, d: NumTy, s: NumTy },
+    Testp { kind: TestKind, ty: NumTy },
     // 32/64-bit integer helpers. Sources are `src[..]`, the result is `dst[0]`.
     Brev { wide: bool },
     Bmsk { wrap: bool },
@@ -453,8 +605,253 @@ pub(super) fn parse<'a>(body: &[&'a str]) -> Result<Option<Instruction<'a>>, Err
             ext(ExtOp::ShflDyn(mode), [d, p], [a, b, c, NONE])
         }
         ["atom" | "red", rest @ ..] => parse_atomic(body, &ops, parts[0] == "atom", rest),
+        ["cvt", ..] => parse_cvt(body, &ops, &parts),
+        ["setp", ..] => parse_fsetp(body, &ops, &parts),
+        ["set", ..] => parse_fset(body, &ops, &parts),
+        ["testp", kind, ty] => {
+            let kind = match *kind {
+                "finite" => TestKind::Finite,
+                "infinite" => TestKind::Infinite,
+                "number" => TestKind::Number,
+                "notanumber" => TestKind::NotANumber,
+                "normal" => TestKind::Normal,
+                "subnormal" => TestKind::Subnormal,
+                _ => return Err(fail()),
+            };
+            let ty = NumTy::parse(ty).filter(|t| matches!(t, NumTy::F32 | NumTy::F64)).ok_or_else(fail)?;
+            let (d, a) = (need!(r(0)), need!(r(1)));
+            ext(ExtOp::Testp { kind, ty }, [d, ""], [a, NONE, NONE, NONE])
+        }
+        [name, ..] if float_op(name).is_some() => parse_float(body, &ops, &parts),
         _ => Ok(None),
     }
+}
+
+fn float_op(name: &str) -> Option<FOp> {
+    Some(match name {
+        "add" => FOp::Add,
+        "sub" => FOp::Sub,
+        "mul" => FOp::Mul,
+        "fma" | "mad" => FOp::Fma,
+        "min" => FOp::Min,
+        "max" => FOp::Max,
+        "neg" => FOp::Neg,
+        "abs" => FOp::Abs,
+        "ex2" => FOp::Ex2,
+        "tanh" => FOp::Tanh,
+        "rcp" => FOp::Rcp,
+        "sqrt" => FOp::Sqrt,
+        "rsqrt" => FOp::Rsqrt,
+        "div" => FOp::Div,
+        _ => return None,
+    })
+}
+
+fn parse_float<'a>(
+    body: &[&'a str],
+    ops: &[Vec<&'a str>],
+    parts: &[&str],
+) -> Result<Option<Instruction<'a>>, Error> {
+    let fail = || unsupported(body);
+    let Some(op) = float_op(parts[0]) else {
+        return Ok(None);
+    };
+    let Some(ty) = parts.last().and_then(|t| NumTy::parse(t)) else {
+        return Ok(None);
+    };
+    if !matches!(ty, NumTy::F16 | NumTy::Bf16 | NumTy::F16x2 | NumTy::Bf16x2 | NumTy::F32 | NumTy::F64) {
+        return Ok(None);
+    }
+    let mut mods = Mods::default();
+    for part in &parts[1..parts.len() - 1] {
+        match *part {
+            "rn" | "ftz" | "approx" | "full" | "noftz" => {}
+            "sat" => mods.sat = true,
+            "relu" => mods.relu = true,
+            "NaN" => mods.nan = true,
+            _ if ty == NumTy::F32 => return Ok(None),
+            _ => return Err(fail()),
+        }
+    }
+    // f32 is mostly handled by the original table; only claim the new modifiers.
+    if ty == NumTy::F32
+        && !(matches!(op, FOp::Add | FOp::Sub | FOp::Mul | FOp::Fma | FOp::Min | FOp::Max)
+            && (mods.sat || mods.nan))
+    {
+        return Ok(None);
+    }
+    let count = match op {
+        FOp::Fma => 4,
+        FOp::Neg | FOp::Abs | FOp::Ex2 | FOp::Tanh | FOp::Rcp | FOp::Sqrt | FOp::Rsqrt => 2,
+        _ => 3,
+    };
+    if ops.len() != count || ops.iter().any(|o| o.len() != 1) {
+        return Err(fail());
+    }
+    let mut src = ["0"; 4];
+    for (slot, operand) in src.iter_mut().zip(&ops[1..]) {
+        *slot = operand[0];
+    }
+    Ok(Some(Instruction::Ext {
+        op: ExtOp::Float { op, ty, mods },
+        dst: [ops[0][0], ""],
+        src,
+    }))
+}
+
+fn parse_cvt<'a>(
+    body: &[&'a str],
+    ops: &[Vec<&'a str>],
+    parts: &[&str],
+) -> Result<Option<Instruction<'a>>, Error> {
+    let fail = || unsupported(body);
+    // cvt [.rnd] [.ftz] [.sat] [.relu] [.satfinite] .dtype .stype
+    if parts.len() < 3 {
+        return Ok(None);
+    }
+    let (Some(d), Some(s)) = (
+        NumTy::parse(parts[parts.len() - 2]),
+        NumTy::parse(parts[parts.len() - 1]),
+    ) else {
+        // cvt.pack and the fp8 / fp4 forms are not implemented.
+        return Ok(None);
+    };
+    let mut round = Round::None;
+    let mut mods = Mods::default();
+    for part in &parts[1..parts.len() - 2] {
+        match *part {
+            "rn" => round = Round::Rn,
+            "rz" => round = Round::Rz,
+            "rm" => round = Round::Rm,
+            "rp" => round = Round::Rp,
+            "rni" => round = Round::Rni,
+            "rzi" => round = Round::Rzi,
+            "rmi" => round = Round::Rmi,
+            "rpi" => round = Round::Rpi,
+            "rna" => round = Round::Rna,
+            "ftz" => {}
+            "sat" | "satfinite" => mods.sat = true,
+            "relu" => mods.relu = true,
+            _ => return Err(fail()),
+        }
+    }
+    let both_int = !d.is_float() && !s.is_float();
+    if both_int && !mods.sat {
+        // Plain integer conversions are handled by the original table.
+        return Ok(None);
+    }
+    let original = !mods.sat
+        && !mods.relu
+        && matches!(
+            (d, s, round),
+            (NumTy::F16, NumTy::F32, Round::Rn | Round::Rz)
+                | (NumTy::F32, NumTy::F16, Round::None | Round::Rn)
+                | (NumTy::F32, NumTy::U32 | NumTy::S32, Round::Rn)
+                | (NumTy::F32, NumTy::S16, Round::Rn)
+                | (NumTy::S32 | NumTy::U32, NumTy::F32, Round::Rni | Round::Rzi)
+                | (NumTy::F32, NumTy::F32, Round::Rni | Round::Rzi | Round::Rmi | Round::Rpi)
+        );
+    if original {
+        return Ok(None);
+    }
+    let want = if d.is_packed() { 3 } else { 2 };
+    if ops.len() != want || ops.iter().any(|o| o.len() != 1) {
+        return Err(fail());
+    }
+    let mut src = ["0"; 4];
+    for (slot, operand) in src.iter_mut().zip(&ops[1..]) {
+        *slot = operand[0];
+    }
+    Ok(Some(Instruction::Ext {
+        op: ExtOp::Cvt { d, s, round, mods },
+        dst: [ops[0][0], ""],
+        src,
+    }))
+}
+
+fn fcmp(name: &str) -> Option<FCmp> {
+    Some(match name {
+        "eq" => FCmp::Eq,
+        "ne" => FCmp::Ne,
+        "lt" => FCmp::Lt,
+        "le" => FCmp::Le,
+        "gt" => FCmp::Gt,
+        "ge" => FCmp::Ge,
+        "equ" => FCmp::Equ,
+        "neu" => FCmp::Neu,
+        "ltu" => FCmp::Ltu,
+        "leu" => FCmp::Leu,
+        "gtu" => FCmp::Gtu,
+        "geu" => FCmp::Geu,
+        "num" => FCmp::Num,
+        "nan" => FCmp::Nan,
+        _ => return None,
+    })
+}
+
+fn parse_fsetp<'a>(
+    body: &[&'a str],
+    ops: &[Vec<&'a str>],
+    parts: &[&str],
+) -> Result<Option<Instruction<'a>>, Error> {
+    let fail = || unsupported(body);
+    let Some(ty) = parts.last().and_then(|t| NumTy::parse(t)) else {
+        return Ok(None);
+    };
+    if !matches!(ty, NumTy::F16 | NumTy::Bf16 | NumTy::F32 | NumTy::F64) || parts.len() < 3 {
+        return Ok(None);
+    }
+    let Some(cmp) = fcmp(parts[1]) else {
+        return Ok(None);
+    };
+    // Plain ordered f32 comparisons stay on the original path.
+    let ordered = matches!(cmp, FCmp::Eq | FCmp::Ne | FCmp::Lt | FCmp::Le | FCmp::Gt | FCmp::Ge);
+    if ty == NumTy::F32 && ordered && parts.len() <= 4 {
+        return Ok(None);
+    }
+    if parts[2..parts.len() - 1].iter().any(|p| !matches!(*p, "ftz")) {
+        return Err(fail());
+    }
+    if ops.len() != 3 || ops.iter().any(|o| o.len() != 1) {
+        return Err(fail());
+    }
+    Ok(Some(Instruction::Ext {
+        op: ExtOp::FSetp { cmp, ty },
+        dst: [ops[0][0], ""],
+        src: [ops[1][0], ops[2][0], "0", "0"],
+    }))
+}
+
+fn parse_fset<'a>(
+    body: &[&'a str],
+    ops: &[Vec<&'a str>],
+    parts: &[&str],
+) -> Result<Option<Instruction<'a>>, Error> {
+    let fail = || unsupported(body);
+    // set.CMP[.ftz].dtype.stype d, a, b
+    if parts.len() < 4 {
+        return Ok(None);
+    }
+    let (Some(d), Some(s)) = (
+        NumTy::parse(parts[parts.len() - 2]),
+        NumTy::parse(parts[parts.len() - 1]),
+    ) else {
+        return Ok(None);
+    };
+    let Some(cmp) = fcmp(parts[1]) else {
+        return Ok(None);
+    };
+    if !matches!(s, NumTy::F16 | NumTy::Bf16 | NumTy::F16x2 | NumTy::Bf16x2 | NumTy::F32 | NumTy::F64) {
+        return Ok(None);
+    }
+    if ops.len() != 3 || ops.iter().any(|o| o.len() != 1) {
+        return Err(fail());
+    }
+    Ok(Some(Instruction::Ext {
+        op: ExtOp::FSet { cmp, d, s },
+        dst: [ops[0][0], ""],
+        src: [ops[1][0], ops[2][0], "0", "0"],
+    }))
 }
 
 fn parse_atomic<'a>(

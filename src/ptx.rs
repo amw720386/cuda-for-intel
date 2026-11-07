@@ -1506,8 +1506,8 @@ mod tests {
     fn rejects_unimplemented_fp32_rounding_and_approximation_modes() {
         for (original, unsupported) in [
             ("fma.rn.f32", "fma.rz.f32"),
-            ("fma.rn.f32", "fma.rn.sat.f32"),
-            ("cvt.rn.f32.u32", "cvt.rz.f32.u32"),
+            ("fma.rn.f32", "fma.rp.f32"),
+            ("fma.rn.f32", "fma.rn.xorsign.f32"),
         ] {
             assert!(RMSNORM.contains(original));
             assert!(translate(&RMSNORM.replace(original, unsupported)).is_err());

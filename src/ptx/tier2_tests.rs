@@ -587,3 +587,317 @@ fn wide_and_extra_atomics_translate_and_validate() {
     assert!(has_op(&module, Op::AtomicCompareExchange));
     assert!(has_op(&module, Op::LoopMerge) || has_op(&module, Op::BranchConditional));
 }
+
+// ---- floating-point reference helpers -------------------------------------
+
+fn h2f(h: u16) -> f32 {
+    let (sign, exp, man) = ((h >> 15) & 1, i32::from((h >> 10) & 0x1f), f32::from(h & 0x3ff));
+    let magnitude = match exp {
+        0 => man * 2f32.powi(-24),
+        0x1f => if man == 0.0 { f32::INFINITY } else { f32::NAN },
+        _ => (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
+    };
+    if sign == 1 { -magnitude } else { magnitude }
+}
+
+fn f2h(x: f32) -> u16 {
+    interp::f32_to_f16_bits(x)
+}
+
+fn bf2f(b: u16) -> f32 {
+    f32::from_bits(u32::from(b) << 16)
+}
+
+fn f2bf(x: f32) -> u16 {
+    if x.is_nan() {
+        return (((x.to_bits() >> 16) & 0x8000) | 0x7fff) as u16;
+    }
+    let u = x.to_bits();
+    ((u + 0x7fff + ((u >> 16) & 1)) >> 16) as u16
+}
+
+const FREGS: &str = "    .reg .f64 %fd<8>;\n    .reg .bf16 %hb<8>;\n    .reg .f16 %h<8>;\n    .reg .b32 %q<16>;";
+
+#[test]
+fn bf16_and_f16_scalar_arithmetic_matches_reference() {
+    // Values chosen so that several results need real rounding.
+    let a = 0x3fc1u16; // bf16 1.5078125
+    let b = 0xc011u16; // bf16 -2.265625
+    let c = 0x3f81u16; // bf16 1.0078125
+    let (ha, hb, hc) = (f2h(1.0009765), f2h(-2.7), f2h(0.3333));
+    let body = format!(
+        r#"    mov.b16 %hb1, {a};
+    mov.b16 %hb2, {b};
+    mov.b16 %hb3, {c};
+    add.rn.bf16 %hb4, %hb1, %hb2;
+    mul.rn.bf16 %hb5, %hb1, %hb2;
+    fma.rn.bf16 %hb6, %hb1, %hb2, %hb3;
+    sub.rn.bf16 %hb7, %hb1, %hb2;
+    neg.bf16 %q1, %hb1;
+    abs.bf16 %q2, %hb2;
+    max.bf16 %q3, %hb1, %hb2;
+    min.bf16 %q4, %hb1, %hb2;
+    mov.b16 %h1, {ha};
+    mov.b16 %h2, {hb};
+    mov.b16 %h3, {hc};
+    add.rn.f16 %h4, %h1, %h2;
+    mul.rn.f16 %h5, %h1, %h2;
+    fma.rn.f16 %h6, %h1, %h2, %h3;
+    fma.rn.relu.f16 %h7, %h1, %h2, %h3;
+    setp.lt.f16 %p1, %h2, %h1;
+    selp.u32 %q5, 1, 0, %p1;
+    setp.gt.bf16 %p2, %hb2, %hb1;
+    selp.u32 %q6, 1, 0, %p2;
+{}"#,
+        stores(&[
+            "%hb4", "%hb5", "%hb6", "%hb7", "%q1", "%q2", "%q3", "%q4", "%h4", "%h5", "%h6",
+            "%h7", "%q5", "%q6"
+        ])
+    );
+    let out = eval(FREGS, &body, 14);
+    let (fa, fb, fc) = (bf2f(a), bf2f(b), bf2f(c));
+    let (fha, fhb, fhc) = (h2f(ha), h2f(hb), h2f(hc));
+    let expected = [
+        u32::from(f2bf(fa + fb)),
+        u32::from(f2bf(fa * fb)),
+        u32::from(f2bf(fa.mul_add(fb, fc))),
+        u32::from(f2bf(fa - fb)),
+        u32::from(a ^ 0x8000),
+        u32::from(b & 0x7fff),
+        u32::from(a),
+        u32::from(b),
+        u32::from(f2h(fha + fhb)),
+        u32::from(f2h(fha * fhb)),
+        u32::from(f2h(fha.mul_add(fhb, fhc))),
+        0, // the fused result is negative, so relu clamps it to +0
+        1,
+        0,
+    ];
+    for (i, (got, want)) in out.iter().zip(expected).enumerate() {
+        assert_eq!(*got, want, "word {i}: {got:#x} != {want:#x}");
+    }
+}
+
+#[test]
+fn packed_half_arithmetic_and_conversions_match_reference() {
+    let pack = |hi: u16, lo: u16| (u32::from(hi) << 16) | u32::from(lo);
+    let (x, y, z) = (pack(f2h(1.5), f2h(-0.75)), pack(f2h(2.25), f2h(0.1)), pack(f2h(-1.0), f2h(3.0)));
+    let (bx, by) = (pack(f2bf(1.5), f2bf(-0.75)), pack(f2bf(2.3), f2bf(0.1)));
+    let nan = f32::NAN;
+    let body = format!(
+        r#"    mov.b32 %q1, {x};
+    mov.b32 %q2, {y};
+    mov.b32 %q3, {z};
+    add.rn.f16x2 %q4, %q1, %q2;
+    mul.rn.f16x2 %q5, %q1, %q2;
+    fma.rn.f16x2 %q6, %q1, %q2, %q3;
+    neg.f16x2 %q7, %q1;
+    abs.f16x2 %q8, %q3;
+    max.f16x2 %q9, %q1, %q3;
+    mov.b32 %q10, {bx};
+    mov.b32 %q11, {by};
+    add.rn.bf16x2 %q12, %q10, %q11;
+    fma.rn.bf16x2 %q13, %q10, %q11, %q10;
+    mov.b32 %f1, {f1};
+    mov.b32 %f2, {f2};
+    cvt.rn.f16x2.f32 %q14, %f1, %f2;
+    cvt.rn.bf16x2.f32 %q15, %f1, %f2;
+    set.gt.f16x2.f16x2 %q0, %q1, %q3;
+{}"#,
+        stores(&["%q4", "%q5", "%q6", "%q7", "%q8", "%q9", "%q12", "%q13", "%q14", "%q15", "%q0"]),
+        f1 = 0.3333f32.to_bits(),
+        f2 = (-70000.0f32).to_bits(),
+    );
+    let out = eval(FREGS, &body, 11);
+    let lane = |v: u32, hi: bool| if hi { (v >> 16) as u16 } else { v as u16 };
+    let both = |f: &dyn Fn(bool) -> u16| pack(f(true), f(false));
+    let expected = [
+        both(&|hi| f2h(h2f(lane(x, hi)) + h2f(lane(y, hi)))),
+        both(&|hi| f2h(h2f(lane(x, hi)) * h2f(lane(y, hi)))),
+        both(&|hi| f2h(h2f(lane(x, hi)).mul_add(h2f(lane(y, hi)), h2f(lane(z, hi))))),
+        x ^ 0x8000_8000,
+        z & 0x7fff_7fff,
+        both(&|hi| f2h(h2f(lane(x, hi)).max(h2f(lane(z, hi))))),
+        both(&|hi| f2bf(bf2f(lane(bx, hi)) + bf2f(lane(by, hi)))),
+        both(&|hi| f2bf(bf2f(lane(bx, hi)).mul_add(bf2f(lane(by, hi)), bf2f(lane(bx, hi))))),
+        pack(f2h(0.3333), f2h(-70000.0)),
+        pack(f2bf(0.3333), f2bf(-70000.0)),
+        // 1.5 > -1.0 in the upper lane, -0.75 > 3.0 is false in the lower lane: 1.0 / 0.0.
+        pack(0x3c00, 0),
+    ];
+    let _ = nan;
+    for (i, (got, want)) in out.iter().zip(expected).enumerate() {
+        assert_eq!(*got, want, "word {i}: {got:#x} != {want:#x}");
+    }
+}
+
+#[test]
+fn bf16_conversion_rounds_to_nearest_even_and_keeps_nan() {
+    let inputs = [
+        1.0f32,
+        f32::from_bits(0x3f80_8000), // exact tie, rounds to even (down)
+        f32::from_bits(0x3f81_8000), // exact tie, rounds to even (up)
+        f32::from_bits(0x3f80_8001), // just above a tie
+        3.4e38,
+        f32::from_bits(0x7f7f_ffff), // largest finite: rounds to infinity
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+    let mut body = String::new();
+    for (i, v) in inputs.iter().enumerate() {
+        body.push_str(&format!(
+            "    mov.b32 %f1, {};\n    cvt.rn.bf16.f32 %hb1, %f1;\n    cvt.f32.bf16 %f2, %hb1;\n    st.global.u32 [%rd15+{}], %hb1;\n    st.global.u32 [%rd15+{}], %f2;\n",
+            v.to_bits(),
+            8 * i,
+            8 * i + 4
+        ));
+    }
+    let out = eval(FREGS, &body, 2 * inputs.len());
+    for (i, v) in inputs.iter().enumerate() {
+        let want = f2bf(*v);
+        assert_eq!(out[2 * i], u32::from(want), "input {i}: {:#x}", v.to_bits());
+        assert_eq!(out[2 * i + 1], bf2f(want).to_bits(), "widened {i}");
+    }
+}
+
+#[test]
+fn f64_arithmetic_conversions_and_compares() {
+    let (p, q) = (2.5f64, -0.75f64);
+    let body = format!(
+        r#"    mov.b64 %fd1, 0d{:016X};
+    mov.b64 %fd2, 0d{:016X};
+    add.f64 %fd3, %fd1, %fd2;
+    sub.rn.f64 %fd4, %fd1, %fd2;
+    mul.rn.f64 %fd5, %fd1, %fd2;
+    div.rn.f64 %fd6, %fd1, %fd2;
+    fma.rn.f64 %fd7, %fd1, %fd2, %fd1;
+    sqrt.rn.f64 %fd0, %fd1;
+    st.global.u64 [%rd15], %fd3;
+    st.global.u64 [%rd15+8], %fd4;
+    st.global.u64 [%rd15+16], %fd5;
+    st.global.u64 [%rd15+24], %fd6;
+    st.global.u64 [%rd15+32], %fd7;
+    st.global.u64 [%rd15+40], %fd0;
+    neg.f64 %fd3, %fd1;
+    abs.f64 %fd4, %fd2;
+    min.f64 %fd5, %fd1, %fd2;
+    max.f64 %fd6, %fd1, %fd2;
+    rcp.rn.f64 %fd7, %fd2;
+    st.global.u64 [%rd15+48], %fd3;
+    st.global.u64 [%rd15+56], %fd4;
+    st.global.u64 [%rd15+64], %fd5;
+    st.global.u64 [%rd15+72], %fd6;
+    st.global.u64 [%rd15+80], %fd7;
+    cvt.rn.f32.f64 %f1, %fd2;
+    cvt.f64.f32 %fd3, %f1;
+    mov.u32 %r1, -7;
+    cvt.rn.f64.s32 %fd4, %r1;
+    cvt.rzi.s32.f64 %r2, %fd1;
+    cvt.rni.s32.f64 %r3, %fd2;
+    cvt.rzi.u32.f64 %r4, %fd2;
+    cvt.rmi.s64.f64 %rd1, %fd2;
+    mov.b64 %fd5, 0d7FF0000000000000;
+    cvt.rzi.s32.f64 %r5, %fd5;
+    setp.lt.f64 %p1, %fd2, %fd1;
+    setp.nan.f64 %p2, %fd5, %fd1;
+    testp.infinite.f64 %p3, %fd5;
+    selp.u32 %r6, 1, 0, %p1;
+    selp.u32 %r7, 1, 0, %p2;
+    selp.u32 %r8, 1, 0, %p3;
+    st.global.u32 [%rd15+88], %f1;
+    st.global.u64 [%rd15+96], %fd3;
+    st.global.u64 [%rd15+104], %fd4;
+    st.global.u32 [%rd15+112], %r2;
+    st.global.u32 [%rd15+116], %r3;
+    st.global.u32 [%rd15+120], %r4;
+    st.global.u64 [%rd15+128], %rd1;
+    st.global.u32 [%rd15+136], %r5;
+    st.global.u32 [%rd15+140], %r6;
+    st.global.u32 [%rd15+144], %r7;
+    st.global.u32 [%rd15+148], %r8;"#,
+        p.to_bits(),
+        q.to_bits()
+    );
+    let out = eval("    .reg .f64 %fd<8>;", &body, 38);
+    let wide = |i: usize| f64::from_bits((u64::from(out[i + 1]) << 32) | u64::from(out[i]));
+    assert_eq!(wide(0), p + q);
+    assert_eq!(wide(2), p - q);
+    assert_eq!(wide(4), p * q);
+    assert_eq!(wide(6), p / q);
+    assert_eq!(wide(8), p.mul_add(q, p));
+    assert_eq!(wide(10), p.sqrt());
+    assert_eq!(wide(12), -p);
+    assert_eq!(wide(14), q.abs());
+    assert_eq!(wide(16), q);
+    assert_eq!(wide(18), p);
+    assert_eq!(wide(20), 1.0 / q);
+    assert_eq!(out[22], (q as f32).to_bits());
+    assert_eq!(wide(24), f64::from(q as f32));
+    assert_eq!(wide(26), -7.0);
+    assert_eq!(out[28] as i32, 2);
+    assert_eq!(out[29] as i32, -1);
+    assert_eq!(out[30], 0);
+    assert_eq!(((u64::from(out[33]) << 32) | u64::from(out[32])) as i64, -1);
+    assert_eq!(out[34] as i32, i32::MAX);
+    assert_eq!((out[35], out[36], out[37]), (1, 0, 1));
+}
+
+#[test]
+fn saturating_nan_aware_f32_and_integer_conversions() {
+    let body = format!(
+        r#"    mov.b32 %f1, {a};
+    mov.b32 %f2, {b};
+    mov.b32 %f3, {n};
+    add.sat.f32 %f4, %f1, %f2;
+    mul.sat.f32 %f5, %f1, %f1;
+    fma.rn.sat.f32 %f6, %f1, %f2, %f2;
+    max.NaN.f32 %f7, %f1, %f3;
+    min.NaN.f32 %f8, %f1, %f2;
+    max.f32 %f9, %f1, %f3;
+    st.global.u32 [%rd15], %f4;
+    st.global.u32 [%rd15+4], %f5;
+    st.global.u32 [%rd15+8], %f6;
+    st.global.u32 [%rd15+12], %f7;
+    st.global.u32 [%rd15+16], %f8;
+    st.global.u32 [%rd15+20], %f9;
+    cvt.rpi.s32.f32 %r1, %f1;
+    cvt.rmi.s32.f32 %r2, %f1;
+    cvt.rzi.u16.f32 %r3, %f2;
+    cvt.rni.s64.f32 %rd1, %f2;
+    mov.u32 %r4, -300;
+    cvt.sat.u8.s32 %r5, %r4;
+    mov.u32 %r6, 70000;
+    cvt.sat.s16.s32 %r7, %r6;
+    cvt.sat.u32.s32 %r8, %r4;
+    cvt.rz.f32.s32 %f10, %r6;
+    cvt.rp.f32.u32 %f11, %r6;
+    st.global.u32 [%rd15+24], %r1;
+    st.global.u32 [%rd15+28], %r2;
+    st.global.u32 [%rd15+32], %r3;
+    st.global.u64 [%rd15+40], %rd1;
+    st.global.u32 [%rd15+48], %r5;
+    st.global.u32 [%rd15+52], %r7;
+    st.global.u32 [%rd15+56], %r8;
+    st.global.u32 [%rd15+60], %f10;
+    st.global.u32 [%rd15+64], %f11;"#,
+        a = 1.25f32.to_bits(),
+        b = 70000.5f32.to_bits(),
+        n = f32::NAN.to_bits(),
+    );
+    let out = eval("", &body, 17);
+    assert_eq!(f32::from_bits(out[0]), 1.0); // 1.25 + 70000.5 saturates
+    assert_eq!(f32::from_bits(out[1]), 1.0); // 1.5625 saturates
+    assert_eq!(f32::from_bits(out[2]), 1.0);
+    assert!(f32::from_bits(out[3]).is_nan()); // max.NaN propagates
+    assert_eq!(f32::from_bits(out[4]), 1.25);
+    assert_eq!(f32::from_bits(out[5]), 1.25); // plain max ignores NaN
+    assert_eq!(out[6] as i32, 2);
+    assert_eq!(out[7] as i32, 1);
+    assert_eq!(out[8], 0xffff); // 70000.5 saturates in u16
+    assert_eq!(((u64::from(out[11]) << 32) | u64::from(out[10])) as i64, 70000);
+    assert_eq!(out[12], 0);
+    assert_eq!(out[13] as i32, 0x7fff);
+    assert_eq!(out[14], 0);
+    assert_eq!(f32::from_bits(out[15]), 70000.0);
+    assert_eq!(f32::from_bits(out[16]), 70000.0);
+}

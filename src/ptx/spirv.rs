@@ -58,6 +58,8 @@ impl Value {
 
 #[path = "ext_emit.rs"]
 mod ext_emit;
+#[path = "ext_float.rs"]
+mod ext_float;
 
 struct Emitter<'a> {
     builder: Builder,

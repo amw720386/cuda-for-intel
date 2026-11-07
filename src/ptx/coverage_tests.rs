@@ -444,9 +444,18 @@ pub(super) mod interp {
                 let index = lit(&inst.operands[1]) as u64;
                 machine.read(get(values, 0) + 8 * index, 8)
             }
+            Op::FConvert if (value_width(inst, values, widths), w) == (32, 16) => {
+                u64::from(f32_to_f16_bits(f32::from_bits(get(values, 0) as u32)))
+            }
+            Op::FConvert if (value_width(inst, values, widths), w) == (32, 64) => {
+                f64::from(f32::from_bits(get(values, 0) as u32)).to_bits()
+            }
+            Op::FConvert if (value_width(inst, values, widths), w) == (64, 32) => {
+                u64::from((f64::from_bits(get(values, 0)) as f32).to_bits())
+            }
             Op::FConvert => {
                 let sw = value_width(inst, values, widths);
-                assert_eq!((sw, w), (16, 32), "only half -> f32 is modelled");
+                assert_eq!((sw, w), (16, 32), "only half <-> f32 and f32 <-> f64 are modelled");
                 let h = get(values, 0) as u32;
                 let (sign, exp, man) = (h >> 15, (h >> 10) & 0x1f, h & 0x3ff);
                 let magnitude = match exp {
@@ -456,8 +465,60 @@ pub(super) mod interp {
                 };
                 u64::from((if sign == 1 { -magnitude } else { magnitude }).to_bits())
             }
-            Op::FMul => u64::from((f32::from_bits(get(values, 0) as u32) * f32::from_bits(get(values, 1) as u32)).to_bits()),
-            Op::FAdd => u64::from((f32::from_bits(get(values, 0) as u32) + f32::from_bits(get(values, 1) as u32)).to_bits()),
+            Op::FMul | Op::FAdd | Op::FSub | Op::FDiv => {
+                let (a, b) = (fv(w, get(values, 0)), fv(w, get(values, 1)));
+                fb(w, match inst.class.opcode {
+                    Op::FMul => a * b,
+                    Op::FAdd => a + b,
+                    Op::FSub => a - b,
+                    _ => a / b,
+                })
+            }
+            Op::FNegate => fb(w, -fv(w, get(values, 0))),
+            Op::FOrdEqual | Op::FOrdNotEqual | Op::FOrdLessThan | Op::FOrdLessThanEqual
+            | Op::FOrdGreaterThan | Op::FOrdGreaterThanEqual | Op::FUnordEqual
+            | Op::FUnordNotEqual | Op::FUnordLessThan | Op::FUnordLessThanEqual
+            | Op::FUnordGreaterThan | Op::FUnordGreaterThanEqual => {
+                let ow = value_width(inst, values, widths);
+                let (a, b) = (fv(ow, get(values, 0)), fv(ow, get(values, 1)));
+                let unordered = a.is_nan() || b.is_nan();
+                let op = inst.class.opcode;
+                let ord = matches!(op, Op::FOrdEqual | Op::FOrdNotEqual | Op::FOrdLessThan | Op::FOrdLessThanEqual | Op::FOrdGreaterThan | Op::FOrdGreaterThanEqual);
+                let value = match op {
+                    Op::FOrdEqual | Op::FUnordEqual => a == b,
+                    Op::FOrdNotEqual | Op::FUnordNotEqual => a != b,
+                    Op::FOrdLessThan | Op::FUnordLessThan => a < b,
+                    Op::FOrdLessThanEqual | Op::FUnordLessThanEqual => a <= b,
+                    Op::FOrdGreaterThan | Op::FUnordGreaterThan => a > b,
+                    _ => a >= b,
+                };
+                u64::from(if unordered { !ord } else { value })
+            }
+            Op::ConvertSToF | Op::ConvertUToF => {
+                let sw = value_width(inst, values, widths);
+                let raw = get(values, 0);
+                let v = if inst.class.opcode == Op::ConvertSToF { sext(sw, raw) as f64 } else { raw as f64 };
+                if w == 32 && sw == 64 {
+                    // Avoid double rounding through f64 for 64-bit sources.
+                    let x = if inst.class.opcode == Op::ConvertSToF { sext(sw, raw) as f32 } else { raw as f32 };
+                    u64::from(x.to_bits())
+                } else {
+                    fb(w, v)
+                }
+            }
+            Op::ConvertFToS | Op::ConvertFToU => {
+                let sw = value_width(inst, values, widths);
+                let v = fv(sw, get(values, 0)).trunc();
+                if inst.class.opcode == Op::ConvertFToS {
+                    let (lo, hi) = (-(2f64.powi(w as i32 - 1)), 2f64.powi(w as i32 - 1) - 1.0);
+                    let clamped = if v.is_nan() { 0.0 } else { v.clamp(lo, hi) };
+                    mask(w, (clamped as i64) as u64)
+                } else {
+                    let hi = if w == 64 { u64::MAX as f64 } else { 2f64.powi(w as i32) - 1.0 };
+                    let clamped = if v.is_nan() { 0.0 } else { v.clamp(0.0, hi) };
+                    mask(w, clamped as u64)
+                }
+            }
             Op::AccessChain | Op::InBoundsAccessChain => get(values, 0),
             Op::PtrAccessChain | Op::InBoundsPtrAccessChain => {
                 // Element size is the pointee size of the base pointer's type.
@@ -483,6 +544,30 @@ pub(super) mod interp {
                     u64::from((arg(0) << (64 - w)).leading_zeros().min(w))
                 } else if op == C::u_mul_hi as u32 {
                     ((u128::from(arg(0)) * u128::from(arg(1))) >> w) as u64
+                } else if op == C::fabs as u32 {
+                    fb(w, fv(w, arg(0)).abs())
+                } else if op == C::fmin as u32 {
+                    let (a, b) = (fv(w, arg(0)), fv(w, arg(1)));
+                    fb(w, if a.is_nan() { b } else if b.is_nan() { a } else { a.min(b) })
+                } else if op == C::fmax as u32 {
+                    let (a, b) = (fv(w, arg(0)), fv(w, arg(1)));
+                    fb(w, if a.is_nan() { b } else if b.is_nan() { a } else { a.max(b) })
+                } else if op == C::fma as u32 {
+                    fb(w, fv(w, arg(0)).mul_add(fv(w, arg(1)), fv(w, arg(2))))
+                } else if op == C::trunc as u32 {
+                    fb(w, fv(w, arg(0)).trunc())
+                } else if op == C::rint as u32 {
+                    fb(w, fv(w, arg(0)).round_ties_even())
+                } else if op == C::floor as u32 {
+                    fb(w, fv(w, arg(0)).floor())
+                } else if op == C::ceil as u32 {
+                    fb(w, fv(w, arg(0)).ceil())
+                } else if op == C::sqrt as u32 {
+                    fb(w, fv(w, arg(0)).sqrt())
+                } else if op == C::exp2 as u32 {
+                    fb(w, fv(w, arg(0)).exp2())
+                } else if op == C::tanh as u32 {
+                    fb(w, fv(w, arg(0)).tanh())
                 } else if op == C::s_mul_hi as u32 {
                     mask(w, ((i128::from(sext(w, arg(0))) * i128::from(sext(w, arg(1)))) >> w) as u64)
                 } else {
@@ -499,6 +584,47 @@ pub(super) mod interp {
     thread_local! {
         /// Bit width of every value id defined so far (pointers are 64).
         static VBITS: std::cell::RefCell<HashMap<u32, u32>> = Default::default();
+    }
+
+    fn fv(w: u32, bits: u64) -> f64 {
+        if w == 64 { f64::from_bits(bits) } else { f64::from(f32::from_bits(bits as u32)) }
+    }
+    fn fb(w: u32, value: f64) -> u64 {
+        if w == 64 { value.to_bits() } else { u64::from((value as f32).to_bits()) }
+    }
+    /// IEEE binary32 to binary16, round to nearest even.
+    pub fn f32_to_f16_bits(x: f32) -> u16 {
+        let b = x.to_bits();
+        let sign = ((b >> 16) & 0x8000) as u16;
+        let exp = ((b >> 23) & 0xff) as i32;
+        let man = b & 0x7f_ffff;
+        if exp == 0xff {
+            return sign | 0x7c00 | if man != 0 { 0x200 | (man >> 13) as u16 } else { 0 };
+        }
+        let e = exp - 127 + 15;
+        if e >= 0x1f {
+            return sign | 0x7c00;
+        }
+        if e <= 0 {
+            if e < -10 {
+                return sign;
+            }
+            let mant = man | 0x80_0000;
+            let shift = (14 - e) as u32;
+            let mut half = mant >> shift;
+            let rem = mant & ((1 << shift) - 1);
+            let halfway = 1 << (shift - 1);
+            if rem > halfway || (rem == halfway && half & 1 == 1) {
+                half += 1;
+            }
+            return sign | half as u16;
+        }
+        let mut h = ((e as u32) << 10) | (man >> 13);
+        let rem = man & 0x1fff;
+        if rem > 0x1000 || (rem == 0x1000 && h & 1 == 1) {
+            h += 1;
+        }
+        sign | h as u16
     }
 
     fn bits_of(id: u32) -> u32 {

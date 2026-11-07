@@ -15,7 +15,7 @@ pub(super) type Stmt = Vec<String>;
 
 /// Entry point: returns canonical PTX text.
 pub(super) fn run(source: &str) -> Result<String, Error> {
-    let tokens = merge_double_colons(parse::tokens(source)?);
+    let tokens = merge_addresses(merge_double_colons(parse::tokens(source)?));
     let statements = split(tokens);
     let statements = inline::expand(statements)?;
     let mut ctx = Ctx::default();
@@ -184,6 +184,27 @@ fn decl_insert_position(out: &[String], open: usize) -> usize {
         at += 1;
     }
     at
+}
+
+/// `[ %rd1 + 8 ]` -> `[ %rd1+8 ]` (the parser expects one address token).
+fn merge_addresses(tokens: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        out.push(tokens[i].clone());
+        if tokens[i] == "[" {
+            if let Some(close) = tokens[i + 1..].iter().take(8).position(|t| t == "]") {
+                let inner = &tokens[i + 1..i + 1 + close];
+                if close > 1 && !inner.iter().any(|t| matches!(t.as_str(), "," | "{" | "}" | ";")) {
+                    out.push(inner.concat());
+                    i += close + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 fn merge_double_colons(tokens: Vec<&str>) -> Vec<String> {
@@ -500,6 +521,24 @@ fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         "prefetch" | "prefetchu" | "discard" | "applypriority" | "nanosleep" | "pmevent"
         | "griddepcontrol" | "setmaxnreg" => return Some(Vec::new()),
         "barrier" if op.starts_with("barrier.cluster") => return Some(Vec::new()),
+        "mad" | "rcp" | "div" | "sqrt" if op.ends_with(".f32") => {
+            let parts: Vec<&str> = op.split('.').collect();
+            let has = |m: &str| parts.contains(&m);
+            let (name, operands): (&str, Vec<String>) = match parts[0] {
+                "mad" if !has("sat") && !has("rz") && !has("rm") && !has("rp") => {
+                    ("fma.rn.f32", inst.operands.clone())
+                }
+                "rcp" if has("rn") && inst.operands.len() == 2 => (
+                    "div.rn.f32",
+                    vec![inst.operands[0].clone(), "0f3F800000".into(), inst.operands[1].clone()],
+                ),
+                "div" if has("full") => ("div.approx.f32", inst.operands.clone()),
+                "div" if has("rn") && has("ftz") => ("div.rn.f32", inst.operands.clone()),
+                "sqrt" if has("rn") && has("ftz") => ("sqrt.rn.f32", inst.operands.clone()),
+                _ => return None,
+            };
+            return Some(vec![render(&inst.guard, name, &operands)]);
+        }
         "createpolicy" => {
             let dst = inst.operand(0);
             return Some(vec![render(&inst.guard, "mov.b64", &[dst.to_owned(), "0".into()])]);
