@@ -96,7 +96,7 @@ Counts are rough instantiation counts for llama.cpp `ggml/src/ggml-cuda` (mmq.cu
 
 ## 5. Tier-2 update (branch `ptx-tier2`)
 
-Corpus pass count: 94 in the original report, 203 on `integration` (ptx-coverage and audit-leftovers merged) and 438 after the tier-2 work (of 623; the remainder is dominated by texture/surface, Hopper/Blackwell, fp8/fp4, video SIMD instructions, module-scope `.global`/`.const` data, named barriers with partial thread counts and ZLUDA fixtures that use bare register names).
+Corpus pass count: 94 in the original report, 203 on `integration` (ptx-coverage and audit-leftovers merged) and 435 after the tier-2 work (of 623; the remainder is dominated by texture/surface, Hopper/Blackwell, fp8/fp4, video SIMD instructions, module-scope `.global`/`.const` data, named barriers with partial thread counts and ZLUDA fixtures that use bare register names).
 
 New files (kept apart from the hand-written parser to limit merge conflicts):
 
