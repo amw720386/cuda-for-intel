@@ -523,32 +523,94 @@ unsafe fn cublasHgemm_tn(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cublasGemmStridedBatchedEx(
-    _handle: *mut c_void,
-    _transa: c_int,
-    _transb: c_int,
-    _m: c_int,
-    _n: c_int,
-    _k: c_int,
-    _alpha: *const c_void,
-    _a: *const c_void,
-    _a_type: c_int,
-    _lda: c_int,
-    _stride_a: i64,
-    _b: *const c_void,
-    _b_type: c_int,
-    _ldb: c_int,
-    _stride_b: i64,
-    _beta: *const c_void,
-    _c: *mut c_void,
-    _c_type: c_int,
-    _ldc: c_int,
-    _stride_c: i64,
-    _batch: c_int,
-    _compute_type: c_int,
-    _algo: c_int,
+    handle: *mut c_void,
+    transa: c_int,
+    transb: c_int,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: *const c_void,
+    a_type: c_int,
+    lda: c_int,
+    stride_a: i64,
+    b: *const c_void,
+    b_type: c_int,
+    ldb: c_int,
+    stride_b: i64,
+    beta: *const c_void,
+    c: *mut c_void,
+    c_type: c_int,
+    ldc: c_int,
+    stride_c: i64,
+    batch: c_int,
+    compute_type: c_int,
+    algo: c_int,
 ) -> c_int {
-    eprintln!("CUDA for Intel cublasGemmStridedBatchedEx not implemented yet");
-    NOT_SUPPORTED
+    // Soft-emulate via GemmEx loop. Strides are in *elements* of the matrix type.
+    const CUDA_R_32F: c_int = 0;
+    const CUDA_R_16F: c_int = 2;
+    if batch <= 0 {
+        return INVALID_VALUE;
+    }
+    let a_elem = match a_type {
+        CUDA_R_32F => 4usize,
+        CUDA_R_16F => 2usize,
+        _ => {
+            eprintln!(
+                "CUDA for Intel cublasGemmStridedBatchedEx unsupported a_type={a_type}"
+            );
+            return NOT_SUPPORTED;
+        }
+    };
+    let b_elem = match b_type {
+        CUDA_R_32F => 4usize,
+        CUDA_R_16F => 2usize,
+        _ => return NOT_SUPPORTED,
+    };
+    let c_elem = match c_type {
+        CUDA_R_32F => 4usize,
+        CUDA_R_16F => 2usize,
+        _ => return NOT_SUPPORTED,
+    };
+    eprintln!(
+        "CUDA for Intel cublasGemmStridedBatchedEx batch={batch} m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} strideA={stride_a} strideB={stride_b} strideC={stride_c} a_type={a_type} compute={compute_type}"
+    );
+    for i in 0..batch as i64 {
+        let a_i = unsafe { (a as *const u8).add((i * stride_a) as usize * a_elem) as *const c_void };
+        let b_i = unsafe { (b as *const u8).add((i * stride_b) as usize * b_elem) as *const c_void };
+        let c_i = unsafe { (c as *mut u8).add((i * stride_c) as usize * c_elem) as *mut c_void };
+        let status = unsafe {
+            cublasGemmEx(
+                handle,
+                transa,
+                transb,
+                m,
+                n,
+                k,
+                alpha,
+                a_i,
+                a_type,
+                lda,
+                b_i,
+                b_type,
+                ldb,
+                beta,
+                c_i,
+                c_type,
+                ldc,
+                compute_type,
+                algo,
+            )
+        };
+        if status != SUCCESS {
+            eprintln!(
+                "CUDA for Intel cublasGemmStridedBatchedEx batch {i}/{batch} failed status={status}"
+            );
+            return status;
+        }
+    }
+    SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -639,7 +701,7 @@ pub unsafe extern "system" fn cublasGemmBatchedEx(
         return INVALID_VALUE;
     }
     eprintln!(
-        "CUDA for Intel cublasGemmBatchedEx batch={batch} m={m} n={n} k={k} a_type={a_type} c_type={c_type} compute={compute_type} a0={:#x} b0={:#x} c0={:#x}",
+        "CUDA for Intel cublasGemmBatchedEx batch={batch} m={m} n={n} k={k} lda={lda} ldb={ldb} ldc={ldc} transa={transa} transb={transb} a_type={a_type} c_type={c_type} compute={compute_type} a0={:#x} b0={:#x} c0={:#x}",
         a_ptrs[0], b_ptrs[0], c_ptrs[0]
     );
     for i in 0..batch_n {

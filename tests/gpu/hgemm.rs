@@ -171,5 +171,93 @@ fn cublas_hgemm_tn_small_matches_cpu() {
     ok!(cuMemFree_v2(da));
     ok!(cuMemFree_v2(db));
     ok!(cuMemFree_v2(dc));
+
+    // Qwen attention shape: m=64 n=3 k=256 lda=32768 (view into a tall buffer).
+    const M2: usize = 64;
+    const N2: usize = 3;
+    const K2: usize = 256;
+    const LDA2: usize = 32768;
+    let mut a2 = vec![0u16; LDA2 * M2];
+    let mut b2 = vec![0u16; K2 * N2];
+    for i in 0..M2 {
+        for kk in 0..K2 {
+            a2[kk + i * LDA2] = f32_to_f16_bits(((i + kk) % 17) as f32 * 0.05);
+        }
+    }
+    for j in 0..N2 {
+        for kk in 0..K2 {
+            b2[kk + j * K2] = f32_to_f16_bits(((j + 1) as f32) * 0.02 + (kk % 9) as f32 * 0.01);
+        }
+    }
+    let mut expected2 = vec![0f32; M2 * N2];
+    for i in 0..M2 {
+        for j in 0..N2 {
+            let mut acc = 0f32;
+            for kk in 0..K2 {
+                acc += f16_bits_to_f32(a2[kk + i * LDA2]) * f16_bits_to_f32(b2[kk + j * K2]);
+            }
+            expected2[i + j * M2] = acc;
+        }
+    }
+    let mut da2 = 0u64;
+    let mut db2 = 0u64;
+    let mut dc2 = 0u64;
+    ok!(cuMemAlloc_v2(&mut da2, a2.len() * 2));
+    ok!(cuMemAlloc_v2(&mut db2, b2.len() * 2));
+    ok!(cuMemAlloc_v2(&mut dc2, M2 * N2 * 2));
+    ok!(cuMemcpyHtoD_v2(da2, a2.as_ptr().cast(), a2.len() * 2));
+    ok!(cuMemcpyHtoD_v2(db2, b2.as_ptr().cast(), b2.len() * 2));
+    let zeros2 = vec![0u16; M2 * N2];
+    ok!(cuMemcpyHtoD_v2(dc2, zeros2.as_ptr().cast(), zeros2.len() * 2));
+    let mut a_ptr2 = da2;
+    let mut b_ptr2 = db2;
+    let mut c_ptr2 = dc2;
+    let mut alpha2 = 1.0f32;
+    let mut beta2 = 0.0f32;
+    let mut m2 = M2 as u32;
+    let mut n2 = N2 as u32;
+    let mut k2 = K2 as u32;
+    let mut lda2 = LDA2 as u32;
+    let mut ldb2 = K2 as u32;
+    let mut ldc2 = M2 as u32;
+    let mut args2: [*mut c_void; 11] = [
+        (&mut a_ptr2 as *mut u64).cast(),
+        (&mut b_ptr2 as *mut u64).cast(),
+        (&mut c_ptr2 as *mut u64).cast(),
+        (&mut alpha2 as *mut f32).cast(),
+        (&mut beta2 as *mut f32).cast(),
+        (&mut m2 as *mut u32).cast(),
+        (&mut n2 as *mut u32).cast(),
+        (&mut k2 as *mut u32).cast(),
+        (&mut lda2 as *mut u32).cast(),
+        (&mut ldb2 as *mut u32).cast(),
+        (&mut ldc2 as *mut u32).cast(),
+    ];
+    ok!(cuLaunchKernel(
+        kernel,
+        m2.div_ceil(16).max(1),
+        n2.div_ceil(16).max(1),
+        1,
+        16,
+        16,
+        1,
+        0,
+        null_mut(),
+        args2.as_mut_ptr(),
+        null_mut(),
+    ));
+    ok!(cuCtxSynchronize());
+    let mut out2 = vec![0u16; M2 * N2];
+    ok!(cuMemcpyDtoH_v2(out2.as_mut_ptr().cast(), dc2, out2.len() * 2));
+    for (idx, (&got_bits, &exp)) in out2.iter().zip(expected2.iter()).enumerate() {
+        let got = f16_bits_to_f32(got_bits);
+        assert!(
+            (got - exp).abs() < 2e-2,
+            "large-lda mismatch at {idx}: got={got} expected={exp}"
+        );
+    }
+    ok!(cuMemFree_v2(da2));
+    ok!(cuMemFree_v2(db2));
+    ok!(cuMemFree_v2(dc2));
     ok!(cuCtxDestroy_v2(context));
 }

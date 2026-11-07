@@ -31,6 +31,14 @@ mod ggml_q8_0_auth;
 mod ggml_half;
 #[path = "gpu/hgemm.rs"]
 mod hgemm;
+#[path = "gpu/convert_unary.rs"]
+mod convert_unary;
+#[path = "gpu/sgemm_attn.rs"]
+mod sgemm_attn;
+#[path = "gpu/soft_max_generic.rs"]
+mod soft_max_generic;
+#[path = "gpu/param_words.rs"]
+mod param_words;
 #[path = "gpu/ggml_dp4a.rs"]
 mod ggml_dp4a;
 #[path = "gpu/ggml_quantize_q8_1.rs"]

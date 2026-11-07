@@ -903,9 +903,12 @@ impl<'a> Emitter<'a> {
                                     "mismatched PTX parameter load for {src}+{offset}"
                                 )));
                             }
+                            // SPIR-V requires the shift operand bitwidth to match
+                            // the base. A u32 shift here made IGC miscompile
+                            // aggregate `ld.param.u64` (soft_max ncols → 0).
                             let lo64 = self.builder.u_convert(self.u64_type, None, value.id)?;
                             let hi64 = self.builder.u_convert(self.u64_type, None, hi.id)?;
-                            let shift = self.builder.constant_bit32(self.u32_type, 32);
+                            let shift = self.builder.constant_bit64(self.u64_type, 32);
                             let hi64 = self.builder.shift_left_logical(
                                 self.u64_type,
                                 None,
