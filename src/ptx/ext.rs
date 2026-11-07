@@ -211,6 +211,10 @@ pub(super) enum ExtOp {
     Mad24 { hi: bool, signed: bool },
     Sad { signed: bool },
     Cnot { wide: bool },
+    /// `add.sat.s32` / `sub.sat.s32`.
+    SatAddSub { sub: bool },
+    /// `mad.wide.{s32,u32} d64, a, b, c64`.
+    MadWide { signed: bool },
     Bfind { wide: bool, signed: bool, shiftamt: bool },
     Clz64,
     MadHi { signed: bool },
@@ -251,6 +255,8 @@ pub(super) enum AtomTy {
     S64,
     F32,
     F64,
+    F16x2,
+    Bf16x2,
 }
 
 impl ExtOp {
@@ -399,6 +405,14 @@ pub(super) fn parse<'a>(body: &[&'a str]) -> Result<Option<Instruction<'a>>, Err
             };
             let (d, a) = (need!(r(0)), need!(r(1)));
             ext(ExtOp::Bfind { wide, signed, shiftamt }, [d, ""], [a, NONE, NONE, NONE])
+        }
+        [name @ ("add" | "sub"), "sat", "s32"] => {
+            let (d, a, b) = (need!(r(0)), need!(r(1)), need!(r(2)));
+            ext(ExtOp::SatAddSub { sub: *name == "sub" }, [d, ""], [a, b, NONE, NONE])
+        }
+        ["mad", "wide", ty @ ("s32" | "u32")] => {
+            let (d, a, b, c) = (need!(r(0)), need!(r(1)), need!(r(2)), need!(r(3)));
+            ext(ExtOp::MadWide { signed: *ty == "s32" }, [d, ""], [a, b, c, NONE])
         }
         ["clz", "b64"] => {
             let (d, a) = (need!(r(0)), need!(r(1)));
@@ -880,7 +894,10 @@ fn parse_atomic<'a>(
             "cas" => kind = Some(AtomicOp::Cas),
             "inc" => kind = None,
             "dec" => kind = None,
-            "u64" | "b64" | "s64" | "f32" | "f64" | "u32" | "b32" | "s32" => ty = Some(*part),
+            "u64" | "b64" | "s64" | "f32" | "f64" | "u32" | "b32" | "s32" | "f16x2" | "bf16x2" => {
+                ty = Some(*part)
+            }
+            "noftz" => {}
             _ => return Ok(None),
         }
     }
@@ -913,6 +930,8 @@ fn parse_atomic<'a>(
         "u64" | "b64" => AtomTy::U64,
         "s64" => AtomTy::S64,
         "f64" => AtomTy::F64,
+        "f16x2" if op == AtomicOp::Add => AtomTy::F16x2,
+        "bf16x2" if op == AtomicOp::Add => AtomTy::Bf16x2,
         "f32" if matches!(op, AtomicOp::Min | AtomicOp::Max | AtomicOp::Exch | AtomicOp::Cas) => {
             AtomTy::F32
         }

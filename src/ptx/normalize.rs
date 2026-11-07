@@ -17,6 +17,7 @@ pub(super) type Stmt = Vec<String>;
 pub(super) fn run(source: &str) -> Result<String, Error> {
     let tokens = merge_addresses(merge_double_colons(parse::tokens(source)?));
     let statements = split(tokens);
+    let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
     let mut ctx = Ctx::default();
     let mut out: Vec<String> = Vec::with_capacity(statements.len());
@@ -24,14 +25,24 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
     // scratch-register declarations that the rewrites of that entry need.
     let mut entry_open: Option<usize> = None;
     let mut depth = 0i32;
+    let mut uses_dynamic = false;
     for stmt in statements {
+        if let Some((name, _)) = &dynamic {
+            if stmt.iter().any(|t| t == name || t.strip_prefix(name.as_str()).is_some_and(|r| r.starts_with('+'))) {
+                uses_dynamic = true;
+            }
+        }
         if stmt.first().is_some_and(|t| t == "{") {
             depth += 1;
         } else if stmt.first().is_some_and(|t| t == "}") {
             depth -= 1;
             if depth == 0 {
                 if let Some(open) = entry_open.take() {
-                    let decls = ctx.take_decls();
+                    let mut decls = ctx.take_decls();
+                    if let (true, Some((name, align))) = (uses_dynamic, &dynamic) {
+                        decls.push(format!(".shared .align {align} .b8 {name} [ 49152 ] ; /*dyn*/"));
+                    }
+                    uses_dynamic = false;
                     if !decls.is_empty() {
                         let at = decl_insert_position(&out, open);
                         for (i, decl) in decls.into_iter().enumerate() {
@@ -90,6 +101,7 @@ fn reorder_prologues(lines: Vec<String>) -> Vec<String> {
         let mut locals = Vec::new();
         let mut regs = Vec::new();
         let mut shared = Vec::new();
+        let mut shared_tail = Vec::new();
         let mut body = Vec::new();
         for line in &lines[start..end] {
             // Only top-level declarations move; nested scopes were flattened earlier.
@@ -98,7 +110,12 @@ fn reorder_prologues(lines: Vec<String>) -> Vec<String> {
             } else if line.starts_with(".reg") {
                 regs.extend(split_reg_list(line));
             } else if line.starts_with(".shared") {
-                shared.push(line.clone());
+                // The dynamic window must follow the static arrays.
+                if line.contains("/*dyn*/") {
+                    shared_tail.push(line.clone());
+                } else {
+                    shared.push(line.clone());
+                }
             } else {
                 body.push(line.clone());
             }
@@ -106,6 +123,7 @@ fn reorder_prologues(lines: Vec<String>) -> Vec<String> {
         out.extend(locals);
         out.extend(regs);
         out.extend(shared);
+        out.extend(shared_tail);
         out.extend(body);
         i = end;
     }
@@ -124,6 +142,53 @@ fn split_reg_list(line: &str) -> Vec<String> {
         .filter(|t| **t != "," && **t != ";")
         .map(|name| format!(".reg {ty} {name} ;"))
         .collect()
+}
+
+/// Module-level `.extern .shared` arrays all alias the dynamic shared window.
+/// They are removed here; every entry that uses one gets a single window
+/// declaration placed after its static shared arrays.
+fn extract_dynamic_shared(statements: Vec<Stmt>) -> (Vec<Stmt>, Option<(String, String)>) {
+    let mut names: Vec<String> = Vec::new();
+    let mut align = "16".to_owned();
+    let mut kept = Vec::with_capacity(statements.len());
+    for stmt in statements {
+        let is_extern_shared = stmt.iter().take(3).any(|t| t == ".extern")
+            && stmt.iter().take(4).any(|t| t == ".shared")
+            && stmt.last().is_some_and(|t| t == ";");
+        if !is_extern_shared {
+            kept.push(stmt);
+            continue;
+        }
+        if let Some(at) = stmt.iter().position(|t| t == "[") {
+            if at > 0 {
+                names.push(stmt[at - 1].clone());
+            }
+        }
+        if let Some(at) = stmt.iter().position(|t| t == ".align") {
+            if let Some(value) = stmt.get(at + 1) {
+                align = value.clone();
+            }
+        }
+    }
+    let Some(first) = names.first().cloned() else {
+        return (kept, None);
+    };
+    if names.len() > 1 {
+        for stmt in &mut kept {
+            for token in stmt.iter_mut() {
+                for other in &names[1..] {
+                    if token == other {
+                        *token = first.clone();
+                    } else if let Some(rest) = token.strip_prefix(other.as_str()) {
+                        if rest.starts_with('+') {
+                            *token = format!("{first}{rest}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (kept, Some((first, align)))
 }
 
 fn is_entry_header(stmt: &[String]) -> bool {

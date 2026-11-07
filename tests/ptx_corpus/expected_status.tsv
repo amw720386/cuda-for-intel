@@ -45,8 +45,8 @@ ggml/vector_add.ptx	pass	strict-pass
 handwritten/atomics/atom_acq_rel_sys_global_add_u32_21.ptx	pass	strict-pass	
 handwritten/atomics/atom_global_add_f32_1.ptx	pass	strict-pass	
 handwritten/atomics/atom_global_add_f64_2.ptx	pass	strict-pass	
-handwritten/atomics/atom_global_add_noftz_bf16x2_5.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.global.add.noftz.bf16x2 %r1 , [ %rd2 ] , %r2
-handwritten/atomics/atom_global_add_noftz_f16x2_4.ptx	unsupported	strict-fail	unsupported PTX instruction: atom.global.add.noftz.f16x2 %r1 , [ %rd2 ] , %r2
+handwritten/atomics/atom_global_add_noftz_bf16x2_5.ptx	pass	strict-pass	
+handwritten/atomics/atom_global_add_noftz_f16x2_4.ptx	pass	strict-pass	
 handwritten/atomics/atom_global_add_u32_0.ptx	pass	strict-pass	
 handwritten/atomics/atom_global_add_u64_3.ptx	pass	strict-pass	
 handwritten/atomics/atom_global_and_b32_13.ptx	pass	strict-pass	
@@ -68,7 +68,7 @@ handwritten/atomics/atom_shared_add_f32_18.ptx	error	strict-fail	expected Shared
 handwritten/atomics/atom_shared_add_u32_17.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
 handwritten/atomics/atom_shared_cas_b32_19.ptx	error	strict-fail	expected Shared address for %rd2, got Address(Global)
 handwritten/atomics/red_global_add_f32_24.ptx	pass	strict-pass	
-handwritten/atomics/red_global_add_noftz_f16x2_25.ptx	unsupported	strict-fail	unsupported PTX instruction: red.global.add.noftz.f16x2 [ %rd2 ] , %r2
+handwritten/atomics/red_global_add_noftz_f16x2_25.ptx	pass	strict-pass	
 handwritten/atomics/red_global_add_u32_23.ptx	pass	strict-pass	
 handwritten/atomics/red_global_add_u64_27.ptx	pass	strict-pass	
 handwritten/atomics/red_global_max_u32_26.ptx	pass	strict-pass	
@@ -292,7 +292,7 @@ handwritten/memory/mov_vector_pack_b32.ptx	pass	strict-pass
 handwritten/memory/multimem_ld_reduce.ptx	unsupported	strict-fail	unsupported PTX instruction: multimem.ld_reduce.relaxed.sys.global.add.u32 %r1 , [ %rd2 ]
 handwritten/memory/prefetch_global_L2.ptx	pass	strict-pass	
 handwritten/memory/prefetchu_L1.ptx	pass	strict-pass	
-handwritten/memory/shared_extern_dynamic.ptx	error	strict-fail	unknown PTX shared symbol dyn
+handwritten/memory/shared_extern_dynamic.ptx	pass	strict-pass	
 handwritten/memory/st_global_cs.ptx	pass	strict-pass	
 handwritten/memory/st_global_u16.ptx	pass	strict-pass	
 handwritten/memory/st_global_v4_u32.ptx	pass	strict-pass	
@@ -490,13 +490,13 @@ zluda/float_math/tanh.ptx	pass	strict-fail
 zluda/integer/add.ptx	pass	strict-fail	
 zluda/integer/add_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 r0 , a0 , b0
 zluda/integer/add_non_coherent.ptx	pass	strict-fail	
-zluda/integer/add_s32_sat.ptx	unsupported	strict-fail	unsupported PTX instruction: add.sat.s32 temp2 , temp0 , temp1
+zluda/integer/add_s32_sat.ptx	error	strict-fail	missing or mismatched PTX declaration for temp0
 zluda/integer/add_tuning.ptx	pass	strict-fail	
 zluda/integer/addc_cc_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: add.cc.u32 %cc_cf , 0xffffffffffffffffU , 1
 zluda/integer/and.ptx	pass	strict-fail	
 zluda/integer/mad_extended.ptx	unsupported	strict-fail	unsupported PTX instruction: mad.lo.cc.u32 %r0 , %a0 , %b0 , %c0
 zluda/integer/mad_s32.ptx	pass	strict-fail	
-zluda/integer/mad_wide.ptx	unsupported	strict-fail	unsupported PTX instruction: mad.wide.s32 %dst , %src1 , %src2 , %src3
+zluda/integer/mad_wide.ptx	pass	strict-fail	
 zluda/integer/min.ptx	pass	strict-fail	
 zluda/integer/mul24_hi_s32.ptx	pass	strict-fail	
 zluda/integer/mul24_hi_u32.ptx	pass	strict-fail	

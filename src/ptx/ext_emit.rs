@@ -123,6 +123,38 @@ impl<'a> Emitter<'a> {
                 let id = self.builder.select(ty, None, is_zero, one, zero)?;
                 self.write(dst[0], Value { id, kind })
             }
+            ExtOp::SatAddSub { sub } => {
+                let t64 = self.u64_type;
+                let a = self.integer(src[0], Kind::B32)?;
+                let b = self.integer(src[1], Kind::B32)?;
+                let a = self.builder.s_convert(t64, None, a)?;
+                let b = self.builder.s_convert(t64, None, b)?;
+                let sum = if sub {
+                    self.builder.i_sub(t64, None, a, b)?
+                } else {
+                    self.builder.i_add(t64, None, a, b)?
+                };
+                let lo = self.builder.constant_bit64(t64, i64::from(i32::MIN) as u64);
+                let hi = self.builder.constant_bit64(t64, i64::from(i32::MAX) as u64);
+                let v = self.opencl_int(t64, OpenclStd100Op::s_max, &[sum, lo])?;
+                let v = self.opencl_int(t64, OpenclStd100Op::s_min, &[v, hi])?;
+                let id = self.builder.u_convert(self.u32_type, None, v)?;
+                self.write(dst[0], Value { id, kind: Kind::B32 })
+            }
+            ExtOp::MadWide { signed } => {
+                let t64 = self.u64_type;
+                let a = self.integer(src[0], Kind::B32)?;
+                let b = self.integer(src[1], Kind::B32)?;
+                let c = self.integer(src[2], Kind::B64)?;
+                let (a, b) = if signed {
+                    (self.builder.s_convert(t64, None, a)?, self.builder.s_convert(t64, None, b)?)
+                } else {
+                    (self.builder.u_convert(t64, None, a)?, self.builder.u_convert(t64, None, b)?)
+                };
+                let product = self.builder.i_mul(t64, None, a, b)?;
+                let id = self.builder.i_add(t64, None, product, c)?;
+                self.write(dst[0], Value { id, kind: Kind::B64 })
+            }
             ExtOp::Bfind { wide, signed, shiftamt } => {
                 let id = self.bfind(src[0], wide, signed, shiftamt)?;
                 self.write(dst[0], Value { id, kind: Kind::B32 })
@@ -1007,6 +1039,9 @@ impl<'a> Emitter<'a> {
         if space == Space::Local {
             return Err(Error::new("atomics on local memory are not supported"));
         }
+        if matches!(ty, AtomTy::F16x2 | AtomTy::Bf16x2) {
+            return self.atom_half2_add(ty == AtomTy::Bf16x2, space, returns, dst, src);
+        }
         let wide = matches!(ty, AtomTy::U64 | AtomTy::S64 | AtomTy::F64);
         let kind = if wide { Kind::B64 } else { Kind::B32 };
         if wide {
@@ -1095,6 +1130,32 @@ impl<'a> Emitter<'a> {
         };
         if returns {
             self.write(dst, Value { id: old, kind })?;
+        }
+        Ok(())
+    }
+
+    /// `atom.add.noftz.{f16x2,bf16x2}`: per-lane half add inside a CAS loop.
+    fn atom_half2_add(
+        &mut self,
+        bf16: bool,
+        space: Space,
+        returns: bool,
+        dst: &'a str,
+        src: [&str; 4],
+    ) -> R<()> {
+        if space == Space::Local {
+            return Err(Error::new("atomics on local memory are not supported"));
+        }
+        let pointer = self.word_pointer(space, src[0])?;
+        let scope = self.atom_scope(space);
+        let value = self.integer(src[1], Kind::B32)?;
+        let ty = super::super::ext::NumTy::F16x2;
+        let _ = ty;
+        let old = self.cas_loop(pointer, false, scope, |e, old| {
+            e.half2_add_bits(old, value, bf16)
+        })?;
+        if returns {
+            self.write(dst, Value { id: old, kind: Kind::B32 })?;
         }
         Ok(())
     }

@@ -901,3 +901,69 @@ fn saturating_nan_aware_f32_and_integer_conversions() {
     assert_eq!(f32::from_bits(out[15]), 70000.0);
     assert_eq!(f32::from_bits(out[16]), 70000.0);
 }
+
+#[test]
+fn extern_shared_arrays_alias_one_dynamic_window_after_static_shared() {
+    let source = r#".version 8.0
+.target sm_80
+.address_size 64
+.extern .shared .align 16 .b8 dyn_a[];
+.extern .shared .align 16 .b8 dyn_b[];
+.visible .entry probe(.param .u64 out_param, .param .u32 n_param)
+{
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<4>;
+    .shared .align 4 .b8 fixed[16];
+    ld.param.u64 %rd0, [out_param];
+    cvta.to.global.u64 %rd1, %rd0;
+    ld.param.u32 %r0, [n_param];
+    st.shared.u32 [dyn_a], %r0;
+    ld.shared.u32 %r1, [dyn_b];
+    mov.u32 %r3, 7;
+    st.shared.u32 [fixed], %r3;
+    mov.u32 %r2, dyn_a;
+    st.global.u32 [%rd1], %r1;
+    st.global.u32 [%rd1+4], %r2;
+    ret;
+}
+"#;
+    // dyn_b aliases dyn_a; the window starts after the 16 static bytes.
+    assert_eq!(run(source, 9, 2), [9, 16]);
+}
+
+#[test]
+fn saturating_and_wide_integer_arithmetic() {
+    let body = r#"    mov.u32 %r1, 0x7ffffff0;
+    mov.u32 %r2, 0x100;
+    mov.u32 %r3, 0x80000010;
+    add.sat.s32 %r4, %r1, %r2;
+    sub.sat.s32 %r5, %r3, %r2;
+    add.sat.s32 %r6, %r2, %r2;
+    mov.u64 %rd1, 5;
+    mad.wide.s32 %rd2, %r3, %r2, %rd1;
+    mad.wide.u32 %rd3, %r3, %r2, %rd1;
+    st.global.u32 [%rd15], %r4;
+    st.global.u32 [%rd15+4], %r5;
+    st.global.u32 [%rd15+8], %r6;
+    st.global.u64 [%rd15+16], %rd2;
+    st.global.u64 [%rd15+24], %rd3;"#;
+    let out = eval("", body, 8);
+    assert_eq!(out[0], i32::MAX as u32);
+    assert_eq!(out[1], i32::MIN as u32);
+    assert_eq!(out[2], 0x200);
+    let wide = |i: usize| (u64::from(out[i + 1]) << 32) | u64::from(out[i]);
+    assert_eq!(wide(4), ((0x8000_0010u32 as i32 as i64) * 0x100 + 5) as u64);
+    assert_eq!(wide(6), 0x8000_0010u64 * 0x100 + 5);
+}
+
+#[test]
+fn half2_atomic_add_translates_and_validates() {
+    lower(&kernel(
+        "",
+        r#"    mov.b32 %r1, 0x3c003c00;
+    atom.global.add.noftz.f16x2 %r2, [%rd15], %r1;
+    red.global.add.noftz.f16x2 [%rd15+4], %r1;
+    atom.global.add.noftz.bf16x2 %r3, [%rd15+8], %r1;
+    st.global.u32 [%rd15+12], %r2;"#,
+    ));
+}

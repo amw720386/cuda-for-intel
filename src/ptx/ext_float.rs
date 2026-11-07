@@ -617,4 +617,33 @@ impl<'a> Emitter<'a> {
             (0, (1i64 << bits) - 1)
         }
     }
+
+    /// Lane-wise half / bf16 addition of two packed registers (round to nearest even).
+    pub(super) fn half2_add_bits(&mut self, a: Word, b: Word, bf16: bool) -> R<Word> {
+        let t = self.u32_type;
+        let mut packed = self.u32_const(0);
+        for lane in 0..2u32 {
+            let (x, y) = if lane == 0 {
+                (a, b)
+            } else {
+                let sh = self.u32_const(16);
+                (
+                    self.builder.shift_right_logical(t, None, a, sh)?,
+                    self.builder.shift_right_logical(t, None, b, sh)?,
+                )
+            };
+            let fx = self.half_bits_to_f32(x, bf16)?;
+            let fy = self.half_bits_to_f32(y, bf16)?;
+            let sum = self.builder.f_add(self.f32_type, None, fx, fy)?;
+            let bits = self.f32_to_half_bits(sum, bf16, FPRoundingMode::RTE)?;
+            let bits = if lane == 1 {
+                let sh = self.u32_const(16);
+                self.builder.shift_left_logical(t, None, bits, sh)?
+            } else {
+                bits
+            };
+            packed = self.builder.bitwise_or(t, None, packed, bits)?;
+        }
+        Ok(packed)
+    }
 }
