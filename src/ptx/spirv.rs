@@ -61,6 +61,8 @@ impl Value {
 mod ext_emit;
 #[path = "ext_float.rs"]
 mod ext_float;
+#[path = "param_space_emit.rs"]
+mod param_space_emit;
 
 struct Emitter<'a> {
     builder: Builder,
@@ -98,8 +100,24 @@ struct Emitter<'a> {
     initialized: HashSet<&'a str>,
     /// Registers assigned somewhere in the entry; others read as zero (undefined in PTX).
     ever_defined: HashSet<&'a str>,
+    /// Registers with a single definition, `mov.u32 %r, <immediate>`: their value is known.
+    const_regs: HashMap<&'a str, u32>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
+    /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
+    param_array: Option<Word>,
+    /// Kernel has staged (pointer-passed) aggregates: computed param addresses are real pointers.
+    param_global_mode: bool,
+    staged_names: HashSet<&'a str>,
+    /// Registers that merge integers into pointers (`mov.u64 %rd, 0` then `add` of a
+    /// global address): discovered by retrying a failed lowering, keyed per entry.
+    address_hints: HashMap<(String, String), Space>,
+    current_entry: String,
+    /// Registers whose slot was created by a read that precedes every write.
+    undef_slots: HashMap<String, Value>,
+    /// Registers written by some instruction of the entry being lowered.
+    written_somewhere: HashSet<String>,
+    param_bases: HashMap<&'a str, u32>,
     device_atomics: bool,
     fp32: bool,
     fp32_fma: bool,
@@ -178,8 +196,17 @@ impl<'a> Emitter<'a> {
             registers: HashMap::new(),
             initialized: HashSet::new(),
             ever_defined: HashSet::new(),
+            const_regs: HashMap::new(),
             locals: Vec::new(),
             params: HashMap::new(),
+            param_array: None,
+            param_global_mode: false,
+            staged_names: HashSet::new(),
+            address_hints: HashMap::new(),
+            current_entry: String::new(),
+            undef_slots: HashMap::new(),
+            written_somewhere: HashSet::new(),
+            param_bases: HashMap::new(),
             device_atomics: false,
             fp32: false,
             fp32_fma: false,
@@ -194,7 +221,7 @@ impl<'a> Emitter<'a> {
             Param::U32 | Param::Words { .. } => self.u32_type,
             Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
-            Param::GlobalPtr => self.global_byte_ptr,
+            Param::GlobalPtr | Param::Staged { .. } => self.global_byte_ptr,
         }
     }
 
@@ -214,11 +241,10 @@ impl<'a> Emitter<'a> {
         // guards both the defining load and later uses with the same predicate,
         // so the join into the use can look uninitialized under path-insensitive
         // analysis even though the use is unreachable when the value is absent.
-        let slot = self.registers.get(operand).copied().ok_or_else(|| {
-            Error::new(format!(
-                "undefined PTX register {operand} on an incoming path"
-            ))
-        })?;
+        let slot = match self.registers.get(operand).or_else(|| self.undef_slots.get(operand)).copied() {
+            Some(slot) => slot,
+            None => self.undefined_register_slot(operand)?,
+        };
         let id = self
             .builder
             .load(self.value_type(slot.kind), None, slot.id, None, [])?;
@@ -228,6 +254,39 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// A register read before any write was lowered (a loop-carried or path-dependent
+    /// value that PTX guards so it is unused when absent): materialise a zero-initialised
+    /// slot typed by the register's declaration.
+    fn undefined_register_slot(&mut self, operand: &str) -> Result<Value, Error> {
+        let kind = match self.declarations.get(operand).filter(|w| super::lenient_undefined() || self.written_somewhere.contains(operand) || **w == Width::Predicate && false) {
+            Some(Width::Predicate) => Kind::Predicate,
+            Some(Width::B32) => Kind::B32,
+            Some(Width::B64) => Kind::B64,
+            None => {
+                return Err(Error::new(format!(
+                    "undefined PTX register {operand} on an incoming path"
+                )));
+            }
+        };
+        let ty = self.value_type(kind);
+        let zero = match kind {
+            Kind::Predicate => self.builder.constant_false(self.bool_type),
+            Kind::B32 => self.builder.constant_bit32(self.u32_type, 0),
+            _ => self.builder.constant_bit64(self.u64_type, 0),
+        };
+        let pointer = self.builder.type_pointer(None, StorageClass::Function, ty);
+        let slot = self.builder.id();
+        self.locals.push(SpirvInstruction::new(
+            Op::Variable,
+            Some(pointer),
+            Some(slot),
+            vec![Operand::StorageClass(StorageClass::Function), Operand::IdRef(zero)],
+        ));
+        let value = Value { id: slot, kind };
+        self.undef_slots.insert(operand.to_string(), value);
+        Ok(value)
+    }
+
     fn write(&mut self, dst: &'a str, value: Value) -> Result<(), Error> {
         if self.declarations.get(dst) != Some(&value.kind.width()) {
             return Err(Error::new(format!(
@@ -235,7 +294,16 @@ impl<'a> Emitter<'a> {
             )));
         }
         let mut value = value;
-        let slot = if let Some(slot) = self.registers.get(dst).copied() {
+        if value.kind == Kind::B64
+            && let Some(&space) = self.address_hints.get(&(self.current_entry.clone(), dst.to_string()))
+        {
+            let kind = Kind::Address(space);
+            let id = self.builder.convert_u_to_ptr(self.value_type(kind), None, value.id)?;
+            value = Value { id, kind };
+        }
+        let known = self.registers.get(dst).or_else(|| self.undef_slots.get(dst)).copied();
+        let slot = if let Some(slot) = known {
+            self.registers.insert(dst, slot);
             // PTX registers are untyped 64-bit values: nvcc reuses one `%rd` for a raw
             // integer and for a pointer. Coerce between the slot's kind and the new value.
             if slot.kind != value.kind {
@@ -282,6 +350,33 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    /// A shift count: PTX types it `.u32`, but 64-bit registers and immediates occur too.
+    fn shift_count64(&mut self, operand: &str) -> Result<Word, Error> {
+        if operand.starts_with('%') {
+            let value = self.read(operand)?;
+            return Ok(match value.kind {
+                Kind::B32 => self.builder.u_convert(self.u64_type, None, value.id)?,
+                Kind::B64 => value.id,
+                Kind::Address(_) => self.builder.bitcast(self.u64_type, None, value.id)?,
+                Kind::Predicate => return Err(Error::new(format!("expected an integer shift count for {operand}"))),
+            });
+        }
+        self.integer(operand, Kind::B64)
+    }
+
+    /// Sub-word loads may target a 64-bit register: extend the 32-bit result.
+    fn widen_to_declaration(&mut self, dst: &'a str, id: Word, signed: bool) -> Result<(&'a str, Word, Kind), Error> {
+        if self.declarations.get(dst) == Some(&Width::B64) {
+            let wide = if signed {
+                self.builder.s_convert(self.u64_type, None, id)?
+            } else {
+                self.builder.u_convert(self.u64_type, None, id)?
+            };
+            return Ok((dst, wide, Kind::B64));
+        }
+        Ok((dst, id, Kind::B32))
+    }
+
     fn parse_u32(operand: &str) -> Option<u32> {
         // `0fXXXXXXXX` float literal used where the translator wants raw 32-bit bits (selp.f32, mov.f32).
         if let Some(bits) = operand.strip_prefix("0f").or_else(|| operand.strip_prefix("0F")).filter(|h| h.len() == 8) {
@@ -298,6 +393,11 @@ impl<'a> Emitter<'a> {
             // PTX often writes all-ones as `-1`.
             operand.parse::<i32>().ok().map(|n| n as u32)
         }
+    }
+
+    /// Value of an immediate or of a register whose only definition is `mov.u32 %r, imm`.
+    fn known_u32(&self, operand: &str) -> Option<u32> {
+        Self::parse_u32(operand).or_else(|| self.const_regs.get(operand).copied())
     }
 
     fn parse_u64(operand: &str) -> Option<u64> {
@@ -337,6 +437,10 @@ impl<'a> Emitter<'a> {
             // Pointer params are often compared/added as .u64 before cvta.to.global.
             if kind == Kind::B64 && matches!(value.kind, Kind::Address(_)) {
                 return Ok(self.builder.bitcast(self.u64_type, None, value.id)?);
+            }
+            // Sub-word consumers (st.u8, cvt.*16 ...) of a 64-bit register use its low bits.
+            if kind == Kind::B32 && value.kind == Kind::B64 {
+                return Ok(self.builder.u_convert(self.u32_type, None, value.id)?);
             }
             // A raw 64-bit integer reused where a pointer is expected (and pointer to pointer).
             if let Kind::Address(_) = kind
@@ -611,6 +715,16 @@ impl<'a> Emitter<'a> {
         {
             // Module-scope variable named directly in the address operand.
             let pointer = self.builder.bitcast(byte_ty, None, variable)?;
+            if offset == 0 {
+                return Ok(pointer);
+            }
+            let bytes = self.builder.constant_bit64(self.i64_type, offset as u64);
+            return Ok(self.builder.ptr_access_chain(byte_ty, None, pointer, bytes, [])?);
+        }
+        if space == Space::Shared && self.shared_offsets.contains_key(base) {
+            // Shared symbol named directly in the address operand.
+            let word = self.shared_base(base)?;
+            let pointer = self.builder.bitcast(byte_ty, None, word)?;
             if offset == 0 {
                 return Ok(pointer);
             }
@@ -1760,6 +1874,10 @@ impl<'a> Emitter<'a> {
                 self.emit_ext(op, dst, src)?;
                 return Ok(());
             }
+            Instruction::ParamSpace(op) => {
+                self.emit_param_space(op)?;
+                return Ok(());
+            }
             Instruction::Fence => {
                 let ty = self.u32_type;
                 let scope = self.builder.constant_bit32(ty, Scope::Device as u32);
@@ -1775,7 +1893,10 @@ impl<'a> Emitter<'a> {
             }
             Instruction::LoadSigned { space, bits, dst, addr } => {
                 let ty = self.u32_type;
-                let loaded = if bits == 8 {
+                let loaded = if bits == 32 {
+                    let pointer = self.word_pointer(space, addr)?;
+                    self.builder.load(ty, None, pointer, None, [])?
+                } else if bits == 8 {
                     let bytes = self.addressed_byte_pointer(space, addr)?;
                     let value = self.builder.load(self.u8_type, None, bytes, None, [])?;
                     self.builder.s_convert(ty, None, value)?
@@ -1784,12 +1905,7 @@ impl<'a> Emitter<'a> {
                     let value = self.builder.load(self.u16_type, None, pointer, None, [])?;
                     self.builder.s_convert(ty, None, value)?
                 };
-                if self.declarations.get(dst) == Some(&Width::B64) {
-                    let wide = self.builder.s_convert(self.u64_type, None, loaded)?;
-                    (dst, wide, Kind::B64)
-                } else {
-                    (dst, loaded, Kind::B32)
-                }
+                self.widen_to_declaration(dst, loaded, true)?
             }
             Instruction::CvtaShared(dst, src) => {
                 let value = self.read(src)?;
@@ -2199,8 +2315,8 @@ impl<'a> Emitter<'a> {
                 dst,
                 src: [a, b],
             } => {
-                let a = self.read(a)?.require(Kind::Predicate, a)?;
-                let b = self.read(b)?.require(Kind::Predicate, b)?;
+                let a = self.predicate_operand(a)?;
+                let b = self.predicate_operand(b)?;
                 let ty = self.bool_type;
                 let id = if and {
                     self.builder.logical_and(ty, None, a, b)?
@@ -2465,7 +2581,7 @@ impl<'a> Emitter<'a> {
                 // signed `/32` idiom (`shr.s64`/`shr.u64`) and OOB-fault
                 // quantize_q8_1 stores.
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B64)?;
+                let shift = self.shift_count64(shift)?;
                 let bits = self.builder.constant_bit64(self.u64_type, 64);
                 let max = self.builder.constant_bit64(self.u64_type, 63);
                 let in_range = self
@@ -2481,21 +2597,20 @@ impl<'a> Emitter<'a> {
                 (dst, id, Kind::B64)
             }
             Instruction::ShiftLeft64(dst, [value, shift]) => {
-                if !shift.parse::<u32>().is_ok_and(|n| n < 64) {
-                    return Err(Error::new(
-                        "only immediate PTX left shifts below 64 are supported",
-                    ));
-                }
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B64)?;
-                let id = self
-                    .builder
-                    .shift_left_logical(self.u64_type, None, value, shift)?;
+                let shift = self.shift_count64(shift)?;
+                // PTX clamps the count: 64 or more gives zero.
+                let bits = self.builder.constant_bit64(self.u64_type, 64);
+                let zero = self.builder.constant_bit64(self.u64_type, 0);
+                let in_range = self.builder.u_less_than(self.bool_type, None, shift, bits)?;
+                let safe = self.builder.select(self.u64_type, None, in_range, shift, zero)?;
+                let shifted = self.builder.shift_left_logical(self.u64_type, None, value, safe)?;
+                let id = self.builder.select(self.u64_type, None, in_range, shifted, zero)?;
                 (dst, id, Kind::B64)
             }
             Instruction::ShiftRightLogical64(dst, [value, shift]) => {
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B64)?;
+                let shift = self.shift_count64(shift)?;
                 let bits = self.builder.constant_bit64(self.u64_type, 64);
                 let zero = self.builder.constant_bit64(self.u64_type, 0);
                 let in_range = self
@@ -2619,13 +2734,7 @@ impl<'a> Emitter<'a> {
                     let pointer = self.word_pointer(space, address)?;
                     self.builder.load(self.u32_type, None, pointer, None, [])?
                 };
-                // `ld.global.s32 %rd, [..]` widens into a 64-bit register (sign-extending).
-                if self.declarations.get(dst) == Some(&Width::B64) {
-                    let wide = self.builder.s_convert(self.u64_type, None, id)?;
-                    (dst, wide, Kind::B64)
-                } else {
-                    (dst, id, Kind::B32)
-                }
+                self.widen_to_declaration(dst, id, false)?
             }
             Instruction::Load16(space, dst, address) => {
                 let pointer = self.half_pointer(space, address)?;
@@ -2633,13 +2742,13 @@ impl<'a> Emitter<'a> {
                     .builder
                     .load(self.u16_type, None, pointer, None, [])?;
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits16)?;
-                (dst, bits32, Kind::B32)
+                self.widen_to_declaration(dst, bits32, false)?
             }
             Instruction::Load8(space, dst, address) => {
                 let bytes = self.addressed_byte_pointer(space, address)?;
                 let bits8 = self.builder.load(self.u8_type, None, bytes, None, [])?;
                 let bits32 = self.builder.u_convert(self.u32_type, None, bits8)?;
-                (dst, bits32, Kind::B32)
+                self.widen_to_declaration(dst, bits32, false)?
             }
             Instruction::LoadVecU8 {
                 space,
@@ -2788,7 +2897,7 @@ impl<'a> Emitter<'a> {
             }
             Instruction::Store32(space, address, src) => {
                 let pointer = self.word_pointer(space, address)?;
-                let value = self.read(src)?.require(Kind::B32, src)?;
+                let value = self.integer(src, Kind::B32)?;
                 self.builder.store(pointer, value, None, [])?;
                 return Ok(());
             }
@@ -2996,24 +3105,64 @@ pub(super) fn emit(
     entries: Vec<Entry<'_>>,
     globals: Vec<GlobalVar>,
 ) -> Result<Translation, Error> {
-    let mut emitter = Emitter::new();
-    emitter.declare_globals(&globals);
-    let kernels = entries
-        .into_iter()
-        .map(|entry| emitter.emit_entry(entry))
-        .collect::<Result<_, _>>()?;
-    Ok(Translation {
-        words: emitter.builder.module().assemble(),
-        kernels,
-        globals,
-    })
+    let mut hints: HashMap<(String, String), Space> = HashMap::new();
+    loop {
+        let mut emitter = Emitter::new();
+        emitter.address_hints = hints.clone();
+        emitter.declare_globals(&globals);
+        let result = entries
+            .iter()
+            .cloned()
+            .map(|entry| emitter.emit_entry(entry))
+            .collect::<Result<Vec<_>, _>>();
+        match result {
+            Ok(kernels) => {
+                return Ok(Translation {
+                    words: emitter.builder.module().assemble(),
+                    kernels,
+                    globals,
+                });
+            }
+            Err(error) => {
+                // "expected Address(Global) for %rd13, got B64": a register that holds
+                // either an integer or a pointer is a pointer slot; lower again.
+                let text = error.to_string();
+                let hint = text.strip_prefix("expected Address(").and_then(|rest| {
+                    let (space, rest) = rest.split_once(") for ")?;
+                    let (reg, kind) = rest.split_once(", got ")?;
+                    let space = match space {
+                        "Global" => Space::Global,
+                        "Shared" => Space::Shared,
+                        "Local" => Space::Local,
+                        _ => return None,
+                    };
+                    (kind == "B64").then(|| (reg.to_string(), space))
+                });
+                match hint {
+                    Some((reg, space)) if hints.insert((emitter.current_entry.clone(), reg.clone()), space).is_none() => {}
+                    _ => return Err(error),
+                }
+            }
+        }
+    }
 }
 
 impl<'a> Emitter<'a> {
     fn emit_entry(&mut self, entry: Entry<'a>) -> Result<KernelMetadata, Error> {
+        self.current_entry = entry.name.to_string();
         let flow = Flow::analyze(&entry.blocks)?;
         self.declarations = entry.registers;
         self.registers.clear();
+        self.undef_slots.clear();
+        self.written_somewhere.clear();
+        {
+            let mut defined = Vec::new();
+            for inst in entry.blocks.iter().flat_map(|block| &block.instructions) {
+                if inst.collect_definitions(&mut defined).is_some() {
+                    self.written_somewhere.extend(defined.iter().map(|name| name.to_string()));
+                }
+            }
+        }
         self.initialized.clear();
         self.params.clear();
         self.local = None;
@@ -3065,6 +3214,19 @@ impl<'a> Emitter<'a> {
                 .builder
                 .variable(pointer, None, StorageClass::Workgroup, None);
             self.shared_array = Some(variable);
+        }
+        self.param_array = None;
+        self.staged_names = entry
+            .params
+            .iter()
+            .filter(|(_, param)| matches!(param, Param::Staged { .. }))
+            .map(|&(name, _)| name)
+            .collect();
+        self.param_global_mode = !self.staged_names.is_empty();
+        if !self.param_global_mode && entry.blocks.iter().flat_map(|block| &block.instructions).any(
+            |inst| matches!(inst, Instruction::ParamSpace(op) if op.is_dynamic()),
+        ) {
+            self.declare_param_array(&entry.params);
         }
         // CUDA `.local` depot: Function-scope private array (spliced into block 0).
         self.local = entry.local.map(|(name, bytes)| {
@@ -3144,18 +3306,37 @@ impl<'a> Emitter<'a> {
                     Kind::B32
                 }
                 Param::U64 => Kind::B64,
-                Param::GlobalPtr => Kind::Address(Space::Global),
+                Param::GlobalPtr | Param::Staged { .. } => Kind::Address(Space::Global),
                 Param::Words { .. } => unreachable!(),
             };
             self.params.insert((name, 0), Value { id, kind });
         }
+        if self.param_array.is_some() {
+            self.setup_param_array(&entry.params)?;
+        }
         self.ever_defined.clear();
+        self.const_regs.clear();
         let mut scratch = Vec::new();
+        let mut definitions: HashMap<&str, u32> = HashMap::new();
+        let mut constants: HashMap<&str, u32> = HashMap::new();
         for block in &entry.blocks {
             for inst in &block.instructions {
                 if inst.collect_definitions(&mut scratch).is_some() {
                     self.ever_defined.extend(scratch.iter().copied());
+                    for name in scratch.iter() {
+                        *definitions.entry(*name).or_default() += 1;
+                    }
                 }
+                if let Instruction::Move32(dst, src) = inst
+                    && let Some(value) = Self::parse_u32(src)
+                {
+                    constants.insert(*dst, value);
+                }
+            }
+        }
+        for (name, value) in constants {
+            if definitions.get(name) == Some(&1) {
+                self.const_regs.insert(name, value);
             }
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
@@ -3205,3 +3386,4 @@ impl<'a> Emitter<'a> {
         })
     }
 }
+

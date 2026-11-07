@@ -225,7 +225,9 @@ fn cvt(st: &mut State, inst: &Inst, parts: &[&str]) -> Option<Vec<String>> {
         return None;
     }
     let ((dw, ds), (sw, ss)) = (width_signed(types[0])?, width_signed(types[1])?);
-    if dw > 16 && sw > 16 || dw == 8 && sw == 8 || (dw != 16 && sw != 16) {
+    // 8-bit <-> 64-bit pairs have no legacy lowering; everything else needs a 16-bit side.
+    let byte_wide = (dw == 8 && sw == 64) || (dw == 64 && sw == 8);
+    if !byte_wide && (dw > 16 && sw > 16 || dw == 8 && sw == 8 || (dw != 16 && sw != 16)) {
         return None;
     }
     let g = inst.guard.as_str();

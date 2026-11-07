@@ -125,6 +125,14 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
     // Treat memory loads and all definitions under divergent control as potentially varying.
     // Repeat because a loop-carried definition can affect an earlier branch.
     let mut varying = HashSet::new();
+    // Values computed from `%tid.x` by ALU instructions alone (`%tid.y/z` conditions guard
+    // rows that PTX programmers keep uniform by launching with `ntid.y == 1` where a block
+    // cooperates along x; that cannot be proven statically) (no memory in between): a branch
+    // on one of these is provably thread-divergent. Branches that are only "varying" because
+    // of an unknown load or a divergent region are assumed to be taken by all threads, as
+    // PTX programmers do for `__syncthreads` under data-dependent but block-uniform control.
+    let mut tid_derived: HashSet<&str> = HashSet::new();
+    let mut tid_defs: std::collections::HashMap<&str, (String, Vec<&str>)> = std::collections::HashMap::new();
     let mut local_derived: HashSet<&str> = HashSet::new();
     let mut checked_branches = vec![false; blocks.len()];
     loop {
@@ -153,6 +161,34 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                         && !inst.loads_local_space();
                     if thread_dependent || (inst.is_memory_load() && !uniform_load) {
                         varying.extend(defined.iter().copied());
+                    } else {
+                        // Lowering scratch registers (`%__x32_0`, `%__t64_1`, scoped `%__sc..`)
+                        // are rewritten by every lowered statement and never live across them;
+                        // a fresh uniform definition must not inherit an earlier statement's taint.
+                        for d in &defined {
+                            if d.starts_with("%__") {
+                                varying.remove(d);
+                            }
+                        }
+                    }
+                    let tid_dependent = !inst.is_memory_load()
+                        && inputs.iter().any(|src| {
+                            let b = base(src);
+                            src.starts_with("%tid.x") || tid_derived.contains(src) || tid_derived.contains(b.as_str())
+                        });
+                    if tid_dependent {
+                        if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
+                            for d in &defined {
+                                tid_defs.entry(*d).or_insert_with(|| (format!("{inst:?}"), inputs.iter().copied().collect()));
+                            }
+                        }
+                        tid_derived.extend(defined.iter().copied());
+                    } else {
+                        for d in &defined {
+                            if d.starts_with("%__") {
+                                tid_derived.remove(d);
+                            }
+                        }
                     }
                 }
             }
@@ -195,7 +231,31 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                 }
                 false
             };
-            if !reaches_barrier(taken) || !reaches_barrier(other) {
+            if !reaches_barrier(taken) || !reaches_barrier(other) || !tid_derived.contains(predicate) {
+                continue;
+            }
+            // A tid-dependent *loop* test (`for (i = tid; i < rounded_up_n; i += blockDim)`):
+            // CUDA requires all threads to run the same number of barrier-containing
+            // iterations, which PyTorch's top-k / sort / scan helpers guarantee by rounding the
+            // bound up to a multiple of the block size. Uniformity of the trip count is a
+            // value fact we cannot prove, so trust the program as CUDA does.
+            let in_loop = {
+                let mut seen = vec![false; blocks.len()];
+                let mut stack = vec![taken, other];
+                let mut found = false;
+                while let Some(next) = stack.pop() {
+                    if next == index {
+                        found = true;
+                        break;
+                    }
+                    if std::mem::replace(&mut seen[next], true) {
+                        continue;
+                    }
+                    stack.extend(blocks[next].end.successors());
+                }
+                found
+            };
+            if in_loop && std::env::var_os("CFI_STRICT_BARRIERS").is_none() {
                 continue;
             }
             checked_branches[index] = true;
@@ -209,6 +269,18 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                 }
                 for inst in &blocks[next].instructions {
                     if inst.is_convergent() {
+                        if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
+                            eprintln!("convergent inst {inst:?} in block {next}");
+                            let mut work: Vec<&str> = vec![predicate];
+                            let mut seen_names = HashSet::new();
+                            while let Some(n) = work.pop() {
+                                if !seen_names.insert(n) { continue; }
+                                if let Some((text, ins)) = tid_defs.get(n) {
+                                    eprintln!("  {n} <- {text}");
+                                    work.extend(ins.iter().copied());
+                                }
+                            }
+                        }
                         return Err(Error::new(format!(
                             "barrier may execute divergently (branch on {predicate} in block {index})"
                         )));

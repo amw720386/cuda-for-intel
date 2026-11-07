@@ -43,6 +43,8 @@ mod soft_max_generic;
 mod param_words;
 #[path = "gpu/ggml_dp4a.rs"]
 mod ggml_dp4a;
+#[path = "gpu/dp4a_all.rs"]
+mod dp4a_all;
 #[path = "gpu/ggml_quantize_q8_1.rs"]
 mod ggml_quantize_q8_1;
 #[path = "gpu/isolation.rs"]

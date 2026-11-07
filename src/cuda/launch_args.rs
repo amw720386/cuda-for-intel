@@ -19,6 +19,43 @@ pub(super) fn size(params: &[Param]) -> usize {
     layout(params).last().map_or(0, |(_, range)| range.end)
 }
 
+/// Bytes of the native argument buffer (a staged aggregate is one pointer).
+pub(super) fn abi_size(params: &[Param]) -> usize {
+    params.iter().fold(0usize, |offset, param| {
+        let alignment = if matches!(param, Param::Staged { .. }) { 8 } else { param.alignment() };
+        offset.next_multiple_of(alignment) + param.abi_size()
+    })
+}
+
+/// Replaces the per-word arguments of each staged aggregate by one pointer argument.
+/// `stage(bytes)` copies the struct into device-visible staging memory and returns its address;
+/// the returned boxes hold the pointer values and must outlive the argument-setting calls.
+pub(super) fn collapse_staged(
+    params: &[Param],
+    args: Vec<KernelArg>,
+    mut stage: impl FnMut(&[u8]) -> Result<u64, CuResult>,
+) -> Result<(Vec<KernelArg>, Vec<Box<u64>>), CuResult> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut keep = Vec::new();
+    let mut index = 0;
+    for param in params {
+        let words = param.host_words();
+        let group = args.get(index..index + words).ok_or(InvalidValue)?;
+        index += words;
+        if let Param::Staged { bytes, .. } = *param {
+            // The words are consecutive ranges of one host struct.
+            let first = group.first().ok_or(InvalidValue)?.value.cast::<u8>();
+            let data = unsafe { std::slice::from_raw_parts(first, usize::from(bytes)) };
+            let address = Box::new(stage(data)?);
+            out.push(KernelArg { value: std::ptr::from_ref(&*address).cast_mut().cast(), size: 8 });
+            keep.push(address);
+        } else {
+            out.extend_from_slice(group);
+        }
+    }
+    Ok((out, keep))
+}
+
 unsafe fn packed_buffer(extra: *const Opaque) -> Result<(Opaque, usize), CuResult> {
     let (mut buffer, mut size) = (None, None);
     // The supported option list contains at most two pairs and a terminator.
@@ -91,8 +128,8 @@ pub(super) unsafe fn read(
         // Pass raw byte ranges directly. A CUDA aggregate may contain padding
         // whose bytes were never initialized by the caller.
         match param {
-            Param::Words { words, .. } => {
-                args.extend((0..usize::from(words)).map(|index| KernelArg {
+            Param::Words { .. } | Param::Staged { .. } => {
+                args.extend((0..param.host_words()).map(|index| KernelArg {
                     value: unsafe { value.byte_add(index * 4) },
                     size: 4,
                 }));
@@ -112,11 +149,34 @@ mod tests {
     use std::ptr::{from_mut, without_provenance_mut};
 
     #[test]
+    fn staged_aggregates_collapse_to_one_pointer_argument() {
+        let params = [Param::U32, Param::Staged { bytes: 2000, align: 8 }, Param::U8];
+        assert_eq!(abi_size(&params), 8 + 8 + 1);
+        assert_eq!(size(&params), 8 + 2000 + 1);
+        let host: Vec<u8> = (0..2000u32).map(|i| i as u8).collect();
+        let word = 5u32;
+        let mut args = vec![KernelArg { value: std::ptr::from_ref(&word).cast(), size: 4 }];
+        args.extend((0..500).map(|i| KernelArg { value: unsafe { host.as_ptr().add(i * 4) }.cast(), size: 4 }));
+        let flag = 9u8;
+        args.push(KernelArg { value: std::ptr::from_ref(&flag).cast(), size: 1 });
+        let mut staged = Vec::new();
+        let (out, keep) = collapse_staged(&params, args, |data| {
+            staged.extend_from_slice(data);
+            Ok(0xdead_0000)
+        })
+        .unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(staged, host);
+        assert_eq!(unsafe { out[1].value.cast::<u64>().read() }, 0xdead_0000);
+        assert_eq!((out[1].size, keep.len()), (8, 1));
+    }
+
+    #[test]
     fn packed_options_and_aggregate_alignment() {
         let params = [
             Param::U32,
             Param::GlobalPtr,
-            Param::Words { words: 3, align: 4 },
+            Param::Words { words: 3, align: 4, trim: 0 },
             Param::U64,
             Param::U8,
         ];

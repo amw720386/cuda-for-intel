@@ -3,8 +3,9 @@
 //! `run_gemm_ex`.
 //!
 //! Switches (read on every call so tests can toggle them):
-//! * `CFI_XMX` unset/`0` - off (the default until hardware validation);
-//!   `1` - on for shapes where DPAS pays (`m>=16, n>=8, k>=16`);
+//! * `CFI_XMX` unset or `1` - on for shapes where DPAS pays (`m>=16, n>=8, k>=16`; the default,
+//!   validated on Arc B390: 574 table cases exact);
+//!   `0` - off, always use the PTX kernels;
 //!   `2` - on for every qualifying call, any size (edge-shape testing).
 //! * `CFI_XMX_TILE=IBxJB` - subgroup tile in 16-row x 8-column DPAS blocks
 //!   (default `2x4`, i.e. 32 x 32 of C).
@@ -49,9 +50,9 @@ pub enum Mode {
 
 pub fn mode() -> Mode {
     match std::env::var("CFI_XMX").as_deref() {
-        Ok("1") => Mode::Auto,
+        Ok("0") => Mode::Off,
         Ok("2") => Mode::Force,
-        _ => Mode::Off,
+        _ => Mode::Auto,
     }
 }
 
@@ -489,9 +490,9 @@ mod tests {
     }
 
     #[test]
-    fn default_is_off_and_f32_never_qualifies() {
+    fn default_is_auto_and_f32_never_qualifies() {
         if std::env::var_os("CFI_XMX").is_none() {
-            assert_eq!(mode(), Mode::Off);
+            assert_eq!(mode(), Mode::Auto);
         }
         let c = call(64, 64, 64, true, false, DType::F16, DType::F32);
         assert!(qualify(&c, Mode::Off, (2, 4), Flags::Packed).is_none());
