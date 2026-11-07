@@ -1,0 +1,13 @@
+[package]
+name = "cublas_shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Minimal cuBLAS shim over cuda-for-intel's Driver API (GPU SGEMM)"
+
+[lib]
+name = "cublas64_12"
+crate-type = ["cdylib"]
+
+[dependencies]
+libloading = "0.8"

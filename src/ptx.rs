@@ -547,6 +547,18 @@ mod tests {
     }
 
     #[test]
+    fn translates_cublas_sgemm_tn_kernel() {
+        let translated = translate(include_str!("../crates/cublas_shim/src/sgemm_tn.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(translated.kernels[0].name, "cfi_sgemm_tn");
+        assert!(translated.kernels[0].fp32);
+        assert_eq!(
+            translated.kernels[0].params[..3],
+            [Param::GlobalPtr; 3]
+        );
+    }
+
+    #[test]
     fn translates_ggml_q8_0_vec_dot_soft_half() {
         let translated = translate(include_str!("../examples/ggml_q8_0_vec_dot.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));

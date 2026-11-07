@@ -1,0 +1,95 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+// C = alpha * A^T * B + beta * C  (column-major, CUBLAS_OP_T x CUBLAS_OP_N)
+// A[k + i*lda], B[k + j*ldb], C[i + j*ldc]
+.visible .entry cfi_sgemm_tn(
+.param .u64 cfi_sgemm_tn_param_0,
+.param .u64 cfi_sgemm_tn_param_1,
+.param .u64 cfi_sgemm_tn_param_2,
+.param .f32 cfi_sgemm_tn_param_3,
+.param .f32 cfi_sgemm_tn_param_4,
+.param .u32 cfi_sgemm_tn_param_5,
+.param .u32 cfi_sgemm_tn_param_6,
+.param .u32 cfi_sgemm_tn_param_7,
+.param .u32 cfi_sgemm_tn_param_8,
+.param .u32 cfi_sgemm_tn_param_9,
+.param .u32 cfi_sgemm_tn_param_10
+)
+{
+.reg .pred %p<4>;
+.reg .f32 %f<8>;
+.reg .b32 %r<24>;
+.reg .b64 %rd<20>;
+
+ld.param.u64 %rd10, [cfi_sgemm_tn_param_0];
+ld.param.u64 %rd11, [cfi_sgemm_tn_param_1];
+ld.param.u64 %rd12, [cfi_sgemm_tn_param_2];
+ld.param.f32 %f1, [cfi_sgemm_tn_param_3];
+ld.param.f32 %f2, [cfi_sgemm_tn_param_4];
+ld.param.u32 %r1, [cfi_sgemm_tn_param_5];
+ld.param.u32 %r2, [cfi_sgemm_tn_param_6];
+ld.param.u32 %r3, [cfi_sgemm_tn_param_7];
+ld.param.u32 %r4, [cfi_sgemm_tn_param_8];
+ld.param.u32 %r5, [cfi_sgemm_tn_param_9];
+ld.param.u32 %r6, [cfi_sgemm_tn_param_10];
+cvta.to.global.u64 %rd1, %rd10;
+cvta.to.global.u64 %rd2, %rd11;
+cvta.to.global.u64 %rd3, %rd12;
+
+mov.u32 %r7, %ctaid.x;
+mov.u32 %r8, %ntid.x;
+mov.u32 %r9, %tid.x;
+mad.lo.s32 %r10, %r7, %r8, %r9;
+mov.u32 %r11, %ctaid.y;
+mov.u32 %r12, %ntid.y;
+mov.u32 %r13, %tid.y;
+mad.lo.s32 %r14, %r11, %r12, %r13;
+
+setp.ge.u32 %p1, %r10, %r1;
+@%p1 bra $L_out;
+setp.ge.u32 %p2, %r14, %r2;
+@%p2 bra $L_out;
+
+mov.f32 %f3, 0f00000000;
+mov.u32 %r15, 0;
+setp.eq.u32 %p3, %r3, 0;
+@%p3 bra $L_kdone;
+
+$L_kloop:
+mul.lo.s32 %r16, %r10, %r4;
+add.s32 %r17, %r16, %r15;
+mul.lo.s32 %r18, %r14, %r5;
+add.s32 %r19, %r18, %r15;
+cvt.s64.s32 %rd4, %r17;
+shl.b64 %rd5, %rd4, 2;
+add.s64 %rd6, %rd1, %rd5;
+ld.global.f32 %f4, [%rd6];
+cvt.s64.s32 %rd7, %r19;
+shl.b64 %rd8, %rd7, 2;
+add.s64 %rd9, %rd2, %rd8;
+ld.global.f32 %f5, [%rd9];
+fma.rn.ftz.f32 %f3, %f4, %f5, %f3;
+add.s32 %r15, %r15, 1;
+setp.lt.u32 %p3, %r15, %r3;
+@%p3 bra $L_kloop;
+
+$L_kdone:
+mul.ftz.f32 %f3, %f3, %f1;
+mul.lo.s32 %r20, %r14, %r6;
+add.s32 %r21, %r20, %r10;
+cvt.s64.s32 %rd13, %r21;
+shl.b64 %rd14, %rd13, 2;
+add.s64 %rd15, %rd3, %rd14;
+setp.eq.ftz.f32 %p1, %f2, 0f00000000;
+@%p1 bra $L_store;
+ld.global.f32 %f6, [%rd15];
+fma.rn.ftz.f32 %f3, %f2, %f6, %f3;
+
+$L_store:
+st.global.f32 [%rd15], %f3;
+
+$L_out:
+ret;
+}

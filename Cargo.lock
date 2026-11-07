@@ -42,6 +42,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cublas_shim"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "cuda-for-intel"
 version = "0.1.0"
 dependencies = [
