@@ -362,6 +362,12 @@ enum Instruction<'a> {
     Move64(&'a str, &'a str),
     /// `mov.b32 %r, { %rs_lo, %rs_hi }` â€” pack two 16-bit lanes into a 32-bit register.
     PackB16(&'a str, [&'a str; 2]),
+    /// `mul.wide.{u,s}16` — 16-bit operands (held in 32-bit registers), 32-bit product.
+    MulWide16 {
+        signed: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
     MulWide32 {
         signed: bool,
         dst: &'a str,
@@ -627,6 +633,7 @@ impl<'a> Instruction<'a> {
             | PredicateLogic { dst, src, .. }
             | Integer32(_, dst, src)
             | MulWide32 { dst, src, .. }
+            | MulWide16 { dst, src, .. }
             | ShiftLeft64(dst, src)
             | ShiftRightLogical64(dst, src)
             | ShiftRightArithmetic64(dst, src)

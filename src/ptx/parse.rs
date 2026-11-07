@@ -881,6 +881,16 @@ impl<'a> Parser<'a> {
                 src,
             },
             ["cvt.u32.u64", dst, ",", src] => Instruction::Narrow(dst, src),
+            ["mul.wide.u16", dst, ",", a, ",", b] => Instruction::MulWide16 {
+                signed: false,
+                dst,
+                src: [a, b],
+            },
+            ["mul.wide.s16", dst, ",", a, ",", b] => Instruction::MulWide16 {
+                signed: true,
+                dst,
+                src: [a, b],
+            },
             ["mul.wide.u32", dst, ",", a, ",", b] => Instruction::MulWide32 {
                 signed: false,
                 dst,

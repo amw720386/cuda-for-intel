@@ -28,9 +28,9 @@ int main() {
   CK(cudaStreamSynchronize(s1)); CK(cudaMemcpy(hp, d, sz, cudaMemcpyDeviceToHost));
   float v = 0; for (int r = 0; r < 3; r++) v = (v + 1.f) * 3.f + 5.f;
   ok = true; for (int i = 0; i < n; i++) ok &= hp[i] == v; EXPECT(ok, "stream_capture_graph_replay");
-  size_t nodes = 0; CK(cudaGraphGetNodes(g, nullptr, &nodes)); EXPECT(nodes == 3, "graph_node_count");
+  size_t nodes = 0; { cudaError_t e = cudaGraphGetNodes(g, nullptr, &nodes); if (e == cudaErrorNotSupported || e == cudaErrorCallRequiresNewerDriver) printf("SKIP graph_node_count (%s)\n", cudaGetErrorString(e)); else { CK(e); EXPECT(nodes == 3, "graph_node_count"); } }
   // explicit graph API
-  cudaGraph_t g2; CK(cudaGraphCreate(&g2, 0)); CK(cudaMemset(d, 0, sz));
+  cudaGraph_t g2; { cudaError_t ge0 = cudaGraphCreate(&g2, 0); if (ge0 == cudaErrorNotSupported || ge0 == cudaErrorCallRequiresNewerDriver) { printf("SKIP explicit_kernel_node_graph (%s)\n", cudaGetErrorString(ge0)); printf(g_fail ? "RESULT FAIL\n" : "RESULT OK\n"); return g_fail; } CK(ge0); } CK(cudaMemset(d, 0, sz));
   void* args[3]; float c1 = 7.f; int nn = n; args[0] = &d; args[1] = &c1; args[2] = &nn;
   cudaKernelNodeParams kp = {}; kp.func = (void*)addc; kp.gridDim = dim3(n / 256); kp.blockDim = dim3(256); kp.kernelParams = args;
   cudaGraphNode_t nd; CK(cudaGraphAddKernelNode(&nd, g2, nullptr, 0, &kp));

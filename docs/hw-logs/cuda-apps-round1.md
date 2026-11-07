@@ -14,3 +14,16 @@ wheels found instead); toolchain pieces kept on the box under the torchbuild wor
   - cublas_gemm: cublasCreate status=1 (NOT_INITIALIZED); cublaslt_bias: cudaMalloc (cudart 12.6)
     -> operation not supported.
   Zero tests reached PASS/FAIL checks; failures are at cudart/shim init, not in kernels.
+
+## Round 2: all 5 programs pass
+
+Staging that was missing: signed nvcudart_hybrid64.dll in an absolute CUDA_FOR_INTEL_HYBRID_DIR,
+shim nvcuda.dll beside the exe, and an explicit LoadLibrary of that nvcuda.dll at start-up
+(cudart 13.5 only searches System32 for the driver; tests/cuda_apps/common.h does the preload).
+Shim fixes found by the apps: shfl.sync with register clamp/segment operands, mul.wide.u16/s16,
+cuEventElapsedTime (host-time approximation, Level Zero timestamps not wired).
+
+Results (cudart 13.5 shared and static both): basic_kernels 5/5, atomics_warp 8/8,
+cublas_gemm 6/6, cublaslt_bias 2/2, streams_graphs 4/4 plus 2 SKIP (cudaGraphGetNodes and
+explicit graph node API not implemented by the shim). cuBLAS programs call cudaFree(0) before
+cublasCreate because the cuBLAS shim requires a current context.

@@ -130,6 +130,7 @@ pub extern "system" fn cuEventRecord(event: Opaque, stream: Opaque) -> CuResult 
                 Some(Recording {
                     producer: key,
                     fence: completion,
+                    at: std::time::Instant::now(),
                 }),
             );
             Ok(())
@@ -192,6 +193,39 @@ pub extern "system" fn cuEventSynchronize(event: Opaque) -> CuResult {
                     .inspect_err(|error| health.observe(error))
                     .map_err(backend_error)?;
             }
+            Ok(())
+        }))
+    })
+}
+
+/// Elapsed milliseconds between two recorded, completed events. Level Zero timestamps are not
+/// wired up yet, so the value is the host time between the two record calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuEventElapsedTime(ms: *mut f32, start: Opaque, end: Opaque) -> CuResult {
+    trace::call("cuEventElapsedTime", || {
+        status(with_context(|runtime, context| {
+            if ms.is_null() {
+                return Err(InvalidValue);
+            }
+            let streams = &context.streams;
+            if streams.captured.contains_key(&start.addr()) || streams.captured.contains_key(&end.addr()) {
+                return Err(CapturedEvent);
+            }
+            let (Some(a), Some(b)) = (streams.event(start)?, streams.event(end)?) else {
+                return Err(NotReady);
+            };
+            for recording in [a, b] {
+                if !recording
+                    .fence
+                    .ready(&runtime.api)
+                    .inspect_err(|error| context.backend.health.observe(error))
+                    .map_err(backend_error)?
+                {
+                    return Err(NotReady);
+                }
+            }
+            let elapsed = b.at.saturating_duration_since(a.at).as_secs_f32() * 1000.0;
+            unsafe { ms.write(elapsed) };
             Ok(())
         }))
     })
