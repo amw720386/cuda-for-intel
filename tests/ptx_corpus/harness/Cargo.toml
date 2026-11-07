@@ -1,0 +1,13 @@
+[package]
+name = "ptx-corpus-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[dependencies]
+rspirv = "0.13"
+
+[workspace]
