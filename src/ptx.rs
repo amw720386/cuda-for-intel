@@ -795,6 +795,8 @@ pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
 mod coverage_tests;
 #[cfg(test)]
 mod tier2_tests;
+#[cfg(test)]
+mod tier3_tests;
 
 #[cfg(test)]
 mod tests {

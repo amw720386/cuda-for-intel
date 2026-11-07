@@ -11,6 +11,9 @@
 
 use super::{Error, inline, parse};
 
+#[path = "tier3.rs"]
+mod tier3;
+
 pub(super) type Stmt = Vec<String>;
 
 /// Entry point: returns canonical PTX text.
@@ -373,6 +376,7 @@ struct Ctx {
     widths: Vec<(String, bool, u32)>,
     /// Number of wmma statements seen, used to give each its own 64-bit address register.
     wmma_seq: u32,
+    t3: tier3::State,
 }
 
 impl Ctx {
@@ -390,6 +394,7 @@ impl Ctx {
         self.t32 = 0;
         self.t64 = 0;
         self.tp = 0;
+        decls.extend(self.t3.take_decls());
         decls
     }
     /// Width in bits (32 or 64) of a declared register, if known.
@@ -607,6 +612,9 @@ fn bit_type(part: &str) -> &str {
 }
 
 fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    if let Some(lines) = tier3::rewrite(&mut ctx.t3, inst) {
+        return Some(lines);
+    }
     let op = inst.op.as_str();
     let family = op.split('.').next().unwrap_or(op);
     match family {
