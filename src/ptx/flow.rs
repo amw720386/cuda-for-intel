@@ -189,7 +189,9 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                 }
                 for inst in &blocks[next].instructions {
                     if inst.is_convergent() {
-                        return Err(Error::new("barrier may execute divergently"));
+                        return Err(Error::new(format!(
+                            "barrier may execute divergently (branch on {predicate} in block {index})"
+                        )));
                     }
                     let mut defined = Vec::new();
                     if inst.collect_definitions(&mut defined).is_some() {

@@ -96,6 +96,8 @@ struct Emitter<'a> {
     declarations: HashMap<String, Width>,
     registers: HashMap<&'a str, Value>,
     initialized: HashSet<&'a str>,
+    /// Registers assigned somewhere in the entry; others read as zero (undefined in PTX).
+    ever_defined: HashSet<&'a str>,
     locals: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
     device_atomics: bool,
@@ -175,6 +177,7 @@ impl<'a> Emitter<'a> {
             declarations: HashMap::new(),
             registers: HashMap::new(),
             initialized: HashSet::new(),
+            ever_defined: HashSet::new(),
             locals: Vec::new(),
             params: HashMap::new(),
             device_atomics: false,
@@ -261,6 +264,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn parse_u32(operand: &str) -> Option<u32> {
+        // `0fXXXXXXXX` float literal used where the translator wants raw 32-bit bits (selp.f32, mov.f32).
+        if let Some(bits) = operand.strip_prefix("0f").or_else(|| operand.strip_prefix("0F")).filter(|h| h.len() == 8) {
+            return u32::from_str_radix(bits, 16).ok();
+        }
         if let Some(hex) = operand
             .strip_prefix("0x")
             .or_else(|| operand.strip_prefix("0X"))
@@ -288,6 +295,21 @@ impl<'a> Emitter<'a> {
     }
 
     fn integer(&mut self, operand: &str, kind: Kind) -> Result<Word, Error> {
+        if operand.starts_with('%')
+            && !self.registers.contains_key(operand)
+            && !self.ever_defined.contains(operand)
+            && !self.params.contains_key(&(operand, 0))
+            && matches!(kind, Kind::B32 | Kind::B64)
+            && !operand.contains('.')
+        {
+            // A register that is never assigned holds an undefined value (nvcc emits
+            // such operands for dead lanes of packed moves); read it as zero.
+            return Ok(if kind == Kind::B32 {
+                self.u32_const(0)
+            } else {
+                self.builder.constant_bit64(self.u64_type, 0)
+            });
+        }
         if operand.starts_with('%') {
             let value = self.read(operand)?;
             if value.kind == kind {
@@ -3044,6 +3066,15 @@ impl<'a> Emitter<'a> {
                 Param::Words { .. } => unreachable!(),
             };
             self.params.insert((name, 0), Value { id, kind });
+        }
+        self.ever_defined.clear();
+        let mut scratch = Vec::new();
+        for block in &entry.blocks {
+            for inst in &block.instructions {
+                if inst.collect_definitions(&mut scratch).is_some() {
+                    self.ever_defined.extend(scratch.iter().copied());
+                }
+            }
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
         self.builder.branch(labels[0])?;
