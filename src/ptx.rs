@@ -1,6 +1,9 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
+mod ext;
 mod flow;
 pub(crate) mod globals;
+mod inline;
+mod normalize;
 mod parse;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
@@ -509,6 +512,13 @@ enum Instruction<'a> {
         membermask: &'a str,
     },
     Barrier,
+    /// Instructions parsed and lowered by `ext.rs` / `ext_emit.rs`. Unused
+    /// sources are `"0"`, unused destinations are `""`.
+    Ext {
+        op: ext::ExtOp,
+        dst: [&'a str; 2],
+        src: [&'a str; 4],
+    },
 }
 
 impl<'a> Instruction<'a> {
@@ -662,6 +672,10 @@ impl<'a> Instruction<'a> {
                 }
                 src
             }
+            Ext { dst, src, .. } => {
+                out.extend(dst.iter().copied().filter(|d| !d.is_empty()));
+                src
+            }
             Store32(..)
             | Store8(..)
             | Store16(..)
@@ -689,6 +703,10 @@ impl<'a> Instruction<'a> {
                 | Self::LoadVecU16 { .. }
                 | Self::AtomicAdd32(..)
                 | Self::Atomic { .. }
+                | Self::Ext {
+                    op: ext::ExtOp::Atom { .. } | ext::ExtOp::AtomIncDec { .. },
+                    ..
+                }
         )
     }
 
@@ -780,7 +798,8 @@ pub(crate) struct Translation {
     pub(crate) globals: Vec<globals::GlobalVar>,
 }
 
-pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
+/// Scope flattening, source canonicalisation and `.func` inlining.
+fn prepare(source: &str) -> Result<String, Error> {
     let rewritten = parse::rewrite_half_scopes(source);
     // Constant-bank variables live in ordinary device memory, so reads are global loads.
     let rewritten = if rewritten.contains("ld.const.") {
@@ -788,12 +807,18 @@ pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
     } else {
         rewritten
     };
+    let normalized = normalize::run(&rewritten)?;
+    normalize::finish(&parse::rewrite_half_scopes(&normalized))
+}
+
+pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
+    let rewritten = prepare(source)?;
     let (entries, vars) = parse::parse_module(&rewritten)?;
     spirv::emit(entries, vars.device)
 }
 
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
-    let rewritten = parse::rewrite_half_scopes(source);
+    let rewritten = prepare(source)?;
     spirv::emit(vec![parse::parse_named(&rewritten, name)?], Vec::new()).map(|_| ())
 }
 
@@ -801,6 +826,8 @@ pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
 mod coverage_tests;
 #[cfg(test)]
 mod globals_tests;
+#[cfg(test)]
+mod tier2_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1294,9 +1321,10 @@ mod tests {
                 .to_string()
                 .contains("membermask")
         );
+        // A register clamp/segment operand is lowered with run-time arithmetic.
         assert!(
             translate(&SHFL.replace("shfl.sync.bfly.b32", "shfl.sync.up.b32"))
-                .is_err()
+                .is_ok()
         );
     }
 
@@ -1427,7 +1455,6 @@ mod tests {
         for (old, new) in [
             ("[16]", "[0]"),
             ("[scratch]", "[missing]"),
-            ("bar.sync 0", "bar.sync 1"),
             ("bar.sync 0", "bar.sync 0, 32"),
             ("bar.sync 0", "bar.arrive 0, 32"),
         ] {
@@ -1605,8 +1632,8 @@ mod tests {
     fn rejects_unimplemented_fp32_rounding_and_approximation_modes() {
         for (original, unsupported) in [
             ("fma.rn.f32", "fma.rz.f32"),
-            ("fma.rn.f32", "fma.rn.sat.f32"),
-            ("cvt.rn.f32.u32", "cvt.rz.f32.u32"),
+            ("fma.rn.f32", "fma.rp.f32"),
+            ("fma.rn.f32", "fma.rn.xorsign.f32"),
         ] {
             assert!(RMSNORM.contains(original));
             assert!(translate(&RMSNORM.replace(original, unsupported)).is_err());

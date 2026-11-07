@@ -220,6 +220,13 @@ impl<'a> Parser<'a> {
             }
             None => body,
         };
+        if let Some(inst) = super::ext::parse(body)? {
+            self.tokens.nth(end);
+            if braced {
+                self.expect("}")?;
+            }
+            return Ok(inst);
+        }
         let result = match body {
             [
                 op @ ("ld.param.b32" | "ld.param.u32" | "ld.param.f32" | "ld.param.s32"),
