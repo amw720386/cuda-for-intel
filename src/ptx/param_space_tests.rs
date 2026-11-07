@@ -65,3 +65,36 @@ fn computed_param_addresses_read_the_argument_buffer() {
     assert_eq!(word(10), 0xab);
     assert_eq!((word(11), word(12)), (0x0403_0201, 0x7654_3210));
 }
+
+/// A register read in a loop header before the (later-lowered) write that feeds it
+/// behaves as zero on the first trip instead of failing translation.
+#[test]
+fn loop_carried_register_without_prior_write_reads_as_zero() {
+    let module = lower(
+        r#"
+.version 7.8
+.target sm_37
+.address_size 64
+.visible .entry k(.param .u64 out)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<4>;
+    .reg .b64 %rd<8>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, 0;
+$L_loop:
+    add.s64 %rd5, %rd4, 5;
+    mov.u64 %rd4, %rd5;
+    add.s32 %r1, %r1, 1;
+    setp.lt.u32 %p1, %r1, 3;
+    @%p1 bra $L_loop;
+    st.global.u64 [%rd2], %rd4;
+    ret;
+}
+"#,
+    );
+    let mut machine = interp::Machine { params: vec![interp::GLOBAL], ..Default::default() };
+    interp::run(&module, &mut machine);
+    assert_eq!(machine.read(interp::GLOBAL, 8), 15);
+}

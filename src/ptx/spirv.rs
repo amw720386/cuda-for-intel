@@ -102,6 +102,10 @@ struct Emitter<'a> {
     params: HashMap<(&'a str, usize), Value>,
     /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
     param_array: Option<Word>,
+    /// Registers whose slot was created by a read that precedes every write.
+    undef_slots: HashMap<String, Value>,
+    /// Registers written by some instruction of the entry being lowered.
+    written_somewhere: HashSet<String>,
     param_bases: HashMap<&'a str, u32>,
     device_atomics: bool,
     fp32: bool,
@@ -183,6 +187,8 @@ impl<'a> Emitter<'a> {
             locals: Vec::new(),
             params: HashMap::new(),
             param_array: None,
+            undef_slots: HashMap::new(),
+            written_somewhere: HashSet::new(),
             param_bases: HashMap::new(),
             device_atomics: false,
             fp32: false,
@@ -218,11 +224,10 @@ impl<'a> Emitter<'a> {
         // guards both the defining load and later uses with the same predicate,
         // so the join into the use can look uninitialized under path-insensitive
         // analysis even though the use is unreachable when the value is absent.
-        let slot = self.registers.get(operand).copied().ok_or_else(|| {
-            Error::new(format!(
-                "undefined PTX register {operand} on an incoming path"
-            ))
-        })?;
+        let slot = match self.registers.get(operand).or_else(|| self.undef_slots.get(operand)).copied() {
+            Some(slot) => slot,
+            None => self.undefined_register_slot(operand)?,
+        };
         let id = self
             .builder
             .load(self.value_type(slot.kind), None, slot.id, None, [])?;
@@ -232,13 +237,54 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// A register read before any write was lowered (a loop-carried or path-dependent
+    /// value that PTX guards so it is unused when absent): materialise a zero-initialised
+    /// slot typed by the register's declaration.
+    fn undefined_register_slot(&mut self, operand: &str) -> Result<Value, Error> {
+        let kind = match self.declarations.get(operand).filter(|_| self.written_somewhere.contains(operand)) {
+            Some(Width::Predicate) => Kind::Predicate,
+            Some(Width::B32) => Kind::B32,
+            Some(Width::B64) => Kind::B64,
+            None => {
+                return Err(Error::new(format!(
+                    "undefined PTX register {operand} on an incoming path"
+                )));
+            }
+        };
+        let ty = self.value_type(kind);
+        let zero = match kind {
+            Kind::Predicate => self.builder.constant_false(self.bool_type),
+            Kind::B32 => self.builder.constant_bit32(self.u32_type, 0),
+            _ => self.builder.constant_bit64(self.u64_type, 0),
+        };
+        let pointer = self.builder.type_pointer(None, StorageClass::Function, ty);
+        let slot = self.builder.id();
+        self.locals.push(SpirvInstruction::new(
+            Op::Variable,
+            Some(pointer),
+            Some(slot),
+            vec![Operand::StorageClass(StorageClass::Function), Operand::IdRef(zero)],
+        ));
+        let value = Value { id: slot, kind };
+        self.undef_slots.insert(operand.to_string(), value);
+        Ok(value)
+    }
+
     fn write(&mut self, dst: &'a str, value: Value) -> Result<(), Error> {
         if self.declarations.get(dst) != Some(&value.kind.width()) {
             return Err(Error::new(format!(
                 "missing or mismatched PTX declaration for {dst}"
             )));
         }
-        let slot = if let Some(slot) = self.registers.get(dst).copied() {
+        let mut value = value;
+        let known = self.registers.get(dst).or_else(|| self.undef_slots.get(dst)).copied();
+        let slot = if let Some(slot) = known {
+            self.registers.insert(dst, slot);
+            if slot.kind != value.kind && self.undef_slots.contains_key(dst) && slot.kind.width() == value.kind.width() {
+                // The slot was created by a read before any write (typed by its declaration).
+                let id = self.builder.bitcast(self.value_type(slot.kind), None, value.id)?;
+                value = Value { id, kind: slot.kind };
+            }
             slot.require(value.kind, dst)?
         } else {
             let pointer = self.builder.type_pointer(
@@ -2945,6 +2991,16 @@ impl<'a> Emitter<'a> {
         let flow = Flow::analyze(&entry.blocks)?;
         self.declarations = entry.registers;
         self.registers.clear();
+        self.undef_slots.clear();
+        self.written_somewhere.clear();
+        {
+            let mut defined = Vec::new();
+            for inst in entry.blocks.iter().flat_map(|block| &block.instructions) {
+                if inst.collect_definitions(&mut defined).is_some() {
+                    self.written_somewhere.extend(defined.iter().map(|name| name.to_string()));
+                }
+            }
+        }
         self.initialized.clear();
         self.params.clear();
         self.local = None;
@@ -3136,3 +3192,4 @@ impl<'a> Emitter<'a> {
         })
     }
 }
+
