@@ -1,12 +1,10 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod flow;
-mod globals;
+pub(crate) mod globals;
 mod parse;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
 mod cublas_ptxgen;
-
-pub(crate) use globals::GlobalVar;
 
 pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
     let tokens = parse::tokens(source)?;

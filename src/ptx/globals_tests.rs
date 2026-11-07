@@ -142,3 +142,20 @@ fn modules_without_variables_emit_none() {
     let module = module(&translated.words);
     assert!(module.annotations.iter().all(|inst| !inst.operands.contains(&Operand::Decoration(Decoration::LinkageAttributes))));
 }
+
+#[test]
+#[ignore = "requires the Khronos spirv-val executable"]
+fn globals_module_validates_as_opencl_spirv() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
+    let translated = translate(MODULE).unwrap();
+    let bytes: Vec<u8> = translated.words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let mut process = Command::new(validator)
+        .args(["--target-env", "opencl2.2", "-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start spirv-val");
+    process.stdin.take().unwrap().write_all(&bytes).unwrap();
+    assert!(process.wait().unwrap().success());
+}

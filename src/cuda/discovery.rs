@@ -1,5 +1,6 @@
 use super::export_table::cuGetExportTable;
 use super::gaps::*;
+use super::globals::*;
 use super::graphs::*;
 use super::library::*;
 use super::primary::*;
@@ -292,6 +293,10 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuModuleLoadData" => entry!(cuModuleLoadData, 2000),
         b"cuModuleGetFunction" => entry!(cuModuleGetFunction, 2000),
         b"cuModuleUnload" => entry!(cuModuleUnload, 2000),
+        b"cuModuleGetGlobal" => entry!(cuModuleGetGlobal_v2, 3020),
+        b"cuModuleGetSurfRef" => entry!(cuModuleGetSurfRef, 3000),
+        b"cuModuleGetTexRef" => entry!(cuModuleGetTexRef, 3000),
+        b"cuLibraryGetGlobal" => entry!(cuLibraryGetGlobal, 12000),
         b"cuLibraryLoadData" => entry!(cuLibraryLoadData, 12000),
         b"cuLibraryUnload" => entry!(cuLibraryUnload, 12000),
         b"cuLibraryGetKernel" => entry!(cuLibraryGetKernel, 12000),

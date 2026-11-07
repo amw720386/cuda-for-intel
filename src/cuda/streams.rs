@@ -23,6 +23,8 @@ pub(super) mod events;
 #[cfg(test)]
 mod fake_tests;
 #[cfg(test)]
+mod globals_tests;
+#[cfg(test)]
 mod graph_tests;
 #[cfg(all(test, windows))]
 mod profiling;

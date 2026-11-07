@@ -398,6 +398,8 @@ loader_api! {
     zeCommandListAppendMemoryFill(Raw, Raw, *const c_void, usize, usize, Raw, u32, *mut Raw),
     zeModuleCreate(Raw, Raw, *const ModuleDesc, *mut Raw, *mut Raw),
     zeModuleDestroy(Raw),
+    zeModuleGetGlobalPointer(Raw, *const c_char, *mut usize, *mut Raw),
+    zeCommandListAppendWriteGlobalTimestamp(Raw, *mut u64, Raw, u32, *mut Raw),
     zeModuleBuildLogGetString(Raw, *mut usize, *mut c_char),
     zeModuleBuildLogDestroy(Raw),
     zeKernelCreate(Raw, *const KernelDesc, *mut Raw),
@@ -551,6 +553,15 @@ impl Module {
         let kernel = Handle(kernel);
         self.kernels.push(kernel);
         Ok(kernel)
+    }
+
+    /// Device address and size of an exported module variable.
+    pub(crate) fn global_pointer(&self, api: &Api, name: &CStr) -> Result<(usize, usize), Error> {
+        let (mut size, mut pointer) = (0usize, std::ptr::null_mut());
+        call("zeModuleGetGlobalPointer", || unsafe {
+            (api.zeModuleGetGlobalPointer)(self.handle.0, name.as_ptr(), &mut size, &mut pointer)
+        })?;
+        Ok((pointer.expose_provenance(), size))
     }
 
     pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {

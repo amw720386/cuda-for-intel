@@ -295,6 +295,50 @@ unsafe extern "system" fn append_barrier(
     call_driver(|driver| driver.append(list.addr(), marker(signal, count, waits)))
 }
 
+unsafe extern "system" fn append_timestamp(
+    list: Raw,
+    dst: *mut u64,
+    signal: Raw,
+    count: u32,
+    waits: *mut Raw,
+) -> Status {
+    call_driver(|driver| {
+        let mut command = marker(signal, count, waits);
+        command.stamp = dst.addr();
+        driver.append(list.addr(), command)
+    })
+}
+
+unsafe extern "system" fn module_global(
+    module: Raw,
+    name: *const std::ffi::c_char,
+    size: *mut usize,
+    out: *mut Raw,
+) -> Status {
+    call_driver(|driver| {
+        driver.get(module.addr(), Kind::Module)?;
+        let name = unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned();
+        if name.contains("missing") {
+            return Err("module variable is not exported");
+        }
+        let id = match driver.globals.get(&(module.addr(), name.clone())) {
+            Some(&id) => id,
+            None => {
+                driver.next += 0x10000;
+                driver.globals.insert((module.addr(), name), driver.next);
+                driver.next
+            }
+        };
+        unsafe {
+            size.write(driver.global_size.unwrap_or(1 << 16));
+            out.write(without_provenance_mut(id));
+        }
+        Ok(0)
+    })
+}
+
 unsafe extern "system" fn append_signal(list: Raw, signal: Raw) -> Status {
     unsafe { append_barrier(list, signal, 0, null_mut()) }
 }
@@ -494,6 +538,8 @@ pub(super) fn api() -> Api {
         zeCommandListAppendMemoryFill: append_fill,
         zeModuleCreate: module_create,
         zeModuleDestroy: module_destroy,
+        zeModuleGetGlobalPointer: module_global,
+        zeCommandListAppendWriteGlobalTimestamp: append_timestamp,
         zeModuleBuildLogDestroy: log_destroy,
         zeKernelCreate: kernel_create,
         zeKernelDestroy: kernel_destroy,
