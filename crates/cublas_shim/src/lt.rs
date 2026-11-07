@@ -331,8 +331,8 @@ pub unsafe extern "system" fn cublasLtMatmulAlgoGetHeuristic(
     results: *mut HeuristicResult,
     returned: *mut c_int,
 ) -> c_int {
-    if handle.is_null() || unsafe { (*(handle as *const LtHandle)).magic } != MAGIC_HANDLE {
-        return lt_trace("heuristic: bad handle");
+    if handle.is_null() {
+        return lt_trace("heuristic: null handle");
     }
     if returned.is_null() || results.is_null() || requested <= 0 {
         return lt_trace("heuristic: null out args");
@@ -382,7 +382,7 @@ pub unsafe extern "system" fn cublasLtMatmul(
     _workspace_size: usize,
     stream: *mut c_void,
 ) -> c_int {
-    if handle.is_null() || unsafe { (*(handle as *const LtHandle)).magic } != MAGIC_HANDLE {
+    if handle.is_null() {
         return INVALID_VALUE;
     }
     if !algo.is_null() && unsafe { (*algo).data[0] } != ALGO_MAGIC {
