@@ -1302,7 +1302,8 @@ pub unsafe extern "system" fn cuLaunchKernel(
     kernel_params: *mut Opaque,
     extra: *mut Opaque,
 ) -> CuResult {
-    trace::call("cuLaunchKernel", || {
+    let mut launched = String::new();
+    let result = trace::call("cuLaunchKernel", || {
         status(state(|state| {
             let mut function = function.addr();
             if state.libraries.contains_kernel(function) {
@@ -1414,7 +1415,8 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 return Ok(());
             }
             let timed = trace::kernel_profile_enabled().then(std::time::Instant::now);
-            let launched = context.streams.launch(
+            launched = name.to_string_lossy().into_owned();
+            let launch_result = context.streams.launch(
                 &runtime.api,
                 &context.backend,
                 kernel,
@@ -1425,14 +1427,33 @@ pub unsafe extern "system" fn cuLaunchKernel(
             if let Some(started) = timed {
                 // CUDA_FOR_INTEL_PROFILE_KERNELS=1 serialises every launch so its wall time is
                 // GPU time plus a constant submission latency; use it to rank kernels only.
-                launched?;
+                launch_result?;
                 context.streams.wait_stream(&runtime.api, stream, u64::MAX)?;
                 trace::kernel_record(&name.to_string_lossy(), started.elapsed().as_nanos() as u64, grid, block);
                 return Ok(());
             }
-            launched
+            launch_result
         }))
-    })
+    });
+    // Debug aid (CUDA_FOR_INTEL_SYNC_LAUNCH=1): wait after every launch so a device fault is
+    // attributed to the kernel that caused it instead of the next stream synchronize.
+    if result == Success && !launched.is_empty() && sync_launch_enabled() {
+        let waited = streams::cuStreamSynchronize(stream);
+        if waited != Success {
+            eprintln!(
+                "CUDA for Intel: kernel {launched} grid={:?} block={:?} faulted: {waited:?}",
+                [grid_x, grid_y, grid_z],
+                [block_x, block_y, block_z]
+            );
+            return waited;
+        }
+    }
+    result
+}
+
+fn sync_launch_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_SYNC_LAUNCH").is_some_and(|v| v != "0"))
 }
 
 #[unsafe(no_mangle)]
