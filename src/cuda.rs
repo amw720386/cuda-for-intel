@@ -1344,7 +1344,13 @@ fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
         }
         from = end;
     };
-    let body = rest.split("\n.entry ").next().unwrap_or(rest);
+    // The body ends where the next kernel or function starts (`.visible .entry`, `.weak`, ...).
+    let end = ["\n.entry ", "\n.visible ", "\n.weak ", "\n.func ", "\n.extern "]
+        .iter()
+        .filter_map(|m| rest.find(m))
+        .min()
+        .unwrap_or(rest.len());
+    let body = &rest[..end];
     if !body.contains(".param") {
         return false;
     }
@@ -2249,5 +2255,17 @@ mod tests {
         assert!(!contains_range(&allocations, 115, 1));
         assert!(!contains_range(&allocations, 99, 1));
         assert!(!contains_range(&allocations, usize::MAX - 1, usize::MAX));
+    }
+}
+
+#[cfg(test)]
+mod arch_guard_tests {
+    use super::is_arch_guard_stub;
+
+    #[test]
+    fn stub_followed_by_real_kernel_is_still_a_stub() {
+        let ptx = ".visible .entry stub(\n.param .u64 p\n)\n{\n.reg .b32 %r<2>;\nst.local.u32 [%rd2], %r1;\n.param .b64 param0;\nst.param.b64 [param0+0], %rd4;\ncall.uni (retval0), vprintf, (param0, param1);\nld.param.b32 %r2, [retval0+0];\nret;\n}\n\n.visible .entry real(\n.param .u64 p\n)\n{\nld.global.u32 %r1, [%rd1];\nst.global.u32 [%rd1], %r1;\nret;\n}\n";
+        assert!(is_arch_guard_stub(ptx, "stub"));
+        assert!(!is_arch_guard_stub(ptx, "real"));
     }
 }
