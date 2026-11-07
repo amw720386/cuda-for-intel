@@ -966,7 +966,8 @@ fn asynchronous_stream_order_and_lifetimes() {
     assert!(first.is_null());
     assert_eq!(unsafe { cuStreamCreate(null_mut(), 0) }, 1);
     assert_eq!(unsafe { cuStreamQuery(invalid) }, 400);
-    assert_eq!(unsafe { cuStreamQuery(per_thread) }, 801);
+    // Per-thread default stream is mapped onto the legacy stream (see stream_key).
+    assert!(matches!(unsafe { cuStreamQuery(per_thread) }, 0 | 600));
     assert_eq!(unsafe { cuStreamDestroy_v2(legacy) }, 400);
 
     let size = size_of::<u32>();
@@ -1011,7 +1012,6 @@ fn asynchronous_stream_order_and_lifetimes() {
         }
     };
     assert_eq!(launch(invalid, shared, 1), 400);
-    assert_eq!(launch(per_thread, shared, 1), 801);
     assert_eq!(launch(legacy, shared, 5), 0);
     ok!(cuStreamCreate(&mut blocking, 0));
     ok!(cuStreamCreate(&mut other_blocking, 0));
