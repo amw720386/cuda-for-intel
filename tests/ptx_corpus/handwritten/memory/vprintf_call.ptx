@@ -1,0 +1,23 @@
+.version 8.0
+.target sm_80
+.address_size 64
+.extern .func (.param .b32 r) vprintf(.param .b64 a,.param .b64 b);
+.visible .entry vprintf_call(
+	.param .u64 out
+)
+{
+	.reg .pred %p<8>;
+	.reg .b16 %h<8>;
+	.reg .b32 %r<32>;
+	.reg .b64 %rd<16>;
+	.reg .f32 %f<16>;
+	ld.param.u64 %rd1, [out];
+	cvta.to.global.u64 %rd2, %rd1;
+	mov.u32 %r1, 1;
+	mov.u32 %r31, 1;
+	mov.u64 %rd3, 1;
+	mov.u64 %rd4, 1;
+	call.uni (%r1), vprintf, (%rd3, %rd4);
+	st.global.u32 [%rd2], %r1;
+	ret;
+}
