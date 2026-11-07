@@ -896,23 +896,42 @@ fn filter_ptx_entry(ptx: &[u8], entry_name: &[u8]) -> Option<Vec<u8>> {
         }
     }
     let end = end?;
+    // Rebuild a minimal module header. nvcc inserts multi-line `.extern .func`
+    // (e.g. vprintf) prototypes; line-wise skips leave orphaned `( .param ) ;`
+    // tokens that poison ModuleLoad. Only the ISA triple is required.
     let mut out = String::new();
-    // Drop module `.global` LUTs — kernels that need them will fail explicitly later.
-    for line in header.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with(".global")
-            || trimmed.starts_with(".const")
-            || trimmed.starts_with(".visible .global")
-            || trimmed.starts_with(".extern")
-        {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
+    out.push_str(&minimal_ptx_header(header));
+    // Preserve a leading `.visible` if present immediately before `.entry`.
+    let entry_prefix = text[..start].rsplit_once('\n').map(|(_, tail)| tail).unwrap_or("");
+    if entry_prefix.trim() == ".visible" {
+        out.push_str(".visible\n");
     }
     out.push_str(&body[..end]);
     out.push('\n');
     Some(out.into_bytes())
+}
+
+fn minimal_ptx_header(header: &str) -> String {
+    let mut version = String::from("8.8");
+    let mut target = String::from("sm_80");
+    let mut address_size = String::from("64");
+    for line in header.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix(".version") {
+            version = rest.trim().to_string();
+        } else if let Some(rest) = t.strip_prefix(".target") {
+            // Take the first sm_XX token; ignore trailing comma options.
+            if let Some(sm) = rest
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .find(|tok| tok.starts_with("sm_"))
+            {
+                target = sm.to_string();
+            }
+        } else if let Some(rest) = t.strip_prefix(".address_size") {
+            address_size = rest.trim().to_string();
+        }
+    }
+    format!(".version {version}\n.target {target}\n.address_size {address_size}\n\n")
 }
 
 fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {

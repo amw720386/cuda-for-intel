@@ -1007,27 +1007,48 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     parser.expect(".entry")?;
     let name = parser.identifier()?;
     let mut params = parser.params()?;
-    let max_threads = if parser.eat(".maxntid") {
-        let mut total = 1u32;
-        for axis in 0..3 {
-            total = parser
-                .take()?
-                .parse::<u32>()
-                .ok()
-                .filter(|&n| n != 0)
-                .and_then(|n| total.checked_mul(n))
-                .ok_or_else(|| Error::new("invalid PTX .maxntid product"))?;
-            if !parser.eat(",") {
-                break;
+    // Performance / occupancy hints may appear in any order before `{`.
+    let mut max_threads = None;
+    loop {
+        if parser.eat(".maxntid") {
+            let mut total = 1u32;
+            for axis in 0..3 {
+                total = parser
+                    .take()?
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&n| n != 0)
+                    .and_then(|n| total.checked_mul(n))
+                    .ok_or_else(|| Error::new("invalid PTX .maxntid product"))?;
+                if !parser.eat(",") {
+                    break;
+                }
+                if axis == 2 {
+                    return Err(Error::new("too many PTX .maxntid dimensions"));
+                }
             }
-            if axis == 2 {
-                return Err(Error::new("too many PTX .maxntid dimensions"));
-            }
+            max_threads = Some(total);
+            continue;
         }
-        Some(total)
-    } else {
-        None
-    };
+        if parser.eat(".minnctapersm") || parser.eat(".maxnctapersm") {
+            let _ = parser.take()?; // integer count
+            continue;
+        }
+        if parser.eat(".reqntid") {
+            // Same shape as .maxntid; ignore beyond validating tokens.
+            for axis in 0..3 {
+                let _ = parser.take()?;
+                if !parser.eat(",") {
+                    break;
+                }
+                if axis == 2 {
+                    return Err(Error::new("too many PTX .reqntid dimensions"));
+                }
+            }
+            continue;
+        }
+        break;
+    }
     parser.expect("{")?;
     let registers = parser.registers()?;
     let mut shared = if parser.eat(".shared") {
