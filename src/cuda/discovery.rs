@@ -1,4 +1,5 @@
 use super::export_table::cuGetExportTable;
+use super::gaps::*;
 use super::graphs::*;
 use super::library::*;
 use super::primary::*;
@@ -63,6 +64,10 @@ fn error_info(code: c_int) -> Option<(&'static CStr, &'static CStr)> {
             c"CUDA_ERROR_NO_BINARY_FOR_GPU",
             c"no kernel image is available",
         ),
+        216 => (
+            c"CUDA_ERROR_PEER_ACCESS_UNSUPPORTED",
+            c"peer access is not supported across the given devices",
+        ),
         218 => (c"CUDA_ERROR_INVALID_PTX", c"invalid PTX"),
         222 => (
             c"CUDA_ERROR_UNSUPPORTED_PTX_VERSION",
@@ -77,11 +82,27 @@ fn error_info(code: c_int) -> Option<(&'static CStr, &'static CStr)> {
         401 => (c"CUDA_ERROR_ILLEGAL_STATE", c"illegal state"),
         500 => (c"CUDA_ERROR_NOT_FOUND", c"named symbol not found"),
         600 => (c"CUDA_ERROR_NOT_READY", c"operation is not ready"),
+        704 => (
+            c"CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED",
+            c"peer access is already enabled",
+        ),
+        705 => (
+            c"CUDA_ERROR_PEER_ACCESS_NOT_ENABLED",
+            c"peer access has not been enabled",
+        ),
         708 => (
             c"CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE",
             c"primary context is active",
         ),
         709 => (c"CUDA_ERROR_CONTEXT_IS_DESTROYED", c"context is destroyed"),
+        712 => (
+            c"CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED",
+            c"part or all of the requested memory range is already mapped",
+        ),
+        713 => (
+            c"CUDA_ERROR_HOST_MEMORY_NOT_REGISTERED",
+            c"pointer does not correspond to any currently registered memory region",
+        ),
         719 => (c"CUDA_ERROR_LAUNCH_FAILED", c"launch failed"),
         801 => (c"CUDA_ERROR_NOT_SUPPORTED", c"operation not supported"),
         900 => (
@@ -201,6 +222,72 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuMemcpyDtoHAsync" => entry!(cuMemcpyDtoHAsync_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemsetD8" => entry!(cuMemsetD8_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemsetD8Async" => entry!(cuMemsetD8Async, 3020, DRIVER_ABI + 1, true),
+        // Memory and copies. Entries that take a stream have PTDS variants.
+        b"cuMemcpyDtoD" => entry!(cuMemcpyDtoD_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyDtoDAsync" => entry!(cuMemcpyDtoDAsync_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD16" => entry!(cuMemsetD16_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD16Async" => entry!(cuMemsetD16Async, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD32" => entry!(cuMemsetD32_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD32Async" => entry!(cuMemsetD32Async, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpy" => entry!(cuMemcpy, 7000, DRIVER_ABI + 1, true),
+        b"cuMemcpyAsync" => entry!(cuMemcpyAsync, 7000, DRIVER_ABI + 1, true),
+        b"cuMemcpy2D" | b"cuMemcpy2DUnaligned" => {
+            entry!(cuMemcpy2D_v2, 3020, DRIVER_ABI + 1, true)
+        }
+        b"cuMemcpy2DAsync" => entry!(cuMemcpy2DAsync_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpy3D" => entry!(cuMemcpy3D_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpy3DAsync" => entry!(cuMemcpy3DAsync_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyPeer" => entry!(cuMemcpyPeer, 4000, DRIVER_ABI + 1, true),
+        b"cuMemcpyPeerAsync" => entry!(cuMemcpyPeerAsync, 4000, DRIVER_ABI + 1, true),
+        b"cuMemGetAddressRange" => entry!(cuMemGetAddressRange_v2, 3020),
+        b"cuPointerGetAttribute" => entry!(cuPointerGetAttribute, 4000),
+        b"cuPointerGetAttributes" => entry!(cuPointerGetAttributes, 7000),
+        // cuMemHostRegister gained its _v2 flags in CUDA 6.5.
+        b"cuMemHostRegister" => entry!(cuMemHostRegister_v2, 6050),
+        b"cuMemHostUnregister" => entry!(cuMemHostUnregister, 4000),
+        b"cuMemAllocHost" => entry!(cuMemAllocHost_v2, 3020),
+        b"cuMemAllocAsync" => entry!(cuMemAllocAsync, 11020, DRIVER_ABI + 1, true),
+        b"cuMemFreeAsync" => entry!(cuMemFreeAsync, 11020, DRIVER_ABI + 1, true),
+        b"cuMemAllocFromPoolAsync" => entry!(cuMemAllocFromPoolAsync, 11020, DRIVER_ABI + 1, true),
+        b"cuDeviceGetDefaultMemPool" => entry!(cuDeviceGetDefaultMemPool, 11020),
+        b"cuDeviceGetMemPool" => entry!(cuDeviceGetMemPool, 11020),
+        b"cuDeviceSetMemPool" => entry!(cuDeviceSetMemPool, 11020),
+        b"cuMemPoolCreate" => entry!(cuMemPoolCreate, 11020),
+        b"cuMemPoolDestroy" => entry!(cuMemPoolDestroy, 11020),
+        b"cuMemPoolSetAttribute" => entry!(cuMemPoolSetAttribute, 11020),
+        b"cuMemPoolGetAttribute" => entry!(cuMemPoolGetAttribute, 11020),
+        b"cuMemPoolTrimTo" => entry!(cuMemPoolTrimTo, 11020),
+        // CUDA 12.2 changed advice and prefetch to take a CUmemLocation.
+        b"cuMemAdvise" if version >= 12020 => entry!(cuMemAdvise_v2, 12020, DRIVER_ABI + 1, false),
+        b"cuMemAdvise" => entry!(cuMemAdvise, 8000, 12020, false),
+        b"cuMemPrefetchAsync" if version >= 12020 => {
+            entry!(cuMemPrefetchAsync_v2, 12020, DRIVER_ABI + 1, true)
+        }
+        b"cuMemPrefetchAsync" => entry!(cuMemPrefetchAsync, 8000, 12020, true),
+        // Functions, occupancy and extended launch.
+        b"cuFuncGetAttribute" => entry!(cuFuncGetAttribute, 2020),
+        b"cuFuncSetAttribute" => entry!(cuFuncSetAttribute, 9000),
+        b"cuFuncSetCacheConfig" => entry!(cuFuncSetCacheConfig, 3000),
+        b"cuOccupancyMaxActiveBlocksPerMultiprocessor" => {
+            entry!(cuOccupancyMaxActiveBlocksPerMultiprocessor, 6050)
+        }
+        b"cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags" => {
+            entry!(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags, 7000)
+        }
+        b"cuOccupancyMaxPotentialBlockSize" => entry!(cuOccupancyMaxPotentialBlockSize, 6050),
+        b"cuOccupancyMaxPotentialBlockSizeWithFlags" => {
+            entry!(cuOccupancyMaxPotentialBlockSizeWithFlags, 7000)
+        }
+        b"cuLaunchKernelEx" => entry!(cuLaunchKernelEx, 12000, DRIVER_ABI + 1, true),
+        // Peers, context stack, stream priorities.
+        b"cuDeviceCanAccessPeer" => entry!(cuDeviceCanAccessPeer, 4000),
+        b"cuDeviceGetP2PAttribute" => entry!(cuDeviceGetP2PAttribute, 8000),
+        b"cuCtxEnablePeerAccess" => entry!(cuCtxEnablePeerAccess, 4000),
+        b"cuCtxDisablePeerAccess" => entry!(cuCtxDisablePeerAccess, 4000),
+        b"cuCtxPushCurrent" => entry!(cuCtxPushCurrent_v2, 4000),
+        b"cuCtxPopCurrent" => entry!(cuCtxPopCurrent_v2, 4000),
+        b"cuCtxGetStreamPriorityRange" => entry!(cuCtxGetStreamPriorityRange, 5050),
+        b"cuStreamCreateWithPriority" => entry!(cuStreamCreateWithPriority, 5050),
         b"cuModuleLoad" => entry!(cuModuleLoad, 2000),
         b"cuModuleLoadData" => entry!(cuModuleLoadData, 2000),
         b"cuModuleGetFunction" => entry!(cuModuleGetFunction, 2000),
@@ -399,6 +486,53 @@ mod tests {
         );
         let init: extern "system" fn(c_uint) -> CuResult = unsafe { std::mem::transmute(function) };
         assert_eq!(init(1), InvalidValue);
+    }
+
+    #[test]
+    fn resolves_driver_gap_entry_points_with_versioned_names() {
+        let at = |name: &CStr, version, per_thread| lookup(name.to_bytes(), version, per_thread);
+        // Unversioned base names resolve to the current _v2 implementation.
+        assert_eq!(at(c"cuMemGetAddressRange", 12000, false), Ok(cuMemGetAddressRange_v2 as Opaque));
+        assert_eq!(at(c"cuMemHostRegister", 12000, false), Ok(cuMemHostRegister_v2 as Opaque));
+        assert_eq!(at(c"cuMemcpyDtoD", 12000, false), Ok(cuMemcpyDtoD_v2 as Opaque));
+        assert_eq!(at(c"cuMemcpyDtoDAsync", 12000, false), Ok(cuMemcpyDtoDAsync_v2 as Opaque));
+        assert_eq!(at(c"cuMemcpy2D", 12000, false), Ok(cuMemcpy2D_v2 as Opaque));
+        assert_eq!(at(c"cuMemsetD32", 12000, false), Ok(cuMemsetD32_v2 as Opaque));
+        assert_eq!(at(c"cuCtxPushCurrent", 12000, false), Ok(cuCtxPushCurrent_v2 as Opaque));
+        // The suffixed names are not base names.
+        assert_eq!(at(c"cuMemcpy2D_v2", 12000, false), Err(MISSING));
+        // Advice and prefetch changed signature in CUDA 12.2.
+        assert_eq!(at(c"cuMemAdvise", 12010, false), Ok(cuMemAdvise as Opaque));
+        assert_eq!(at(c"cuMemAdvise", 12020, false), Ok(cuMemAdvise_v2 as Opaque));
+        assert_eq!(at(c"cuMemPrefetchAsync", 12010, false), Ok(cuMemPrefetchAsync as Opaque));
+        assert_eq!(at(c"cuMemPrefetchAsync", 13000, false), Ok(cuMemPrefetchAsync_v2 as Opaque));
+        assert_eq!(at(c"cuMemAdvise", 7000, false), Err(VERSION));
+        // Entry points are absent before the release that introduced them.
+        assert_eq!(at(c"cuLaunchKernelEx", 11080, false), Err(VERSION));
+        assert_eq!(at(c"cuLaunchKernelEx", 12000, false), Ok(cuLaunchKernelEx as Opaque));
+        assert_eq!(at(c"cuMemAllocAsync", 11010, false), Err(VERSION));
+        assert_eq!(at(c"cuMemAllocAsync", 11020, false), Ok(cuMemAllocAsync as Opaque));
+        assert_eq!(at(c"cuFuncSetAttribute", 8000, false), Err(VERSION));
+        assert_eq!(at(c"cuOccupancyMaxActiveBlocksPerMultiprocessor", 6040, false), Err(VERSION));
+        // Stream-aware entries have no PTDS variant; others resolve for PTDS callers.
+        assert_eq!(at(c"cuMemcpyAsync", 13000, true), Err(MISSING));
+        assert_eq!(at(c"cuLaunchKernelEx", 13000, true), Err(MISSING));
+        assert!(at(c"cuFuncGetAttribute", 13000, true).is_ok());
+        assert!(at(c"cuPointerGetAttributes", 13000, true).is_ok());
+        for name in [
+            c"cuFuncGetAttribute",
+            c"cuOccupancyMaxPotentialBlockSize",
+            c"cuOccupancyMaxPotentialBlockSizeWithFlags",
+            c"cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags",
+            c"cuMemFreeAsync",
+            c"cuMemPoolSetAttribute",
+            c"cuDeviceGetDefaultMemPool",
+            c"cuMemcpyPeer",
+            c"cuCtxEnablePeerAccess",
+            c"cuStreamCreateWithPriority",
+        ] {
+            assert!(at(name, 13000, false).is_ok(), "{name:?}");
+        }
     }
 
     #[test]
