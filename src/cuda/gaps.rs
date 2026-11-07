@@ -93,6 +93,50 @@ pub extern "system" fn cuFuncSetAttribute(function: Opaque, attr: c_int, value: 
     })
 }
 
+/// CUDA 12 library-kernel attribute entry points resolve the kernel to its function in
+/// the current context and reuse the function attribute logic.
+fn kernel_to_function(kernel: Opaque) -> Result<Opaque, CuResult> {
+    let mut function: Opaque = std::ptr::null_mut();
+    match unsafe { super::library::cuKernelGetFunction(&mut function, kernel) } {
+        Success => Ok(function),
+        error => Err(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuKernelGetAttribute(
+    out: *mut c_int,
+    attr: c_int,
+    kernel: Opaque,
+    _device: c_int,
+) -> CuResult {
+    trace::call("cuKernelGetAttribute", || match kernel_to_function(kernel) {
+        Ok(function) => unsafe { cuFuncGetAttribute(out, attr, function) },
+        Err(error) => error,
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuKernelSetAttribute(
+    attr: c_int,
+    value: c_int,
+    kernel: Opaque,
+    _device: c_int,
+) -> CuResult {
+    trace::call("cuKernelSetAttribute", || match kernel_to_function(kernel) {
+        Ok(function) => cuFuncSetAttribute(function, attr, value),
+        Err(error) => error,
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuKernelSetCacheConfig(kernel: Opaque, config: c_int, _device: c_int) -> CuResult {
+    trace::call("cuKernelSetCacheConfig", || match kernel_to_function(kernel) {
+        Ok(function) => cuFuncSetCacheConfig(function, config),
+        Err(error) => error,
+    })
+}
+
 /// Cache preference is a hint; the backend has no configurable L1/shared split.
 #[unsafe(no_mangle)]
 pub extern "system" fn cuFuncSetCacheConfig(function: Opaque, config: c_int) -> CuResult {

@@ -271,6 +271,9 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuFuncGetAttribute" => entry!(cuFuncGetAttribute, 2020),
         b"cuFuncSetAttribute" => entry!(cuFuncSetAttribute, 9000),
         b"cuFuncSetCacheConfig" => entry!(cuFuncSetCacheConfig, 3000),
+        b"cuKernelGetAttribute" => entry!(cuKernelGetAttribute, 12000),
+        b"cuKernelSetAttribute" => entry!(cuKernelSetAttribute, 12000),
+        b"cuKernelSetCacheConfig" => entry!(cuKernelSetCacheConfig, 12000),
         b"cuOccupancyMaxActiveBlocksPerMultiprocessor" => {
             entry!(cuOccupancyMaxActiveBlocksPerMultiprocessor, 6050)
         }
