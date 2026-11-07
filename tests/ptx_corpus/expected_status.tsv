@@ -268,11 +268,11 @@ handwritten/ldmatrix/ldmatrix_x4_trans.ptx	pass	strict-pass
 handwritten/ldmatrix/stmatrix_x4.ptx	pass	strict-pass	
 handwritten/memory/applypriority_L2.ptx	pass	strict-pass	
 handwritten/memory/call_noreturn_stub.ptx	pass	strict-pass	
-handwritten/memory/const_array_init.ptx	error	strict-fail	unknown PTX local symbol ctbl
+handwritten/memory/const_array_init.ptx	error	strict-fail	expected Address(Global) for %rd3, got B64
 handwritten/memory/createpolicy_fractional.ptx	pass	strict-pass	
 handwritten/memory/discard_global_L2.ptx	pass	strict-pass	
 handwritten/memory/func_call_internal.ptx	unsupported	strict-fail	unsupported integer operand a
-handwritten/memory/global_array_init.ptx	error	strict-fail	undefined PTX register tbl on an incoming path
+handwritten/memory/global_array_init.ptx	pass	strict-pass	
 handwritten/memory/ld_const_u32.ptx	pass	strict-pass	
 handwritten/memory/ld_global_L1_no_allocate.ptx	pass	strict-pass	
 handwritten/memory/ld_global_L2_128B.ptx	pass	strict-pass	
@@ -529,15 +529,15 @@ zluda/integer/subc_cc_s32.ptx	pass	strict-fail
 zluda/integer/xor.ptx	pass	strict-fail	
 zluda/ldmatrix/ldmatrix.ptx	error	strict-fail	undefined PTX register %tid.x on an incoming path
 zluda/ldmatrix/ldmatrix_trans.ptx	unsupported	strict-fail	unsupported PTX register type .v2.b16
-zluda/memory/const.ptx	error	strict-fail	undefined PTX register constparams on an incoming path
-zluda/memory/const_ident.ptx	error	strict-fail	unknown PTX local symbol x
+zluda/memory/const.ptx	pass	strict-fail	
+zluda/memory/const_ident.ptx	unsupported	strict-fail	unsupported PTX initialiser element x
 zluda/memory/constant_f32.ptx	pass	strict-fail	
 zluda/memory/constant_negative.ptx	pass	strict-fail	
 zluda/memory/extern_func.ptx	unsupported	strict-fail	unsupported PTX instruction: call.uni ( retval0 ) , foobar , ( param0 )
 zluda/memory/extern_shared.ptx	error	strict-fail	undefined PTX register shared_mem on an incoming path
 zluda/memory/extern_shared_call.ptx	error	strict-fail	undefined PTX register shared_mem on an incoming path
-zluda/memory/global_array.ptx	error	strict-fail	unknown PTX local symbol foobar
-zluda/memory/global_array_f32.ptx	error	strict-fail	unknown PTX local symbol foobar
+zluda/memory/global_array.ptx	pass	strict-fail	
+zluda/memory/global_array_f32.ptx	pass	strict-fail	
 zluda/memory/implicit_param.ptx	unsupported	strict-fail	unsupported PTX instruction: .param .b32 temp_param
 zluda/memory/instruction_mode_to_global_mode__fold_denormal.ptx	error	strict-fail	undefined PTX register %temp1 on an incoming path
 zluda/memory/ld_st.ptx	pass	strict-fail	

@@ -593,6 +593,9 @@ fn rewrite(ctx: &mut Ctx, stmt: &[String]) -> Vec<String> {
                 return lines;
             }
         }
+        ".global" | ".const" | ".visible" | ".weak" | ".extern" | ".common" => {
+            tier3::module_decl(ctx, stmt);
+        }
         ".reg" => {
             ctx.note_register_declaration(stmt);
             return vec![rewrite_reg(stmt)];

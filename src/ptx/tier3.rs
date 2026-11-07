@@ -36,6 +36,9 @@ pub(super) struct State {
     shared: Vec<String>,
     uses_lsym: bool,
     uses_ssym: bool,
+    /// Names of module-scope `.global` / `.const` data (kept across entries).
+    module_globals: Vec<String>,
+    uses_gsym: bool,
 }
 
 impl State {
@@ -71,6 +74,9 @@ impl State {
         }
         if self.uses_ssym {
             decls.push(".reg .b32 %__ssym ;".into());
+        }
+        if self.uses_gsym {
+            decls.push(".reg .b64 %__gsym ;".into());
         }
         if self.cc {
             decls.push(".reg .b32 %__cc ;".into());
@@ -108,7 +114,9 @@ impl State {
             }
             decls.push("bar.sync 0 ;".into());
         }
+        let keep = std::mem::take(&mut self.module_globals);
         *self = State::default();
+        self.module_globals = keep;
         decls
     }
 }
@@ -246,7 +254,7 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             Some(again(ctx, &copy))
         }
         "cvta" if inst.op.split('.').any(|p| p == "const") && inst.operands.len() == 2 => {
-            Some(vec![render(&inst.guard, "mov.b64", &inst.operands)])
+            Some(vec![render(&inst.guard, "cvta.global.u64", &inst.operands)])
         }
         "mov" if matches!(inst.operand(1), "%dynamic_smem_size" | "%total_smem_size") && inst.operands.len() == 2 => {
             let bits = if inst.op.ends_with("64") { 64 } else { 32 };
@@ -1090,7 +1098,7 @@ fn bracket_symbol(operand: &str) -> Option<(String, i64)> {
 /// rewritten to the register form (`mov` of the symbol, then `[reg+offset]`).
 fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     let family = inst.op.split('.').next()?;
-    if ctx.t3.locals.is_empty() && ctx.t3.shared.is_empty() {
+    if ctx.t3.locals.is_empty() && ctx.t3.shared.is_empty() && ctx.t3.module_globals.is_empty() {
         return None;
     }
     let mut lines = Vec::new();
@@ -1111,6 +1119,13 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             }
             return Some(lines);
         }
+        if ctx.t3.module_globals.contains(&base) && off != 0 {
+            let dst = inst.operand(0).to_owned();
+            return Some(vec![
+                render(&inst.guard, "mov.u64", &[dst.clone(), base]),
+                render(&inst.guard, "add.u64", &[dst.clone(), dst, off.to_string()]),
+            ]);
+        }
         return None;
     }
     if !matches!(family, "ld" | "ldu" | "st" | "atom" | "red") {
@@ -1122,6 +1137,11 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             ctx.t3.uses_lsym = true;
             lines.push(format!("mov.u64 %__lsym , __t3_local ;"));
             *operand = format!("[%__lsym+{}]", i64::from(*o) + off);
+            changed = true;
+        } else if ctx.t3.module_globals.contains(&base) {
+            ctx.t3.uses_gsym = true;
+            lines.push(format!("mov.u64 %__gsym , {base} ;"));
+            *operand = format!("[%__gsym+{off}]");
             changed = true;
         } else if ctx.t3.shared.iter().any(|n| *n == base)
             && (off != 0 || inst.op.split('.').any(|p| matches!(p, "u64" | "s64" | "b64" | "f64")))
@@ -1474,4 +1494,35 @@ fn half_fma(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
         b.p(render(&inst.guard, "mov.b32", &[inst.operand(0).to_owned(), results[0].clone()]));
     }
     Some(b.finish())
+}
+
+/// Records the name of a module-scope `.global` / `.const` data declaration.
+pub(super) fn module_decl(ctx: &mut Ctx, stmt: &[String]) {
+    let mut i = 0;
+    while stmt.get(i).is_some_and(|t| matches!(t.as_str(), ".visible" | ".weak" | ".extern" | ".common")) {
+        if stmt[i] == ".extern" {
+            return;
+        }
+        i += 1;
+    }
+    if !stmt.get(i).is_some_and(|t| matches!(t.as_str(), ".global" | ".const")) {
+        return;
+    }
+    // The name is the token before `[`, `=` or `;`.
+    let mut j = i + 1;
+    let mut name = None;
+    while let Some(t) = stmt.get(j) {
+        if matches!(t.as_str(), "[" | "=" | ";") {
+            break;
+        }
+        if !t.starts_with('.') && !t.chars().all(|c| c.is_ascii_digit()) {
+            name = Some(t.clone());
+        }
+        j += 1;
+    }
+    if let Some(name) = name {
+        if !ctx.t3.module_globals.contains(&name) {
+            ctx.t3.module_globals.push(name);
+        }
+    }
 }

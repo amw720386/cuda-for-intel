@@ -60,6 +60,8 @@ impl Value {
 mod ext_emit;
 #[path = "ext_float.rs"]
 mod ext_float;
+#[path = "tier3_emit.rs"]
+mod tier3_emit;
 
 struct Emitter<'a> {
     builder: Builder,
@@ -84,6 +86,8 @@ struct Emitter<'a> {
     /// Byte offset of each `.shared` symbol within `shared_array`.
     shared_offsets: HashMap<&'a str, u32>,
     local: Option<(&'a str, Word)>,
+    /// Module-scope data variables by symbol name.
+    globals: HashMap<&'a str, Word>,
     /// Set when the entry uses CUDA warp shuffles / redux (forces SubgroupSize 32).
     warp_ops: bool,
     /// Capabilities / extensions already declared on the module.
@@ -164,6 +168,7 @@ impl<'a> Emitter<'a> {
             shared_array: None,
             shared_offsets: HashMap::new(),
             local: None,
+            globals: HashMap::new(),
             warp_ops: false,
             declared: HashSet::new(),
             builtin_type,
@@ -1830,6 +1835,10 @@ impl<'a> Emitter<'a> {
                 let id = self.builder.constant_bit32(self.u32_type, offset);
                 (dst, id, Kind::B32)
             }
+            Instruction::LocalSymbol64(dst, src) if self.globals.contains_key(src) => {
+                let id = self.global_symbol(src).unwrap()?;
+                (dst, id, Kind::Address(Space::Global))
+            }
             Instruction::LocalSymbol64(dst, src) => {
                 let pointer = self.local_base(src)?;
                 let id = self.builder.bitcast(self.local_byte_ptr, None, pointer)?;
@@ -2748,6 +2757,7 @@ pub(super) fn emit(entries: Vec<Entry<'_>>) -> Result<Translation, Error> {
 impl<'a> Emitter<'a> {
     fn emit_entry(&mut self, entry: Entry<'a>) -> Result<KernelMetadata, Error> {
         let flow = Flow::analyze(&entry.blocks)?;
+        self.declare_globals(&entry.globals)?;
         self.declarations = entry.registers;
         self.registers.clear();
         self.initialized.clear();

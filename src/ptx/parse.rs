@@ -41,8 +41,13 @@ pub(super) fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
     }
 }
 
+#[path = "tier3_data.rs"]
+mod tier3_data;
+
 struct Parser<'a> {
     tokens: std::vec::IntoIter<&'a str>,
+    /// Module-scope data declarations seen so far.
+    globals: Vec<super::GlobalData<'a>>,
 }
 
 impl<'a> Parser<'a> {
@@ -1573,17 +1578,29 @@ fn skip_module_directives(parser: &mut Parser<'_>) -> Result<(), Error> {
                 if rest.get(1) == Some(&".entry") {
                     return Ok(());
                 }
-                parser.take()?;
+                let linkage = parser.take()?;
                 // Optional second linkage/storage token, then declaration body.
                 if matches!(
                     parser.peek(),
                     Some(".global" | ".const" | ".shared" | ".local" | ".tex")
                 ) {
-                    parser.take()?;
+                    let space = parser.take()?;
+                    if matches!(space, ".global" | ".const") {
+                        if let Some(data) = tier3_data::parse_declaration(parser, linkage == ".extern")? {
+                            parser.globals.push(data);
+                        }
+                        continue;
+                    }
                 }
                 skip_module_declaration(parser)?;
             }
-            ".global" | ".const" | ".shared" | ".local" | ".tex" => {
+            ".global" | ".const" => {
+                parser.take()?;
+                if let Some(data) = tier3_data::parse_declaration(parser, false)? {
+                    parser.globals.push(data);
+                }
+            }
+            ".shared" | ".local" | ".tex" => {
                 parser.take()?;
                 skip_module_declaration(parser)?;
             }
@@ -1980,6 +1997,7 @@ fn rename_identifiers(text: &str, renames: &[(String, String, bool)]) -> String 
 pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
     let mut parser = Parser {
         tokens: tokens(source)?.into_iter(),
+        globals: Vec::new(),
     };
     parser.expect(".version")?;
     // Stock CUDA 11 through 13 toolchains emit PTX ISA 7.0 through 9.x.
@@ -2036,6 +2054,9 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
             break;
         }
     }
+    for entry in &mut entries {
+        entry.globals = parser.globals.clone();
+    }
     if entries.is_empty() {
         return Err(first_skip.unwrap_or_else(|| {
             Error::new("PTX module contains no supported .entry kernels")
@@ -2053,6 +2074,7 @@ pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, 
     tokens.drain(..start);
     let mut parser = Parser {
         tokens: tokens.into_iter(),
+        globals: Vec::new(),
     };
     parse_entry(&mut parser)
 }
@@ -2194,6 +2216,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
         local,
         max_threads,
         blocks,
+        globals: Vec::new(),
     })
 }
 

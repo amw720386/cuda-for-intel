@@ -401,3 +401,40 @@ fn f64_directed_rounding_matches_exact_arithmetic() {
         assert_eq!(got.to_bits(), want.to_bits(), "{op} {operands:?}: got {got:e} want {want:e}");
     }
 }
+
+#[test]
+fn module_scope_const_and_global_data() {
+    let source = r#".version 9.0
+.target sm_80
+.address_size 64
+.const .align 4 .u32 ctbl[4] = {11, 22, 33, 0x2c};
+.global .align 8 .b8 gtbl[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+.global .align 4 .f32 fv[2] = {0f3F800000, 0f40000000};
+.visible .entry data(.param .u64 out_param)
+{
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<4>;
+    ld.param.u64 %rd0, [out_param];
+    cvta.to.global.u64 %rd1, %rd0;
+    ld.const.u32 %r1, [ctbl+8];
+    mov.u64 %rd2, ctbl;
+    ld.const.u32 %r2, [%rd2+12];
+    ld.global.u8 %r3, [gtbl+5];
+    ld.global.f32 %f1, [fv+4];
+    mov.u64 %rd3, gtbl+2;
+    ld.global.u8 %r4, [%rd3];
+    st.global.u32 [%rd1], %r1;
+    st.global.u32 [%rd1+4], %r2;
+    st.global.u32 [%rd1+8], %r3;
+    st.global.f32 [%rd1+12], %f1;
+    st.global.u32 [%rd1+16], %r4;
+    ret;
+}
+"#;
+    // Translation and spirv-val; the interpreter has no program-scope variables.
+    let module = lower(source);
+    assert!(super::coverage_tests::has_op(&module, rspirv::spirv::Op::Variable));
+    assert!(module.types_global_values.iter().any(|i| i.class.opcode == rspirv::spirv::Op::Variable
+        && i.operands.first() == Some(&rspirv::dr::Operand::StorageClass(rspirv::spirv::StorageClass::CrossWorkgroup))));
+}

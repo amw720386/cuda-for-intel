@@ -755,6 +755,16 @@ struct Entry<'a> {
     local: Option<(&'a str, u32)>,
     max_threads: Option<u32>,
     blocks: Vec<Block<'a>>,
+    /// Module-scope `.global` / `.const` data visible to the entry.
+    globals: Vec<GlobalData<'a>>,
+}
+
+/// A module-scope data symbol with its initial bytes.
+#[derive(Clone, Debug)]
+struct GlobalData<'a> {
+    name: &'a str,
+    align: u32,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
