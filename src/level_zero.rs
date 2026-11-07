@@ -305,6 +305,9 @@ macro_rules! loader_api {
                 };
                 #[cfg(target_os = "linux")]
                 let library = unsafe { Library::new("libze_loader.so.1") }.map_err(Error::Loader)?;
+                // Host-only unit-test builds (for example macOS) run on the fake backend.
+                #[cfg(not(any(windows, target_os = "linux")))]
+                let library: Library = unsafe { Library::new("libze_loader.so.1") }.map_err(Error::Loader)?;
 
                 Ok(Self {
                     $( $name: unsafe { library.get(concat!(stringify!($name), "\0").as_bytes()) }
