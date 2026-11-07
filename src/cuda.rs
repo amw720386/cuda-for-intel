@@ -2041,8 +2041,42 @@ fn reported_cc() -> (u32, u32) {
                 let (a, b) = v.split_once('.')?;
                 Some((a.parse().ok()?, b.parse().ok()?))
             })
+            .or_else(process_profile_cc)
             .unwrap_or((COMPUTE_CAPABILITY_MAJOR, COMPUTE_CAPABILITY_MINOR))
     })
+}
+
+/// Compute capability for known PyTorch builds, chosen so that PyTorch's dispatch only selects
+/// kernels whose PTX is real code (architecture-guarded variants such as the CUTLASS
+/// memory-efficient attention compile to `vprintf` stubs in PTX built for another arch):
+/// * `torch_cuda.dll` with `cudart64_110.dll` (official cu118 wheels, PTX compute_37): 3.7;
+/// * `torch_cuda.dll` with `cudart64_12.dll` (conda-forge cuda12 builds, PTX compute_120): 12.0.
+/// Other processes (llama.cpp, Ollama, CUDA samples) keep 7.5. `CFI_REPORT_CC` always wins.
+#[cfg(windows)]
+fn process_profile_cc() -> Option<(u32, u32)> {
+    unsafe extern "system" {
+        fn GetModuleHandleA(name: *const u8) -> *mut std::ffi::c_void;
+    }
+    let loaded = |name: &str| {
+        let mut bytes = name.as_bytes().to_vec();
+        bytes.push(0);
+        !unsafe { GetModuleHandleA(bytes.as_ptr()) }.is_null()
+    };
+    if !loaded("torch_cuda.dll") {
+        return None;
+    }
+    if loaded("cudart64_110.dll") {
+        Some((3, 7))
+    } else if loaded("cudart64_12.dll") {
+        Some((12, 0))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+fn process_profile_cc() -> Option<(u32, u32)> {
+    None
 }
 
 const COMPUTE_CAPABILITY_MAJOR: u32 = 7;
