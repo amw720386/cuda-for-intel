@@ -910,6 +910,40 @@ pub unsafe extern "system" fn cuLaunchKernel(
                     return Err(error);
                 }
             };
+            // Optional launch dump for soft_max bring-up (CUDA_FOR_INTEL_DUMP_LAUNCH=1).
+            if std::env::var_os("CUDA_FOR_INTEL_DUMP_LAUNCH").is_some()
+                && name.to_string_lossy().contains("soft_max")
+            {
+                let mut summary = format!(
+                    "soft_max launch args={} shared_bytes={shared_bytes} grid={grid:?} block={block:?}",
+                    args.len()
+                );
+                if args.len() >= 4 {
+                    for (i, label) in ["x", "mask", "sinks", "dst"].iter().enumerate() {
+                        let ptr = unsafe { args[i].value.cast::<u64>().read_unaligned() };
+                        summary.push_str(&format!(" {label}={ptr:#x}"));
+                    }
+                }
+                if args.len() >= 4 + 32 {
+                    let word = |offset: usize| -> u32 {
+                        unsafe { args[4 + offset / 4].value.cast::<u32>().read_unaligned() }
+                    };
+                    let word64 = |offset: usize| -> u64 {
+                        let lo = word(offset) as u64;
+                        let hi = word(offset + 4) as u64;
+                        lo | (hi << 32)
+                    };
+                    let scale = f32::from_bits(word(112));
+                    summary.push_str(&format!(
+                        " ncols={} ne01={} scale={scale} n_head_log2={}",
+                        word64(16) as i64,
+                        word64(48) as i64,
+                        word(8)
+                    ));
+                }
+                export_log(summary.clone());
+                eprintln!("CUDA for Intel {summary}");
+            }
             context.streams.launch(
                 &runtime.api,
                 &context.backend,

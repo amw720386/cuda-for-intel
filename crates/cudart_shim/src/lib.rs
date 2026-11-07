@@ -280,6 +280,10 @@ pub unsafe extern "system" fn cudaDeviceGetPCIBusId(
     }
 }
 
+/// CUDA 12 `cudaDeviceProp` storage. Layout matches MSVC x64 `driver_types.h`.
+/// Named early fields cover the common bring-up path; later fields (notably
+/// `sharedMemPerBlockOptin` at byte 696) are written through `bytes` so GGML
+/// soft_max can select the shared-memory kernels instead of the Lb0 fallback.
 #[repr(C)]
 pub struct CudaDeviceProp {
     pub name: [c_char; 256],
@@ -298,9 +302,16 @@ pub struct CudaDeviceProp {
     pub total_const_mem: usize,
     pub major: c_int,
     pub minor: c_int,
-    // Remaining fields zeroed — ggml reads the early ones during init.
-    pub _pad: [u8; 512],
+    /// Bytes from offset 368 through the end of a CUDA 12 `cudaDeviceProp`
+    /// (~offset 1024 with reserved[]). Zero-initialized then selectively filled.
+    pub _pad: [u8; 656],
 }
+
+const PROP_TEXTURE_ALIGNMENT: usize = 368;
+const PROP_MULTIPROCESSOR_COUNT: usize = 388;
+const PROP_SHARED_MEM_PER_MULTIPROCESSOR: usize = 640;
+const PROP_SHARED_MEM_PER_BLOCK_OPTIN: usize = 696;
+const PROP_MAX_THREADS_PER_MULTIPROCESSOR: usize = 624;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaGetDeviceProperties_v2(
@@ -358,6 +369,42 @@ pub unsafe extern "system" fn cudaGetDeviceProperties_v2(
         if attr(11, &mut pitch) == SUCCESS {
             p.mem_pitch = pitch as usize;
         }
+
+        // Fill ABI offsets past `minor` that GGML / cudart consumers read.
+        let base = prop as *mut u8;
+        let write_usize = |offset: usize, value: usize| {
+            base.add(offset).cast::<usize>().write_unaligned(value);
+        };
+        let write_i32 = |offset: usize, value: c_int| {
+            base.add(offset).cast::<c_int>().write_unaligned(value);
+        };
+        write_usize(PROP_TEXTURE_ALIGNMENT, 512);
+        write_usize(PROP_TEXTURE_ALIGNMENT + 8, 32); // texturePitchAlignment
+        let mut mp = 0;
+        if attr(16, &mut mp) == SUCCESS {
+            write_i32(PROP_MULTIPROCESSOR_COUNT, mp);
+        }
+        let mut shared_mp = 0;
+        if attr(81, &mut shared_mp) == SUCCESS {
+            write_usize(PROP_SHARED_MEM_PER_MULTIPROCESSOR, shared_mp as usize);
+        }
+        let mut optin = 0;
+        if attr(97, &mut optin) == SUCCESS {
+            write_usize(PROP_SHARED_MEM_PER_BLOCK_OPTIN, optin as usize);
+        } else {
+            // Fall back to per-block shared so soft_max can still opt into SLM.
+            write_usize(PROP_SHARED_MEM_PER_BLOCK_OPTIN, p.shared_mem_per_block);
+        }
+        let mut max_threads_mp = 0;
+        if attr(39, &mut max_threads_mp) == SUCCESS {
+            write_i32(PROP_MAX_THREADS_PER_MULTIPROCESSOR, max_threads_mp);
+        }
+        // Integrated / canMapHostMemory — common cudart bring-up checks.
+        let mut integrated = 0;
+        if attr(18, &mut integrated) == SUCCESS {
+            write_i32(396, integrated);
+        }
+        write_i32(400, 1); // canMapHostMemory
     }
     set_error(SUCCESS)
 }
