@@ -1002,7 +1002,9 @@ fn probe_dot_product(runtime: &Runtime, context: &mut CudaContext) {
         ptx::set_dynamic_shared_bytes(window);
         export_log_always(format_args!("dynamic shared window {window} (device max {device_max})"));
     }
-    if std::env::var_os("CUDA_FOR_INTEL_DP4A").as_deref() == Some(std::ffi::OsStr::new("0")) {
+    // The native integer-dot-product lowering is opt-in (CUDA_FOR_INTEL_DP4A=1) until the
+    // Q6_K ncols_dst=4 mismatch is root-caused.
+    if std::env::var_os("CUDA_FOR_INTEL_DP4A").as_deref() != Some(std::ffi::OsStr::new("1")) {
         return;
     }
     #[cfg(test)]
