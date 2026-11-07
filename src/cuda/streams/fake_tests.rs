@@ -152,6 +152,10 @@ pub(super) fn assert_baseline() {
 #[test]
 fn fake_cuda_library_loads_in_each_context_and_retires_handles() {
     use crate::cuda::library::*;
+    // The one-instruction test kernel is an empty body, which the runtime otherwise rejects
+    // as an architecture-guard stub.
+    // SAFETY: set before any other thread of this test reads it.
+    unsafe { std::env::set_var("CFI_ALLOW_EMPTY_KERNELS", "1") };
     use std::ptr::null;
 
     let _fixture = Fixture::new();

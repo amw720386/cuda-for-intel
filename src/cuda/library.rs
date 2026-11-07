@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct Libraries {
-    images: HashMap<usize, Library>,
+    pub(in crate::cuda) images: HashMap<usize, Library>,
     kernels: HashMap<usize, (usize, CString)>,
 }
 
@@ -14,7 +14,7 @@ impl Libraries {
     }
 }
 
-struct Library {
+pub(in crate::cuda) struct Library {
     ptx: Vec<u8>,
     /// Normalised PTX for per-kernel translation: `None` until needed, `Some(None)` if unusable.
     prepared: Option<Option<std::sync::Arc<String>>>,
@@ -349,12 +349,12 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
     trace::call("cuLibraryUnload", || {
         status(state(|state| {
             let key = library.addr();
-            if let Some(lazy) = state.lazy_modules.remove(&key)
-                && let Some(context) = state.contexts.get_mut(&lazy.context)
-            {
-                for (child, _) in lazy.children.values() {
-                    context.streams.wait_all(&state.runtime.api)?;
-                    context.unload(&state.runtime.api, *child)?;
+            if let Some(lazy) = state.lazy_modules.remove(&key) {
+                for ((ctx, _), (child, _)) in lazy.children.iter() {
+                    if let Some(context) = state.contexts.get_mut(ctx) {
+                        context.streams.wait_all(&state.runtime.api)?;
+                        context.unload(&state.runtime.api, *child)?;
+                    }
                 }
             }
             let library = state.libraries.images.get_mut(&key).ok_or(InvalidHandle)?;

@@ -118,7 +118,7 @@ pub(crate) struct LazyModule {
     pub(crate) prepared: std::cell::OnceCell<String>,
     pub(crate) names: std::collections::HashSet<CString>,
     /// kernel name -> (hidden child module, function handle)
-    pub(crate) children: HashMap<CString, (usize, usize)>,
+    pub(crate) children: HashMap<(usize, CString), (usize, usize)>,
 }
 
 struct CudaModule {
@@ -1360,19 +1360,21 @@ fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
 pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
     // Translation settings (dp4a lowering, dynamic shared window) must be fixed before
     // any source is normalised or any cache key is computed.
-    if let Some(context_key) = state.lazy_modules.get(&module).map(|l| l.context)
-        && let Some(context) = state.contexts.get_mut(&context_key)
+    let lazy_context = state.lazy_modules.get(&module).map(|l| l.context);
+    // Each context gets its own translation of a kernel, like a driver module load per context.
+    let current_context = current().or(lazy_context).ok_or(InvalidContext)?;
+    if let Some(context) = state.contexts.get_mut(&current_context)
     {
         probe_dot_product(&state.runtime, context);
     }
     let lazy = state.lazy_modules.get(&module).ok_or(InvalidHandle)?;
-    if let Some(&(_, function)) = lazy.children.get(name) {
+    if let Some(&(_, function)) = lazy.children.get(&(current_context, name.to_owned())) {
         return Ok(function);
     }
     if !lazy.names.contains(name) {
         return Err(NotFound);
     }
-    let context_key = lazy.context;
+    let context_key = current_context;
     let raw_len = lazy.raw.len();
     if trace::enabled() {
         trace::record(format_args!("lazy kernel {}", name.to_string_lossy()));
@@ -1443,7 +1445,7 @@ pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr
         .get_mut(&module)
         .ok_or(InvalidHandle)?
         .children
-        .insert(name.to_owned(), (child, function));
+        .insert((context_key, name.to_owned()), (child, function));
     Ok(function)
 }
 
@@ -1470,11 +1472,15 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
 pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
     trace::call("cuModuleUnload", || {
         streams::drain_unlocked(None);
+        // A library's module is owned by the library: only cuLibraryUnload releases it.
+        if state(|state| Ok(state.libraries.images.contains_key(&module.addr()))).unwrap_or(false) {
+            return InvalidHandle;
+        }
         let lazy = state(|state| Ok(state.lazy_modules.remove(&module.addr()))).unwrap_or(None);
         if let Some(lazy) = lazy {
             return status(state(|state| {
-                if let Some(context) = state.contexts.get_mut(&lazy.context) {
-                    for (child, _) in lazy.children.values() {
+                for ((ctx, _), (child, _)) in lazy.children.iter() {
+                    if let Some(context) = state.contexts.get_mut(ctx) {
                         context.streams.wait_all(&state.runtime.api)?;
                         context.unload(&state.runtime.api, *child)?;
                     }
