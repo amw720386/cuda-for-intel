@@ -16,6 +16,8 @@ impl Libraries {
 
 struct Library {
     ptx: Vec<u8>,
+    /// Normalised PTX for per-kernel translation: `None` until needed, `Some(None)` if unusable.
+    prepared: Option<Option<std::sync::Arc<String>>>,
     entries: HashMap<CString, Option<usize>>,
     unloading: bool,
 }
@@ -155,6 +157,7 @@ pub unsafe extern "system" fn cuLibraryLoadData(
                 key,
                 Library {
                     ptx: bytes,
+                    prepared: None,
                     entries,
                     unloading: false,
                 },
@@ -265,6 +268,78 @@ pub unsafe extern "system" fn cuModuleGetLoadingMode(mode: *mut c_int) -> CuResu
         unsafe { mode.write(2) };
         Success
     })
+/// `CUDA_FOR_INTEL_LAZY=0` restores whole-library modules.
+fn lazy_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_LAZY").as_deref() != Some(std::ffi::OsStr::new("0")))
+}
+
+/// Resolves a library kernel through a module holding only that kernel. `Ok(None)` means the
+/// kernel needs the whole-library path (module variables, or a translation the entry path
+/// cannot do), which then reports any real error itself.
+fn lazy_kernel_function(state: &mut State, library: usize, name: &CStr) -> Result<Option<usize>, CuResult> {
+    let context_key = current().ok_or(InvalidContext)?;
+    // Translation settings (dp4a lowering, dynamic shared window) must be fixed before any
+    // source is normalised.
+    probe_dot_product(
+        &state.runtime,
+        state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?,
+    );
+    let image = state.libraries.images.get_mut(&library).ok_or(InvalidHandle)?;
+    if image.unloading {
+        return Err(InvalidHandle);
+    }
+    if let Some(&module) = state
+        .contexts
+        .get(&context_key)
+        .ok_or(ContextIsDestroyed)?
+        .entry_modules
+        .get(&(library, name.to_owned()))
+    {
+        let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
+        return module_function(&state.runtime.api, context, &mut state.next_handle, module, name).map(Some);
+    }
+    if image.prepared.is_none() {
+        let started = std::time::Instant::now();
+        let prepared = std::str::from_utf8(&image.ptx)
+            .ok()
+            .and_then(|source| ptx::prepare_source(source).ok())
+            .map(std::sync::Arc::new);
+        export_log(format_args!(
+            "lazy library prepared: ptx_bytes={} ok={} prepare_ms={}",
+            image.ptx.len(),
+            prepared.is_some(),
+            started.elapsed().as_millis()
+        ));
+        image.prepared = Some(prepared);
+    }
+    let Some(Some(prepared)) = image.prepared.clone() else {
+        return Ok(None);
+    };
+    // CFI_DUMP_ENTRY=<substring> with CFI_DUMP_PTX_DIR keeps the normalised PTX of matching kernels.
+    if let (Some(pattern), Some(dir)) = (std::env::var_os("CFI_DUMP_ENTRY"), std::env::var_os("CFI_DUMP_PTX_DIR"))
+        && name.to_string_lossy().contains(&*pattern.to_string_lossy())
+        && let Some(start) = prepared.find(&format!(".entry {}", name.to_string_lossy()))
+    {
+        let end = prepared[start + 6..].find(".entry").map_or(prepared.len(), |e| start + 6 + e);
+        let file = format!("entry-{}.ptx", name.to_string_lossy().chars().take(80).collect::<String>());
+        let _ = std::fs::write(std::path::Path::new(&dir).join(file), &prepared[start..end]);
+    }
+    let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
+    context.check_live()?;
+    let module = match load_ptx_entry(
+        &state.runtime,
+        context,
+        &mut state.next_handle,
+        &prepared,
+        &name.to_string_lossy(),
+    ) {
+        Ok(module) => module,
+        Err(InvalidPtx) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    context.entry_modules.insert((library, name.to_owned()), module);
+    module_function(&state.runtime.api, context, &mut state.next_handle, module, name).map(Some)
 }
 
 #[unsafe(no_mangle)]
@@ -287,6 +362,17 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
                     context.streams.wait_all(&state.runtime.api)?;
                     context.unload(&state.runtime.api, module)?;
                     context.library_modules.remove(&key);
+                }
+                let lazy: Vec<_> = context
+                    .entry_modules
+                    .iter()
+                    .filter(|((owner, _), _)| *owner == key)
+                    .map(|(entry, &module)| (entry.clone(), module))
+                    .collect();
+                for (entry, module) in lazy {
+                    context.streams.wait_all(&state.runtime.api)?;
+                    context.unload(&state.runtime.api, module)?;
+                    context.entry_modules.remove(&entry);
                 }
             }
             for kernel in library.entries.values().flatten() {

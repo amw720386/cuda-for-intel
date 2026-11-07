@@ -11,6 +11,7 @@ use std::sync::{
 pub(crate) mod fake;
 #[cfg(test)]
 pub(crate) mod fault;
+mod native_cache;
 mod regular;
 pub(crate) use regular::{Queue, QueueFence};
 mod streams;
@@ -80,6 +81,12 @@ fn check(call: &'static str, status: Status) -> Result<(), Error> {
 fn invoke(_name: &'static str, native: impl FnOnce() -> Status) -> Status {
     #[cfg(test)]
     if let Some(status) = fault::status(_name) {
+        return status;
+    }
+    if crate::cuda::profile_on() {
+        let started = std::time::Instant::now();
+        let status = native();
+        crate::cuda::profile_note(_name, started.elapsed().as_nanos() as u64);
         return status;
     }
     native()
@@ -404,6 +411,7 @@ loader_api! {
     zeCommandListAppendMemoryFill(Raw, Raw, *const c_void, usize, usize, Raw, u32, *mut Raw),
     zeModuleCreate(Raw, Raw, *const ModuleDesc, *mut Raw, *mut Raw),
     zeModuleDestroy(Raw),
+    zeModuleGetNativeBinary(Raw, *mut usize, *mut u8),
     zeModuleGetGlobalPointer(Raw, *const c_char, *mut usize, *mut Raw),
     zeCommandListAppendWriteGlobalTimestamp(Raw, *mut u64, Raw, u32, *mut Raw),
     zeModuleBuildLogGetString(Raw, *mut usize, *mut c_char),
@@ -538,6 +546,8 @@ pub(crate) struct Context {
     commands: Option<Handle>,
     build_logs: Vec<Handle>,
     ordinal: u32,
+    /// Device and driver identity mixed into native-binary cache keys.
+    cache_tag: String,
 }
 
 pub(crate) struct Module {
@@ -561,6 +571,22 @@ impl Module {
         Ok(kernel)
     }
 
+    /// The driver's compiled binary for this module, when it can produce one.
+    fn native_binary(&self, api: &Api) -> Option<Vec<u8>> {
+        let mut size = 0usize;
+        if unsafe { (api.zeModuleGetNativeBinary)(self.handle.0, &mut size, std::ptr::null_mut()) } != 0
+            || size == 0
+        {
+            return None;
+        }
+        let mut data = vec![0u8; size];
+        (unsafe { (api.zeModuleGetNativeBinary)(self.handle.0, &mut size, data.as_mut_ptr()) } == 0)
+            .then(|| {
+                data.truncate(size);
+                data
+            })
+    }
+
     /// Device address and size of an exported module variable.
     pub(crate) fn global_pointer(&self, api: &Api, name: &CStr) -> Result<(usize, usize), Error> {
         let (mut size, mut pointer) = (0usize, std::ptr::null_mut());
@@ -581,6 +607,25 @@ impl Module {
             (api.zeModuleDestroy)(self.handle.0)
         })
     }
+}
+
+/// Intel compiler options for a SPIR-V module of `words` words. `CUDA_FOR_INTEL_BUILD_FLAGS`
+/// applies to every module and `CUDA_FOR_INTEL_BIG_FLAGS` to modules above
+/// `CUDA_FOR_INTEL_BIG_WORDS` (default 400000) words.
+fn build_flags(words: usize) -> String {
+    let get = |name: &str| std::env::var(name).unwrap_or_default();
+    let mut flags = get("CUDA_FOR_INTEL_BUILD_FLAGS");
+    let threshold = get("CUDA_FOR_INTEL_BIG_WORDS").parse().unwrap_or(400_000);
+    if words > threshold {
+        let big = get("CUDA_FOR_INTEL_BIG_FLAGS");
+        if !big.is_empty() {
+            if !flags.is_empty() {
+                flags.push(' ');
+            }
+            flags.push_str(&big);
+        }
+    }
+    flags
 }
 
 fn build_log(api: &Api, handle: Raw) -> String {
@@ -622,6 +667,14 @@ impl Context {
             commands: None,
             build_logs: Vec::new(),
             ordinal,
+            cache_tag: format!(
+                "{:x}:{:x}:{}:{:x}:{:x}",
+                device.info.vendor_id,
+                device.info.device_id,
+                device.info.name,
+                device.info.driver_version,
+                device.info.api_version
+            ),
         })
     }
 
@@ -746,12 +799,40 @@ impl Context {
 
     pub(crate) fn load_module(&mut self, api: &Api, words: &[u32]) -> Result<Module, Error> {
         self.commands()?;
+        // Fake backends cannot produce native binaries.
+        #[cfg(test)]
+        let cache = if api.is_fake() { None } else { native_cache::directory() };
+        #[cfg(not(test))]
+        let cache = native_cache::directory();
+        let flags = build_flags(words.len());
+        let key = cache.map(|_| native_cache::key(words, &self.cache_tag, &flags));
+        if let (Some(dir), Some(key)) = (cache, &key) {
+            if let Some(binary) = native_cache::load(dir, key) {
+                match self.create_module(api, 1, binary.as_ptr(), binary.len(), "") {
+                    Ok(module) => return Ok(module),
+                    Err(Error::Build(..)) | Err(Error::Driver(..)) => native_cache::discard(dir, key),
+                    Err(other) => return Err(other),
+                }
+            }
+        }
+        let module = self.create_module(api, 0, words.as_ptr().cast(), std::mem::size_of_val(words), &flags)?;
+        if let (Some(dir), Some(key)) = (cache, &key) {
+            if let Some(binary) = module.native_binary(api) {
+                native_cache::store(dir, key, &binary);
+            }
+        }
+        Ok(module)
+    }
+
+    /// `format` 0 is SPIR-V and 1 is a native binary (`ZE_MODULE_FORMAT_*`).
+    fn create_module(&mut self, api: &Api, format: u32, input: *const u8, size: usize, flags: &str) -> Result<Module, Error> {
+        let flags = std::ffi::CString::new(flags).unwrap_or_default();
         let desc = ModuleDesc {
             header: Header::new(0x1b),
-            format: 0, // ZE_MODULE_FORMAT_IL_SPIRV
-            input_size: std::mem::size_of_val(words),
-            input: words.as_ptr().cast(),
-            build_flags: std::ptr::null(),
+            format,
+            input_size: size,
+            input,
+            build_flags: if flags.as_bytes().is_empty() { std::ptr::null() } else { flags.as_ptr() },
             constants: std::ptr::null(),
         };
         let mut module = std::ptr::null_mut();

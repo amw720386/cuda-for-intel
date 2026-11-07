@@ -538,6 +538,13 @@ enum Instruction<'a> {
         dst: [&'a str; 4],
         addr: &'a str,
     },
+    /// `ld.global.v2/v4.u8` — packed byte vector load, each lane zero-extended.
+    LoadVecU8 {
+        space: Space,
+        count: u8,
+        dst: [&'a str; 4],
+        addr: &'a str,
+    },
     AtomicAdd32(&'a str, &'a str, &'a str),
     /// CUDA `shfl.sync.bfly.b32` â€” warp butterfly exchange with an active mask.
     /// Sources are `[value, xor_mask, clamp, membermask]`.
@@ -636,6 +643,9 @@ impl<'a> Instruction<'a> {
                 count, dst, addr, ..
             }
             | LoadVecU16 {
+                count, dst, addr, ..
+            }
+            | LoadVecU8 {
                 count, dst, addr, ..
             } => {
                 out.extend_from_slice(&dst[..usize::from(*count)]);
@@ -753,6 +763,7 @@ impl<'a> Instruction<'a> {
                 | Self::LoadSigned { .. }
                 | Self::LoadVec { .. }
                 | Self::LoadVecU16 { .. }
+                | Self::LoadVecU8 { .. }
                 | Self::AtomicAdd32(..)
                 | Self::Atomic { .. }
                 | Self::Ext {
@@ -777,6 +788,7 @@ impl<'a> Instruction<'a> {
                 | Self::LoadSigned { space: Space::Local, .. }
                 | Self::LoadVec { space: Space::Local, .. }
                 | Self::LoadVecU16 { space: Space::Local, .. }
+                | Self::LoadVecU8 { space: Space::Local, .. }
         )
     }
 
@@ -926,6 +938,45 @@ pub(crate) fn skipped_entries() -> Vec<(String, String)> {
 #[allow(dead_code)]
 pub(crate) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), String>)>, Error> {
     probe::probe_module(prepared)
+static DYNAMIC_SHARED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(49152);
+
+/// Bytes reserved for a kernel's dynamic (`extern __shared__`) block, fixed at translation time.
+pub(crate) fn dynamic_shared_bytes() -> u32 {
+    DYNAMIC_SHARED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_dynamic_shared_bytes(bytes: u32) {
+    DYNAMIC_SHARED.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+static DOT_PRODUCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `dp4a` lowers to SPIR-V integer dot product (Xe DP4A) instead of scalar arithmetic.
+/// The runtime turns it on after the driver accepts a probe module; `CUDA_FOR_INTEL_DP4A=0` keeps it off.
+pub(crate) fn dot_product_enabled() -> bool {
+    DOT_PRODUCT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_dot_product(enabled: bool) {
+    DOT_PRODUCT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Smallest module that exercises every dot-product form, used to probe driver support.
+pub(crate) const DOT_PROBE_PTX: &str = ".version 7.0\n.target sm_75\n.address_size 64\n\
+.visible .entry cfi_dot_probe(.param .u64 out)\n{\n.reg .b32 %r<8>;\n.reg .b64 %rd<3>;\n\
+ld.param.u64 %rd1, [out];\ncvta.to.global.u64 %rd2, %rd1;\nld.global.u32 %r1, [%rd2];\n\
+dp4a.s32.s32 %r2, %r1, %r1, %r1;\ndp4a.u32.u32 %r3, %r1, %r2, %r2;\n\
+dp4a.s32.u32 %r4, %r1, %r3, %r3;\ndp4a.u32.s32 %r5, %r1, %r4, %r4;\n\
+st.global.u32 [%rd2], %r5;\nret;\n}\n";
+
+/// Normalised source for [`translate_entry`]; computed once per library.
+pub(crate) fn prepare_source(source: &str) -> Result<String, Error> {
+    prepare(source)
+}
+
+/// Translates a single entry of a source returned by [`prepare_source`], without module variables.
+pub(crate) fn translate_entry(prepared: &str, name: &str) -> Result<Translation, Error> {
+    spirv::emit(vec![parse::parse_named(prepared, name)?], Vec::new())
 }
 
 pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
@@ -1000,6 +1051,7 @@ mod tests {
                 let name = entry.name.to_owned();
                 if let Err(error) = spirv::emit(vec![entry], vars.device.clone()) {
                     failed += 1;
+                    eprintln!("SCAN_FAIL blob{blobs} {name} :: {error}");
                     kinds.entry(error.to_string()).or_default().push(name);
                 }
             }
