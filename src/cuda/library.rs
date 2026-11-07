@@ -16,6 +16,8 @@ impl Libraries {
 
 struct Library {
     ptx: Vec<u8>,
+    /// Normalised PTX for per-kernel translation: `None` until needed, `Some(None)` if unusable.
+    prepared: Option<Option<std::sync::Arc<String>>>,
     entries: HashMap<CString, Option<usize>>,
     unloading: bool,
 }
@@ -110,6 +112,7 @@ pub unsafe extern "system" fn cuLibraryLoadData(
                 key,
                 Library {
                     ptx: bytes,
+                    prepared: None,
                     entries,
                     unloading: false,
                 },
@@ -192,6 +195,11 @@ pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize,
             name.to_string_lossy()
         ));
     }
+    if lazy_enabled()
+        && let Some(function) = lazy_kernel_function(state, library, &name)?
+    {
+        return Ok(function);
+    }
     let result = module_for_library(state, library).and_then(|(context, module)| {
         module_function(
             &state.runtime.api,
@@ -213,6 +221,65 @@ pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize,
     result
 }
 
+/// `CUDA_FOR_INTEL_LAZY=0` restores whole-library modules.
+fn lazy_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_LAZY").as_deref() != Some(std::ffi::OsStr::new("0")))
+}
+
+/// Resolves a library kernel through a module holding only that kernel. `Ok(None)` means the
+/// kernel needs the whole-library path (module variables, or a translation the entry path
+/// cannot do), which then reports any real error itself.
+fn lazy_kernel_function(state: &mut State, library: usize, name: &CStr) -> Result<Option<usize>, CuResult> {
+    let image = state.libraries.images.get_mut(&library).ok_or(InvalidHandle)?;
+    if image.unloading {
+        return Err(InvalidHandle);
+    }
+    let context_key = current().ok_or(InvalidContext)?;
+    if let Some(&module) = state
+        .contexts
+        .get(&context_key)
+        .ok_or(ContextIsDestroyed)?
+        .entry_modules
+        .get(&(library, name.to_owned()))
+    {
+        let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
+        return module_function(&state.runtime.api, context, &mut state.next_handle, module, name).map(Some);
+    }
+    if image.prepared.is_none() {
+        let started = std::time::Instant::now();
+        let prepared = std::str::from_utf8(&image.ptx)
+            .ok()
+            .and_then(|source| ptx::prepare_source(source).ok())
+            .map(std::sync::Arc::new);
+        export_log(format_args!(
+            "lazy library prepared: ptx_bytes={} ok={} prepare_ms={}",
+            image.ptx.len(),
+            prepared.is_some(),
+            started.elapsed().as_millis()
+        ));
+        image.prepared = Some(prepared);
+    }
+    let Some(Some(prepared)) = image.prepared.clone() else {
+        return Ok(None);
+    };
+    let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
+    context.check_live()?;
+    let module = match load_ptx_entry(
+        &state.runtime,
+        context,
+        &mut state.next_handle,
+        &prepared,
+        &name.to_string_lossy(),
+    ) {
+        Ok(module) => module,
+        Err(InvalidPtx) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    context.entry_modules.insert((library, name.to_owned()), module);
+    module_function(&state.runtime.api, context, &mut state.next_handle, module, name).map(Some)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
     trace::call("cuLibraryUnload", || {
@@ -225,6 +292,17 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
                     context.streams.wait_all(&state.runtime.api)?;
                     context.unload(&state.runtime.api, module)?;
                     context.library_modules.remove(&key);
+                }
+                let lazy: Vec<_> = context
+                    .entry_modules
+                    .iter()
+                    .filter(|((owner, _), _)| *owner == key)
+                    .map(|(entry, &module)| (entry.clone(), module))
+                    .collect();
+                for (entry, module) in lazy {
+                    context.streams.wait_all(&state.runtime.api)?;
+                    context.unload(&state.runtime.api, module)?;
+                    context.entry_modules.remove(&entry);
                 }
             }
             for kernel in library.entries.values().flatten() {
