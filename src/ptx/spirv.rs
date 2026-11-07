@@ -314,6 +314,20 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    /// A shift count: PTX types it `.u32`, but 64-bit registers and immediates occur too.
+    fn shift_count64(&mut self, operand: &str) -> Result<Word, Error> {
+        if operand.starts_with('%') {
+            let value = self.read(operand)?;
+            return Ok(match value.kind {
+                Kind::B32 => self.builder.u_convert(self.u64_type, None, value.id)?,
+                Kind::B64 => value.id,
+                Kind::Address(_) => self.builder.bitcast(self.u64_type, None, value.id)?,
+                Kind::Predicate => return Err(Error::new(format!("expected an integer shift count for {operand}"))),
+            });
+        }
+        self.integer(operand, Kind::B64)
+    }
+
     fn parse_u32(operand: &str) -> Option<u32> {
         if let Some(hex) = operand
             .strip_prefix("0x")
@@ -2473,7 +2487,7 @@ impl<'a> Emitter<'a> {
                 // signed `/32` idiom (`shr.s64`/`shr.u64`) and OOB-fault
                 // quantize_q8_1 stores.
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B64)?;
+                let shift = self.shift_count64(shift)?;
                 let bits = self.builder.constant_bit64(self.u64_type, 64);
                 let max = self.builder.constant_bit64(self.u64_type, 63);
                 let in_range = self
@@ -2489,21 +2503,20 @@ impl<'a> Emitter<'a> {
                 (dst, id, Kind::B64)
             }
             Instruction::ShiftLeft64(dst, [value, shift]) => {
-                if !shift.parse::<u32>().is_ok_and(|n| n < 64) {
-                    return Err(Error::new(
-                        "only immediate PTX left shifts below 64 are supported",
-                    ));
-                }
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B64)?;
-                let id = self
-                    .builder
-                    .shift_left_logical(self.u64_type, None, value, shift)?;
+                let shift = self.shift_count64(shift)?;
+                // PTX clamps the count: 64 or more gives zero.
+                let bits = self.builder.constant_bit64(self.u64_type, 64);
+                let zero = self.builder.constant_bit64(self.u64_type, 0);
+                let in_range = self.builder.u_less_than(self.bool_type, None, shift, bits)?;
+                let safe = self.builder.select(self.u64_type, None, in_range, shift, zero)?;
+                let shifted = self.builder.shift_left_logical(self.u64_type, None, value, safe)?;
+                let id = self.builder.select(self.u64_type, None, in_range, shifted, zero)?;
                 (dst, id, Kind::B64)
             }
             Instruction::ShiftRightLogical64(dst, [value, shift]) => {
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B64)?;
+                let shift = self.shift_count64(shift)?;
                 let bits = self.builder.constant_bit64(self.u64_type, 64);
                 let zero = self.builder.constant_bit64(self.u64_type, 0);
                 let in_range = self
