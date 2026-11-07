@@ -75,6 +75,10 @@ mod hw_mma;
 mod hw_float;
 #[path = "gpu/hw_warp.rs"]
 mod hw_warp;
+#[path = "gpu/module_globals.rs"]
+mod module_globals;
+#[path = "gpu/event_timing.rs"]
+mod event_timing;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

@@ -2,7 +2,7 @@
 use crate::level_zero::{Api, Context, DeviceInfo, Error, Handle, Module, Runtime};
 use crate::ptx::{self, Param};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
@@ -14,6 +14,7 @@ mod export_table;
 mod gap_math;
 mod gaps;
 mod graph_api;
+mod globals;
 mod graphs;
 #[cfg(windows)]
 mod integrity;
@@ -88,6 +89,8 @@ struct CudaContext {
     host_registered: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
     library_modules: HashMap<usize, usize>,
+    /// Allocation-table entries that belong to a module variable, not to cuMemAlloc.
+    module_globals: BTreeSet<usize>,
     functions: HashMap<usize, (usize, CString)>,
     local_storage: HashMap<usize, export_table::ContextStorage>,
 }
@@ -95,6 +98,8 @@ struct CudaContext {
 struct CudaModule {
     backend: Module,
     entries: HashMap<CString, CudaEntry>,
+    /// Exported `.global`/`.const` variables of the module.
+    globals: HashMap<CString, globals::ModuleGlobal>,
     unloading: bool,
 }
 
@@ -402,6 +407,7 @@ impl State {
                 host_registered: BTreeMap::new(),
                 modules: HashMap::new(),
                 library_modules: HashMap::new(),
+                module_globals: BTreeSet::new(),
                 functions: HashMap::new(),
                 local_storage: HashMap::new(),
             },
@@ -534,6 +540,7 @@ impl CudaContext {
 
     fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
         self.streams.drain_for_teardown(api)?;
+        self.streams.release_timestamps(api, &self.backend)?;
         self.streams.destroy(api)?;
         while let Some(&key) = self.modules.keys().next() {
             self.unload(api, key)?;
@@ -557,7 +564,7 @@ impl CudaContext {
     }
 
     fn free(&mut self, api: &Api, base: usize) -> Result<(), CuResult> {
-        if !self.allocations.contains_key(&base) {
+        if !self.allocations.contains_key(&base) || self.module_globals.contains(&base) {
             return Err(InvalidValue);
         }
         self.backend
@@ -569,6 +576,7 @@ impl CudaContext {
     }
 
     fn unload(&mut self, api: &Api, key: usize) -> Result<(), CuResult> {
+        self.retire_module_globals(key);
         let module = self.modules.get_mut(&key).ok_or(InvalidHandle)?;
         // A failed module destroy can follow a successful kernel destroy.
         // Keep the module for a retry, while retiring its function handles.
@@ -980,6 +988,7 @@ fn load_ptx(
     if info.spirv_version < 0x10000 {
         return Err(NotSupported);
     }
+    let globals = globals::from_translation(&translated.globals)?;
     let mut entries = HashMap::with_capacity(translated.kernels.len());
     for kernel in translated.kernels {
         let argument_bytes = launch_args::size(&kernel.params);
@@ -1013,6 +1022,7 @@ fn load_ptx(
         CudaModule {
             backend,
             entries,
+            globals,
             unloading: false,
         },
     );

@@ -20,12 +20,17 @@ mod batch;
 mod batch_tests;
 mod batch_wake;
 pub(super) mod events;
+pub(super) mod timing;
 #[cfg(test)]
 mod fake_tests;
 #[cfg(test)]
 mod graph_api_tests;
 #[cfg(test)]
+mod globals_tests;
+#[cfg(test)]
 mod graph_tests;
+#[cfg(test)]
+mod timing_tests;
 #[cfg(all(test, windows))]
 mod profiling;
 #[cfg(all(test, windows))]
@@ -292,6 +297,7 @@ pub(super) struct Streams {
     retired: Vec<Stream>,
     fences: Fences,
     events: HashMap<usize, Option<Recording>>,
+    times: timing::EventTimes,
     /// Events recorded while their stream was capturing: event -> (capture, stream, op sequence).
     pub(super) captured: HashMap<usize, (Capture, usize, u64)>,
     policy: Option<Policy>,
@@ -324,6 +330,7 @@ impl Streams {
             retired: Vec::new(),
             fences: Fences::default(),
             events: HashMap::new(),
+            times: timing::EventTimes::default(),
             captured: HashMap::new(),
             event_waiters: Arc::new(()),
             track_legacy: false,
@@ -655,6 +662,7 @@ impl Streams {
             self.retired.pop();
         }
         self.events.clear();
+        self.times.clear();
         self.captured.clear();
         self.fences.destroy(api).map_err(backend_error)
     }

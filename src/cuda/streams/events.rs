@@ -98,11 +98,11 @@ impl Streams {
         Ok(())
     }
 
-    fn event(&self, handle: Opaque) -> Result<&Option<Recording>, CuResult> {
+    pub(super) fn event(&self, handle: Opaque) -> Result<&Option<Recording>, CuResult> {
         self.events.get(&handle.addr()).ok_or(InvalidHandle)
     }
 
-    fn event_marker(
+    pub(super) fn event_marker(
         &mut self,
         api: &Api,
         context: &Context,
@@ -145,6 +145,7 @@ pub unsafe extern "system" fn cuEventCreate(out: *mut Opaque, flags: u32) -> CuR
             }
             let key = reserve_handle(next)?;
             context.streams.events.insert(key, None);
+            context.streams.times.register(key, flags);
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))
@@ -173,7 +174,7 @@ pub extern "system" fn cuEventRecord(event: Opaque, stream: Opaque) -> CuResult 
             streams.captured.remove(&event.addr());
             // Publish only after append succeeds. Older consumers keep their own
             // reference to the previous recording, even after this handle changes.
-            let completion = streams.event_marker(&runtime.api, &context.backend, key, None)?;
+            let completion = streams.record_event(&runtime.api, &context.backend, key, event.addr())?;
             streams.events.insert(
                 event.addr(),
                 Some(Recording {
@@ -250,11 +251,15 @@ pub extern "system" fn cuEventSynchronize(event: Opaque) -> CuResult {
 pub extern "system" fn cuEventDestroy_v2(event: Opaque) -> CuResult {
     trace::call("cuEventDestroy_v2", || {
         status(with_context(|_, context| {
-            context
+            let recording = context
                 .streams
                 .events
                 .remove(&event.addr())
                 .ok_or(InvalidHandle)?;
+            context
+                .streams
+                .times
+                .release(event.addr(), recording.map(|recording| recording.fence));
             context.streams.captured.remove(&event.addr());
             Ok(())
         }))
