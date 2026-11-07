@@ -373,9 +373,13 @@ pub struct DotOpts {
     pub half_mul: bool,
     /// Use d8 * sum(q8) instead of the stored (half rounded) block sum.
     pub exact_sum: bool,
+    /// mmq (DS4 layout) subtracts the K-quant mins through the stored block sum as well.
+    pub k_min_by_sum: bool,
+    /// mmq K-quant tiles keep (d*sc, dmin*m) as half2.
+    pub half_scales: bool,
 }
 
-pub const MMVQ: DotOpts = DotOpts { half_mul: true, exact_sum: false };
+pub const MMVQ: DotOpts = DotOpts { half_mul: true, exact_sum: false, k_min_by_sum: false, half_scales: false };
 
 pub fn dot_ref(q: Q, row: &[u8], y: &[u8]) -> (f64, f64) {
     dot_ref_opts(q, row, y, MMVQ)
@@ -385,8 +389,15 @@ pub fn dot_ref_opts(q: Q, row: &[u8], y: &[u8], opts: DotOpts) -> (f64, f64) {
     let mut total = 0.0f64;
     let mut abs = 0.0f64;
     let per = q.qk() / 32;
+    let by_sum = q.min_by_sum() || (opts.k_min_by_sum && matches!(q, Q::Q4K | Q::Q5K));
     for (bi, wb) in row.chunks(q.block_bytes()).enumerate() {
-        let elems = decode_block(q, wb);
+        let mut elems = decode_block(q, wb);
+        if opts.half_scales && matches!(q, Q::Q4K | Q::Q5K) {
+            for e in &mut elems {
+                e.s = f64::from(f16_val(f16_bits(e.s as f32)));
+                e.m = f64::from(f16_val(f16_bits(e.m as f32)));
+            }
+        }
         for g in 0..per {
             let yb = &y[(bi * per + g) * Q8_1_BYTES..][..Q8_1_BYTES];
             let d8 = half(yb, 0);
@@ -403,7 +414,7 @@ pub fn dot_ref_opts(q: Q, row: &[u8], y: &[u8], opts: DotOpts) -> (f64, f64) {
                 let term = e.s * f64::from(e.q) * u * d8;
                 acc += term;
                 abs += term.abs();
-                if !q.min_by_sum() {
+                if !by_sum {
                     macc += e.m * u * d8;
                     abs += (e.m * u * d8).abs();
                 }
@@ -420,7 +431,7 @@ pub fn dot_ref_opts(q: Q, row: &[u8], y: &[u8], opts: DotOpts) -> (f64, f64) {
                 continue;
             }
             total += acc - macc;
-            if q.min_by_sum() {
+            if by_sum {
                 let m = elems[32 * g].m;
                 debug_assert!(elems[32 * g..32 * g + 32].iter().all(|e| e.m == m));
                 total -= m * s8;

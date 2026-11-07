@@ -662,3 +662,99 @@ fn dp4a_constant_operand_matches_reference_in_both_lowerings() {
         }
     }
 }
+
+/// block_q8_1_mmq (144 bytes, 128 values) from four consecutive q8_1 groups of one column.
+fn mmq_block(layout: &str, groups: &[&[u8]]) -> Vec<u8> {
+    let mut b = vec![0u8; 144];
+    for (g, grp) in groups.iter().enumerate() {
+        b[16 + 32 * g..16 + 32 * g + 32].copy_from_slice(&grp[4..36]);
+        match layout {
+            "d4" => b[4 * g..4 * g + 4].copy_from_slice(&f16_val(u16::from_le_bytes([grp[0], grp[1]])).to_le_bytes()),
+            "ds4" => b[4 * g..4 * g + 4].copy_from_slice(&grp[0..4]),
+            _ => unreachable!(),
+        }
+    }
+    b
+}
+
+fn check_mmq(t: Q, mmq_x: usize, nrows: usize, ncols: usize, k: usize, nsm: u32, seed: u64, pow2: bool) {
+    let layout = match t {
+        Q::Q4_0 | Q::Q4_1 | Q::Q5_1 | Q::Q4K | Q::Q5K => "ds4",
+        Q::Q2K => panic!("D2S6 layout not modelled"),
+        _ => "d4",
+    };
+    let case = gen_case(t, nrows, ncols, k, seed, pow2);
+    let tn = t.ggml_type();
+    let nc_flag = u8::from(nrows % 128 != 0);
+    let main = load_kernel(&format!("_Z9mul_mat_qIL9ggml_type{tn}ELi{mmq_x}ELb{nc_flag}EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii"), false);
+    let fix = load_kernel(&format!("_Z24mul_mat_q_stream_k_fixupIL9ggml_type{tn}ELi{mmq_x}ELb{nc_flag}EEvPKiS2_PfPKfiiiiiiiii"), false);
+    let mut gpu = Gpu::default();
+    let w = gpu.upload(&case.weights.concat());
+    // y: [chunk][col] blocks of 144 bytes
+    let mut y = Vec::new();
+    for chunk in 0..k / 128 {
+        for col in 0..ncols {
+            let groups: Vec<&[u8]> = (0..4).map(|g| &case.y[col][(chunk * 4 + g) * Q8_1_BYTES..][..Q8_1_BYTES]).collect();
+            y.extend(mmq_block(layout, &groups));
+        }
+    }
+    y.extend(vec![0u8; 128 * 144]); // ggml pads src1 by mmq_x_max blocks
+    let yp = gpu.upload(&y);
+    let dst = gpu.alloc(4 * nrows * ncols);
+    let fixup = gpu.alloc(4 * nsm as usize * mmq_x * 128);
+    let (nr, nc, kk) = (nrows as u32, ncols as u32, k as u32);
+    let margs = vec![
+        Arg::P(w), Arg::P(yp), Arg::P(0), Arg::P(0), Arg::P(dst), Arg::P(fixup),
+        Arg::U(kk), Arg::U(nr), Arg::U(nc), Arg::U((k / t.qk()) as u32), Arg::U(nc), Arg::U(nr),
+        Arg::U(1), Arg::U(1), Arg::U(0), Arg::U(0), Arg::U(0), Arg::U(1), Arg::U(1), Arg::U(0), Arg::U(0), Arg::U(0), Arg::U(nc),
+    ];
+    main.run(&mut gpu, [nsm, 1, 1], [32, 8, 1], &margs).unwrap();
+    let fargs = vec![
+        Arg::P(0), Arg::P(0), Arg::P(dst), Arg::P(fixup),
+        Arg::U(kk), Arg::U(nr), Arg::U(nc), Arg::U(nr), Arg::U(1), Arg::U(0), Arg::U(1), Arg::U(0), Arg::U(nc),
+    ];
+    fix.run(&mut gpu, [nsm, 1, 1], [32, 8, 1], &fargs).unwrap();
+    let got = gpu.download_f32(dst, nrows * ncols);
+    let opts = DotOpts { half_mul: false, exact_sum: layout == "d4" || t == Q::Q4_0, k_min_by_sum: true, half_scales: true };
+    for j in 0..ncols {
+        for r in 0..nrows {
+            let (want, mag) = dot_ref_opts(t, &case.weights[r], &case.y[j], opts);
+            let g = f64::from(got[j * nrows + r]);
+            let tol = if pow2 { 1e-7 * mag + 1e-12 } else { 3e-5 * mag + 1e-9 };
+            assert!((g - want).abs() <= tol, "mmq {} x={mmq_x} nsm={nsm} pow2={pow2} col {j} row {r}: got {g} want {want}", t.name());
+        }
+    }
+}
+
+fn mmq_matrix(t: Q) {
+    if ptx_dir().is_none() {
+        return;
+    }
+    for (x, nrows, nsm) in [(8usize, 128usize, 3u32), (32, 192, 5)] {
+        let ncols = if x == 8 { 8 } else { x / 2 + 3 };
+        for (pow2, seed) in [(true, 21u64), (false, 22)] {
+            check_mmq(t, x, nrows, ncols, 512, nsm, seed, pow2);
+        }
+    }
+}
+
+macro_rules! mmq_tests {
+    ($($name:ident: $q:expr,)*) => {$(
+        #[test]
+        fn $name() { mmq_matrix($q); }
+    )*};
+}
+
+mmq_tests! {
+    mmq_q8_0: Q::Q8_0,
+    mmq_q4_k: Q::Q4K,
+    mmq_q6_k: Q::Q6K,
+    mmq_q5_k: Q::Q5K,
+    mmq_q3_k: Q::Q3K,
+    mmq_q4_0: Q::Q4_0,
+    mmq_q5_0: Q::Q5_0,
+    mmq_q4_1: Q::Q4_1,
+    mmq_q5_1: Q::Q5_1,
+    mmq_iq4_nl: Q::IQ4NL,
+    mmq_iq4_xs: Q::IQ4XS,
+}
