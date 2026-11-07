@@ -540,6 +540,25 @@ impl Streams {
         Ok(())
     }
 
+    /// Flush and wait a specific stream (including non-blocking). Used when a
+    /// pageable `cudaMemcpyAsync` falls back to a host-synchronous copy and must
+    /// still observe prior work queued on that stream.
+    pub(super) fn wait_stream(
+        &mut self,
+        api: &Api,
+        key: usize,
+        timeout: u64,
+    ) -> Result<(), CuResult> {
+        let stream = self.get_mut(key)?;
+        stream.flush(api)?;
+        stream.wait(api, timeout)?;
+        Ok(())
+    }
+
+    pub(super) fn stream_is_blocking(&self, key: usize) -> Result<bool, CuResult> {
+        Ok(self.get(key)?.blocking)
+    }
+
     pub(super) fn wait_all(&mut self, api: &Api) -> Result<(), CuResult> {
         let mut flushed = Ok(());
         for stream in self.all_mut() {

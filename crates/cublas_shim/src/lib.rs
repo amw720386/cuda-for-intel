@@ -574,14 +574,36 @@ pub unsafe extern "system" fn cublasGemmBatchedEx(
     compute_type: c_int,
     _algo: c_int,
 ) -> c_int {
-    // GGML builds device-side pointer tables then passes the device address of
-    // those tables cast to `const void**`. Pull them to the host and loop.
+    // GGML builds device-side pointer tables (`k_compute_batched_ptrs`) on the
+    // cuBLAS stream, then passes the *device* address of those tables cast to
+    // `const void**`. Pull them to the host and loop over GemmEx.
+    //
+    // Critical: sync the handle stream *before* the host DtoH. Synchronous
+    // `cuMemcpyDtoH_v2` only waits for legacy/blocking streams; ggml often uses
+    // a non-null (possibly non-blocking) stream, so without an explicit
+    // `cuStreamSynchronize` we can read stale/zero pointer tables and GEMM the
+    // wrong buffers — which produces fluent-looking garbage tokens.
     if batch <= 0 {
         return INVALID_VALUE;
     }
     let Ok(drv) = driver() else {
         return NOT_INITIALIZED;
     };
+    let Ok(h) = handle_mut(handle) else {
+        return INVALID_VALUE;
+    };
+    let sync_stream = if h.stream.is_null() {
+        std::ptr::null_mut()
+    } else {
+        h.stream
+    };
+    let err = unsafe { (drv.cuStreamSynchronize)(sync_stream) };
+    if err != SUCCESS {
+        eprintln!(
+            "CUDA for Intel cublasGemmBatchedEx pre-DtoH stream sync failed err={err}"
+        );
+        return STATUS_MAPPING_ERROR;
+    }
     let batch_n = batch as usize;
     let bytes = batch_n * std::mem::size_of::<u64>();
     let mut a_ptrs = vec![0u64; batch_n];
@@ -608,8 +630,17 @@ pub unsafe extern "system" fn cublasGemmBatchedEx(
         eprintln!("CUDA for Intel cublasGemmBatchedEx DtoH C failed err={err}");
         return STATUS_MAPPING_ERROR;
     }
+    // Cheap sanity: GGML never passes null matrix pointers into BatchedEx.
+    if a_ptrs.iter().any(|&p| p == 0) || b_ptrs.iter().any(|&p| p == 0) || c_ptrs.iter().any(|&p| p == 0)
+    {
+        eprintln!(
+            "CUDA for Intel cublasGemmBatchedEx null ptr in tables A={a_ptrs:?} B={b_ptrs:?} C={c_ptrs:?}"
+        );
+        return INVALID_VALUE;
+    }
     eprintln!(
-        "CUDA for Intel cublasGemmBatchedEx batch={batch} m={m} n={n} k={k} a_type={a_type} c_type={c_type} compute={compute_type}"
+        "CUDA for Intel cublasGemmBatchedEx batch={batch} m={m} n={n} k={k} a_type={a_type} c_type={c_type} compute={compute_type} a0={:#x} b0={:#x} c0={:#x}",
+        a_ptrs[0], b_ptrs[0], c_ptrs[0]
     );
     for i in 0..batch_n {
         let status = unsafe {

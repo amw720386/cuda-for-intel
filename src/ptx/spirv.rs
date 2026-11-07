@@ -8,7 +8,7 @@ use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Instruction as SpirvInstruction, Operand};
 use rspirv::spirv::{
     AddressingModel, BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel,
-    FPRoundingMode, FunctionControl, GroupOperation, MemoryModel, MemorySemantics, Op,
+    FPRoundingMode, FunctionControl, MemoryModel, MemorySemantics, Op,
     OpenclStd100Op, Scope, StorageClass, Word,
 };
 use std::collections::{HashMap, HashSet};
@@ -375,22 +375,28 @@ impl<'a> Emitter<'a> {
             ));
         }
         let _membermask = self.integer(membermask, Kind::B32)?;
-        let value = self.read(value)?.require(Kind::B32, value)?;
+        // Emulate CUDA `redux.sync.add.s32` with a 32-lane ShuffleXor butterfly.
+        // Isolated `redux` and combined float-max+redux probes pass on Iris; the
+        // native GroupNonUniformIAdd path was not reliable for GGML quantize.
         let scope = self
             .builder
             .constant_bit32(self.u32_type, Scope::Subgroup as u32);
-        let result = self.builder.group_non_uniform_i_add(
-            self.u32_type,
-            None,
-            scope,
-            GroupOperation::Reduce,
-            value,
-            None,
-        )?;
+        let mut acc = self.read(value)?.require(Kind::B32, value)?;
+        for delta in [16u32, 8, 4, 2, 1] {
+            let xor_mask = self.builder.constant_bit32(self.u32_type, delta);
+            let other = self.builder.group_non_uniform_shuffle_xor(
+                self.u32_type,
+                None,
+                scope,
+                acc,
+                xor_mask,
+            )?;
+            acc = self.builder.i_add(self.u32_type, None, acc, other)?;
+        }
         self.write(
             dst,
             Value {
-                id: result,
+                id: acc,
                 kind: Kind::B32,
             },
         )?;
@@ -1445,11 +1451,26 @@ impl<'a> Emitter<'a> {
                 )
             }
             Instruction::ShiftRightArithmetic64(dst, [value, shift]) => {
+                // SPIR-V requires the shift operand bitwidth to match the base
+                // (u64). Passing a u32 immediate made IGC miscompile GGML's
+                // signed `/32` idiom (`shr.s64`/`shr.u64`) and OOB-fault
+                // quantize_q8_1 stores.
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B32)?;
+                let shift = self.integer(shift, Kind::B64)?;
+                let bits = self.builder.constant_bit64(self.u64_type, 64);
+                let zero = self.builder.constant_bit64(self.u64_type, 0);
+                let in_range = self
+                    .builder
+                    .u_less_than(self.bool_type, None, shift, bits)?;
+                let safe = self
+                    .builder
+                    .select(self.u64_type, None, in_range, shift, zero)?;
+                let shifted = self
+                    .builder
+                    .shift_right_arithmetic(self.u64_type, None, value, safe)?;
                 let id = self
                     .builder
-                    .shift_right_arithmetic(self.u64_type, None, value, shift)?;
+                    .select(self.u64_type, None, in_range, shifted, zero)?;
                 (dst, id, Kind::B64)
             }
             Instruction::ShiftLeft64(dst, [value, shift]) => {
@@ -1459,7 +1480,7 @@ impl<'a> Emitter<'a> {
                     ));
                 }
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B32)?;
+                let shift = self.integer(shift, Kind::B64)?;
                 let id = self
                     .builder
                     .shift_left_logical(self.u64_type, None, value, shift)?;
@@ -1467,10 +1488,21 @@ impl<'a> Emitter<'a> {
             }
             Instruction::ShiftRightLogical64(dst, [value, shift]) => {
                 let value = self.integer(value, Kind::B64)?;
-                let shift = self.integer(shift, Kind::B32)?;
+                let shift = self.integer(shift, Kind::B64)?;
+                let bits = self.builder.constant_bit64(self.u64_type, 64);
+                let zero = self.builder.constant_bit64(self.u64_type, 0);
+                let in_range = self
+                    .builder
+                    .u_less_than(self.bool_type, None, shift, bits)?;
+                let safe = self
+                    .builder
+                    .select(self.u64_type, None, in_range, shift, zero)?;
+                let shifted = self
+                    .builder
+                    .shift_right_logical(self.u64_type, None, value, safe)?;
                 let id = self
                     .builder
-                    .shift_right_logical(self.u64_type, None, value, shift)?;
+                    .select(self.u64_type, None, in_range, shifted, zero)?;
                 (dst, id, Kind::B64)
             }
             Instruction::And64(dst, [a, b]) => {
@@ -1825,8 +1857,6 @@ impl<'a> Emitter<'a> {
             self.builder.capability(Capability::GroupNonUniform);
             self.builder
                 .capability(Capability::GroupNonUniformShuffle);
-            self.builder
-                .capability(Capability::GroupNonUniformArithmetic);
         }
         self.shared_offsets.clear();
         self.shared_array = None;

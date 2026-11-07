@@ -1,0 +1,33 @@
+// Full-warp redux.sync.add.s32 probe (CUDA 32-lane semantics).
+.version 8.8
+.target sm_80
+.address_size 64
+
+.visible .entry redux_add(
+	.param .u64 .ptr .align 1 redux_add_param_0,
+	.param .u64 .ptr .align 1 redux_add_param_1,
+	.param .u32 redux_add_param_2
+)
+.maxntid 128
+{
+	.reg .pred %p<2>;
+	.reg .b32 %r<8>;
+	.reg .b64 %rd<8>;
+	ld.param.u64 %rd1, [redux_add_param_0];
+	cvta.to.global.u64 %rd2, %rd1;
+	ld.param.u64 %rd3, [redux_add_param_1];
+	cvta.to.global.u64 %rd4, %rd3;
+	ld.param.u32 %r1, [redux_add_param_2];
+	mov.u32 %r2, %tid.x;
+	setp.ge.u32 %p1, %r2, %r1;
+	@%p1 bra $L_done;
+	mul.wide.u32 %rd5, %r2, 4;
+	add.s64 %rd6, %rd2, %rd5;
+	ld.global.b32 %r3, [%rd6];
+	mov.u32 %r4, -1;
+	redux.sync.add.s32 %r5, %r3, %r4;
+	add.s64 %rd7, %rd4, %rd5;
+	st.global.b32 [%rd7], %r5;
+$L_done:
+	ret;
+}

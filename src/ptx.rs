@@ -1,4 +1,4 @@
-//! PTX subset to OpenCL-environment SPIR-V.
+﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod flow;
 mod parse;
 mod rounded;
@@ -14,7 +14,7 @@ pub(crate) enum Param {
     F32,
     U64,
     GlobalPtr,
-    /// `.param .align N .b8 name[bytes]` — `words` is `bytes/4`, `align` is 4/8/16.
+    /// `.param .align N .b8 name[bytes]` â€” `words` is `bytes/4`, `align` is 4/8/16.
     Words { words: u16, align: u16 },
 }
 
@@ -72,7 +72,7 @@ enum Width {
 enum Space {
     Global,
     Shared,
-    /// CUDA `.local` — per-thread private memory (`__local_depot`).
+    /// CUDA `.local` â€” per-thread private memory (`__local_depot`).
     Local,
 }
 
@@ -130,11 +130,11 @@ enum FloatOp<'a> {
     Lg2Approx([&'a str; 1]),
     Ex2Approx([&'a str; 1]),
     Abs([&'a str; 1]),
-    /// `neg.f32` / `neg.ftz.f32` — floating-point negation.
+    /// `neg.f32` / `neg.ftz.f32` â€” floating-point negation.
     Neg([&'a str; 1]),
-    /// `tanh.approx.f32` — hyperbolic tangent.
+    /// `tanh.approx.f32` â€” hyperbolic tangent.
     TanhApprox([&'a str; 1]),
-    /// `cvt.rzi.f32.f32` — truncate toward zero, stay in f32.
+    /// `cvt.rzi.f32.f32` â€” truncate toward zero, stay in f32.
     Trunc([&'a str; 1]),
 }
 
@@ -168,7 +168,7 @@ impl<'a> FloatOp<'a> {
 #[derive(Clone, Copy, Debug)]
 enum Instruction<'a> {
     Param(Width, &'a str, &'a str, usize),
-    /// `ld.param.s8` — load a byte parameter and sign-extend into a b16/b32 slot.
+    /// `ld.param.s8` â€” load a byte parameter and sign-extend into a b16/b32 slot.
     ParamS8(&'a str, &'a str),
     /// `ld.param.v2.f32` / `ld.param.v4.f32` from an aggregate `.b8` parameter.
     ParamVec {
@@ -179,13 +179,13 @@ enum Instruction<'a> {
     },
     ToGlobal(&'a str, &'a str),
     SharedAddress(&'a str, &'a str),
-    /// `mov.u32 %r, shared_symbol` — 32-bit address of a (possibly dynamic) shared array.
+    /// `mov.u32 %r, shared_symbol` â€” 32-bit address of a (possibly dynamic) shared array.
     SharedSymbol32(&'a str, &'a str),
-    /// `mov.u64 %rd, local_symbol` — 64-bit address of a `.local` depot.
+    /// `mov.u64 %rd, local_symbol` â€” 64-bit address of a `.local` depot.
     LocalSymbol64(&'a str, &'a str),
     Builtin(&'a str, &'a str),
     Mad32(&'a str, [&'a str; 3]),
-    /// CUDA `dp4a.s32.s32` — signed 4×8-bit dot-product accumulate.
+    /// CUDA `dp4a.s32.s32` â€” signed 4Ã—8-bit dot-product accumulate.
     Dp4a(&'a str, [&'a str; 3]),
     Compare {
         op: Comparison,
@@ -206,7 +206,7 @@ enum Instruction<'a> {
         dst: &'a str,
         src: [&'a str; 2],
     },
-    /// `selp.*` — `dst = src[2] ? src[0] : src[1]`.
+    /// `selp.*` â€” `dst = src[2] ? src[0] : src[1]`.
     Select {
         kind: Width,
         dst: &'a str,
@@ -217,16 +217,16 @@ enum Instruction<'a> {
         dst: &'a str,
         src: [&'a str; 2],
     },
-    /// `not.pred %pD, %pA` — boolean negation.
+    /// `not.pred %pD, %pA` â€” boolean negation.
     NotPred(&'a str, &'a str),
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
     Not32(&'a str, &'a str),
-    /// `not.b64` — bitwise complement of a 64-bit register.
+    /// `not.b64` â€” bitwise complement of a 64-bit register.
     Not64(&'a str, &'a str),
     Move32(&'a str, &'a str),
     /// `mov.u64` / `mov.b64` between registers or from an immediate.
     Move64(&'a str, &'a str),
-    /// `mov.b32 %r, { %rs_lo, %rs_hi }` — pack two 16-bit lanes into a 32-bit register.
+    /// `mov.b32 %r, { %rs_lo, %rs_hi }` â€” pack two 16-bit lanes into a 32-bit register.
     PackB16(&'a str, [&'a str; 2]),
     MulWide32 {
         signed: bool,
@@ -238,7 +238,7 @@ enum Instruction<'a> {
         dst: &'a str,
         src: &'a str,
     },
-    /// `cvt.u32.u64` — truncate the low 32 bits of a 64-bit value.
+    /// `cvt.u32.u64` â€” truncate the low 32 bits of a 64-bit value.
     Narrow(&'a str, &'a str),
     ShiftLeft64(&'a str, [&'a str; 2]),
     ShiftRightLogical64(&'a str, [&'a str; 2]),
@@ -269,14 +269,14 @@ enum Instruction<'a> {
         addr: &'a str,
     },
     Float32(&'a str, FloatOp<'a>),
-    /// `cvt.rzi.ftz.s32.f32` — float→int32 toward zero.
+    /// `cvt.rzi.ftz.s32.f32` â€” floatâ†’int32 toward zero.
     CvtRziS32(&'a str, &'a str),
-    /// `cvt.rn.f16.f32` — f32→f16 bits in the low 16 bits of a b32 register.
+    /// `cvt.rn.f16.f32` â€” f32â†’f16 bits in the low 16 bits of a b32 register.
     CvtToHalf(&'a str, &'a str),
     Store32(Space, &'a str, &'a str),
-    /// `st.global.u8` — store the low 8 bits of a b32 register.
+    /// `st.global.u8` â€” store the low 8 bits of a b32 register.
     Store8(Space, &'a str, &'a str),
-    /// `st.global.u16` — store the low 16 bits of a b32 register.
+    /// `st.global.u16` â€” store the low 16 bits of a b32 register.
     Store16(Space, &'a str, &'a str),
     /// `st.global.u64` / `st.global.b64`.
     Store64(Space, &'a str, &'a str),
@@ -286,13 +286,13 @@ enum Instruction<'a> {
         addr: &'a str,
         src: [&'a str; 4],
     },
-    /// `st.global.v2.u16` — pack two low-16 values into one 32-bit global store.
+    /// `st.global.v2.u16` â€” pack two low-16 values into one 32-bit global store.
     StoreVecU16(Space, &'a str, [&'a str; 2]),
-    /// `st.global.v4.u16` — four packed IEEE half stores.
+    /// `st.global.v4.u16` â€” four packed IEEE half stores.
     StoreVec4U16(Space, &'a str, [&'a str; 4]),
-    /// `ld.global.u8` — zero-extend a byte into a 32-bit slot.
+    /// `ld.global.u8` â€” zero-extend a byte into a 32-bit slot.
     Load8(Space, &'a str, &'a str),
-    /// `ld.global.v2/v4.u16` — packed IEEE half / u16 vector load.
+    /// `ld.global.v2/v4.u16` â€” packed IEEE half / u16 vector load.
     LoadVecU16 {
         space: Space,
         count: u8,
@@ -300,7 +300,7 @@ enum Instruction<'a> {
         addr: &'a str,
     },
     AtomicAdd32(&'a str, &'a str, &'a str),
-    /// CUDA `shfl.sync.bfly.b32` — warp butterfly exchange with an active mask.
+    /// CUDA `shfl.sync.bfly.b32` â€” warp butterfly exchange with an active mask.
     /// Sources are `[value, xor_mask, clamp, membermask]`.
     /// Optional `pred` is the dual-destination lane-valid flag (`dst|pred`).
     ShuffleBfly {
@@ -308,7 +308,7 @@ enum Instruction<'a> {
         pred: Option<&'a str>,
         src: [&'a str; 4],
     },
-    /// `redux.sync.add.s32` — warp-wide signed integer sum broadcast.
+    /// `redux.sync.add.s32` â€” warp-wide signed integer sum broadcast.
     ReduxSyncAdd {
         dst: &'a str,
         src: &'a str,
@@ -692,9 +692,21 @@ mod tests {
     }
 
     #[test]
+    fn translates_quantize_q8_1_simple() {
+        translate(include_str!("../examples/quantize_q8_1_simple.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[test]
+    fn translates_quantize_warp_ops() {
+        translate(include_str!("../examples/quantize_warp_ops.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[test]
     fn half_extract_rewrite_does_not_glue_onto_line_comments() {
         // Regression: trimming whitespace before `{` stole the newline after
-        // `//` and produced `//and.b32…`, which the tokenizer then skipped.
+        // `//` and produced `//and.b32â€¦`, which the tokenizer then skipped.
         let src = "\n//\r\n{.reg .f16 low,high;\r\nmov.b32 {low,high}, %r64;\r\nmov.b16 %rs2, low;}\r\n";
         let rewritten = parse::rewrite_half_scopes(src);
         assert!(
@@ -797,7 +809,7 @@ mod tests {
     fn translates_convert_unary_half_to_f32_dump() {
         let translated =
             translate(include_str!("../examples/convert_unary_half_to_f32_dump.ptx"))
-                .expect("convert_unary half→f32 dump");
+                .expect("convert_unary halfâ†’f32 dump");
         assert!(translated.kernels[0].name.contains("convert_unary"));
     }
 
@@ -1394,3 +1406,4 @@ mod tests {
         assert!(translate("not PTX").is_err());
     }
 }
+

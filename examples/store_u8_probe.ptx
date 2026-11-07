@@ -1,0 +1,41 @@
+// Minimal st.global.u8 / ld.global.nc.f32 probe with quantize-like addressing.
+.version 8.8
+.target sm_80
+.address_size 64
+
+.visible .entry store_u8_probe(
+	.param .u64 .ptr store_u8_probe_param_0,
+	.param .u64 .ptr store_u8_probe_param_1,
+	.param .u32 store_u8_probe_param_2
+)
+.maxntid 64
+{
+	.reg .pred %p<2>;
+	.reg .f32 %f<4>;
+	.reg .b32 %r<8>;
+	.reg .b64 %rd<12>;
+	ld.param.u64 %rd1, [store_u8_probe_param_0];
+	cvta.to.global.u64 %rd2, %rd1;
+	ld.param.u64 %rd3, [store_u8_probe_param_1];
+	cvta.to.global.u64 %rd4, %rd3;
+	ld.param.u32 %r1, [store_u8_probe_param_2];
+	mov.u32 %r2, %tid.x;
+	setp.ge.u32 %p1, %r2, %r1;
+	@%p1 bra $L_done;
+	mul.wide.u32 %rd5, %r2, 4;
+	add.s64 %rd6, %rd2, %rd5;
+	ld.global.nc.f32 %f1, [%rd6];
+	mul.ftz.f32 %f2, %f1, 0f42FE0000; // *127
+	cvt.rzi.ftz.s32.f32 %r3, %f2;
+	// Pack like block_q8_1: 4 byte header + qs[i]
+	mul.wide.u32 %rd7, %r2, 1;
+	add.s64 %rd8, %rd4, %rd7;
+	st.global.u8 [%rd8+4], %r3;
+	setp.ne.u32 %p1, %r2, 0;
+	@%p1 bra $L_done;
+	mov.u32 %r4, 0x3C00; // half 1.0
+	mov.u32 %r5, 0x4000; // half 2.0
+	st.global.v2.u16 [%rd4], {%r4, %r5};
+$L_done:
+	ret;
+}

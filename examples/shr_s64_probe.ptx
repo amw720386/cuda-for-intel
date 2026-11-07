@@ -1,0 +1,36 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.visible .entry shr_s64_probe(
+	.param .u64 .ptr shr_s64_probe_param_0,
+	.param .u64 .ptr shr_s64_probe_param_1,
+	.param .u32 shr_s64_probe_param_2
+)
+.maxntid 64
+{
+	.reg .pred %p<2>;
+	.reg .b32 %r<4>;
+	.reg .b64 %rd<12>;
+	ld.param.u64 %rd1, [shr_s64_probe_param_0];
+	cvta.to.global.u64 %rd2, %rd1;
+	ld.param.u64 %rd3, [shr_s64_probe_param_1];
+	cvta.to.global.u64 %rd4, %rd3;
+	ld.param.u32 %r1, [shr_s64_probe_param_2];
+	mov.u32 %r2, %tid.x;
+	setp.ge.u32 %p1, %r2, %r1;
+	@%p1 bra $L_done;
+	mul.wide.u32 %rd5, %r2, 8;
+	add.s64 %rd6, %rd2, %rd5;
+	ld.global.u64 %rd7, [%rd6];
+	// GGML signed /32 idiom
+	shr.s64 %rd8, %rd7, 63;
+	shr.u64 %rd9, %rd8, 59;
+	add.s64 %rd10, %rd7, %rd9;
+	shr.s64 %rd11, %rd10, 5;
+	mul.wide.u32 %rd5, %r2, 8;
+	add.s64 %rd6, %rd4, %rd5;
+	st.global.u64 [%rd6], %rd11;
+$L_done:
+	ret;
+}

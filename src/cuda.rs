@@ -601,6 +601,11 @@ unsafe fn copy_async(
         // NVIDIA Runtime allows async copies from pageable host memory (may
         // synchronize). Our Level Zero path needs registered/pinned host for
         // true async; fall back to a blocking copy for ordinary host pointers.
+        //
+        // Critical: wait for *this* stream before the fallback copy. Waiting only
+        // for legacy/blocking streams races with ggml's common pattern of
+        // non-blocking stream compute followed by cudaMemcpyAsync(DtoH) of
+        // logits / BatchedEx pointer tables into pageable host memory.
         if contains_range(&context.host_allocations, host.addr(), size) {
             unsafe {
                 context
@@ -608,7 +613,12 @@ unsafe fn copy_async(
                     .copy(&runtime.api, &context.backend, key, (dst, src), size)
             }
         } else {
-            context.streams.wait_legacy(&runtime.api, u64::MAX)?;
+            context
+                .streams
+                .wait_stream(&runtime.api, key, u64::MAX)?;
+            if context.streams.stream_is_blocking(key)? {
+                context.streams.wait_legacy(&runtime.api, u64::MAX)?;
+            }
             unsafe { context.backend.copy(&runtime.api, dst, src, size) }
                 .inspect_err(|error| context.backend.health.observe(error))
                 .map_err(backend_error)

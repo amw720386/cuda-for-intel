@@ -1,4 +1,4 @@
-//! Opt-in tests against the built CUDA DLL and an actual Intel GPU.
+﻿//! Opt-in tests against the built CUDA DLL and an actual Intel GPU.
 #![cfg(windows)]
 
 use libloading::Library;
@@ -29,8 +29,12 @@ mod ggml_q8_0;
 mod ggml_q8_0_auth;
 #[path = "gpu/ggml_half.rs"]
 mod ggml_half;
+#[path = "gpu/hgemm.rs"]
+mod hgemm;
 #[path = "gpu/ggml_dp4a.rs"]
 mod ggml_dp4a;
+#[path = "gpu/ggml_quantize_q8_1.rs"]
+mod ggml_quantize_q8_1;
 #[path = "gpu/isolation.rs"]
 mod isolation;
 #[path = "gpu/isolation_capability.rs"]
@@ -43,6 +47,16 @@ mod pinned;
 mod progress;
 #[path = "gpu/shfl.rs"]
 mod shfl;
+#[path = "gpu/redux.rs"]
+mod redux;
+#[path = "gpu/store_u8.rs"]
+mod store_u8;
+#[path = "gpu/quantize_warp_ops.rs"]
+mod quantize_warp_ops;
+#[path = "gpu/ctaid.rs"]
+mod ctaid;
+#[path = "gpu/shr_s64.rs"]
+mod shr_s64;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
@@ -1050,3 +1064,7 @@ fn asynchronous_stream_order_and_lifetimes() {
         "Verified legacy ordering, independent streams, retirement, and 3,072 queued launches"
     );
 }
+
+
+
+
