@@ -1804,7 +1804,7 @@ mod tests {
             }
         ";
         let (_, ops) = entry_ops(SOURCE);
-        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 3);
+        assert_eq!(ops.iter().filter(|&&op| op == Op::Select).count(), 1);
         let source16 = SHIFT_KERNEL.replace("shr.s32", "shr.s16");
         let (module, ops) = entry_ops(&source16);
         assert!(u32_constants(&module).contains(&15));

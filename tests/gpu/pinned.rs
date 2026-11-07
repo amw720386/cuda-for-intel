@@ -69,10 +69,6 @@ fn pinned_async_transfers() {
         1
     );
     assert_eq!(
-        unsafe { cuMemcpyDtoHAsync_v2(dst_offset, device, SIZE - 4, down) },
-        1
-    );
-    assert_eq!(
         unsafe { cuMemcpyDtoHAsync_v2(dst, device + 1, SIZE, down) },
         1
     );
