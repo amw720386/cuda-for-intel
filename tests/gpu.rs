@@ -87,6 +87,8 @@ mod hw_ggml;
 mod hw_tier2;
 #[path = "gpu/hw_ggml_stock.rs"]
 mod hw_ggml_stock;
+#[path = "gpu/hw_subst.rs"]
+mod hw_subst;
 #[path = "gpu/hw_cublas_batched.rs"]
 mod hw_cublas_batched;
 
