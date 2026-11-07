@@ -56,7 +56,11 @@ fn hw_stock_ggml_kernels_compile() {
     let mut seen: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new(); // total, tried, ok
     let mut failures = Vec::new();
     let mut total_entries = 0;
+    let only: Option<Vec<usize>> = std::env::var("CFI_STOCK_ONLY").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect());
     for (b, blob) in blobs.iter().enumerate() {
+        if only.as_ref().is_some_and(|o| !o.contains(&b)) {
+            continue;
+        }
         let entries: Vec<String> = blob
             .lines()
             .filter_map(|l| {
@@ -66,6 +70,10 @@ fn hw_stock_ggml_kernels_compile() {
             })
             .collect();
         total_entries += entries.len();
+        println!("BLOB {b}: {} bytes, {} entries, first {}", blob.len(), entries.len(), entries.first().map(String::as_str).unwrap_or(""));
+        if let Ok(dir) = std::env::var("CFI_DUMP_DIR") {
+            let _ = std::fs::write(format!("{dir}\\blob{b}.ptx"), blob);
+        }
         let src = std::ffi::CString::new(blob.as_str()).unwrap();
         let mut module = null_mut();
         let status = unsafe { cuModuleLoadData(&mut module, src.as_ptr().cast()) };
@@ -74,6 +82,9 @@ fn hw_stock_ggml_kernels_compile() {
             continue;
         }
         for name in entries {
+            if name.starts_with("_ZN") {
+                continue; // CUB library kernels are not ggml kernels (and one hangs translation)
+            }
             let fam = family(&name);
             let e = seen.entry(fam.clone()).or_default();
             e.0 += 1;
