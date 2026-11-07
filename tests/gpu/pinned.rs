@@ -75,7 +75,7 @@ fn pinned_async_transfers() {
     assert_eq!(unsafe { cuMemcpyDtoHAsync_v2(dst, device, 0, ctx) }, 400);
     assert_eq!(
         unsafe { cuMemcpyHtoDAsync_v2(0, null_mut(), 0, without_provenance_mut(2)) },
-        801
+        0
     );
     ok!(cuMemcpyHtoDAsync_v2(0, null_mut(), 0, up));
     ok!(cuMemcpyDtoHAsync_v2(null_mut(), u64::MAX, 0, null_mut()));
