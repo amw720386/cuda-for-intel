@@ -479,10 +479,9 @@ impl<'a> Emitter<'a> {
                 let ty = self.u32_type;
                 let (lo, hi) = self.match_operand(src[0], wide)?;
                 let scope = self.builder.constant_bit32(ty, Scope::Subgroup as u32);
-                let mut all = self.builder.group_non_uniform_all_equal(self.bool_type, None, scope, lo)?;
+                let mut all = self.subgroup_all_equal(scope, lo)?;
                 if let Some(hi) = hi {
-                    let hi_all =
-                        self.builder.group_non_uniform_all_equal(self.bool_type, None, scope, hi)?;
+                    let hi_all = self.subgroup_all_equal(scope, hi)?;
                     all = self.builder.logical_and(self.bool_type, None, all, hi_all)?;
                 }
                 if !dst[0].is_empty() {
@@ -500,9 +499,10 @@ impl<'a> Emitter<'a> {
                 self.declare("vote", Some(Capability::GroupNonUniformVote), None);
                 let predicate = self.predicate_operand(src[0])?;
                 let scope = self.builder.constant_bit32(self.u32_type, Scope::Subgroup as u32);
-                let id = self
-                    .builder
-                    .group_non_uniform_all_equal(self.bool_type, None, scope, predicate)?;
+                let ty = self.u32_type;
+                let (one, zero) = (self.u32_const(1), self.u32_const(0));
+                let as_word = self.builder.select(ty, None, predicate, one, zero)?;
+                let id = self.subgroup_all_equal(scope, as_word)?;
                 self.write(dst[0], Value { id, kind: Kind::Predicate })
             }
             ExtOp::Elect => {
@@ -577,7 +577,18 @@ impl<'a> Emitter<'a> {
         Ok(self.builder.select(ty, None, ok, shifted, zero)?)
     }
 
-    fn linear_tid(&mut self) -> R<Word> {
+    /// `OpGroupNonUniformAllEqual` is not provided by the Intel OpenCL backend
+    /// (undefined `__spirv_GroupNonUniformAllEqual`), so compare against the first active lane.
+    fn subgroup_all_equal(&mut self, scope: Word, value: Word) -> R<Word> {
+        self.declare("ballot", Some(Capability::GroupNonUniformBallot), None);
+        let first = self
+            .builder
+            .group_non_uniform_broadcast_first(self.u32_type, None, scope, value)?;
+        let same = self.builder.i_equal(self.bool_type, None, value, first)?;
+        Ok(self.builder.group_non_uniform_all(self.bool_type, None, scope, same)?)
+    }
+
+    pub(super) fn linear_tid(&mut self) -> R<Word> {
         let ty = self.u32_type;
         let tid: Vec<Word> = ["x", "y", "z"]
             .iter()

@@ -382,3 +382,34 @@ fn hw_cvt_int_to_float_and_half_conversions() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+fn hw_cvt_sat_and_ftz_variants() {
+    let mut rng = Rng(0x5a75_f700_5a75_f700);
+    let mut inputs = cvt_inputs(&mut rng, 1 << 14);
+    inputs.extend([0x3f80_0001, 0xbf80_0000, 0x7f7f_ffff, 0x3f7f_ffff, 0x8000_0001]);
+    for instr in ["cvt.sat.f32.f32", "cvt.rn.sat.f32.f32", "cvt.sat.ftz.f32.f32", "cvt.rn.ftz.sat.f32.f32"] {
+        let got = run_cvt(instr, "f32", "f32", &inputs);
+        for (i, &x) in inputs.iter().enumerate() {
+            let fx = f32::from_bits(x);
+            let want = if fx.is_nan() { 0.0 } else { fx.clamp(0.0, 1.0) };
+            assert!(got[i] == want.to_bits() || (want == 0.0 && got[i] & 0x7fff_ffff == 0), "{instr} x={x:08x} got={:08x}", got[i]);
+            assert_ne!(got[i], 0x8000_0000, "{instr}: saturate must not return -0 (x={x:08x})");
+        }
+    }
+    let plain = [
+        ("cvt.rzi.s32.f32", "cvt.rzi.ftz.s32.f32"),
+        ("cvt.rni.s32.f32", "cvt.rni.ftz.s32.f32"),
+        ("cvt.rzi.u32.f32", "cvt.rzi.ftz.u32.f32"),
+        ("cvt.rni.u32.f32", "cvt.rni.ftz.u32.f32"),
+    ];
+    let normal: Vec<u32> = inputs.iter().copied().filter(|b| b & 0x7f80_0000 != 0 || b & 0x7fff_ffff == 0).collect();
+    for (a, b) in plain {
+        assert_eq!(run_cvt(a, "f32", "b32", &normal), run_cvt(b, "f32", "b32", &normal), "{b}");
+    }
+    let halves: Vec<u32> = (0..65536).collect();
+    assert_eq!(run_cvt("cvt.f32.f16", "b16", "f32", &halves), run_cvt("cvt.ftz.f32.f16", "b16", "f32", &halves));
+    let big: Vec<u32> = normal.iter().copied().filter(|b| (b >> 23) & 0xff >= 113).collect();
+    assert_eq!(run_cvt("cvt.rn.f16.f32", "f32", "b16", &big), run_cvt("cvt.rn.ftz.f16.f32", "f32", "b16", &big));
+}
