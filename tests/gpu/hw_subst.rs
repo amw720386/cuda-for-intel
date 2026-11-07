@@ -5,7 +5,7 @@
 //! Intel GPU. Run (one slot):
 //!   set CFI_STOCK_GGML_DLL=<path>\ggml-cuda.dll
 //!   cargo test --test gpu hw_subst -- --ignored --nocapture --test-threads=1
-//! Optional: CFI_SUBST_REPS (benchmark launches, default 40), CFI_SUBST_NWARPS_SWEEP=1 (also time
+//! Also runs Q8_0 mul_mat_q (prefill) native vs translated. Optional: CFI_SUBST_REPS (benchmark launches, default 40), CFI_SUBST_NWARPS_SWEEP=1 (also time
 //! the native kernels with 8 warps per block), CFI_SUBST_TYPES=q8_0,q4_0,q4_k,q6_k.
 use super::hw_ggml_stock::extract_all;
 use super::{Handle, library, ok, symbols, test_device};
@@ -125,6 +125,57 @@ fn make_case(ty: u32, ncols: usize, nrows: usize, ncols_x: usize, nch: usize, ra
     Case { p, x, y, ids }
 }
 
+fn make_mmq_case(nrows: usize, ncols_x: usize, ncols: usize, nch: usize, ratio: usize, nsamples: usize, seed: u64) -> MmqCase {
+    let mut rng = Rng(seed);
+    let nb = ncols_x / 32;
+    let nch_x = nch / ratio;
+    let ychan = ncols_x / 128 * ncols * 36;
+    let p = refs::Mmq {
+        ncols_x,
+        nrows_x: nrows,
+        ncols_dst: ncols,
+        nchannels_y: nch,
+        nsamples_y: nsamples,
+        channel_ratio: ratio,
+        sample_ratio: 1,
+        stride_row_x: nb,
+        ncols_y: ncols,
+        stride_col_dst: nrows,
+        stride_channel_x: nrows * nb,
+        stride_channel_y: ychan,
+        stride_channel_dst: nrows * ncols,
+        stride_sample_x: nrows * nb * nch_x,
+        stride_sample_y: ychan * nch,
+        stride_sample_dst: nrows * ncols * nch,
+    };
+    let x = refs::random_blocks(refs::Q8_0, nrows * nb * nch_x * nsamples, &mut rng);
+    let mut y = Vec::new();
+    for _ in 0..nch * nsamples {
+        let acts: Vec<f32> = (0..ncols_x * ncols).map(|_| rng.unit() * 2.0).collect();
+        y.extend(refs::quantize_mmq_d4(&acts, ncols_x, ncols));
+    }
+    MmqCase { p, x, y }
+}
+
+struct MmqCase {
+    p: refs::Mmq,
+    x: Vec<u8>,
+    y: Vec<u8>,
+}
+
+/// `mul_mat_q` parameters: six pointers (ids, expert bounds unused) and 17 words.
+fn mmq_params(p: &refs::Mmq, x: u64, y: u64, dst: u64, tmp: u64) -> Vec<Vec<u8>> {
+    let w = |v: usize| (v as u32).to_le_bytes().to_vec();
+    let q = |v: u64| v.to_le_bytes().to_vec();
+    vec![
+        q(x), q(y), q(0), q(0), q(dst), q(tmp),
+        w(p.ncols_x), w(p.nrows_x), w(p.ncols_dst), w(p.stride_row_x), w(p.ncols_y), w(p.stride_col_dst),
+        w(p.channel_ratio), w(p.nchannels_y), w(p.stride_channel_x), w(p.stride_channel_y), w(p.stride_channel_dst),
+        w(p.sample_ratio), w(p.nsamples_y), w(p.stride_sample_x), w(p.stride_sample_y), w(p.stride_sample_dst),
+        w(p.ncols_dst),
+    ]
+}
+
 fn floats(bytes: &[u8]) -> Vec<f32> {
     bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
@@ -211,6 +262,9 @@ fn hw_subst_native_vs_translated() {
     let plain_mmvq = load(mmvq_blob, "", None);
     let native_mmvq = load(mmvq_blob, "mmvq", None);
     let wide_mmvq = sweep.then(|| load(mmvq_blob, "mmvq", Some(8)));
+    let mmq_blob = blobs.iter().find(|b| b.contains(".entry _Z9mul_mat_qIL9ggml_type8ELi64ELb0E")).expect("mmq blob");
+    let plain_mmq = load(mmq_blob, "", None);
+    let native_mmq = load(mmq_blob, "mmq", None);
     let plain_quant = load(quant_blob, "", None);
     let native_quant = load(quant_blob, "quantize_q8_1", None);
     unsafe {
@@ -305,6 +359,68 @@ fn hw_subst_native_vs_translated() {
         if n_bad != 0 || nt_bad != 0 {
             failures.push("quantize_q8_1".into());
         }
+    }
+
+    println!("== mul_mat_q Q8_0 (prefill): native vs translated vs host reference");
+    {
+        let cases = [
+            // (nrows, ncols_x, ncols, mmq_x, need_check, nch, ratio, nsamples)
+            (256usize, 1024usize, 64usize, 64usize, 0u32, 1usize, 1usize, 1usize),
+            (300, 1024, 40, 64, 1, 2, 1, 1),
+            (384, 512, 17, 32, 1, 4, 2, 2),
+        ];
+        for (nrows, ncols_x, ncols, mmq_x, need_check, nch, ratio, nsamples) in cases {
+            let entry = format!("_Z9mul_mat_qIL9ggml_type8ELi{mmq_x}ELb{need_check}EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+            let c = make_mmq_case(nrows, ncols_x, ncols, nch, ratio, nsamples, 7 + nrows as u64);
+            let n = c.p.nsamples_y * c.p.stride_sample_dst;
+            let mut want = vec![0f32; n];
+            refs::mmq_q8_0(&c.p, &c.x, &c.y, &mut want);
+            let (xa, ya) = (upload(&api, &c.x), upload(&api, &c.y));
+            let tmp = upload(&api, &vec![0u8; 1 << 22]);
+            let mut outs = Vec::new();
+            for module in [plain_mmq, native_mmq] {
+                let f = function(module, &entry);
+                let da = upload(&api, &vec![0u8; n * 4]);
+                let params = mmq_params(&c.p, xa, ya, da, tmp);
+                // one stock CTA per tile: no stream-k split, no fixup kernel
+                let tiles = (c.p.ncols_dst.div_ceil(mmq_x) * nrows.div_ceil(128) * nch * nsamples) as u32;
+                assert_eq!(launch(&api, f, [tiles, 1, 1], [32, 8, 1], &params), 0);
+                assert_eq!(unsafe { (api.sync)() }, 0);
+                outs.push(floats(&download(&api, da, n * 4)));
+            }
+            let (t, nat) = (&outs[0], &outs[1]);
+            let (a, b, d) = (refs::nmse(nat, &want), refs::nmse(nat, t), refs::nmse(t, &want));
+            println!("rows {nrows} k {ncols_x} cols {ncols} mmq_x {mmq_x} ch {nch}/{ratio} s {nsamples}: native-vs-ref {a:.2e}, native-vs-translated {b:.2e}, translated-vs-ref {d:.2e}");
+            if !(a < 1e-9 && b < 1e-9) {
+                failures.push(format!("mmq {entry}"));
+            }
+        }
+        // bandwidth-ish throughput: 4096 x 4096 weights, 512 prompt columns
+        let (nrows, ncols_x, ncols, mmq_x) = (4096usize, 4096usize, 512usize, 64usize);
+        let entry = format!("_Z9mul_mat_qIL9ggml_type8ELi{mmq_x}ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+        let c = make_mmq_case(nrows, ncols_x, ncols, 1, 1, 1, 3);
+        let (xa, ya) = (upload(&api, &c.x), upload(&api, &c.y));
+        let tmp = upload(&api, &vec![0u8; 1 << 22]);
+        let da = upload(&api, &vec![0u8; nrows * ncols * 4]);
+        let params = mmq_params(&c.p, xa, ya, da, tmp);
+        let tiles = (ncols.div_ceil(mmq_x) * nrows.div_ceil(128)) as u32;
+        let flops = 2.0 * nrows as f64 * ncols as f64 * ncols_x as f64;
+        println!("type  translated TOPS  native TOPS  speedup  (m={nrows} k={ncols_x} n={ncols}, stock one CTA per tile)");
+        let mut rates = Vec::new();
+        for module in [plain_mmq, native_mmq] {
+            let f = function(module, &entry);
+            for _ in 0..2 {
+                assert_eq!(launch(&api, f, [tiles, 1, 1], [32, 8, 1], &params), 0);
+            }
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            let start = Instant::now();
+            for _ in 0..reps {
+                assert_eq!(launch(&api, f, [tiles, 1, 1], [32, 8, 1], &params), 0);
+            }
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            rates.push(flops * reps as f64 / start.elapsed().as_secs_f64() / 1e12);
+        }
+        println!("q8_0  {:15.3}  {:11.3}  {:6.2}x", rates[0], rates[1], rates[1] / rates[0]);
     }
 
     println!("== mul_mat_vec_q bandwidth (rows 8192, cols 4096, {reps} launches each)");

@@ -11,7 +11,8 @@ Opt-in layer that replaces recognised ggml-cuda kernels with hand-written Intel-
 * Native kernels: `src/subst/{mmvq,quantize}.rs` on the builder in `spv.rs`. mmvq keeps ggml's thread decomposition, accumulation and
   reduction order and the fma structure nvcc emitted, so results are bit-identical to the translated stock PTX (verified on the interpreter,
   `CFI_STOCK_PTX_DIR=<dir with extracted blobN.ptx> cargo test --lib subst`). The only deliberate difference is the opt-in nwarps override.
-* Not done: `mul_mat_q` (Q8_0/Q4_K, DPAS). The stock PTX uses the Turing MMA path with stream-k + a separate fixup kernel; a native version must
-  consume `block_q8_1_mmq` (from `quantize_mmq_q8_1`), compute its own grid, skip the paired `mul_mat_q_stream_k_fixup`, and needs the
-  interpreter to model the Intel DPAS op. Float order would differ from stock only on stream-k-split tiles (sequential k per output otherwise).
+* `mul_mat_q` Q8_0 (`mmq`, `src/subst/mmq.rs`): tiled SDot kernel (64x32 tile, 16x16 threads), own grid, non-MoE only (`ids_dst`/`expert_bounds` null, else PTX).
+  Sequential-k accumulation `fma(dA*(float)sumi, dB, sum)`: bit-identical to the translated stock MMA kernel on non-split tiles (interpreter test);
+  stream-k-split tiles differ in rounding only. The paired `mul_mat_q_stream_k_fixup` is skipped when it follows a native launch (matched by dst/tmp pointers).
+  Not done: Q4_K/Q6_K mmq and DPAS (int8 XMX) variant.
 * Hardware: `tests/gpu/hw_subst.rs` (see its header for the command).

@@ -428,3 +428,81 @@ pub fn nmse(got: &[f32], want: &[f32]) -> f64 {
     }
     if den == 0.0 { num } else { num / den }
 }
+
+// ---- mul_mat_q (Q8_0 x block_q8_1_mmq D4) ----
+
+pub const MMQ_BLOCK_BYTES: usize = 144;
+
+/// `quantize_mmq_q8_1<D4>` layout for `ncols` columns of `ne0` values (`ne0 % 128 == 0`):
+/// block `(k/128) * ncols + col` holds `float d4[4]` then `int8 qs[128]`. Values are quantized
+/// with `x * (127/amax)` as ggml does; an all-zero 32-group gets d = 0 and zero quants.
+pub fn quantize_mmq_d4(x: &[f32], ne0: usize, ncols: usize) -> Vec<u8> {
+    assert!(ne0 % 128 == 0 && x.len() == ne0 * ncols);
+    let mut out = vec![0u8; ne0 / 128 * ncols * MMQ_BLOCK_BYTES];
+    for col in 0..ncols {
+        for g in 0..ne0 / 32 {
+            let v = &x[col * ne0 + g * 32..col * ne0 + g * 32 + 32];
+            let amax = v.iter().fold(0f32, |a, b| fmax(a, b.abs()));
+            let d_inv = 127.0 / amax;
+            let blk = (g / 4) * ncols + col;
+            let o = blk * MMQ_BLOCK_BYTES;
+            let d = if amax == 0.0 { 0.0 } else { 1.0 / d_inv };
+            out[o + 4 * (g % 4)..o + 4 * (g % 4) + 4].copy_from_slice(&d.to_le_bytes());
+            for (l, xv) in v.iter().enumerate() {
+                let q = if amax == 0.0 { 0 } else { (xv * d_inv).round() as i32 as i8 };
+                out[o + 16 + (g % 4) * 32 + l] = q as u8;
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Debug)]
+pub struct Mmq {
+    pub ncols_x: usize,
+    pub nrows_x: usize,
+    pub ncols_dst: usize,
+    pub nchannels_y: usize,
+    pub nsamples_y: usize,
+    pub channel_ratio: usize,
+    pub sample_ratio: usize,
+    pub stride_row_x: usize,       // blocks
+    pub ncols_y: usize,
+    pub stride_col_dst: usize,
+    pub stride_channel_x: usize,   // blocks
+    pub stride_channel_y: usize,   // ints
+    pub stride_channel_dst: usize,
+    pub stride_sample_x: usize,
+    pub stride_sample_y: usize,
+    pub stride_sample_dst: usize,
+}
+
+/// Sequential-k reference of the Q8_0 `mul_mat_q` result for tiles that are not split by
+/// stream-k: per k block `sum = fma(dA * (float)sumi, dB, sum)`.
+pub fn mmq_q8_0(p: &Mmq, x: &[u8], y: &[u8], dst: &mut [f32]) {
+    let nb = p.ncols_x / 32;
+    for w in 0..p.nsamples_y {
+        for z in 0..p.nchannels_y {
+            let xo = (w / p.sample_ratio) * p.stride_sample_x + (z / p.channel_ratio) * p.stride_channel_x;
+            let yo = w * p.stride_sample_y + z * p.stride_channel_y;
+            for col in 0..p.ncols_dst {
+                for row in 0..p.nrows_x {
+                    let mut sum = 0f32;
+                    for kb in 0..nb {
+                        let xb = &x[(xo + row * p.stride_row_x + kb) * 34..];
+                        let d_a = f16_to_f32(u16::from_le_bytes([xb[0], xb[1]]));
+                        let yb_int = yo + (kb / 4) * p.ncols_y * 36 + col * 36;
+                        let yb = &y[yb_int * 4..];
+                        let d_b = f32::from_le_bytes([yb[4 * (kb % 4)], yb[4 * (kb % 4) + 1], yb[4 * (kb % 4) + 2], yb[4 * (kb % 4) + 3]]);
+                        let mut sumi = 0i32;
+                        for t in 0..8 {
+                            sumi = dp4a(b2(&xb[2..], t), b2(&yb[16 + (kb % 4) * 32..], t), sumi);
+                        }
+                        sum = fmaf(d_a * sumi as f32, d_b, sum);
+                    }
+                    dst[w * p.stride_sample_dst + z * p.stride_channel_dst + col * p.stride_col_dst + row] = sum;
+                }
+            }
+        }
+    }
+}

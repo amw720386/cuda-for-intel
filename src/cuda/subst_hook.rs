@@ -14,6 +14,8 @@ enum Native {
 #[derive(Default)]
 pub(super) struct Natives {
     map: HashMap<String, Native>,
+    /// (dst, tmp_fixup) of the last native `mul_mat_q`: its stream-k fixup kernel is skipped.
+    pending_fixup: Option<(u64, u64)>,
 }
 
 impl Natives {
@@ -64,19 +66,48 @@ pub(super) fn launch(
     geometry: ([u32; 3], [u32; 3]),
     args: &[KernelArg],
 ) -> Result<(), CuResult> {
-    if let Some(plan) = plan
-        && let Some(mapped) = plan.map_geometry(geometry.0, geometry.1)
-        && let Some(kernel) = native(api, context, plan, stream)
-    {
-        match context.streams.launch(api, &context.backend, kernel, stream, mapped, args) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                export_log_always(format_args!("subst: native {} launch failed ({error:?}); using PTX", plan.key));
-                context.subst.map.insert(plan.key.clone(), Native::Failed);
+    if let Some(plan) = plan {
+        let needs_values = matches!(plan.kernel, subst::Kernel::MmqQ80 | subst::Kernel::MmqFixupQ80);
+        let vals: Vec<u64> = if needs_values { arg_values(args) } else { Vec::new() };
+        if plan.kernel == subst::Kernel::MmqQ80 {
+            context.subst.pending_fixup = None;
+        }
+        if plan.kernel == subst::Kernel::MmqFixupQ80 {
+            // [ids, bounds, dst, tmp, ...]: only fixups of a native mul_mat_q are no-ops
+            if vals.len() == 13 && context.subst.pending_fixup == Some((vals[2], vals[3])) {
+                context.subst.pending_fixup = None;
+                return Ok(());
+            }
+        } else if let Some(mapped) = plan.map_launch(geometry.0, geometry.1, &vals)
+            && let Some(kernel) = native(api, context, plan, stream)
+        {
+            match context.streams.launch(api, &context.backend, kernel, stream, mapped, args) {
+                Ok(()) => {
+                    if plan.kernel == subst::Kernel::MmqQ80 {
+                        context.subst.pending_fixup = Some((vals[4], vals[5]));
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    export_log_always(format_args!("subst: native {} launch failed ({error:?}); using PTX", plan.key));
+                    context.subst.map.insert(plan.key.clone(), Native::Failed);
+                }
             }
         }
     }
     context.streams.launch(api, &context.backend, translated, stream, geometry, args)
+}
+
+/// Launch words as integers (pointers as addresses).
+fn arg_values(args: &[KernelArg]) -> Vec<u64> {
+    args.iter()
+        .map(|a| {
+            let mut b = [0u8; 8];
+            let n = a.size.min(8);
+            unsafe { std::ptr::copy_nonoverlapping(a.value.cast::<u8>(), b.as_mut_ptr(), n) };
+            u64::from_le_bytes(b)
+        })
+        .collect()
 }
 
 fn native(api: &Api, context: &mut CudaContext, plan: &Plan, stream: usize) -> Option<Handle> {

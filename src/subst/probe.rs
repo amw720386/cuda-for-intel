@@ -210,6 +210,113 @@ impl QuantizeCase {
     }
 }
 
+pub(crate) struct MmqCase {
+    pub p: refs::Mmq,
+    pub x: Vec<u8>,
+    pub y: Vec<u8>,
+}
+
+pub(crate) fn mmq_case(ncols_x: usize, nrows: usize, ncols: usize, nch: usize, ratio: usize, nsamples: usize, seed: u64) -> MmqCase {
+    let mut rng = Rng(seed);
+    let nb = ncols_x / 32;
+    let nch_x = nch / ratio;
+    let ychan = ncols_x / 128 * ncols * 36; // ints per (channel, sample) of y
+    let p = refs::Mmq {
+        ncols_x,
+        nrows_x: nrows,
+        ncols_dst: ncols,
+        nchannels_y: nch,
+        nsamples_y: nsamples,
+        channel_ratio: ratio,
+        sample_ratio: 1,
+        stride_row_x: nb,
+        ncols_y: ncols,
+        stride_col_dst: nrows,
+        stride_channel_x: nrows * nb,
+        stride_channel_y: ychan,
+        stride_channel_dst: nrows * ncols,
+        stride_sample_x: nrows * nb * nch_x,
+        stride_sample_y: ychan * nch,
+        stride_sample_dst: nrows * ncols * nch,
+    };
+    let x = refs::random_blocks(refs::Q8_0, nrows * nb * nch_x * nsamples, &mut rng);
+    let mut y = Vec::new();
+    for _ in 0..nch * nsamples {
+        let acts: Vec<f32> = (0..ncols_x * ncols).map(|_| rng.unit() * 2.0).collect();
+        y.extend(refs::quantize_mmq_d4(&acts, ncols_x, ncols));
+    }
+    MmqCase { p, x, y }
+}
+
+impl MmqCase {
+    pub fn dst_len(&self) -> usize {
+        self.p.nsamples_y * self.p.stride_sample_dst
+    }
+
+    pub fn reference(&self) -> Vec<f32> {
+        let mut want = vec![0f32; self.dst_len()];
+        refs::mmq_q8_0(&self.p, &self.x, &self.y, &mut want);
+        want
+    }
+
+    /// The launch words of `mul_mat_q` (pointers as addresses), in parameter order.
+    pub fn args(&self, x: u64, y: u64, dst: u64) -> Vec<PArg> {
+        let p = &self.p;
+        let u = |v: usize| PArg::U32(v as u32);
+        vec![
+            PArg::Ptr(x),
+            PArg::Ptr(y),
+            PArg::Ptr(0),
+            PArg::Ptr(0),
+            PArg::Ptr(dst),
+            PArg::Ptr(0),
+            u(p.ncols_x),
+            u(p.nrows_x),
+            u(p.ncols_dst),
+            u(p.stride_row_x),
+            u(p.ncols_y),
+            u(p.stride_col_dst),
+            u(p.channel_ratio),
+            u(p.nchannels_y),
+            u(p.stride_channel_x),
+            u(p.stride_channel_y),
+            u(p.stride_channel_dst),
+            u(p.sample_ratio),
+            u(p.nsamples_y),
+            u(p.stride_sample_x),
+            u(p.stride_sample_y),
+            u(p.stride_sample_dst),
+            u(p.ncols_dst),
+        ]
+    }
+
+    pub fn run(&self, dev: &mut impl Device, plan: &Plan) -> Result<Vec<f32>, String> {
+        let xa = dev.alloc(self.x.len())?;
+        dev.upload(xa, &self.x)?;
+        let ya = dev.alloc(self.y.len())?;
+        dev.upload(ya, &self.y)?;
+        let n = self.dst_len();
+        let da = dev.alloc(n * 4)?;
+        dev.upload(da, &vec![0u8; n * 4])?;
+        let args = self.args(xa, ya, da);
+        let vals = launch_values(&args);
+        let (grid, block) = plan.map_launch([1, 1, 1], [32, 8, 1], &vals).ok_or("mmq geometry rejected")?;
+        dev.run(grid, block, &args)?;
+        let bytes = dev.download(da, n * 4)?;
+        Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    }
+}
+
+/// Launch words as the integers `Plan::map_launch` expects.
+pub(crate) fn launch_values(args: &[PArg]) -> Vec<u64> {
+    args.iter()
+        .map(|a| match *a {
+            PArg::Ptr(v) | PArg::U64(v) => v,
+            PArg::U32(v) => u64::from(v),
+        })
+        .collect()
+}
+
 /// Runs the plan's self-check on `dev`. `Ok` means the native kernel agrees with the host
 /// reference (bitwise for quantize; NMSE below 1e-9 for the float dot products).
 pub(crate) fn validate(plan: &Plan, dev: &mut impl Device) -> Result<(), String> {
@@ -225,6 +332,17 @@ pub(crate) fn validate(plan: &Plan, dev: &mut impl Device) -> Result<(), String>
             }
             Ok(())
         }
+        Kernel::MmqQ80 => {
+            let case = mmq_case(256, 70, 40, 2, 1, 1, 0x3171);
+            let want = case.reference();
+            let got = case.run(dev, plan)?;
+            let nmse = refs::nmse(&got, &want);
+            if !(nmse < 1e-9) || want.iter().all(|v| *v == 0.0) {
+                return Err(format!("mmq probe nmse {nmse}"));
+            }
+            Ok(())
+        }
+        Kernel::MmqFixupQ80 => Ok(()),
         Kernel::QuantizeQ81 => {
             let case = quantize_case(96, 128, 3, 2, 1, 0x71);
             let want = case.reference();
