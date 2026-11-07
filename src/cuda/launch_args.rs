@@ -91,7 +91,7 @@ pub(super) unsafe fn read(
         // Pass raw byte ranges directly. A CUDA aggregate may contain padding
         // whose bytes were never initialized by the caller.
         match param {
-            Param::Words(words) => {
+            Param::Words { words, .. } => {
                 args.extend((0..usize::from(words)).map(|index| KernelArg {
                     value: unsafe { value.byte_add(index * 4) },
                     size: 4,
@@ -113,7 +113,13 @@ mod tests {
 
     #[test]
     fn packed_options_and_aggregate_alignment() {
-        let params = [Param::U32, Param::GlobalPtr, Param::Words(3), Param::U64, Param::U8];
+        let params = [
+            Param::U32,
+            Param::GlobalPtr,
+            Param::Words { words: 3, align: 4 },
+            Param::U64,
+            Param::U8,
+        ];
         let mut bytes = [0u8; 41];
         bytes[8..16].copy_from_slice(&42u64.to_ne_bytes());
         bytes[40] = 0xab;

@@ -164,7 +164,7 @@ impl<'a> Emitter<'a> {
     fn param_type(&self, param: Param) -> Word {
         match param {
             Param::U8 => self.u8_type,
-            Param::U32 | Param::Words(_) => self.u32_type,
+            Param::U32 | Param::Words { .. } => self.u32_type,
             Param::F32 => self.f32_type,
             Param::U64 => self.u64_type,
             Param::GlobalPtr => self.global_byte_ptr,
@@ -265,7 +265,15 @@ impl<'a> Emitter<'a> {
 
     fn integer(&mut self, operand: &str, kind: Kind) -> Result<Word, Error> {
         if operand.starts_with('%') {
-            return self.read(operand)?.require(kind, operand);
+            let value = self.read(operand)?;
+            if value.kind == kind {
+                return Ok(value.id);
+            }
+            // Pointer params are often compared/added as .u64 before cvta.to.global.
+            if kind == Kind::B64 && matches!(value.kind, Kind::Address(_)) {
+                return Ok(self.builder.bitcast(self.u64_type, None, value.id)?);
+            }
+            return Ok(value.require(kind, operand)?);
         }
         match kind {
             Kind::B32 => Self::parse_u32(operand)
@@ -457,12 +465,37 @@ impl<'a> Emitter<'a> {
             ),
             None => (address, 0),
         };
-        let pointer = self.read(base)?.require(Kind::Address(space), base)?;
         let byte_ty = match space {
             Space::Global => self.global_byte_ptr,
             Space::Shared => self.shared_byte_ptr,
         };
-        let bytes_ptr = self.builder.bitcast(byte_ty, None, pointer)?;
+        let value = self.read(base)?;
+        let bytes_ptr = match (space, value.kind) {
+            (Space::Shared, Kind::B32) => {
+                // 32-bit shared addressing: register holds a byte offset from the shared base.
+                let (_, array) = self.shared.ok_or_else(|| {
+                    Error::new("shared memory access without a shared declaration")
+                })?;
+                let zero = self.builder.constant_bit32(self.u32_type, 0);
+                let word_ptr =
+                    self.builder
+                        .access_chain(self.shared_word_ptr, None, array, [zero])?;
+                let base_bytes = self.builder.bitcast(byte_ty, None, word_ptr)?;
+                let off32 = value.id;
+                let off64 = self.builder.u_convert(self.u64_type, None, off32)?;
+                self.builder
+                    .ptr_access_chain(byte_ty, None, base_bytes, off64, [])?
+            }
+            (_, Kind::Address(actual)) if actual == space => {
+                self.builder.bitcast(byte_ty, None, value.id)?
+            }
+            _ => {
+                return Err(Error::new(format!(
+                    "expected {:?} address for {base}, got {:?}",
+                    space, value.kind
+                )));
+            }
+        };
         if offset == 0 {
             Ok(bytes_ptr)
         } else {
@@ -746,15 +779,61 @@ impl<'a> Emitter<'a> {
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
         let (dst, id, kind) = match inst {
             Instruction::Param(width, dst, src, offset) => {
-                let value = self.params.get(&(src, offset)).copied().ok_or_else(|| {
-                    Error::new(format!("unknown PTX parameter word {src}+{offset}"))
-                })?;
-                if width != value.kind.width() {
-                    return Err(Error::new(format!(
-                        "mismatched PTX parameter load for {src}"
-                    )));
+                if width == Width::B64 {
+                    if let Some(value) = self.params.get(&(src, offset)).copied() {
+                        // Native .u64 / promoted GlobalPtr both occupy a 64-bit slot.
+                        if value.kind.width() == Width::B64 {
+                            (dst, value.id, value.kind)
+                        } else if value.kind == Kind::B32 {
+                            // Aggregate `.b8` params are stored as B32 words; assemble a u64.
+                            let hi = self
+                                .params
+                                .get(&(src, offset + 4))
+                                .copied()
+                                .ok_or_else(|| {
+                                    Error::new(format!(
+                                        "unknown PTX parameter word {src}+{}",
+                                        offset + 4
+                                    ))
+                                })?;
+                            if hi.kind != Kind::B32 {
+                                return Err(Error::new(format!(
+                                    "mismatched PTX parameter load for {src}+{offset}"
+                                )));
+                            }
+                            let lo64 = self.builder.u_convert(self.u64_type, None, value.id)?;
+                            let hi64 = self.builder.u_convert(self.u64_type, None, hi.id)?;
+                            let shift = self.builder.constant_bit32(self.u32_type, 32);
+                            let hi64 = self.builder.shift_left_logical(
+                                self.u64_type,
+                                None,
+                                hi64,
+                                shift,
+                            )?;
+                            let id =
+                                self.builder.bitwise_or(self.u64_type, None, lo64, hi64)?;
+                            (dst, id, Kind::B64)
+                        } else {
+                            return Err(Error::new(format!(
+                                "mismatched PTX parameter load for {src}+{offset}"
+                            )));
+                        }
+                    } else {
+                        return Err(Error::new(format!(
+                            "unknown PTX parameter word {src}+{offset}"
+                        )));
+                    }
+                } else {
+                    let value = self.params.get(&(src, offset)).copied().ok_or_else(|| {
+                        Error::new(format!("unknown PTX parameter word {src}+{offset}"))
+                    })?;
+                    if width != value.kind.width() {
+                        return Err(Error::new(format!(
+                            "mismatched PTX parameter load for {src}"
+                        )));
+                    }
+                    (dst, value.id, value.kind)
                 }
-                (dst, value.id, value.kind)
             }
             Instruction::ParamS8(dst, src) => {
                 let value = self.params.get(&(src, 0)).copied().ok_or_else(|| {
@@ -776,16 +855,56 @@ impl<'a> Emitter<'a> {
                     .shift_right_arithmetic(ty, None, raised, shift)?;
                 (dst, id, Kind::B32)
             }
+            Instruction::ParamVec {
+                count,
+                dst,
+                name,
+                offset,
+            } => {
+                for index in 0..usize::from(count) {
+                    let word = offset + index * 4;
+                    let value = self.params.get(&(name, word)).copied().ok_or_else(|| {
+                        Error::new(format!("unknown PTX parameter word {name}+{word}"))
+                    })?;
+                    if value.kind != Kind::B32 {
+                        return Err(Error::new(format!(
+                            "mismatched PTX parameter load for {name}+{word}"
+                        )));
+                    }
+                    self.write(dst[index], value)?;
+                }
+                return Ok(());
+            }
             Instruction::ToGlobal(dst, src) => {
-                // The frontend accepts only pointers to device allocations for this state space.
+                // Accept either an already-typed global pointer or a raw .u64 address.
                 let kind = Kind::Address(Space::Global);
-                let id = self.read(src)?.require(kind, src)?;
+                let value = self.read(src)?;
+                let id = match value.kind {
+                    Kind::Address(Space::Global) => value.id,
+                    Kind::B64 => self.builder.bitcast(self.global_byte_ptr, None, value.id)?,
+                    Kind::Address(Space::Shared) => {
+                        return Err(Error::new(format!(
+                            "cannot cvta.to.global from shared pointer {src}"
+                        )));
+                    }
+                    other => {
+                        return Err(Error::new(format!(
+                            "expected B64 or global pointer for {src}, got {other:?}"
+                        )));
+                    }
+                };
                 (dst, id, kind)
             }
             Instruction::SharedAddress(dst, src) => {
                 let pointer = self.shared_base(src)?;
                 let id = self.builder.bitcast(self.shared_byte_ptr, None, pointer)?;
                 (dst, id, Kind::Address(Space::Shared))
+            }
+            Instruction::SharedSymbol32(dst, src) => {
+                // Validate the symbol exists; CUDA 32-bit shared addressing uses offset 0.
+                let _ = self.shared_base(src)?;
+                let id = self.builder.constant_bit32(self.u32_type, 0);
+                (dst, id, Kind::B32)
             }
             Instruction::Builtin(dst, src) => (dst, self.builtin(src)?, Kind::B32),
             Instruction::Mad32(dst, [a, b, c]) => {
@@ -899,6 +1018,54 @@ impl<'a> Emitter<'a> {
                 self.fp32 = true;
                 (dst, id, Kind::Predicate)
             }
+            Instruction::Compare64 {
+                op,
+                signed,
+                dst,
+                src: [a, b],
+            } => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
+                let ty = self.bool_type;
+                let id = match (op, signed) {
+                    (Comparison::Equal, _) => self.builder.i_equal(ty, None, a, b),
+                    (Comparison::NotEqual, _) => self.builder.i_not_equal(ty, None, a, b),
+                    (Comparison::Less, false) => self.builder.u_less_than(ty, None, a, b),
+                    (Comparison::LessEqual, false) => {
+                        self.builder.u_less_than_equal(ty, None, a, b)
+                    }
+                    (Comparison::Greater, false) => self.builder.u_greater_than(ty, None, a, b),
+                    (Comparison::GreaterEqual, false) => {
+                        self.builder.u_greater_than_equal(ty, None, a, b)
+                    }
+                    (Comparison::Less, true) => self.builder.s_less_than(ty, None, a, b),
+                    (Comparison::LessEqual, true) => self.builder.s_less_than_equal(ty, None, a, b),
+                    (Comparison::Greater, true) => self.builder.s_greater_than(ty, None, a, b),
+                    (Comparison::GreaterEqual, true) => {
+                        self.builder.s_greater_than_equal(ty, None, a, b)
+                    }
+                }?;
+                (dst, id, Kind::Predicate)
+            }
+            Instruction::Select {
+                kind,
+                dst,
+                src: [a, b, pred],
+            } => {
+                let cond = self.read(pred)?.require(Kind::Predicate, pred)?;
+                let value_kind = match kind {
+                    Width::B32 => Kind::B32,
+                    Width::B64 => Kind::B64,
+                    Width::Predicate => {
+                        return Err(Error::new("selp predicate destination is unsupported"));
+                    }
+                };
+                let a = self.integer(a, value_kind)?;
+                let b = self.integer(b, value_kind)?;
+                let ty = self.value_type(value_kind);
+                let id = self.builder.select(ty, None, cond, a, b)?;
+                (dst, id, value_kind)
+            }
             Instruction::PredicateLogic {
                 and,
                 dst,
@@ -927,6 +1094,7 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Div => self.builder.s_div(ty, None, a, b),
                     IntegerOp::DivUnsigned => self.builder.u_div(ty, None, a, b),
                     IntegerOp::Rem => self.builder.s_rem(ty, None, a, b),
+                    IntegerOp::RemUnsigned => self.builder.u_mod(ty, None, a, b),
                     IntegerOp::SignExtend8 => {
                         // PTX cvt.s32.s8 sign-extends the low 8 bits of the source.
                         let shift = self.builder.constant_bit32(ty, 24);
@@ -1055,11 +1223,24 @@ impl<'a> Emitter<'a> {
                 )
             }
             Instruction::Widen { signed, dst, src } => {
-                let src = self.integer(src, Kind::B32)?;
-                let id = if signed {
-                    self.builder.s_convert(self.u64_type, None, src)?
+                // nvcc may feed a .b64 register to cvt.*.s32/u32, meaning "low 32 bits".
+                let src32 = if let Ok(value) = self.read(src) {
+                    match value.kind {
+                        Kind::B32 => value.id,
+                        Kind::B64 => self.builder.u_convert(self.u32_type, None, value.id)?,
+                        other => {
+                            return Err(Error::new(format!(
+                                "expected B32 for {src}, got {other:?}"
+                            )));
+                        }
+                    }
                 } else {
-                    self.builder.u_convert(self.u64_type, None, src)?
+                    self.integer(src, Kind::B32)?
+                };
+                let id = if signed {
+                    self.builder.s_convert(self.u64_type, None, src32)?
+                } else {
+                    self.builder.u_convert(self.u64_type, None, src32)?
                 };
                 (dst, id, Kind::B64)
             }
@@ -1083,6 +1264,34 @@ impl<'a> Emitter<'a> {
                 let id = self
                     .builder
                     .shift_left_logical(self.u64_type, None, value, shift)?;
+                (dst, id, Kind::B64)
+            }
+            Instruction::ShiftRightLogical64(dst, [value, shift]) => {
+                let value = self.integer(value, Kind::B64)?;
+                let shift = self.integer(shift, Kind::B32)?;
+                let id = self
+                    .builder
+                    .shift_right_logical(self.u64_type, None, value, shift)?;
+                (dst, id, Kind::B64)
+            }
+            Instruction::And64(dst, [a, b]) => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
+                let id = self.builder.bitwise_and(self.u64_type, None, a, b)?;
+                (dst, id, Kind::B64)
+            }
+            Instruction::Rem64 {
+                signed,
+                dst,
+                src: [a, b],
+            } => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
+                let id = if signed {
+                    self.builder.s_rem(self.u64_type, None, a, b)?
+                } else {
+                    self.builder.u_mod(self.u64_type, None, a, b)?
+                };
                 (dst, id, Kind::B64)
             }
             Instruction::Load64(space, dst, address) => {
@@ -1280,7 +1489,7 @@ impl<'a> Emitter<'a> {
             .iter()
             .flat_map(|&(_, param)| {
                 let count = match param {
-                    Param::Words(words) => usize::from(words),
+                    Param::Words { words, .. } => usize::from(words),
                     _ => 1,
                 };
                 std::iter::repeat_n(self.param_type(param), count)
@@ -1302,7 +1511,7 @@ impl<'a> Emitter<'a> {
         for &(name, param) in &entry.params {
             // Keep one CUDA argument, but pass each aligned word to Level Zero
             // as a scalar so the device ABI needs no by-value struct pointer.
-            if let Param::Words(words) = param {
+            if let Param::Words { words, .. } = param {
                 for offset in 0..usize::from(words) {
                     let id = values.next().unwrap();
                     self.params.insert(
@@ -1329,7 +1538,7 @@ impl<'a> Emitter<'a> {
                 }
                 Param::U64 => Kind::B64,
                 Param::GlobalPtr => Kind::Address(Space::Global),
-                Param::Words(_) => unreachable!(),
+                Param::Words { .. } => unreachable!(),
             };
             self.params.insert((name, 0), Value { id, kind });
         }

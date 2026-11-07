@@ -74,6 +74,8 @@ struct CudaModule {
 struct CudaEntry {
     params: Vec<Param>,
     max_threads: Option<u32>,
+    /// SPIR-V workgroup shared buffer size (bytes); bounds CUDA dynamic shared launches.
+    shared_bytes: u32,
     function: Option<(usize, Handle)>,
 }
 
@@ -715,6 +717,7 @@ fn load_ptx(
             CudaEntry {
                 params: kernel.params,
                 max_threads: kernel.max_threads,
+                shared_bytes: kernel.shared_bytes,
                 function: None,
             },
         );
@@ -868,9 +871,6 @@ pub unsafe extern "system" fn cuLaunchKernel(
 ) -> CuResult {
     trace::call("cuLaunchKernel", || {
         status(with_context(|runtime, context| {
-            if shared_bytes != 0 {
-                return Err(NotSupported);
-            }
             let stream = context.streams.launch_key(stream)?;
             let (module_key, name) = context
                 .functions
@@ -879,6 +879,13 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
             let entry = module.entries.get(name).ok_or(InvalidHandle)?;
             let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
+            // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
+            if shared_bytes != 0 && entry.shared_bytes == 0 {
+                return Err(NotSupported);
+            }
+            if shared_bytes > entry.shared_bytes {
+                return Err(InvalidValue);
+            }
             let grid = [grid_x, grid_y, grid_z];
             let block = [block_x, block_y, block_z];
             validate_launch(

@@ -14,7 +14,8 @@ pub(crate) enum Param {
     F32,
     U64,
     GlobalPtr,
-    Words(u16),
+    /// `.param .align N .b8 name[bytes]` — `words` is `bytes/4`, `align` is 4/8/16.
+    Words { words: u16, align: u16 },
 }
 
 impl Param {
@@ -22,7 +23,8 @@ impl Param {
         match self {
             Self::U8 => 1,
             Self::U64 | Self::GlobalPtr => 8,
-            Self::U32 | Self::F32 | Self::Words(_) => 4,
+            Self::Words { align, .. } => usize::from(align),
+            Self::U32 | Self::F32 => 4,
         }
     }
 
@@ -31,7 +33,7 @@ impl Param {
             Self::U8 => 1,
             Self::U32 | Self::F32 => 4,
             Self::U64 | Self::GlobalPtr => 8,
-            Self::Words(words) => usize::from(words) * 4,
+            Self::Words { words, .. } => usize::from(words) * 4,
         }
     }
 }
@@ -95,6 +97,7 @@ enum IntegerOp {
     Div,
     DivUnsigned,
     Rem,
+    RemUnsigned,
     MulHighUnsigned,
     SignExtend8,
     /// Zero-extend / truncate to u16 in the low 16 bits (`cvt.u16.u32`).
@@ -154,8 +157,17 @@ enum Instruction<'a> {
     Param(Width, &'a str, &'a str, usize),
     /// `ld.param.s8` — load a byte parameter and sign-extend into a b16/b32 slot.
     ParamS8(&'a str, &'a str),
+    /// `ld.param.v2.f32` / `ld.param.v4.f32` from an aggregate `.b8` parameter.
+    ParamVec {
+        count: u8,
+        dst: [&'a str; 4],
+        name: &'a str,
+        offset: usize,
+    },
     ToGlobal(&'a str, &'a str),
     SharedAddress(&'a str, &'a str),
+    /// `mov.u32 %r, shared_symbol` — 32-bit address of a (possibly dynamic) shared array.
+    SharedSymbol32(&'a str, &'a str),
     Builtin(&'a str, &'a str),
     Mad32(&'a str, [&'a str; 3]),
     /// CUDA `dp4a.s32.s32` — signed 4×8-bit dot-product accumulate.
@@ -172,6 +184,18 @@ enum Instruction<'a> {
         op: Comparison,
         dst: &'a str,
         src: [&'a str; 2],
+    },
+    Compare64 {
+        op: Comparison,
+        signed: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
+    /// `selp.*` — `dst = src[2] ? src[0] : src[1]`.
+    Select {
+        kind: Width,
+        dst: &'a str,
+        src: [&'a str; 3],
     },
     PredicateLogic {
         and: bool,
@@ -194,6 +218,13 @@ enum Instruction<'a> {
     /// `cvt.u32.u64` — truncate the low 32 bits of a 64-bit value.
     Narrow(&'a str, &'a str),
     ShiftLeft64(&'a str, [&'a str; 2]),
+    ShiftRightLogical64(&'a str, [&'a str; 2]),
+    And64(&'a str, [&'a str; 2]),
+    Rem64 {
+        signed: bool,
+        dst: &'a str,
+        src: [&'a str; 2],
+    },
     Add64(&'a str, [&'a str; 2]),
     Mul64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
@@ -231,8 +262,16 @@ impl<'a> Instruction<'a> {
         use Instruction::*;
         out.clear();
         Some(match self {
-            Param(_, dst, ..) | ParamS8(dst, _) | SharedAddress(dst, _) | AtomicAdd32(dst, ..) => {
+            Param(_, dst, ..)
+            | ParamS8(dst, _)
+            | SharedAddress(dst, _)
+            | SharedSymbol32(dst, _)
+            | AtomicAdd32(dst, ..) => {
                 out.push(*dst);
+                &[]
+            }
+            ParamVec { count, dst, .. } => {
+                out.extend_from_slice(&dst[..usize::from(*count)]);
                 &[]
             }
             Mad32(dst, src) | Dp4a(dst, src) => {
@@ -259,12 +298,20 @@ impl<'a> Instruction<'a> {
             }
             Compare { dst, src, .. }
             | CompareFloat { dst, src, .. }
+            | Compare64 { dst, src, .. }
             | PredicateLogic { dst, src, .. }
             | Integer32(_, dst, src)
             | MulWide32 { dst, src, .. }
             | ShiftLeft64(dst, src)
+            | ShiftRightLogical64(dst, src)
+            | And64(dst, src)
+            | Rem64 { dst, src, .. }
             | Add64(dst, src)
             | Mul64(dst, src) => {
+                out.push(*dst);
+                src
+            }
+            Select { dst, src, .. } => {
                 out.push(*dst);
                 src
             }
@@ -438,7 +485,10 @@ mod tests {
         for (kernel, function) in translated.kernels.iter().zip(&module.functions) {
             assert_eq!(kernel.params.len(), 14);
             assert_eq!(kernel.params[..2], [Param::GlobalPtr; 2]);
-            assert_eq!(kernel.params[5..8], [Param::Words(3); 3]);
+            assert_eq!(
+                kernel.params[5..8],
+                [Param::Words { words: 3, align: 4 }; 3]
+            );
             assert_eq!(function.parameters.len(), 20);
         }
     }
@@ -474,8 +524,25 @@ mod tests {
         assert!(kernel.fp32 && kernel.fp32_fma);
         assert_eq!(kernel.params.last(), Some(&Param::U8));
         assert!(
-            kernel.params.iter().any(|param| matches!(param, Param::Words(2))),
+            kernel.params.iter().any(|param| {
+                matches!(param, Param::Words { words: 2, align: 4 })
+            }),
             "expected rope_corr_dims .b8[8] aggregate"
+        );
+    }
+
+    #[test]
+    fn translates_authentic_ggml_soft_max_f32_entry() {
+        let translated = translate(include_str!("../examples/ggml_softmax_auth.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let kernel = &translated.kernels[0];
+        assert!(kernel.fp32);
+        assert!(
+            kernel
+                .params
+                .iter()
+                .any(|param| matches!(param, Param::Words { align: 8, .. })),
+            "expected soft_max_params .align 8 aggregate"
         );
     }
 

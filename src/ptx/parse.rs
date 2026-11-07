@@ -87,7 +87,12 @@ impl<'a> Parser<'a> {
         self.expect(".param")?;
         let ty = match self.take()? {
             ".align" => {
-                self.expect("4")?;
+                let align = self
+                    .take()?
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|n| matches!(n, 4 | 8 | 16))
+                    .ok_or_else(|| Error::new("unsupported PTX parameter alignment"))?;
                 self.expect(".b8")?;
                 let name = self.identifier()?;
                 self.expect("[")?;
@@ -95,10 +100,18 @@ impl<'a> Parser<'a> {
                     .take()?
                     .parse::<u16>()
                     .ok()
-                    .filter(|n| (4..=4096).contains(n) && n.is_multiple_of(4))
+                    .filter(|n| {
+                        (4..=4096).contains(n) && n.is_multiple_of(4) && n.is_multiple_of(align)
+                    })
                     .ok_or_else(|| Error::new("unsupported PTX parameter aggregate size"))?;
                 self.expect("]")?;
-                return Ok((name, Param::Words(bytes / 4)));
+                return Ok((
+                    name,
+                    Param::Words {
+                        words: bytes / 4,
+                        align,
+                    },
+                ));
             }
             ".u8" | ".s8" => Param::U8,
             ".u32" | ".b32" => Param::U32,
@@ -215,7 +228,64 @@ impl<'a> Parser<'a> {
             }
             ["ld.param.s8", dst, ",", "[", src, "]"] => Instruction::ParamS8(dst, src),
             ["ld.param.b64" | "ld.param.u64", dst, ",", "[", src, "]"] => {
-                Instruction::Param(Width::B64, dst, src, 0)
+                let (name, offset) = if let Some((name, offset)) = src.split_once('+') {
+                    (
+                        name,
+                        offset
+                            .parse()
+                            .map_err(|_| Error::new("invalid PTX parameter offset"))?,
+                    )
+                } else {
+                    (*src, 0)
+                };
+                Instruction::Param(Width::B64, dst, name, offset)
+            }
+            [
+                op @ ("ld.param.v2.f32" | "ld.param.v4.f32"),
+                "{",
+                a,
+                ",",
+                b,
+                rest @ ..,
+            ] => {
+                let count = if *op == "ld.param.v4.f32" { 4u8 } else { 2 };
+                let (c, d, src) = if count == 4 {
+                    match rest {
+                        [",", c, ",", d, "}", ",", "[", src, "]"] => (*c, *d, *src),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                } else {
+                    match rest {
+                        ["}", ",", "[", src, "]"] => ("", "", *src),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "unsupported PTX instruction: {}",
+                                slice[..end].join(" ")
+                            )));
+                        }
+                    }
+                };
+                let (name, offset) = if let Some((name, offset)) = src.split_once('+') {
+                    (
+                        name,
+                        offset
+                            .parse()
+                            .map_err(|_| Error::new("invalid PTX parameter offset"))?,
+                    )
+                } else {
+                    (src, 0)
+                };
+                Instruction::ParamVec {
+                    count,
+                    dst: [a, b, c, d],
+                    name,
+                    offset,
+                }
             }
             ["cvta.to.global.u64", dst, ",", src] => Instruction::ToGlobal(dst, src),
             ["mov.b64", dst, ",", src] => Instruction::SharedAddress(dst, src),
@@ -255,6 +325,13 @@ impl<'a> Parser<'a> {
             ["mov.u32", dst, ",", src] => {
                 if src.contains('.') {
                     Instruction::Builtin(dst, src)
+                } else if !src.starts_with('%')
+                    && !src.starts_with("0x")
+                    && !src.starts_with("0X")
+                    && src.parse::<i64>().is_err()
+                {
+                    // `mov.u32 %r, data_soft_max_f32` — address of extern/dynamic shared.
+                    Instruction::SharedSymbol32(dst, src)
                 } else {
                     Instruction::Move32(dst, src)
                 }
@@ -294,6 +371,55 @@ impl<'a> Parser<'a> {
                 }
             }
             [
+                op @ ("setp.eq.s64" | "setp.ne.s64" | "setp.lt.s64" | "setp.le.s64"
+                | "setp.gt.s64" | "setp.ge.s64" | "setp.eq.u64" | "setp.ne.u64"
+                | "setp.lt.u64" | "setp.le.u64" | "setp.gt.u64" | "setp.ge.u64"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => {
+                let signed = op.ends_with(".s64");
+                let comparison = match &op[5..7] {
+                    "ge" => Comparison::GreaterEqual,
+                    "gt" => Comparison::Greater,
+                    "lt" => Comparison::Less,
+                    "le" => Comparison::LessEqual,
+                    "eq" => Comparison::Equal,
+                    _ => Comparison::NotEqual,
+                };
+                Instruction::Compare64 {
+                    op: comparison,
+                    signed,
+                    dst,
+                    src: [a, b],
+                }
+            }
+            [
+                op @ ("selp.b32" | "selp.u32" | "selp.s32" | "selp.f32" | "selp.b64"
+                | "selp.u64" | "selp.s64"),
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+                ",",
+                pred,
+            ] => {
+                let kind = if op.ends_with(".b64") || op.ends_with(".u64") || op.ends_with(".s64")
+                {
+                    Width::B64
+                } else {
+                    Width::B32
+                };
+                Instruction::Select {
+                    kind,
+                    dst,
+                    src: [a, b, pred],
+                }
+            }
+            [
                 op @ ("setp.eq.f32" | "setp.eq.ftz.f32" | "setp.ne.f32" | "setp.ne.ftz.f32"
                 | "setp.lt.f32" | "setp.lt.ftz.f32" | "setp.le.f32" | "setp.le.ftz.f32"
                 | "setp.gt.f32" | "setp.gt.ftz.f32" | "setp.ge.f32" | "setp.ge.ftz.f32"),
@@ -325,7 +451,7 @@ impl<'a> Parser<'a> {
             [
                 op @ ("add.s32" | "sub.s32" | "mul.lo.s32" | "mul.hi.u32" | "shl.b32"
                 | "shr.u32" | "shr.s32" | "and.b32" | "or.b32" | "div.s32" | "div.u32"
-                | "rem.s32"),
+                | "rem.s32" | "rem.u32"),
                 dst,
                 ",",
                 a,
@@ -344,10 +470,23 @@ impl<'a> Parser<'a> {
                     "div.s32" => IntegerOp::Div,
                     "div.u32" => IntegerOp::DivUnsigned,
                     "rem.s32" => IntegerOp::Rem,
+                    "rem.u32" => IntegerOp::RemUnsigned,
                     _ => IntegerOp::ShiftRightLogical,
                 };
                 Instruction::Integer32(op, dst, [a, b])
             }
+            ["and.b64", dst, ",", a, ",", b] => Instruction::And64(dst, [a, b]),
+            ["shr.u64", dst, ",", a, ",", b] => Instruction::ShiftRightLogical64(dst, [a, b]),
+            ["rem.s64", dst, ",", a, ",", b] => Instruction::Rem64 {
+                signed: true,
+                dst,
+                src: [a, b],
+            },
+            ["rem.u64", dst, ",", a, ",", b] => Instruction::Rem64 {
+                signed: false,
+                dst,
+                src: [a, b],
+            },
             ["cvt.s32.s8", dst, ",", src] => {
                 Instruction::Integer32(IntegerOp::SignExtend8, dst, [src, src])
             }
@@ -394,17 +533,19 @@ impl<'a> Parser<'a> {
                 | "ld.global.f32"
                 | "ld.global.nc.u32"
                 | "ld.global.nc.f32"
-                | "ld.shared.b32"),
+                | "ld.shared.b32"
+                | "ld.shared.f32"
+                | "ld.shared.u32"),
                 dst,
                 ",",
                 "[",
                 addr,
                 "]",
             ] => {
-                let space = if *op != "ld.shared.b32" {
-                    Space::Global
-                } else {
+                let space = if op.starts_with("ld.shared.") {
                     Space::Shared
+                } else {
+                    Space::Global
                 };
                 Instruction::Load32(space, dst, addr)
             }
@@ -536,17 +677,22 @@ impl<'a> Parser<'a> {
                 Instruction::Float32(dst, FloatOp::Ex2Approx([src]))
             }
             [
-                op @ ("st.global.b32" | "st.global.u32" | "st.global.f32" | "st.shared.b32"),
+                op @ ("st.global.b32"
+                | "st.global.u32"
+                | "st.global.f32"
+                | "st.shared.b32"
+                | "st.shared.f32"
+                | "st.shared.u32"),
                 "[",
                 addr,
                 "]",
                 ",",
                 src,
             ] => {
-                let space = if *op != "st.shared.b32" {
-                    Space::Global
-                } else {
+                let space = if op.starts_with("st.shared.") {
                     Space::Shared
+                } else {
+                    Space::Global
                 };
                 Instruction::Store32(space, addr, src)
             }
@@ -884,7 +1030,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     };
     parser.expect("{")?;
     let registers = parser.registers()?;
-    let shared = if parser.eat(".shared") {
+    let mut shared = if parser.eat(".shared") {
         parser.expect(".align")?;
         parser.expect("4")?;
         parser.expect(".b8")?;
@@ -907,6 +1053,17 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     };
     let blocks = parser.blocks()?;
     infer_direct_global_params(&mut params, &blocks);
+    // Dynamic / extern shared: nvcc emits `mov.u32 %r, symbol` without a local .shared decl.
+    if shared.is_none() {
+        for inst in blocks.iter().flat_map(|block| &block.instructions) {
+            if let Instruction::SharedSymbol32(_, name) = inst {
+                // Allocate a generous workgroup buffer; CUDA launch shared size selects the
+                // live prefix. Softmax and similar kernels index from symbol address 0.
+                shared = Some((*name, 48 * 1024));
+                break;
+            }
+        }
+    }
     Ok(Entry {
         name,
         params,

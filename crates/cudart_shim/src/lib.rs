@@ -905,6 +905,18 @@ fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
         raw.len(),
         filtered.len()
     );
+    if std::env::var_os("CUDA_FOR_INTEL_DUMP_PTX").is_some() {
+        let dump_name = format!(
+            "cfi_dump_{}.ptx",
+            String::from_utf8_lossy(&name)
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .take(80)
+                .collect::<String>()
+        );
+        let _ = std::fs::write(&dump_name, &filtered);
+        eprintln!("CUDA for Intel resolve: dumped filtered PTX to {dump_name}");
+    }
     let err = ensure_context(drv);
     if err != SUCCESS {
         eprintln!("CUDA for Intel resolve: ensure_context -> {err}");
