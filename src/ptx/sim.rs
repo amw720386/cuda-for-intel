@@ -761,6 +761,13 @@ impl Sim {
                 next_pc = false;
                 None
             }
+            Op::Bitcast if self.vlen[ins.res as usize] > 1 => {
+                let n = self.vlen[ins.res as usize];
+                let src = g!(0);
+                let v = (0..n).map(|k| mask(w, src >> (k * w))).collect();
+                t.vecs.insert(ins.res, v);
+                None
+            }
             Op::Bitcast | Op::ConvertPtrToU | Op::ConvertUToPtr | Op::GenericCastToPtr | Op::PtrCastToGeneric | Op::CopyObject => {
                 Some(mask(w.max(1), g!(0)))
             }
@@ -920,7 +927,13 @@ impl Sim {
                 Some(g!(0).wrapping_add((sext(64, g!(1)) as u64).wrapping_mul(elem)))
             }
             Op::SDot | Op::UDot | Op::SUDot | Op::SDotAccSat | Op::UDotAccSat | Op::SUDotAccSat => {
-                let (a, b) = (g!(0) as u32, g!(1) as u32);
+                let pack = |t: &Thread, i: usize| -> u32 {
+                    match t.vecs.get(&o[i]) {
+                        Some(v) => v.iter().enumerate().fold(0u32, |a, (k, e)| a | (((*e as u32) & 0xff) << (8 * k))),
+                        None => t.vals[o[i] as usize] as u32,
+                    }
+                };
+                let (a, b) = (pack(t, 0), pack(t, 1));
                 let mut sum = 0i64;
                 for k in 0..4 {
                     let (x, y) = ((a >> (8 * k)) & 0xff, (b >> (8 * k)) & 0xff);

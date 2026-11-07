@@ -156,7 +156,13 @@ pub(super) fn gen_case(t: Q, nrows: usize, ncols: usize, k: usize, seed: u64, po
 /// Runs mul_mat_vec_q and returns dst[col][row].
 pub(super) fn run_mmvq(t: Q, case: &MmvqCase, k: usize, dot: bool) -> Result<Vec<Vec<f32>>, String> {
     let (nrows, ncols) = (case.weights.len(), case.y.len());
-    let kern = load_kernel(&mmvq_name(t, ncols as u32), dot);
+    let new_name = format!(
+        "_Z13mul_mat_vec_qIL9ggml_type{}ELi{ncols}ELb0ELb0ELb0EEvPKvS2_PKi31ggml_cuda_mm_fusion_args_devicePfj5uint3jjjS7_jjjS7_jjjj",
+        t.ggml_type()
+    );
+    let fused_abi = index().contains_key(&new_name);
+    let name = if fused_abi { new_name } else { mmvq_name(t, ncols as u32) };
+    let kern = load_kernel(&name, dot);
     assert_eq!(kern.has_dot_op, dot, "mmvq must use dp4a");
     let rows_per_block = if ncols == 1 { 1 } else { 2 };
     let nwarps = (kern.meta.max_threads.unwrap() / 32) as u32;
@@ -165,11 +171,13 @@ pub(super) fn run_mmvq(t: Q, case: &MmvqCase, k: usize, dot: bool) -> Result<Vec
     let ybytes: Vec<u8> = case.y.concat();
     let (w, y) = (gpu.upload(&wbytes), gpu.upload(&ybytes));
     let dst = gpu.alloc(4 * nrows * ncols);
-    let args = vec![
-        Arg::P(w),
-        Arg::P(y),
-        Arg::P(0),
-        Arg::P(dst),
+    let head = if fused_abi {
+        vec![Arg::P(w), Arg::P(y), Arg::P(0), Arg::W(vec![0; 20]), Arg::P(dst)]
+    } else {
+        vec![Arg::P(w), Arg::P(y), Arg::P(0), Arg::P(dst)]
+    };
+    let mut args = head;
+    args.extend([
         Arg::U(k as u32),
         Arg::W(fastdiv(1)),
         Arg::U((k / t.qk()) as u32),
@@ -183,7 +191,10 @@ pub(super) fn run_mmvq(t: Q, case: &MmvqCase, k: usize, dot: bool) -> Result<Vec
         Arg::U(0),
         Arg::U(0),
         Arg::U(0),
-    ];
+    ]);
+    if fused_abi {
+        args.push(Arg::U(0)); // ids_stride
+    }
     kern.run(&mut gpu, [(nrows / rows_per_block) as u32, 1, 1], [32, nwarps, 1], &args)?;
     let flat = gpu.download_f32(dst, nrows * ncols);
     Ok((0..ncols).map(|j| flat[j * nrows..(j + 1) * nrows].to_vec()).collect())
@@ -588,5 +599,66 @@ fn mmvq_q6_k_hardware_shape() {
     }
     for dot in [false, true] {
         check_mmvq(Q::Q6K, 4, 512, 2048, 77, false, dot);
+    }
+}
+
+#[test]
+#[ignore = "bring-up probe"]
+fn probe_mmq_meta() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    for (t, x) in [(Q::Q8_0, 8), (Q::Q4K, 8), (Q::Q6K, 8), (Q::Q8_0, 128)] {
+        let k = load_kernel(&format!("_Z9mul_mat_qIL9ggml_type{}ELi{x}ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii", t.ggml_type()), false);
+        eprintln!("MMQ {} x={x} shared={} maxthreads={:?} params={}", t.name(), k.meta.shared_bytes, k.meta.max_threads, k.meta.params.len());
+    }
+}
+
+/// Translates a self-contained PTX source with the requested dp4a lowering.
+fn load_source(src: &str, dot: bool) -> Kernel {
+    let _guard = DP4A_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let before = dot_product_enabled();
+    set_dot_product(dot);
+    let translated = translate(src);
+    set_dot_product(before);
+    let mut t = translated.unwrap();
+    coverage_tests::validate(&t.words);
+    let module = rspirv::dr::load_words(&t.words).unwrap();
+    let has_dot_op = module
+        .all_inst_iter()
+        .any(|i| matches!(i.class.opcode, rspirv::spirv::Op::SDot | rspirv::spirv::Op::UDot | rspirv::spirv::Op::SUDot));
+    Kernel { meta: t.kernels.remove(0), module, words: t.words, has_dot_op }
+}
+
+/// Q6_K-style `dp4a(x', u) + dp4a(0xE0E0E0E0, u)` over four columns: both lowerings must equal
+/// sum((x'_i - 32) * u_i). Hardware reproducer: examples/dp4a_const_operand.ptx.
+#[test]
+fn dp4a_constant_operand_matches_reference_in_both_lowerings() {
+    let src = include_str!("../../examples/dp4a_const_operand.ptx");
+    let n = 64usize;
+    let mut rng = Rng(5);
+    let x: Vec<u32> = (0..n).map(|_| rng.next() as u32).collect();
+    let u: Vec<u32> = (0..4 * n).map(|_| rng.next() as u32).collect();
+    for dot in [false, true] {
+        let kern = load_source(src, dot);
+        assert_eq!(kern.has_dot_op, dot);
+        let mut gpu = Gpu::default();
+        let xp = gpu.upload(&x.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+        let up = gpu.upload(&u.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+        let op = gpu.alloc(4 * 4 * n);
+        kern.run(&mut gpu, [1, 1, 1], [64, 1, 1], &[Arg::P(xp), Arg::P(up), Arg::P(op), Arg::U(n as u32)]).unwrap();
+        for j in 0..4 {
+            for t in 0..n {
+                let xv = (x[t] & 0x0f0f_0f0f) | ((x[t] << 4) & 0x3030_3030);
+                let mut want = 0i32;
+                for b in 0..4 {
+                    let q = (((xv >> (8 * b)) & 0xff) as u8 as i8 as i32) + i32::from((0xE0u8 as i8) as i8);
+                    let uu = ((u[j * n + t] >> (8 * b)) & 0xff) as u8 as i8 as i32;
+                    want += q * uu;
+                }
+                let got = gpu.mem.read(op + 4 * (j * n + t) as u64, 4) as u32 as i32;
+                assert_eq!(got, want, "dot={dot} col {j} lane {t}");
+            }
+        }
     }
 }
