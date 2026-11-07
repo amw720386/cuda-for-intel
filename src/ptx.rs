@@ -1,6 +1,19 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod flow;
 mod parse;
+
+pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
+    let tokens = parse::tokens(source)?;
+    if !matches!(tokens.as_slice(), [".version", _, ".target", _, ..])
+        || !tokens.windows(2).any(|tokens| tokens == [".address_size", "64"])
+    {
+        return Err(Error::new("invalid PTX module header"));
+    }
+    Ok(tokens
+        .windows(3)
+        .filter_map(|tokens| (tokens[0] == ".entry" && tokens[2] == "(").then_some(tokens[1]))
+        .collect())
+}
 mod rounded;
 mod spirv;
 

@@ -114,7 +114,7 @@ fn retire(ordinal: c_int, reset: bool) -> CuResult {
         }
         if !reset && primary.retains > 1 {
             primary.retains -= 1;
-            return Ok((Ok(()), None));
+            return Ok((Ok(()), None, None));
         }
 
         let teardown = if let Some(key) = primary.key {
@@ -125,7 +125,7 @@ fn retire(ordinal: c_int, reset: bool) -> CuResult {
             }
             teardown
         } else {
-            (Ok(()), None)
+            (Ok(()), None, None)
         };
         let primary = state.primary.get_mut(&ordinal).unwrap();
         primary.key = None;

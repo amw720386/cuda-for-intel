@@ -392,6 +392,7 @@ loader_api! {
     zeMemAllocHost(Raw, *const HostAllocDesc, usize, usize, *mut Raw),
     zeMemFree(Raw, Raw),
     zeCommandListAppendMemoryCopy(Raw, Raw, *const c_void, usize, Raw, u32, *mut Raw),
+    zeCommandListAppendMemoryFill(Raw, Raw, *const c_void, usize, usize, Raw, u32, *mut Raw),
     zeModuleCreate(Raw, Raw, *const ModuleDesc, *mut Raw, *mut Raw),
     zeModuleDestroy(Raw),
     zeModuleBuildLogGetString(Raw, *mut usize, *mut c_char),

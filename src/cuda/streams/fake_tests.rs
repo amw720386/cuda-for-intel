@@ -44,6 +44,7 @@ impl Fixture {
                     contexts: HashMap::new(),
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
+                    libraries: library::Libraries::default(),
                 })
                 .is_none()
         );
@@ -143,6 +144,72 @@ fn assert_baseline() {
     assert_eq!(stats.ledger.created, stats.ledger.released, "{stats:?}");
     assert_eq!(stats.ledger.submitted, stats.ledger.completed, "{stats:?}");
     assert!(consumed());
+}
+
+#[test]
+fn fake_cuda_library_loads_in_each_context_and_retires_handles() {
+    use crate::cuda::library::*;
+    use std::ptr::null;
+
+    let _fixture = Fixture::new();
+    let mut library = null_mut();
+    assert_eq!(
+        unsafe {
+            cuLibraryLoadData(
+                &mut library,
+                IMAGE.as_ptr().cast(),
+                null(),
+                null(),
+                0,
+                null(),
+                null(),
+                0,
+            )
+        },
+        Success
+    );
+    let mut kernel = null_mut();
+    let mut function = null_mut();
+    assert_eq!(
+        unsafe { cuLibraryGetKernel(&mut kernel, library, c"missing".as_ptr()) },
+        NotFound
+    );
+    assert_eq!(
+        unsafe { cuLibraryGetKernel(&mut kernel, library, c"k".as_ptr()) },
+        Success
+    );
+    assert_eq!(
+        unsafe { cuKernelGetFunction(&mut function, kernel) },
+        InvalidContext
+    );
+
+    let first = context(None);
+    assert_eq!(
+        unsafe { cuKernelGetFunction(&mut function, kernel) },
+        Success
+    );
+    let first_function = function;
+    let mut module = null_mut();
+    assert_eq!(unsafe { cuLibraryGetModule(&mut module, library) }, Success);
+    assert_eq!(cuModuleUnload(module), InvalidHandle);
+
+    let second = context(None);
+    assert_eq!(
+        unsafe { cuKernelGetFunction(&mut function, kernel) },
+        Success
+    );
+    assert_ne!(first_function, function);
+    let (device, _) = allocations();
+    assert_eq!(launch(kernel, null_mut(), device), Success);
+    assert_eq!(cuLibraryUnload(library), Success);
+    assert_eq!(
+        unsafe { cuKernelGetFunction(&mut function, kernel) },
+        InvalidHandle
+    );
+    assert_eq!(launch(function, null_mut(), device), InvalidHandle);
+    assert_eq!(cuCtxDestroy_v2(second), Success);
+    assert_eq!(cuCtxDestroy_v2(first), Success);
+    assert_baseline();
 }
 
 #[test]

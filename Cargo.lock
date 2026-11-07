@@ -33,6 +33,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "cfi-fatbin"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "lz4_flex",
+ "zstd",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -52,6 +61,7 @@ dependencies = [
 name = "cuda-for-intel"
 version = "0.1.0"
 dependencies = [
+ "cfi-fatbin",
  "libloading",
  "rspirv",
 ]
@@ -60,10 +70,8 @@ dependencies = [
 name = "cudart_shim"
 version = "0.1.0"
 dependencies = [
- "flate2",
+ "cfi-fatbin",
  "libloading",
- "lz4_flex",
- "zstd",
 ]
 
 [[package]]

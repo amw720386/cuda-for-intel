@@ -90,7 +90,7 @@ impl Tables {
         tools_tls[0] = (4 * PTR_SIZE) as *const c_void;
 
         let mut context_local = [std::ptr::null(); 4];
-        // Slot 0 size is not used the same way; provide put/get/delete stubs.
+        // This table starts with a callback, without a size slot.
         context_local[0] = context_local_storage_put as *const c_void;
         context_local[1] = context_local_storage_delete as *const c_void;
         context_local[2] = context_local_storage_get as *const c_void;
@@ -252,17 +252,58 @@ unsafe extern "system" fn tools_hook_fn6(ptr: *mut *mut u32, count: *mut usize) 
 
 type ContextDtor = Option<unsafe extern "system" fn(Opaque, *mut c_void, *mut c_void)>;
 
+pub(super) struct ContextStorage {
+    value: usize,
+    destructor: ContextDtor,
+}
+
+impl ContextStorage {
+    pub(super) fn destroy(self, context: usize, key: usize) {
+        if let Some(destroy) = self.destructor {
+            unsafe {
+                destroy(
+                    std::ptr::without_provenance_mut(context),
+                    std::ptr::with_exposed_provenance_mut(key),
+                    std::ptr::with_exposed_provenance_mut(self.value),
+                )
+            };
+        }
+    }
+}
+
+fn with_local_storage(
+    context: Opaque,
+    operation: impl FnOnce(&mut HashMap<usize, ContextStorage>) -> Result<(), CuResult>,
+) -> CuResult {
+    status(state(|state| {
+        let context = state
+            .contexts
+            .get_mut(&context_key(context)?)
+            .ok_or(InvalidContext)?;
+        context.check_live()?;
+        operation(&mut context.local_storage)
+    }))
+}
+
 unsafe extern "system" fn context_local_storage_put(
     context: Opaque,
     key: *mut c_void,
     value: *mut c_void,
-    _dtor: ContextDtor,
+    destructor: ContextDtor,
 ) -> CuResult {
     super::export_log(format!(
         "context_local_storage_put ctx={context:?} key={key:?} value={value:?}"
     ));
-    // Accept and ignore — enough for cudart init probes that park TLS state.
-    Success
+    with_local_storage(context, |storage| {
+        storage.insert(
+            key.expose_provenance(),
+            ContextStorage {
+                value: value.expose_provenance(),
+                destructor,
+            },
+        );
+        Ok(())
+    })
 }
 
 unsafe extern "system" fn context_local_storage_delete(
@@ -272,7 +313,10 @@ unsafe extern "system" fn context_local_storage_delete(
     super::export_log(format!(
         "context_local_storage_delete ctx={context:?} key={key:?}"
     ));
-    Success
+    with_local_storage(context, |storage| {
+        storage.remove(&key.addr());
+        Ok(())
+    })
 }
 
 unsafe extern "system" fn context_local_storage_get(
@@ -286,9 +330,12 @@ unsafe extern "system" fn context_local_storage_get(
     if value.is_null() {
         return InvalidValue;
     }
-    unsafe { *value = std::ptr::null_mut() };
-    // Report success with a null value; NotFound aborts cudart bring-up.
-    Success
+    unsafe { value.write(std::ptr::null_mut()) };
+    with_local_storage(context, |storage| {
+        let stored = storage.get(&key.addr()).ok_or(InvalidHandle)?;
+        unsafe { value.write(std::ptr::with_exposed_provenance_mut(stored.value)) };
+        Ok(())
+    })
 }
 
 #[cfg(windows)]

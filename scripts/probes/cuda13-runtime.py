@@ -3,6 +3,7 @@
 import argparse
 import ctypes as c
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -30,6 +31,16 @@ def runtime_probe(runtime):
     if count.value < 1:
         raise SystemExit("The CUDA Runtime enumerated zero devices")
     print(f"CUDA devices: {count.value}")
+    def fresh_thread_memory():
+        free = c.c_size_t()
+        total = c.c_size_t()
+        size_ptr = c.POINTER(c.c_size_t)
+        check(runtime, "cudaMemGetInfo", (size_ptr, size_ptr), c.byref(free), c.byref(total))
+        if not 0 < free.value <= total.value:
+            raise SystemExit("Invalid device memory reported on a fresh host thread")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(fresh_thread_memory).result()
     check(runtime, "cudaSetDevice", (c.c_int,), 0)
 
     # An aligned buffer for cudaDeviceProp. This probe only reads the leading name.

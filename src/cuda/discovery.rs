@@ -1,4 +1,5 @@
 use super::export_table::cuGetExportTable;
+use super::library::*;
 use super::primary::*;
 use super::streams::events::*;
 use super::streams::{cuStreamCreate, cuStreamDestroy_v2, cuStreamQuery, cuStreamSynchronize};
@@ -188,10 +189,17 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuMemcpyDtoH" => entry!(cuMemcpyDtoH_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemcpyHtoDAsync" => entry!(cuMemcpyHtoDAsync_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemcpyDtoHAsync" => entry!(cuMemcpyDtoHAsync_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD8" => entry!(cuMemsetD8_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD8Async" => entry!(cuMemsetD8Async, 3020, DRIVER_ABI + 1, true),
         b"cuModuleLoad" => entry!(cuModuleLoad, 2000),
         b"cuModuleLoadData" => entry!(cuModuleLoadData, 2000),
         b"cuModuleGetFunction" => entry!(cuModuleGetFunction, 2000),
         b"cuModuleUnload" => entry!(cuModuleUnload, 2000),
+        b"cuLibraryLoadData" => entry!(cuLibraryLoadData, 12000),
+        b"cuLibraryUnload" => entry!(cuLibraryUnload, 12000),
+        b"cuLibraryGetKernel" => entry!(cuLibraryGetKernel, 12000),
+        b"cuLibraryGetModule" => entry!(cuLibraryGetModule, 12000),
+        b"cuKernelGetFunction" => entry!(cuKernelGetFunction, 12000),
         b"cuLaunchKernel" => entry!(cuLaunchKernel, 4000, DRIVER_ABI + 1, true),
         b"cuStreamCreate" => entry!(cuStreamCreate, 2000),
         b"cuStreamDestroy" => entry!(cuStreamDestroy_v2, 4000),

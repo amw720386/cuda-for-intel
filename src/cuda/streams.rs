@@ -441,18 +441,9 @@ impl Streams {
         geometry: ([u32; 3], [u32; 3]),
         args: &[KernelArg],
     ) -> Result<(), CuResult> {
-        let blocking = self.get(key)?.blocking;
-        self.collect_retired(api)?;
-        let signal = if blocking && self.track_legacy {
-            Some(self.next_fence(api, context)?)
-        } else {
-            None
-        };
-        let waits = self.legacy_waits(api, key, blocking)?;
-        self.get_mut(key)?
-            .record(api, context, signal, waits, |list, signal, waits| {
-                list.launch(api, kernel, geometry, args, signal, waits)
-            })
+        self.record_ordered(api, context, key, |list, signal, waits| {
+            list.launch(api, kernel, geometry, args, signal, waits)
+        })
     }
 
     pub(super) unsafe fn copy(
@@ -463,6 +454,34 @@ impl Streams {
         pointers: (Opaque, *const std::ffi::c_void),
         size: usize,
     ) -> Result<(), CuResult> {
+        self.record_ordered(api, context, key, |list, signal, waits| unsafe {
+            list.copy(api, pointers, size, signal, waits)
+        })
+    }
+
+    pub(super) fn fill(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        fill: (Opaque, u8, usize),
+    ) -> Result<(), CuResult> {
+        self.record_ordered(api, context, key, |list, signal, waits| {
+            list.fill(api, fill, signal, waits)
+        })
+    }
+
+    fn record_ordered(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        append: impl FnOnce(
+            &CommandList,
+            Option<&Fence>,
+            &[Arc<Fence>],
+        ) -> Result<(), crate::level_zero::Error>,
+    ) -> Result<(), CuResult> {
         let blocking = self.get(key)?.blocking;
         self.collect_retired(api)?;
         let signal = if blocking && self.track_legacy {
@@ -471,10 +490,7 @@ impl Streams {
             None
         };
         let waits = self.legacy_waits(api, key, blocking)?;
-        self.get_mut(key)?
-            .record(api, context, signal, waits, |list, signal, waits| unsafe {
-                list.copy(api, pointers, size, signal, waits)
-            })
+        self.get_mut(key)?.record(api, context, signal, waits, append)
     }
 
     fn legacy_waits(

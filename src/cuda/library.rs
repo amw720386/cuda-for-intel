@@ -1,0 +1,219 @@
+//! Context-independent CUDA libraries with a Level Zero module per CUDA context.
+
+use super::*;
+
+#[derive(Default)]
+pub(super) struct Libraries {
+    images: HashMap<usize, Library>,
+    kernels: HashMap<usize, (usize, CString)>,
+}
+
+impl Libraries {
+    pub(super) fn contains_kernel(&self, key: usize) -> bool {
+        self.kernels.contains_key(&key)
+    }
+}
+
+struct Library {
+    ptx: Vec<u8>,
+    entries: HashMap<CString, Option<usize>>,
+    unloading: bool,
+}
+
+fn module_for_library(state: &mut State, library: usize) -> Result<(usize, usize), CuResult> {
+    let library_image = state.libraries.images.get(&library).ok_or(InvalidHandle)?;
+    if library_image.unloading {
+        return Err(InvalidHandle);
+    }
+    let context_key = current().ok_or(InvalidContext)?;
+    let context = state
+        .contexts
+        .get_mut(&context_key)
+        .ok_or(ContextIsDestroyed)?;
+    context.check_live()?;
+    if let Some(&module) = context.library_modules.get(&library) {
+        return Ok((context_key, module));
+    }
+    let module = load_ptx(
+        &state.runtime,
+        context,
+        &mut state.next_handle,
+        &library_image.ptx,
+    )?;
+    context.library_modules.insert(library, module);
+    Ok((context_key, module))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuLibraryLoadData(
+    out: *mut Opaque,
+    code: *const c_void,
+    jit_options: *const c_int,
+    jit_values: *const Opaque,
+    jit_count: c_uint,
+    library_options: *const c_int,
+    library_values: *const Opaque,
+    library_count: c_uint,
+) -> CuResult {
+    trace::call("cuLibraryLoadData", || {
+        if out.is_null()
+            || code.is_null()
+            || (jit_count != 0 && (jit_options.is_null() || jit_values.is_null()))
+            || (library_count != 0 && (library_options.is_null() || library_values.is_null()))
+        {
+            return InvalidValue;
+        }
+        // We take ownership of a copy, so BINARY_IS_PRESERVED is a safe hint.
+        if jit_count != 0
+            || library_count > 1
+            || (library_count == 1 && unsafe { library_options.read() } != 1)
+        {
+            if trace::enabled() {
+                trace::record(format_args!(
+                    "library options unsupported: jit={jit_count}, library={library_count}"
+                ));
+            }
+            return NotSupported;
+        }
+        let code = code.cast::<u8>();
+        let bytes = match unsafe { code.read() } {
+            0xb1 | 0x50 => match unsafe { cfi_fatbin::extract_ptx(code) } {
+                Some(ptx) => ptx,
+                None => return InvalidImage,
+            },
+            0x7f => return InvalidImage,
+            _ => unsafe { CStr::from_ptr(code.cast()) }.to_bytes().to_vec(),
+        };
+        let Ok(source) = std::str::from_utf8(&bytes) else {
+            return InvalidPtx;
+        };
+        let names = match ptx::entry_names(source) {
+            Ok(names) => names,
+            Err(error) => {
+                diagnostic(&error);
+                return InvalidPtx;
+            }
+        };
+        let mut entries = HashMap::new();
+        for name in names {
+            let Ok(name) = CString::new(name) else {
+                return InvalidPtx;
+            };
+            if entries.insert(name, None).is_some() {
+                return InvalidPtx;
+            }
+        }
+        status(state(|state| {
+            let key = reserve_handle(&mut state.next_handle)?;
+            state.libraries.images.insert(
+                key,
+                Library {
+                    ptx: bytes,
+                    entries,
+                    unloading: false,
+                },
+            );
+            unsafe { out.write(std::ptr::without_provenance_mut(key)) };
+            Ok(())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuLibraryGetKernel(
+    out: *mut Opaque,
+    library: Opaque,
+    name: *const c_char,
+) -> CuResult {
+    trace::call("cuLibraryGetKernel", || {
+        if out.is_null() || name.is_null() {
+            return InvalidValue;
+        }
+        status(state(|state| {
+            let key = library.addr();
+            let library = state.libraries.images.get_mut(&key).ok_or(InvalidHandle)?;
+            if library.unloading {
+                return Err(InvalidHandle);
+            }
+            let name = unsafe { CStr::from_ptr(name) };
+            let slot = library.entries.get_mut(name).ok_or(NotFound)?;
+            let kernel = if let Some(kernel) = *slot {
+                kernel
+            } else {
+                let kernel = reserve_handle(&mut state.next_handle)?;
+                state
+                    .libraries
+                    .kernels
+                    .insert(kernel, (key, name.to_owned()));
+                *slot = Some(kernel);
+                kernel
+            };
+            unsafe { out.write(std::ptr::without_provenance_mut(kernel)) };
+            Ok(())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuLibraryGetModule(out: *mut Opaque, library: Opaque) -> CuResult {
+    trace::call("cuLibraryGetModule", || {
+        if out.is_null() {
+            return InvalidValue;
+        }
+        status(state(|state| {
+            let (_, module) = module_for_library(state, library.addr())?;
+            unsafe { out.write(std::ptr::without_provenance_mut(module)) };
+            Ok(())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuKernelGetFunction(out: *mut Opaque, kernel: Opaque) -> CuResult {
+    trace::call("cuKernelGetFunction", || {
+        if out.is_null() {
+            return InvalidValue;
+        }
+        status(state(|state| {
+            let function = kernel_function(state, kernel.addr())?;
+            unsafe { out.write(std::ptr::without_provenance_mut(function)) };
+            Ok(())
+        }))
+    })
+}
+
+pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize, CuResult> {
+    let (library, name) = state.libraries.kernels.get(&kernel).ok_or(InvalidHandle)?;
+    let (library, name) = (*library, name.clone());
+    let (context, module) = module_for_library(state, library)?;
+    module_function(
+        &state.runtime.api,
+        state.contexts.get_mut(&context).ok_or(ContextIsDestroyed)?,
+        &mut state.next_handle,
+        module,
+        &name,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
+    trace::call("cuLibraryUnload", || {
+        status(state(|state| {
+            let key = library.addr();
+            let library = state.libraries.images.get_mut(&key).ok_or(InvalidHandle)?;
+            library.unloading = true;
+            for context in state.contexts.values_mut() {
+                if let Some(&module) = context.library_modules.get(&key) {
+                    context.streams.wait_all(&state.runtime.api)?;
+                    context.unload(&state.runtime.api, module)?;
+                    context.library_modules.remove(&key);
+                }
+            }
+            for kernel in library.entries.values().flatten() {
+                state.libraries.kernels.remove(kernel);
+            }
+            state.libraries.images.remove(&key);
+            Ok(())
+        }))
+    })
+}

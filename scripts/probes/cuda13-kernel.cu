@@ -30,11 +30,18 @@ int wmain(int argc, wchar_t **argv) {
     constexpr int expected = 0x12345678;
     check(cudaSetDevice(0), "cudaSetDevice");
     check(cudaMalloc(reinterpret_cast<void **>(&device), sizeof(result)), "cudaMalloc");
+    check(cudaMemset(device, 0x7e, sizeof(result)), "cudaMemset");
+    check(cudaMemcpy(&result, device, sizeof(result), cudaMemcpyDeviceToHost), "cudaMemcpy after fill");
+    if (result != 0x7e7e7e7e) {
+        std::fprintf(stderr, "Unexpected fill result %08x\n", static_cast<unsigned>(result));
+        return 2;
+    }
     write_value<<<1, 1>>>(device, expected);
     check(cudaGetLastError(), "write_value launch");
     check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
     check(cudaMemcpy(&result, device, sizeof(result), cudaMemcpyDeviceToHost), "cudaMemcpy");
     check(cudaFree(device), "cudaFree");
+    check(cudaDeviceReset(), "cudaDeviceReset");
     std::printf("Kernel result %08x\n", static_cast<unsigned>(result));
     return result == expected ? 0 : 2;
 }

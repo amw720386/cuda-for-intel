@@ -4,7 +4,7 @@ use super::{
 };
 use std::collections::HashMap;
 
-fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
+pub(super) fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
     fn punctuation(c: char) -> bool {
         "(){}[],;:<>@!".contains(c)
     }

@@ -113,6 +113,29 @@ impl CommandList {
         })
     }
 
+    pub(crate) fn fill(
+        &self,
+        api: &Api,
+        (dst, value, size): (Raw, u8, usize),
+        signal: Option<&Fence>,
+        waits: &[Arc<Fence>],
+    ) -> Result<(), Error> {
+        let mut events = WaitEvents::new(waits)?;
+        let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+        call("zeCommandListAppendMemoryFill", || unsafe {
+            (api.zeCommandListAppendMemoryFill)(
+                self.0.0,
+                dst,
+                std::ptr::from_ref(&value).cast(),
+                size_of::<u8>(),
+                size,
+                signal,
+                events.count,
+                events.ptr(),
+            )
+        })
+    }
+
     pub(crate) fn signal(&self, api: &Api, fence: &Fence) -> Result<(), Error> {
         call("zeCommandListAppendSignalEvent", || unsafe {
             (api.zeCommandListAppendSignalEvent)(self.0.0, fence.handle.0)

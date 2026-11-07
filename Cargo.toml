@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/cudart_shim", "crates/cublas_shim"]
+members = [".", "crates/cudart_shim", "crates/cublas_shim", "crates/fatbin"]
 resolver = "2"
 
 [package]
@@ -14,6 +14,7 @@ name = "nvcuda"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+cfi-fatbin = { path = "crates/fatbin" }
 libloading = "0.8"
 rspirv = "0.13"
 

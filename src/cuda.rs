@@ -13,6 +13,7 @@ mod export_table;
 #[cfg(windows)]
 mod integrity;
 mod launch_args;
+mod library;
 mod primary;
 mod streams;
 mod trace;
@@ -65,7 +66,9 @@ struct CudaContext {
     allocations: BTreeMap<usize, usize>,
     host_allocations: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
+    library_modules: HashMap<usize, usize>,
     functions: HashMap<usize, (usize, CString)>,
+    local_storage: HashMap<usize, export_table::ContextStorage>,
 }
 
 struct CudaModule {
@@ -88,6 +91,7 @@ struct State {
     contexts: HashMap<usize, CudaContext>,
     incomplete_contexts: Vec<Context>,
     primary: HashMap<c_int, primary::Primary>,
+    libraries: library::Libraries,
 }
 
 static RUNTIME: Mutex<Option<State>> = Mutex::new(None);
@@ -232,6 +236,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
                     contexts: HashMap::new(),
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
+                    libraries: library::Libraries::default(),
                 });
                 Success
             }
@@ -277,7 +282,7 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
             {
                 return Err(InvalidContext);
             }
-            let (result, worker) = state.destroy_context(key)?;
+            let teardown = state.destroy_context(key)?;
             if !state.contexts.contains_key(&key) {
                 CURRENT.with_borrow_mut(|stack| {
                     if stack.last() == Some(&key) {
@@ -285,7 +290,7 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
                     }
                 });
             }
-            Ok((result, worker))
+            Ok(teardown)
         });
         finish_destroy(destroyed)
     })
@@ -294,13 +299,19 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
 type ContextTeardown = (
     Result<(), CuResult>,
     Option<std::thread::JoinHandle<Result<(), CuResult>>>,
+    Option<(usize, HashMap<usize, export_table::ContextStorage>)>,
 );
 
 fn finish_destroy(destroyed: Result<ContextTeardown, CuResult>) -> CuResult {
-    status(destroyed.and_then(|(result, worker)| {
+    status(destroyed.and_then(|(result, worker, storage)| {
         let stopped = worker.map_or(Ok(()), |worker| {
             worker.join().map_err(|_| Unknown).and_then(|result| result)
         });
+        if let Some((context, storage)) = storage {
+            for (key, value) in storage {
+                value.destroy(context, key);
+            }
+        }
         result.and(stopped)
     }))
 }
@@ -341,7 +352,9 @@ impl State {
                 allocations: BTreeMap::new(),
                 host_allocations: BTreeMap::new(),
                 modules: HashMap::new(),
+                library_modules: HashMap::new(),
                 functions: HashMap::new(),
+                local_storage: HashMap::new(),
             },
         );
         if trace::enabled() {
@@ -361,11 +374,12 @@ impl State {
         if let Err(error) = result {
             // Some native resources may already have been released.
             context.teardown_error.get_or_insert(error);
-            return Ok((result, worker));
+            return Ok((result, worker, None));
         }
         let result = context.streams.execution_error().map_or(Ok(()), Err);
+        let storage = std::mem::take(&mut context.local_storage);
         self.contexts.remove(&key);
-        Ok((result, worker))
+        Ok((result, worker, Some((key, storage))))
     }
 }
 
@@ -781,6 +795,37 @@ pub unsafe extern "system" fn cuMemcpyDtoDAsync_v2(
     })
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn cuMemsetD8_v2(dst: u64, value: u8, size: usize) -> CuResult {
+    trace::call("cuMemsetD8_v2", || {
+        memset_bytes(dst, value, size, std::ptr::null_mut())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn cuMemsetD8Async(dst: u64, value: u8, size: usize, stream: Opaque) -> CuResult {
+    trace::call("cuMemsetD8Async", || memset_bytes(dst, value, size, stream))
+}
+
+fn memset_bytes(dst: u64, value: u8, size: usize, stream: Opaque) -> CuResult {
+    status(with_context(|runtime, context| {
+        let key = context.streams.launch_key(stream)?;
+        if size == 0 {
+            return Ok(());
+        }
+        let dst = dst as usize;
+        if !contains_range(&context.allocations, dst, size) {
+            return Err(InvalidValue);
+        }
+        context.streams.fill(
+            &runtime.api,
+            &context.backend,
+            key,
+            (std::ptr::with_exposed_provenance_mut(dst), value, size),
+        )
+    }))
+}
+
 fn load_ptx(
     runtime: &Runtime,
     context: &mut CudaContext,
@@ -886,7 +931,9 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
 pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
     trace::call("cuModuleUnload", || {
         status(with_context(|runtime, context| {
-            if !context.modules.contains_key(&module.addr()) {
+            if !context.modules.contains_key(&module.addr())
+                || context.library_modules.values().any(|&key| key == module.addr())
+            {
                 return Err(InvalidHandle);
             }
             context.streams.wait_all(&runtime.api)?;
@@ -906,32 +953,38 @@ pub unsafe extern "system" fn cuModuleGetFunction(
             if out.is_null() || name.is_null() {
                 return Err(InvalidValue);
             }
-            let module_key = module.addr();
-            let module = context.modules.get_mut(&module_key).ok_or(InvalidHandle)?;
-            if module.unloading {
-                return Err(InvalidHandle);
-            }
             let name = unsafe { CStr::from_ptr(name) };
-            let entry = module.entries.get_mut(name).ok_or(NotFound)?;
-            let function = if let Some((function, _)) = entry.function {
-                function
-            } else {
-                let function = reserve_handle(next)?;
-                let kernel = module
-                    .backend
-                    .create_kernel(&runtime.api, name)
-                    .inspect_err(|error| context.backend.health.observe(error))
-                    .map_err(backend_error)?;
-                entry.function = Some((function, kernel));
-                context
-                    .functions
-                    .insert(function, (module_key, name.to_owned()));
-                function
-            };
+            let function = module_function(&runtime.api, context, next, module.addr(), name)?;
             unsafe { out.write(std::ptr::without_provenance_mut(function)) };
             Ok(())
         }))
     })
+}
+
+fn module_function(
+    api: &Api,
+    context: &mut CudaContext,
+    next: &mut usize,
+    module_key: usize,
+    name: &CStr,
+) -> Result<usize, CuResult> {
+    let module = context.modules.get_mut(&module_key).ok_or(InvalidHandle)?;
+    if module.unloading {
+        return Err(InvalidHandle);
+    }
+    let entry = module.entries.get_mut(name).ok_or(NotFound)?;
+    if let Some((function, _)) = entry.function {
+        return Ok(function);
+    }
+    let function = reserve_handle(next)?;
+    let kernel = module
+        .backend
+        .create_kernel(api, name)
+        .inspect_err(|error| context.backend.health.observe(error))
+        .map_err(backend_error)?;
+    entry.function = Some((function, kernel));
+    context.functions.insert(function, (module_key, name.to_owned()));
+    Ok(function)
 }
 
 fn validate_launch(
@@ -973,11 +1026,19 @@ pub unsafe extern "system" fn cuLaunchKernel(
     extra: *mut Opaque,
 ) -> CuResult {
     trace::call("cuLaunchKernel", || {
-        status(with_context(|runtime, context| {
+        status(state(|state| {
+            let mut function = function.addr();
+            if state.libraries.contains_kernel(function) {
+                function = library::kernel_function(state, function)?;
+            }
+            let runtime = &state.runtime;
+            let key = current().ok_or(InvalidContext)?;
+            let context = state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?;
+            context.check_live()?;
             let stream = context.streams.launch_key(stream)?;
             let (module_key, name) = context
                 .functions
-                .get(&function.addr())
+                .get(&function)
                 .ok_or(InvalidHandle)?;
             let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
             let entry = module.entries.get(name).ok_or(InvalidHandle)?;

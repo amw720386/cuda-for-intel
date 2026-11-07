@@ -10,8 +10,5 @@ name = "cudart64_12"
 crate-type = ["cdylib"]
 
 [dependencies]
+cfi-fatbin = { path = "../fatbin" }
 libloading = "0.8"
-lz4_flex = { version = "0.11", default-features = false }
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# CUDA 12+ fatbins commonly use Zstd (flag 0x8000); match ZLUDA FatbinFileHeaderFlags.
-zstd = { version = "0.13", default-features = false }

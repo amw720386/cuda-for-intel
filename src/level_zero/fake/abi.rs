@@ -342,6 +342,22 @@ unsafe extern "system" fn group_size(kernel: Raw, _: u32, _: u32, _: u32) -> Sta
     })
 }
 
+unsafe extern "system" fn append_fill(
+    list: Raw,
+    dst: Raw,
+    pattern: *const c_void,
+    pattern_size: usize,
+    _: usize,
+    signal: Raw,
+    count: u32,
+    waits: *mut Raw,
+) -> Status {
+    if pattern.is_null() || pattern_size != 1 {
+        return fake::unexpected("zeCommandListAppendMemoryFill");
+    }
+    unsafe { append_copy(list, dst, std::ptr::null(), 0, signal, count, waits) }
+}
+
 unsafe extern "system" fn kernel_arg(
     kernel: Raw,
     index: u32,
@@ -475,6 +491,7 @@ pub(super) fn api() -> Api {
         zeMemAllocHost: alloc_host,
         zeMemFree: free,
         zeCommandListAppendMemoryCopy: append_copy,
+        zeCommandListAppendMemoryFill: append_fill,
         zeModuleCreate: module_create,
         zeModuleDestroy: module_destroy,
         zeModuleBuildLogDestroy: log_destroy,
