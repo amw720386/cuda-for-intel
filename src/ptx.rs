@@ -799,6 +799,26 @@ mod tests {
     const GGML_MODERN: &str = include_str!("../examples/ggml_scale_clamp.ptx");
     const GGML_ADD: &str = include_str!("../examples/ggml_add_f32.ptx");
 
+    /// Bring-up aid: CFI_PTX_FILE=<path> CFI_PTX_ENTRY=<mangled name> times each phase.
+    #[test]
+    #[ignore = "reads a PTX dump named by CFI_PTX_FILE"]
+    fn time_translation_of_dumped_entry() {
+        let (Some(path), Some(name)) = (
+            std::env::var_os("CFI_PTX_FILE"),
+            std::env::var("CFI_PTX_ENTRY").ok(),
+        ) else {
+            return;
+        };
+        let source = std::fs::read_to_string(path).unwrap();
+        let t = std::time::Instant::now();
+        let rewritten = parse::rewrite_half_scopes(&source);
+        eprintln!("rewrite: {:?}", t.elapsed());
+        let entry = parse::parse_named(&rewritten, &name).unwrap();
+        eprintln!("parse: {:?} blocks={}", t.elapsed(), entry.blocks.len());
+        let result = spirv::emit(vec![entry]);
+        eprintln!("emit: {:?} ok={:?}", t.elapsed(), result.as_ref().map(|t| t.words.len()).map_err(|e| e.to_string()));
+    }
+
     #[test]
     fn sign_extends_s32_parameter_load_into_a_64_bit_register() {
         let source = r#"
