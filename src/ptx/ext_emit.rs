@@ -525,6 +525,26 @@ impl<'a> Emitter<'a> {
                 Ok(())
             }
             ExtOp::ShflDyn(mode) => {
+                // Butterfly with a full-warp clamp (31, no segment mask) and a constant lane mask
+                // is a plain subgroup xor-shuffle that the Intel compiler can lower directly
+                // instead of an indirect, per-lane computed shuffle.
+                if mode == ShflMode::Bfly
+                    && crate::ptx::xor_shuffle_enabled()
+                    && let (Some(delta), Some(control)) = (self.known_u32(src[1]), self.known_u32(src[2]))
+                    && delta < 32
+                    && control == 31
+                {
+                    let value = self.integer(src[0], Kind::B32)?;
+                    let mask = self.u32_const(delta);
+                    let scope = self.builder.constant_bit32(self.u32_type, Scope::Subgroup as u32);
+                    let result = self.builder.group_non_uniform_shuffle_xor(self.u32_type, None, scope, value, mask)?;
+                    self.write(dst[0], Value { id: result, kind: Kind::B32 })?;
+                    if !dst[1].is_empty() {
+                        let valid = self.builder.constant_true(self.bool_type);
+                        self.write(dst[1], Value { id: valid, kind: Kind::Predicate })?;
+                    }
+                    return Ok(());
+                }
                 let value = self.integer(src[0], Kind::B32)?;
                 let delta = self.integer(src[1], Kind::B32)?;
                 let control = self.integer(src[2], Kind::B32)?;

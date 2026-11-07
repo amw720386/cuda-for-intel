@@ -57,6 +57,9 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
                     out.pop();
                 }
                 if let Some(open) = entry_open.take() {
+                    if super::load16_merge_enabled() {
+                        merge_u16_load_pairs(&mut out, open, &mut ctx);
+                    }
                     let mut decls = ctx.take_decls();
                     if let (true, Some((name, align))) = (uses_dynamic, &dynamic) {
                         // Dynamic window = min(device max, env, 64 KiB) minus the entry's static
@@ -1438,5 +1441,144 @@ fn static_shared_bytes(line: &str) -> u64 {
         (Some(e), Some(n)) => e * n,
         (Some(e), None) => e,
         _ => 0,
+
+/// Splits `ld.global[.nc].u16 %rs , [ %rd+off ] ;` into (op, destination, base, offset).
+fn parse_u16_load(line: &str) -> Option<(&str, &str, &str, i64)> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() != 7 || !(tokens[0] == "ld.global.u16" || tokens[0] == "ld.global.nc.u16") {
+        return None;
+    }
+    if tokens[2] != "," || tokens[3] != "[" || tokens[5] != "]" || tokens[6] != ";" {
+        return None;
+    }
+    let (base, offset) = match tokens[4].split_once('+') {
+        Some((base, offset)) => (base, offset.parse::<i64>().ok()?),
+        None => (tokens[4], 0),
+    };
+    base.starts_with("%rd").then_some((tokens[0], tokens[1], base, offset))
+}
+
+/// Rewrites the two adjacent 16-bit loads that nvcc emits for unaligned 32-bit reads
+/// (`ld.u16 lo; ld.u16 hi; mov.b32 d, {lo, hi}`, as in Q8_0 blocks) into two aligned
+/// 32-bit loads and a funnel shift. The second dword is only fetched when the pair
+/// straddles dwords, so no byte outside the original two loads' dwords is read.
+fn merge_u16_load_pairs(out: &mut Vec<String>, open: usize, ctx: &mut Ctx) {
+    let mut i = open + 1;
+    while i < out.len() {
+        let Some((op, dst1, base, off1)) = parse_u16_load(&out[i]) else {
+            i += 1;
+            continue;
+        };
+        let mut matched = None;
+        for j in i + 1..(i + 9).min(out.len()) {
+            let Some((_, dst2, base2, off2)) = parse_u16_load(&out[j]) else {
+                // The base register must not change between the loads.
+                if out[j].split_whitespace().nth(1) == Some(base) {
+                    break;
+                }
+                continue;
+            };
+            if base2 == base && (off2 == off1 + 2 || off2 == off1 - 2) {
+                matched = Some((j, dst2, off2));
+                break;
+            }
+            if out[j].split_whitespace().nth(1) == Some(base) {
+                break;
+            }
+        }
+        let Some((j, dst2, off2)) = matched else {
+            i += 1;
+            continue;
+        };
+        let (lo, hi, low_offset) = if off2 > off1 { (dst1, dst2, off1) } else { (dst2, dst1, off2) };
+        let pack = format!("mov.b32 ");
+        let want = format!(" , {{ {lo} , {hi} }} ;");
+        let Some(k) = (j + 1..(j + 17).min(out.len())).find(|&k| out[k].starts_with(&pack) && out[k].ends_with(&want)) else {
+            i += 1;
+            continue;
+        };
+        let used = |reg: &str| out[open..].iter().map(|l| l.split_whitespace().filter(|t| *t == reg).count()).sum::<usize>();
+        let straight = out[i..=k].iter().all(|l| !l.ends_with(" :") && !l.contains(" bra ") && !l.starts_with('@') && !l.starts_with("ret") && !l.starts_with("bar"));
+        if !straight || used(lo) != 2 || used(hi) != 2 || low_offset % 2 != 0 {
+            i += 1;
+            continue;
+        }
+        let result = out[k].split_whitespace().nth(1).unwrap().to_owned();
+        let t64 = |ctx: &mut Ctx| {
+            ctx.t64 += 1;
+            format!("%__t64_{}", ctx.t64 - 1)
+        };
+        let t32 = |ctx: &mut Ctx| {
+            ctx.t32 += 1;
+            format!("%__t32_{}", ctx.t32 - 1)
+        };
+        let (a, aligned, bit, next, w0, w1, sh, shifted, merged) =
+            (t64(ctx), t64(ctx), t64(ctx), t64(ctx), t32(ctx), t32(ctx), t32(ctx), t32(ctx), t32(ctx));
+        let wide = op.replace("u16", "u32");
+        let mut seq = vec![
+            if low_offset == 0 {
+                format!("mov.b64 {a} , {base} ;")
+            } else {
+                format!("add.s64 {a} , {base} , {low_offset} ;")
+            },
+            format!("and.b64 {aligned} , {a} , 0xfffffffffffffffc ;"),
+            format!("and.b64 {bit} , {a} , 2 ;"),
+            format!("{wide} {w0} , [ {aligned} ] ;"),
+            format!("shl.b64 {next} , {bit} , 1 ;"),
+            format!("add.s64 {next} , {aligned} , {next} ;"),
+            format!("{wide} {w1} , [ {next} ] ;"),
+            format!("cvt.u32.u64 {sh} , {bit} ;"),
+            format!("shl.b32 {shifted} , {sh} , 3 ;"),
+            format!("shf.r.wrap.b32 {merged} , {w0} , {w1} , {shifted} ;"),
+        ];
+        out[k] = format!("mov.b32 {result} , {merged} ;");
+        out.remove(j);
+        let count = seq.len();
+        out.splice(i..=i, seq.drain(..));
+        i += count;
+    }
+}
+
+#[cfg(test)]
+mod load_pair_tests {
+    use super::*;
+
+    #[test]
+    fn merges_adjacent_u16_loads_into_aligned_dwords() {
+        let mut out: Vec<String> = [
+            "{",
+            "ld.global.nc.u16 %rs4 , [ %rd31 ] ;",
+            "ld.global.nc.u16 %rs5 , [ %rd31+2 ] ;",
+            "mov.b32 %r77 , { %rs4 , %rs5 } ;",
+            "ret ;",
+            "}",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut ctx = Ctx::default();
+        merge_u16_load_pairs(&mut out, 0, &mut ctx);
+        let text = out.join("\n");
+        assert!(!text.contains(".u16"), "{text}");
+        assert!(text.contains("ld.global.nc.u32"), "{text}");
+        assert!(text.contains("shf.r.wrap.b32"), "{text}");
+        assert!(text.contains("mov.b32 %r77 , %__t32_"), "{text}");
+        assert_eq!(ctx.t64, 4);
+    }
+
+    #[test]
+    fn leaves_pairs_alone_when_a_half_is_reused() {
+        let mut out: Vec<String> = [
+            "{",
+            "ld.global.nc.u16 %rs4 , [ %rd31 ] ;",
+            "ld.global.nc.u16 %rs5 , [ %rd31+2 ] ;",
+            "mov.b32 %r77 , { %rs4 , %rs5 } ;",
+            "cvt.f32.f16 %f1 , %rs4 ;",
+            "}",
+        ]
+        .map(String::from)
+        .to_vec();
+        let before = out.clone();
+        merge_u16_load_pairs(&mut out, 0, &mut Ctx::default());
+        assert_eq!(out, before);
     }
 }

@@ -14,7 +14,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Bump when the translator's output for the same PTX can change.
-const TRANSLATOR_VERSION: u32 = 1;
+const TRANSLATOR_VERSION: u32 = 2;
 const MAGIC: u32 = 0x5850_4331; // "XPC1"
 
 fn enabled() -> bool {
@@ -43,6 +43,11 @@ pub(crate) fn key(prepared: &str, entry: &str) -> u64 {
     entry.hash(&mut h);
     env!("CARGO_PKG_VERSION").hash(&mut h);
     TRANSLATOR_VERSION.hash(&mut h);
+    // Process-wide translator switches that change the SPIR-V for the same PTX.
+    crate::ptx::dot_product_enabled().hash(&mut h);
+    crate::ptx::dynamic_shared_bytes().hash(&mut h);
+    crate::ptx::load16_merge_enabled().hash(&mut h);
+    crate::ptx::xor_shuffle_enabled().hash(&mut h);
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| {
             k.starts_with("CFI_")
