@@ -397,6 +397,8 @@ struct Ctx {
     t32: u32,
     t64: u32,
     tp: u32,
+    /// Private 32-bit scratch registers of `param_and_byte_vectors` (own namespace).
+    tc: u32,
     /// Declared register widths of the current entry: exact names and range prefixes.
     widths: Vec<(String, bool, u32)>,
     /// Number of wmma statements seen, used to give each its own 64-bit address register.
@@ -420,6 +422,10 @@ impl Ctx {
         if self.tp > 0 {
             decls.push(format!(".reg .pred %__tp_<{}> ;", self.tp));
         }
+        if self.tc > 0 {
+            decls.push(format!(".reg .b32 %__tc_<{}> ;", self.tc));
+        }
+        self.tc = 0;
         self.t32 = 0;
         self.t64 = 0;
         self.tp = 0;
@@ -1464,6 +1470,39 @@ fn param_and_byte_vectors(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             render(&inst.guard, "cvta.to.global.u64", &[inst.operand(0).trim().to_owned(), "%__t64_0".to_owned()]),
         ]);
     }
+    // 16 <-> 64-bit conversions go through a 32-bit intermediate.
+    if let Some(rest) = op.strip_prefix("cvt.") {
+        let parts: Vec<&str> = rest.split('.').collect();
+        if let [dt, st] = parts[..] {
+            let bits = |t: &str| t[1..].parse::<u32>().ok();
+            let signed = |t: &str| t.starts_with('s');
+            if let (Some(db), Some(sb)) = (bits(dt), bits(st)) {
+                if inst.operands.len() == 2 && ((matches!(db, 8 | 16) && sb == 64) || (db == 64 && matches!(sb, 8 | 16))) {
+                    ctx.tc = ctx.tc.max(2);
+                    let (d, sreg) = (inst.operand(0).trim().to_owned(), inst.operand(1).trim().to_owned());
+                    let lines = if db != 64 {
+                        vec![
+                            render(&inst.guard, "cvt.u32.u64", &["%__tc_1".to_owned(), sreg]),
+                            render(&inst.guard, &format!("cvt.{dt}.u32"), &[d, "%__tc_1".to_owned()]),
+                        ]
+                    } else {
+                        let t32 = format!("cvt.{}32.{st}", if signed(st) { "s" } else { "u" });
+                        let t64 = if signed(st) { "cvt.s64.s32" } else { "cvt.u64.u32" };
+                        let (t32, t64) = (t32.as_str(), t64);
+                        vec![
+                            render(&inst.guard, t32, &["%__tc_1".to_owned(), sreg]),
+                            render(&inst.guard, t64, &[d, "%__tc_1".to_owned()]),
+                        ]
+                    };
+                    return Some(lines);
+                }
+            }
+        }
+    }
+    // setp.<cmp>.b64 compares like the unsigned form for eq/ne.
+    if op.starts_with("setp.") && op.ends_with(".b64") && (op.contains(".eq.") || op.contains(".ne.")) {
+        return Some(vec![render(&inst.guard, &format!("{}u64", &op[..op.len() - 3]), &inst.operands)]);
+    }
     // Alias tracking.
     if matches!(op, "mov.b64" | "mov.u64") && inst.operands.len() == 2 && inst.guard.is_empty() {
         let (dst, src) = (inst.operand(0).trim(), inst.operand(1).trim());
@@ -1497,14 +1536,14 @@ fn param_and_byte_vectors(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             let word = offset & !3;
             let shift = (offset & 3) * 8;
             let (dst,) = (inst.operand(0).trim(),);
-            ctx.need32(1);
-            let mut lines = vec![render(&inst.guard, "ld.param.u32", &["%__t32_0".to_owned(), format!("[{name}+{word}]")])];
+            ctx.tc = ctx.tc.max(1);
+            let mut lines = vec![render(&inst.guard, "ld.param.u32", &["%__tc_0".to_owned(), format!("[{name}+{word}]")])];
             let _ = bits;
             if shift != 0 {
-                lines.push(render(&inst.guard, "shr.u32", &["%__t32_0".into(), "%__t32_0".into(), shift.to_string()]));
+                lines.push(render(&inst.guard, "shr.u32", &["%__tc_0".into(), "%__tc_0".into(), shift.to_string()]));
             }
-            lines.push(render(&inst.guard, "and.b32", &["%__t32_0".into(), "%__t32_0".into(), mask.to_string()]));
-            lines.push(render(&inst.guard, "cvt.u16.u32", &[dst.to_owned(), "%__t32_0".into()]));
+            lines.push(render(&inst.guard, "and.b32", &["%__tc_0".into(), "%__tc_0".into(), mask.to_string()]));
+            lines.push(render(&inst.guard, "cvt.u16.u32", &[dst.to_owned(), "%__tc_0".into()]));
             return Some(lines);
         }
         if aliased {
