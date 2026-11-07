@@ -13,6 +13,8 @@ use super::{Error, inline, parse};
 
 #[path = "tier3.rs"]
 mod tier3;
+#[path = "tier3_mma.rs"]
+mod tier3_mma;
 
 pub(super) type Stmt = Vec<String>;
 

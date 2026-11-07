@@ -16,6 +16,12 @@ pub(super) struct State {
     x32: u32,
     x64: u32,
     xp: u32,
+    /// Scratch registers of the tensor-core emulation (`tier3_mma.rs`).
+    pub(super) m32: u32,
+    pub(super) m64: u32,
+    pub(super) mp: u32,
+    pub(super) addr_seq: u32,
+    pub(super) addr_max: u32,
     /// The condition-code carry flag `CC.CF` is used by the entry.
     cc: bool,
     /// Named-barrier and `bar.red` lowering need shared counters.
@@ -36,6 +42,18 @@ impl State {
         }
         if self.xp > 0 {
             decls.push(format!(".reg .pred %__xp_<{}> ;", self.xp));
+        }
+        if self.m32 > 0 {
+            decls.push(format!(".reg .b32 %__m32_<{}> ;", self.m32));
+        }
+        if self.addr_max > 0 {
+            decls.push(format!(".reg .b64 %__ma_<{}> ;", self.addr_max));
+        }
+        if self.m64 > 0 {
+            decls.push(format!(".reg .b64 %__m64_<{}> ;", self.m64));
+        }
+        if self.mp > 0 {
+            decls.push(format!(".reg .pred %__mp_<{}> ;", self.mp));
         }
         if self.cc {
             decls.push(".reg .b32 %__cc ;".into());
@@ -151,8 +169,11 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         }
         return Some(again(ctx, &copy));
     }
-    let st = &mut ctx.t3;
     let family = inst.op.split('.').next().unwrap_or("");
+    if matches!(family, "mma" | "wmma") {
+        return super::tier3_mma::rewrite(ctx, inst);
+    }
+    let st = &mut ctx.t3;
     match family {
         "ld" | "ldu" if inst.op.split('.').any(|p| p == "const") => {
             // Constant-bank loads read ordinary device memory.

@@ -797,6 +797,8 @@ mod coverage_tests;
 mod tier2_tests;
 #[cfg(test)]
 mod tier3_tests;
+#[cfg(test)]
+mod tier3_mma_tests;
 
 #[cfg(test)]
 mod tests {
