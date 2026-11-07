@@ -159,3 +159,32 @@ fn globals_module_validates_as_opencl_spirv() {
     process.stdin.take().unwrap().write_all(&bytes).unwrap();
     assert!(process.wait().unwrap().success());
 }
+
+#[test]
+fn direct_symbol_stores_and_hardware_probe_module_translate() {
+    let source = r#"
+.version 7.0
+.target sm_75
+.address_size 64
+.global .align 4 .u32 counter = 7;
+.const .align 4 .u32 table[4] = {10, 20, 30, 40};
+.global .align 4 .u32 result;
+.entry combine(.param .u64 .ptr .global out)
+{
+    .reg .b32 %r<6>;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u64 %rd3, counter;
+    ld.global.u32 %r1, [%rd3];
+    ld.const.u32 %r2, [table+8];
+    add.u32 %r3, %r1, %r2;
+    st.global.u32 [result], %r3;
+    st.global.u32 [%rd2], %r3;
+    ret;
+}
+"#;
+    let translated = translate(source).unwrap();
+    assert_eq!(translated.globals.len(), 3);
+    assert_eq!(translated.kernels[0].name, "combine");
+}

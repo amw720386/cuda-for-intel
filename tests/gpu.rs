@@ -67,6 +67,10 @@ mod quantize_warp_ops;
 mod ctaid;
 #[path = "gpu/shr_s64.rs"]
 mod shr_s64;
+#[path = "gpu/module_globals.rs"]
+mod module_globals;
+#[path = "gpu/event_timing.rs"]
+mod event_timing;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
