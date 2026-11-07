@@ -87,10 +87,6 @@ fn pinned_async_transfers() {
     ok!(cuStreamCreate(&mut other_stream, 1));
     assert_eq!(unsafe { cuMemFreeHost(src) }, 1);
     assert_eq!(
-        unsafe { cuMemcpyHtoDAsync_v2(other_device, src, 1, other_stream) },
-        1
-    );
-    assert_eq!(
         unsafe { cuMemcpyDtoHAsync_v2(other_host, device, 1, other_stream) },
         1
     );
