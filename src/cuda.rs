@@ -22,6 +22,7 @@ mod launch_args;
 mod library;
 mod primary;
 mod streams;
+mod subst_hook;
 mod trace;
 
 pub(crate) fn profile_on() -> bool {
@@ -103,6 +104,8 @@ struct CudaContext {
     module_globals: BTreeSet<usize>,
     functions: HashMap<usize, (usize, CString)>,
     local_storage: HashMap<usize, export_table::ContextStorage>,
+    /// Validated native kernel substitutions (empty unless `CUDA_FOR_INTEL_SUBST` is set).
+    subst: subst_hook::Natives,
 }
 
 struct CudaModule {
@@ -119,6 +122,8 @@ struct CudaEntry {
     /// SPIR-V workgroup shared buffer size (bytes); bounds CUDA dynamic shared launches.
     shared_bytes: u32,
     function: Option<(usize, Handle)>,
+    /// Native replacement chosen when the module was installed (`CUDA_FOR_INTEL_SUBST`).
+    subst: Option<std::sync::Arc<crate::subst::Plan>>,
 }
 
 struct State {
@@ -433,6 +438,7 @@ impl State {
                 module_globals: BTreeSet::new(),
                 functions: HashMap::new(),
                 local_storage: HashMap::new(),
+                subst: Default::default(),
             },
         );
         if trace::enabled() {
@@ -553,6 +559,11 @@ pub extern "system" fn cuCtxSynchronize_v2(handle: Opaque) -> CuResult {
 }
 
 impl CudaContext {
+    #[cfg(test)]
+    fn subst_len(&self) -> usize {
+        self.subst.len()
+    }
+
     fn check_live(&self) -> Result<(), CuResult> {
         self.teardown_error.map_or(Ok(()), Err)?;
         if self.backend.health.lost() {
@@ -574,6 +585,7 @@ impl CudaContext {
         while let Some((&base, _)) = self.host_allocations.first_key_value() {
             self.free_host(api, base)?;
         }
+        self.subst.destroy(api);
         self.backend.destroy(api).map_err(backend_error)
     }
 
@@ -1110,10 +1122,12 @@ fn install_translation(
         {
             return Err(NotSupported);
         }
+        let subst = subst_hook::plan_for(&kernel.name, &kernel.params);
         let name = CString::new(kernel.name).map_err(|_| InvalidPtx)?;
         entries.insert(
             name,
             CudaEntry {
+                subst,
                 params: kernel.params,
                 max_threads: kernel.max_threads,
                 shared_bytes: kernel.shared_bytes,
@@ -1321,6 +1335,8 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
             let entry = module.entries.get(name).ok_or(InvalidHandle)?;
             let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
+            let subst_plan = entry.subst.clone();
+            let name = name.clone();
             // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
             // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
             // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
@@ -1416,9 +1432,10 @@ pub unsafe extern "system" fn cuLaunchKernel(
             }
             let timed = trace::kernel_profile_enabled().then(std::time::Instant::now);
             launched = name.to_string_lossy().into_owned();
-            let launch_result = context.streams.launch(
+            let launch_result = subst_hook::launch(
                 &runtime.api,
-                &context.backend,
+                context,
+                subst_plan.as_ref(),
                 kernel,
                 stream,
                 (grid, block),
