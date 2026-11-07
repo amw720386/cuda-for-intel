@@ -2131,7 +2131,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     while parser.eat(".shared") {
         parser.expect(".align")?;
         let align = parser.take()?;
-        if !matches!(align, "4" | "8" | "16") {
+        if !matches!(align, "1" | "2" | "4" | "8" | "16") {
             return Err(Error::new("unsupported PTX .shared alignment"));
         }
         parser.expect(".b8")?;
@@ -2144,8 +2144,9 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
             .take()?
             .parse::<u32>()
             .ok()
-            .filter(|&size| size != 0 && size.is_multiple_of(4))
-            .ok_or_else(|| Error::new("shared array size must be a positive multiple of four"))?;
+            .filter(|&size| size != 0)
+            .and_then(|size| size.checked_next_multiple_of(4))
+            .ok_or_else(|| Error::new("shared array size must be a positive 32-bit byte count"))?;
         parser.expect("]")?;
         parser.expect(";")?;
         // Offsets are prefix sums, so pad the previous symbol to honour this

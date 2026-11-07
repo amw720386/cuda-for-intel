@@ -305,14 +305,73 @@ impl<'a> Math<'a> {
                 OpenclStd100Op::fma as u32,
                 [fa, fb, np].map(Operand::IdRef),
             )?;
+            // For tiny products the exact error term falls below the smallest subnormal and
+            // fma rounds it away. Redo the product with operands below 2^32 scaled by 2^64
+            // (exact) and compare against the equally scaled nearest result; only the sign
+            // of the error matters. A product that underflowed to zero while both operands
+            // are nonzero has an error with the product's sign.
+            let scale_bits = self.c(0x5f80_0000); // 2^64
+            let scale = self.b.bitcast(f32t, None, scale_bits)?;
+            let small_limit = self.c(0x4f80_0000); // 2^32: scaling by 2^64 cannot overflow
+            let (a_m, b_m) = (self.magnitude(a)?, self.magnitude(b)?);
+            let a_small = self.lt(a_m, small_limit)?;
+            let b_small = self.lt(b_m, small_limit)?;
+            let a_scaled = self.b.f_mul(f32t, None, fa, scale)?;
+            let b_scaled = self.b.f_mul(f32t, None, fb, scale)?;
+            let fa_up = self.b.select(f32t, None, a_small, a_scaled, fa)?;
+            let fb_up = self.b.select(f32t, None, b_small, b_scaled, fb)?;
+            let p_up = self.b.f_mul(f32t, None, fa_up, fb_up)?;
+            let np_up = self.b.f_negate(f32t, None, p_up)?;
+            let e_up = self.b.ext_inst(
+                f32t,
+                None,
+                self.opencl,
+                OpenclStd100Op::fma as u32,
+                [fa_up, fb_up, np_up].map(Operand::IdRef),
+            )?;
+            let p_once = self.b.f_mul(f32t, None, p, scale)?;
+            let p_twice = self.b.f_mul(f32t, None, p_once, scale)?;
+            let p_scaled = {
+                let both = self.both(a_small, b_small)?;
+                let one = self.b.select(f32t, None, a_small, p_once, p)?;
+                let one = self.b.select(f32t, None, b_small, p_once, one)?;
+                self.b.select(f32t, None, both, p_twice, one)?
+            };
+            let diff = self.b.f_sub(f32t, None, p_up, p_scaled)?;
+            let e_tiny = self.b.f_add(f32t, None, diff, e_up)?;
+            let p_bits = self.b.bitcast(self.u32, None, p)?;
+            let p_mag = self.magnitude(p_bits)?;
+            let limit = self.c(0x2180_0000); // 2^-60
+            let tiny = self.lt(p_mag, limit)?;
+            let e = self.b.select(f32t, None, tiny, e_tiny, e)?;
+            // Underflow to zero: error carries the sign of the (nonzero) exact product.
+            let zero = self.c(0);
+            let p_zero = self.eq(p_mag, zero)?;
+            let a_nz = self.lt(zero, a_m)?;
+            let b_nz = self.lt(zero, b_m)?;
+            let operands_nz = self.both(a_nz, b_nz)?;
+            let underflow = self.both(p_zero, operands_nz)?;
+            let sign = self.xor(a, b)?;
+            let sign_c = self.c(SIGN);
+            let sign_only = self.and(sign, sign_c)?;
+            let one_bits = self.c(0x3f80_0000);
+            let signed_one = self.or(sign_only, one_bits)?;
+            let unit = self.b.bitcast(f32t, None, signed_one)?;
+            let e = self.b.select(f32t, None, underflow, unit, e)?;
             (p, e)
         } else {
+            // Fast2Sum with the larger magnitude first: the intermediate `s - big` never
+            // exceeds the smaller operand, unlike Knuth's TwoSum which overflows when the
+            // operands are near +-MAX with opposite signs and silently loses the error term.
             let s = self.b.f_add(f32t, None, fa, fb)?;
-            let bb = self.b.f_sub(f32t, None, s, fa)?;
-            let t = self.b.f_sub(f32t, None, s, bb)?;
-            let ea = self.b.f_sub(f32t, None, fa, t)?;
-            let eb = self.b.f_sub(f32t, None, fb, bb)?;
-            (s, self.b.f_add(f32t, None, ea, eb)?)
+            let (a_m, b_m) = (self.magnitude(a)?, self.magnitude(b)?);
+            let a_big = self.lt(b_m, a_m)?;
+            let big_bits = self.select(a_big, a, b)?;
+            let small_bits = self.select(a_big, b, a)?;
+            let big = self.b.bitcast(f32t, None, big_bits)?;
+            let small = self.b.bitcast(f32t, None, small_bits)?;
+            let z = self.b.f_sub(f32t, None, s, big)?;
+            (s, self.b.f_sub(f32t, None, small, z)?)
         };
         let s = self.b.bitcast(self.u32, None, fs)?;
         let zero_f = self.b.constant_bit32(f32t, 0);

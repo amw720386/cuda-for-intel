@@ -1,0 +1,32 @@
+# Hardware kernel validation, round 1 (Arc B390, Windows, branch hw-kernels)
+cargo test --release --test gpu -- --ignored --test-threads=1  (50 passed, 0 failed)
+test hw_float::hw_cvt_float_to_integral_float_and_int_rounding ... ok
+test hw_float::hw_cvt_int_to_float_and_half_conversions ... ok
+test hw_float::hw_directed_rounding_add_sub_mul_rz_rm_rp ... [
+test hw_float::hw_directed_rounding_regressions ... ok
+test hw_mma::hw_ldmatrix_all_counts_and_trans ... ok
+test hw_mma::hw_ldmatrix_generic_pointer_without_shared_qualifier ... ok
+test hw_mma::hw_mma_f16_f32_accumulate ... ok
+test hw_mma::hw_mma_int8_all_shapes_all_signedness ... ok
+test hw_warp::hw_aligned_global_loads_and_stores_all_widths ... ok
+test hw_warp::hw_atom_add_f32_shared ... ok
+test hw_warp::hw_atomic_add_f32_global_return_value ... ok
+test hw_warp::hw_bar_sync_orders_shared_memory_across_warps ... ok
+test hw_warp::hw_red_add_f32_global ... ok
+test hw_warp::hw_shared_symbols_honor_declared_alignment_for_v4 ... ok
+test hw_warp::hw_shfl_idx_up_down_with_clamp_and_segments ... ok
+test hw_warp::hw_subgroup_is_32_lanes_laneid_ballot_activemask ... ok
+test hw_warp::hw_vote_ballot_all_any_and_divergent_activemask ... ok
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1.71s
+    "add.rz: 0 wrong, 0 denormal diffs of 131072",
+    "add.rm: 0 wrong, 0 denormal diffs of 131072",
+    "add.rp: 0 wrong, 0 denormal diffs of 131072",
+    "sub.rz: 0 wrong, 0 denormal diffs of 131072",
+    "sub.rm: 0 wrong, 0 denormal diffs of 131072",
+    "sub.rp: 0 wrong, 0 denormal diffs of 131072",
+    "mul.rz: 0 wrong, 0 denormal diffs of 131072",
+    "mul.rm: 0 wrong, 0 denormal diffs of 131072",
+    "mul.rp: 0 wrong, 0 denormal diffs of 131072",
+]
+ok
+test hw_float::hw_directed_rounding_regressions ... ok

@@ -1317,6 +1317,49 @@ mod tests {
     ";
 
     #[test]
+    fn shared_arrays_accept_byte_alignment_and_odd_sizes() {
+        let translated = translate(
+            "
+            .version 4.1
+            .target sm_52
+            .address_size 64
+            .entry odd_shared() {
+                .reg .b32 %r;
+                .shared .align 1 .b8 tag[3];
+                .shared .align 16 .b8 wide[32];
+                mov.u32 %r, wide;
+                ld.shared.b32 %r, [wide];
+                ret;
+            }
+            ",
+        )
+        .unwrap();
+        // 3 bytes round up to 4, then 12 bytes of padding keep `wide` 16-byte aligned.
+        assert_eq!(translated.kernels[0].shared_bytes, 48);
+    }
+
+    #[test]
+    fn ldmatrix_accepts_generic_form_without_shared_qualifier() {
+        for op in ["ldmatrix.sync.aligned.m8n8.x2.b16", "ldmatrix.sync.aligned.m8n8.x2.trans.b16"] {
+            let source = format!(
+                "
+                .version 7.0
+                .target sm_80
+                .address_size 64
+                .entry ldm() {{
+                    .reg .b32 %r<4>;
+                    .shared .align 16 .b8 tile[512];
+                    mov.u32 %r0, tile;
+                    {op} {{%r1, %r2}}, [%r0];
+                    ret;
+                }}
+                "
+            );
+            translate(&source).unwrap();
+        }
+    }
+
+    #[test]
     fn lowers_static_shared_memory_and_full_block_barrier() {
         use rspirv::dr::Operand;
         use rspirv::spirv::{MemorySemantics, Scope, StorageClass};
@@ -1367,7 +1410,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_shared_memory_and_barriers() {
         for (old, new) in [
-            ("[16]", "[3]"),
+            ("[16]", "[0]"),
             ("[scratch]", "[missing]"),
             ("bar.sync 0", "bar.sync 1"),
             ("bar.sync 0", "bar.sync 0, 32"),
