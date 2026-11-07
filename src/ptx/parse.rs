@@ -501,6 +501,7 @@ impl<'a> Parser<'a> {
             }
             ["not.b32", dst, ",", src] => Instruction::Not32(dst, src),
             ["mov.b32" | "mov.f32", dst, ",", src] => Instruction::Move32(dst, src),
+            ["mov.b32", dst, ",", "{", lo, ",", hi, "}"] => Instruction::PackB16(dst, [lo, hi]),
             ["cvt.u64.u32", dst, ",", src] => Instruction::Widen {
                 signed: false,
                 dst,
@@ -524,6 +525,13 @@ impl<'a> Parser<'a> {
             },
             ["shl.b64", dst, ",", a, ",", b] => Instruction::ShiftLeft64(dst, [a, b]),
             ["add.s64" | "add.u64", dst, ",", a, ",", b] => Instruction::Add64(dst, [a, b]),
+            ["sub.s64" | "sub.u64", dst, ",", a, ",", b] => Instruction::Sub64(dst, [a, b]),
+            ["shr.s64", dst, ",", a, ",", b] => Instruction::ShiftRightArithmetic64(dst, [a, b]),
+            ["redux.sync.add.s32", dst, ",", src, ",", membermask] => Instruction::ReduxSyncAdd {
+                dst,
+                src,
+                membermask,
+            },
             ["mul.lo.s64" | "mul.lo.u64", dst, ",", a, ",", b] => {
                 Instruction::Mul64(dst, [a, b])
             }
@@ -609,9 +617,24 @@ impl<'a> Parser<'a> {
                     addr,
                 }
             }
-            ["add.f32" | "add.rn.f32" | "add.ftz.f32", dst, ",", a, ",", b] => {
-                Instruction::Float32(dst, FloatOp::Add([a, b]))
+            [
+                "add.f32" | "add.rn.f32" | "add.ftz.f32" | "add.rz.ftz.f32" | "add.rz.f32",
+                dst,
+                ",",
+                a,
+                ",",
+                b,
+            ] => Instruction::Float32(dst, FloatOp::Add([a, b])),
+            ["abs.ftz.f32" | "abs.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Abs([src]))
             }
+            ["cvt.rzi.f32.f32" | "cvt.rzi.ftz.f32.f32", dst, ",", src] => {
+                Instruction::Float32(dst, FloatOp::Trunc([src]))
+            }
+            ["cvt.rzi.ftz.s32.f32" | "cvt.rzi.s32.f32", dst, ",", src] => {
+                Instruction::CvtRziS32(dst, src)
+            }
+            ["cvt.rn.f16.f32" | "cvt.rz.f16.f32", dst, ",", src] => Instruction::CvtToHalf(dst, src),
             ["sub.f32" | "sub.rn.f32" | "sub.ftz.f32", dst, ",", a, ",", b] => {
                 Instruction::Float32(dst, FloatOp::Sub([a, b]))
             }
@@ -676,6 +699,33 @@ impl<'a> Parser<'a> {
             ["ex2.approx.f32" | "ex2.approx.ftz.f32", dst, ",", src] => {
                 Instruction::Float32(dst, FloatOp::Ex2Approx([src]))
             }
+            [
+                "st.global.u8" | "st.global.b8" | "st.shared.u8" | "st.shared.b8",
+                "[",
+                addr,
+                "]",
+                ",",
+                src,
+            ] => {
+                let space = if body[0].starts_with("st.shared") {
+                    Space::Shared
+                } else {
+                    Space::Global
+                };
+                Instruction::Store8(space, addr, src)
+            }
+            [
+                "st.global.v2.u16" | "st.global.v2.b16",
+                "[",
+                addr,
+                "]",
+                ",",
+                "{",
+                a,
+                ",",
+                b,
+                "}",
+            ] => Instruction::StoreVecU16(Space::Global, addr, [a, b]),
             [
                 op @ ("st.global.b32"
                 | "st.global.u32"
@@ -938,6 +988,116 @@ fn skip_failed_entry(parser: &mut Parser<'_>) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Rewrite nvcc half2 extract scopes into plain bitwise ops our parser accepts.
+///
+/// ```ptx
+/// {.reg .f16 low,high;
+/// mov.b32 {low,high}, %rN;
+/// mov.b16 %rsM, low;}
+/// ```
+/// becomes `and.b32 %rsM, %rN, 65535;` (low 16 bits). High-lane extracts become
+/// `shr.u32 %rsM, %rN, 16;`.
+fn rewrite_half_extract_scopes(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Only attempt a match at `{`. Trimming whitespace before `{` would
+        // steal the newline after a `//` comment and glue the replacement onto
+        // that comment line (`//\n{…}` → `//and.b32…`), which then disappears.
+        if bytes[i] == b'{'
+            && let Some(caps) = HalfExtract::match_prefix(&source[i..])
+        {
+            out.push_str(&caps.replacement);
+            i += caps.consumed;
+            continue;
+        }
+        out.push(source[i..].chars().next().unwrap());
+        i += source[i..].chars().next().unwrap().len_utf8();
+    }
+    out
+}
+
+struct HalfExtract {
+    replacement: String,
+    consumed: usize,
+}
+
+impl HalfExtract {
+    /// `rest` must begin at the opening `{` of a half-extract scope.
+    fn match_prefix(rest: &str) -> Option<Self> {
+        if !rest.starts_with('{') {
+            return None;
+        }
+        let after_brace = rest[1..].trim_start();
+        if !after_brace.starts_with(".reg") {
+            return None;
+        }
+        // Find matching `}` that closes the scope (not the mov.b32 {low,high}).
+        let mut depth = 0i32;
+        let mut end = None;
+        for (idx, ch) in rest.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(idx + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end?;
+        let block = &rest[..end];
+        // Require the nvcc half2 unpack pattern specifically.
+        if !block.contains(".f16") {
+            return None;
+        }
+        // mov.b32 {low,high}, %rSRC;
+        let src = {
+            let key = "mov.b32 {low,high},";
+            let pos = block.find(key)?;
+            let after = block[pos + key.len()..].trim_start();
+            let name = after.split(';').next()?.trim();
+            if !name.starts_with('%') {
+                return None;
+            }
+            name.to_string()
+        };
+        // mov.b16 %rsDST, low|high;
+        let (dst, lane) = {
+            let key = "mov.b16";
+            let pos = block.find(key)?;
+            let after = block[pos + key.len()..].trim_start();
+            let mut parts = after.split(',');
+            let dst = parts.next()?.trim().to_string();
+            let lane = parts
+                .next()?
+                .trim()
+                .trim_matches(|c: char| c == ';' || c == '}' || c.is_whitespace());
+            if !dst.starts_with('%') || !matches!(lane, "low" | "high") {
+                return None;
+            }
+            (dst, lane)
+        };
+        let replacement = if lane == "low" {
+            format!("and.b32 {dst}, {src}, 65535;\n")
+        } else {
+            format!("shr.u32 {dst}, {src}, 16;\n")
+        };
+        Some(Self {
+            replacement,
+            consumed: end,
+        })
+    }
+}
+
+pub(super) fn rewrite_half_scopes(source: &str) -> String {
+    rewrite_half_extract_scopes(source)
 }
 
 pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {

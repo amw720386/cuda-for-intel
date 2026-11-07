@@ -8,8 +8,8 @@ use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Instruction as SpirvInstruction, Operand};
 use rspirv::spirv::{
     AddressingModel, BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel,
-    FPRoundingMode, FunctionControl, MemoryModel, MemorySemantics, Op, OpenclStd100Op, Scope,
-    StorageClass, Word,
+    FPRoundingMode, FunctionControl, GroupOperation, MemoryModel, MemorySemantics, Op,
+    OpenclStd100Op, Scope, StorageClass, Word,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -73,9 +73,8 @@ struct Emitter<'a> {
     shared_byte_ptr: Word,
     shared_word_ptr: Word,
     shared: Option<(&'a str, Word)>,
-    /// Workgroup scratch used to emulate CUDA warp shuffles across Intel subgroup widths.
-    shuffle: Option<Word>,
-    shuffle_words: u32,
+    /// Set when the entry uses CUDA warp shuffles / redux (forces SubgroupSize 32).
+    warp_ops: bool,
     builtin_type: Word,
     builtins: [Word; BUILTINS.len()],
     declarations: HashMap<String, Width>,
@@ -145,8 +144,7 @@ impl<'a> Emitter<'a> {
             shared_byte_ptr,
             shared_word_ptr,
             shared: None,
-            shuffle: None,
-            shuffle_words: 0,
+            warp_ops: false,
             builtin_type,
             builtins,
             declarations: HashMap::new(),
@@ -285,15 +283,6 @@ impl<'a> Emitter<'a> {
         .ok_or_else(|| Error::new(format!("unsupported integer operand {operand}")))
     }
 
-    fn shuffle_slot(&mut self, index: Word) -> Result<Word, Error> {
-        let array = self
-            .shuffle
-            .ok_or_else(|| Error::new("missing warp shuffle scratch buffer"))?;
-        Ok(self
-            .builder
-            .access_chain(self.shared_word_ptr, None, array, [index])?)
-    }
-
     fn emit_shuffle_bfly(
         &mut self,
         dst: &'a str,
@@ -319,36 +308,24 @@ impl<'a> Emitter<'a> {
                 "only full-warp shfl.sync.bfly.b32 membermask 0xffffffff is supported",
             ));
         }
-        // Keep register clamp/membermask live for ABI fidelity even though the
-        // shared-memory emulation currently assumes a full 32-lane warp.
+        // Keep register clamp/membermask live for ABI fidelity.
         let _clamp = self.integer(clamp, Kind::B32)?;
         let _membermask = self.integer(membermask, Kind::B32)?;
         let value = self.read(value)?.require(Kind::B32, value)?;
         let xor_mask = self.integer(xor_mask, Kind::B32)?;
-        let tid = self.builtin("%tid.x")?;
-        let lane_mask = self.builder.constant_bit32(self.u32_type, 31);
-        let warp_mask = self.builder.constant_bit32(self.u32_type, !31u32);
-        let slot = self.shuffle_slot(tid)?;
-        self.builder.store(slot, value, None, [])?;
+        // Native subgroup shuffle: no workgroup barrier, so warps that early-exit
+        // after bar.sync (GGML mmvq) cannot hang the remaining warp's reduction.
+        // SubgroupSize=32 (set on the entry) makes Intel subgroups match CUDA warps.
         let scope = self
             .builder
-            .constant_bit32(self.u32_type, Scope::Workgroup as u32);
-        let semantics = MemorySemantics::ACQUIRE_RELEASE
-            | MemorySemantics::WORKGROUP_MEMORY
-            | MemorySemantics::CROSS_WORKGROUP_MEMORY;
-        let semantics = self.builder.constant_bit32(self.u32_type, semantics.bits());
-        self.builder.control_barrier(scope, scope, semantics)?;
-        let lane = self.builder.bitwise_and(self.u32_type, None, tid, lane_mask)?;
-        let warp = self.builder.bitwise_and(self.u32_type, None, tid, warp_mask)?;
-        let flipped = self.builder.bitwise_xor(self.u32_type, None, lane, xor_mask)?;
-        let source_lane = self
-            .builder
-            .bitwise_and(self.u32_type, None, flipped, lane_mask)?;
-        let source = self.builder.bitwise_or(self.u32_type, None, warp, source_lane)?;
-        let source_slot = self.shuffle_slot(source)?;
-        let result = self
-            .builder
-            .load(self.u32_type, None, source_slot, None, [])?;
+            .constant_bit32(self.u32_type, Scope::Subgroup as u32);
+        let result = self.builder.group_non_uniform_shuffle_xor(
+            self.u32_type,
+            None,
+            scope,
+            value,
+            xor_mask,
+        )?;
         self.write(
             dst,
             Value {
@@ -367,6 +344,42 @@ impl<'a> Emitter<'a> {
                 },
             )?;
         }
+        Ok(())
+    }
+
+    fn emit_redux_add(
+        &mut self,
+        dst: &'a str,
+        value: &str,
+        membermask: &str,
+    ) -> Result<(), Error> {
+        if let Some(membermask) = Self::parse_u32(membermask)
+            && membermask != u32::MAX
+        {
+            return Err(Error::new(
+                "only full-warp redux.sync.add.s32 membermask 0xffffffff is supported",
+            ));
+        }
+        let _membermask = self.integer(membermask, Kind::B32)?;
+        let value = self.read(value)?.require(Kind::B32, value)?;
+        let scope = self
+            .builder
+            .constant_bit32(self.u32_type, Scope::Subgroup as u32);
+        let result = self.builder.group_non_uniform_i_add(
+            self.u32_type,
+            None,
+            scope,
+            GroupOperation::Reduce,
+            value,
+            None,
+        )?;
+        self.write(
+            dst,
+            Value {
+                id: result,
+                kind: Kind::B32,
+            },
+        )?;
         Ok(())
     }
 
@@ -768,6 +781,26 @@ impl<'a> Emitter<'a> {
                     None,
                     self.opencl,
                     opcode as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
+            FloatOp::Abs([source]) => {
+                let value = self.float_value(source)?;
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::fabs as u32,
+                    [Operand::IdRef(value)],
+                )?
+            }
+            FloatOp::Trunc([source]) => {
+                let value = self.float_value(source)?;
+                self.builder.ext_inst(
+                    ty,
+                    None,
+                    self.opencl,
+                    OpenclStd100Op::trunc as u32,
                     [Operand::IdRef(value)],
                 )?
             }
@@ -1190,6 +1223,22 @@ impl<'a> Emitter<'a> {
                 };
                 (dst, id, Kind::B32)
             }
+            Instruction::PackB16(dst, [lo, hi]) => {
+                let lo = self.integer(lo, Kind::B32)?;
+                let hi = self.integer(hi, Kind::B32)?;
+                let mask = self.builder.constant_bit32(self.u32_type, 0xffff);
+                let lo = self.builder.bitwise_and(self.u32_type, None, lo, mask)?;
+                let hi = self.builder.bitwise_and(self.u32_type, None, hi, mask)?;
+                let shift = self.builder.constant_bit32(self.u32_type, 16);
+                let hi = self
+                    .builder
+                    .shift_left_logical(self.u32_type, None, hi, shift)?;
+                (
+                    dst,
+                    self.builder.bitwise_or(self.u32_type, None, lo, hi)?,
+                    Kind::B32,
+                )
+            }
             Instruction::MulWide32 {
                 signed,
                 dst,
@@ -1252,6 +1301,23 @@ impl<'a> Emitter<'a> {
             Instruction::Add64(dst, [a, b]) => {
                 let value = self.add64(a, b)?;
                 (dst, value.id, value.kind)
+            }
+            Instruction::Sub64(dst, [a, b]) => {
+                let a = self.integer(a, Kind::B64)?;
+                let b = self.integer(b, Kind::B64)?;
+                (
+                    dst,
+                    self.builder.i_sub(self.u64_type, None, a, b)?,
+                    Kind::B64,
+                )
+            }
+            Instruction::ShiftRightArithmetic64(dst, [value, shift]) => {
+                let value = self.integer(value, Kind::B64)?;
+                let shift = self.integer(shift, Kind::B32)?;
+                let id = self
+                    .builder
+                    .shift_right_arithmetic(self.u64_type, None, value, shift)?;
+                (dst, id, Kind::B64)
             }
             Instruction::ShiftLeft64(dst, [value, shift]) => {
                 if !shift.parse::<u32>().is_ok_and(|n| n < 64) {
@@ -1369,10 +1435,40 @@ impl<'a> Emitter<'a> {
                 return Ok(());
             }
             Instruction::Float32(dst, op) => (dst, self.float_op(op)?, Kind::B32),
+            Instruction::CvtRziS32(dst, src) => {
+                let value = self.float_value(src)?;
+                let converted = self.builder.convert_f_to_s(self.u32_type, None, value)?;
+                self.builder.decorate(
+                    converted,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
+                );
+                (dst, converted, Kind::B32)
+            }
+            Instruction::CvtToHalf(dst, src) => {
+                let value = self.float_value(src)?;
+                let half = self.builder.f_convert(self.f16_type, None, value)?;
+                self.builder.decorate(
+                    half,
+                    Decoration::FPRoundingMode,
+                    [Operand::FPRoundingMode(FPRoundingMode::RTE)],
+                );
+                let bits16 = self.builder.bitcast(self.u16_type, None, half)?;
+                let bits32 = self.builder.u_convert(self.u32_type, None, bits16)?;
+                self.fp32 = true;
+                (dst, bits32, Kind::B32)
+            }
             Instruction::Store32(space, address, src) => {
                 let pointer = self.word_pointer(space, address)?;
                 let value = self.read(src)?.require(Kind::B32, src)?;
                 self.builder.store(pointer, value, None, [])?;
+                return Ok(());
+            }
+            Instruction::Store8(space, address, src) => {
+                let bytes = self.addressed_byte_pointer(space, address)?;
+                let value = self.integer(src, Kind::B32)?;
+                let byte = self.builder.u_convert(self.u8_type, None, value)?;
+                self.builder.store(bytes, byte, None, [])?;
                 return Ok(());
             }
             Instruction::StoreVec {
@@ -1382,6 +1478,29 @@ impl<'a> Emitter<'a> {
                 src,
             } => {
                 self.store_float_vector(space, count, addr, &src)?;
+                return Ok(());
+            }
+            Instruction::StoreVecU16(space, addr, [a, b]) => {
+                let lo = self.integer(a, Kind::B32)?;
+                let hi = self.integer(b, Kind::B32)?;
+                let mask = self.builder.constant_bit32(self.u32_type, 0xffff);
+                let lo = self.builder.bitwise_and(self.u32_type, None, lo, mask)?;
+                let hi = self.builder.bitwise_and(self.u32_type, None, hi, mask)?;
+                let shift = self.builder.constant_bit32(self.u32_type, 16);
+                let hi = self
+                    .builder
+                    .shift_left_logical(self.u32_type, None, hi, shift)?;
+                let packed = self.builder.bitwise_or(self.u32_type, None, lo, hi)?;
+                let pointer = self.word_pointer(space, addr)?;
+                self.builder.store(pointer, packed, None, [])?;
+                return Ok(());
+            }
+            Instruction::ReduxSyncAdd {
+                dst,
+                src,
+                membermask,
+            } => {
+                self.emit_redux_add(dst, src, membermask)?;
                 return Ok(());
             }
             Instruction::Barrier => {
@@ -1450,28 +1569,24 @@ impl<'a> Emitter<'a> {
         self.device_atomics = false;
         self.fp32 = false;
         self.fp32_fma = false;
-        let needs_shuffle = entry.blocks.iter().any(|block| {
-            block
-                .instructions
-                .iter()
-                .any(|inst| matches!(inst, Instruction::ShuffleBfly { .. }))
+        self.warp_ops = entry.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                matches!(
+                    inst,
+                    Instruction::ShuffleBfly { .. } | Instruction::ReduxSyncAdd { .. }
+                )
+            })
         });
-        self.shuffle_words = if needs_shuffle {
-            entry.max_threads.unwrap_or(1024).max(32)
-        } else {
-            0
-        };
-        self.shuffle = (self.shuffle_words > 0).then(|| {
-            let length = self
-                .builder
-                .constant_bit32(self.u32_type, self.shuffle_words);
-            let array = self.builder.type_array(self.u32_type, length);
-            let pointer = self
-                .builder
-                .type_pointer(None, StorageClass::Workgroup, array);
+        if self.warp_ops {
+            // GroupNonUniform requires SPIR-V 1.3; force 32-lane subgroups so CUDA
+            // warp shuffles map 1:1 onto Intel subgroup shuffles.
+            self.builder.set_version(1, 3);
+            self.builder.capability(Capability::GroupNonUniform);
             self.builder
-                .variable(pointer, None, StorageClass::Workgroup, None)
-        });
+                .capability(Capability::GroupNonUniformShuffle);
+            self.builder
+                .capability(Capability::GroupNonUniformArithmetic);
+        }
         self.shared = entry.shared.map(|(name, bytes)| {
             // Use a u32 array to retain the PTX declaration's four-byte alignment.
             let length = self.builder.constant_bit32(self.u32_type, bytes / 4);
@@ -1502,6 +1617,10 @@ impl<'a> Emitter<'a> {
             .begin_function(void, None, FunctionControl::NONE, signature)?;
         self.builder
             .entry_point(ExecutionModel::Kernel, function, entry.name, self.builtins);
+        if self.warp_ops {
+            self.builder
+                .execution_mode(function, ExecutionMode::SubgroupSize, [32]);
+        }
         let values = types
             .into_iter()
             .map(|ty| self.builder.function_parameter(ty))
@@ -1581,8 +1700,7 @@ impl<'a> Emitter<'a> {
         Ok(KernelMetadata {
             name: entry.name.to_owned(),
             params: entry.params.into_iter().map(|(_, param)| param).collect(),
-            shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes)
-                + self.shuffle_words.saturating_mul(4),
+            shared_bytes: entry.shared.map_or(0, |(_, bytes)| bytes),
             max_threads: entry.max_threads,
             device_atomics: self.device_atomics,
             fp32: self.fp32,

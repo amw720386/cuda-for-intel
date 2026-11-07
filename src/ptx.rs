@@ -127,6 +127,9 @@ enum FloatOp<'a> {
     CosApprox([&'a str; 1]),
     Lg2Approx([&'a str; 1]),
     Ex2Approx([&'a str; 1]),
+    Abs([&'a str; 1]),
+    /// `cvt.rzi.f32.f32` — truncate toward zero, stay in f32.
+    Trunc([&'a str; 1]),
 }
 
 impl<'a> FloatOp<'a> {
@@ -147,7 +150,9 @@ impl<'a> FloatOp<'a> {
             | Self::SinApprox(inputs)
             | Self::CosApprox(inputs)
             | Self::Lg2Approx(inputs)
-            | Self::Ex2Approx(inputs) => inputs,
+            | Self::Ex2Approx(inputs)
+            | Self::Abs(inputs)
+            | Self::Trunc(inputs) => inputs,
         }
     }
 }
@@ -205,6 +210,8 @@ enum Instruction<'a> {
     Integer32(IntegerOp, &'a str, [&'a str; 2]),
     Not32(&'a str, &'a str),
     Move32(&'a str, &'a str),
+    /// `mov.b32 %r, { %rs_lo, %rs_hi }` — pack two 16-bit lanes into a 32-bit register.
+    PackB16(&'a str, [&'a str; 2]),
     MulWide32 {
         signed: bool,
         dst: &'a str,
@@ -226,7 +233,9 @@ enum Instruction<'a> {
         src: [&'a str; 2],
     },
     Add64(&'a str, [&'a str; 2]),
+    Sub64(&'a str, [&'a str; 2]),
     Mul64(&'a str, [&'a str; 2]),
+    ShiftRightArithmetic64(&'a str, [&'a str; 2]),
     Load32(Space, &'a str, &'a str),
     Load64(Space, &'a str, &'a str),
     Load16(Space, &'a str, &'a str),
@@ -237,13 +246,21 @@ enum Instruction<'a> {
         addr: &'a str,
     },
     Float32(&'a str, FloatOp<'a>),
+    /// `cvt.rzi.ftz.s32.f32` — float→int32 toward zero.
+    CvtRziS32(&'a str, &'a str),
+    /// `cvt.rn.f16.f32` — f32→f16 bits in the low 16 bits of a b32 register.
+    CvtToHalf(&'a str, &'a str),
     Store32(Space, &'a str, &'a str),
+    /// `st.global.u8` — store the low 8 bits of a b32 register.
+    Store8(Space, &'a str, &'a str),
     StoreVec {
         space: Space,
         count: u8,
         addr: &'a str,
         src: [&'a str; 4],
     },
+    /// `st.global.v2.u16` — pack two low-16 values into one 32-bit global store.
+    StoreVecU16(Space, &'a str, [&'a str; 2]),
     AtomicAdd32(&'a str, &'a str, &'a str),
     /// CUDA `shfl.sync.bfly.b32` — warp butterfly exchange with an active mask.
     /// Sources are `[value, xor_mask, clamp, membermask]`.
@@ -252,6 +269,12 @@ enum Instruction<'a> {
         dst: &'a str,
         pred: Option<&'a str>,
         src: [&'a str; 4],
+    },
+    /// `redux.sync.add.s32` — warp-wide signed integer sum broadcast.
+    ReduxSyncAdd {
+        dst: &'a str,
+        src: &'a str,
+        membermask: &'a str,
     },
     Barrier,
 }
@@ -292,6 +315,10 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 std::slice::from_ref(src)
             }
+            PackB16(dst, src) => {
+                out.push(*dst);
+                src
+            }
             Widen { dst, src, .. } | Narrow(dst, src) => {
                 out.push(*dst);
                 std::slice::from_ref(src)
@@ -304,9 +331,11 @@ impl<'a> Instruction<'a> {
             | MulWide32 { dst, src, .. }
             | ShiftLeft64(dst, src)
             | ShiftRightLogical64(dst, src)
+            | ShiftRightArithmetic64(dst, src)
             | And64(dst, src)
             | Rem64 { dst, src, .. }
             | Add64(dst, src)
+            | Sub64(dst, src)
             | Mul64(dst, src) => {
                 out.push(*dst);
                 src
@@ -319,6 +348,20 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 op.inputs()
             }
+            CvtRziS32(dst, src) | CvtToHalf(dst, src) => {
+                out.push(*dst);
+                std::slice::from_ref(src)
+            }
+            ReduxSyncAdd {
+                dst,
+                src,
+                membermask,
+            } => {
+                out.push(*dst);
+                // membermask is usually an immediate register holding 0xffffffff.
+                let _ = membermask;
+                std::slice::from_ref(src)
+            }
             ShuffleBfly { dst, pred, src } => {
                 out.push(*dst);
                 if let Some(pred) = pred {
@@ -326,7 +369,7 @@ impl<'a> Instruction<'a> {
                 }
                 src
             }
-            Store32(..) | StoreVec { .. } | Barrier => return None,
+            Store32(..) | Store8(..) | StoreVec { .. } | StoreVecU16(..) | Barrier => return None,
         })
     }
 
@@ -342,7 +385,11 @@ impl<'a> Instruction<'a> {
     }
 
     fn is_convergent(&self) -> bool {
-        matches!(self, Self::Barrier | Self::ShuffleBfly { .. })
+        // Only CTA `bar.sync` is rejected under divergent control. Warp ops
+        // (`shfl.sync` / `redux.sync` with full masks) are routinely emitted by
+        // nvcc inside lane-predicated regions and are emulated with workgroup
+        // barriers that all launched threads reach in our GGML kernels.
+        matches!(self, Self::Barrier)
     }
 }
 
@@ -403,7 +450,8 @@ pub(crate) struct Translation {
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
-    spirv::emit(parse::parse(source)?)
+    let rewritten = parse::rewrite_half_scopes(source);
+    spirv::emit(parse::parse(&rewritten)?)
 }
 
 #[cfg(test)]
@@ -559,6 +607,38 @@ mod tests {
     }
 
     #[test]
+    fn translates_quantize_q8_1_dump() {
+        let translated = translate(include_str!("../examples/quantize_q8_1_dump.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].name.contains("quantize_q8_1"));
+        assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
+    fn half_extract_rewrite_does_not_glue_onto_line_comments() {
+        // Regression: trimming whitespace before `{` stole the newline after
+        // `//` and produced `//and.b32…`, which the tokenizer then skipped.
+        let src = "\n//\r\n{.reg .f16 low,high;\r\nmov.b32 {low,high}, %r64;\r\nmov.b16 %rs2, low;}\r\n";
+        let rewritten = parse::rewrite_half_scopes(src);
+        assert!(
+            rewritten.contains("\nand.b32 %rs2, %r64, 65535;"),
+            "expected and.b32 on its own line, got:\n{rewritten:?}"
+        );
+        assert!(
+            !rewritten.contains("//and.b32"),
+            "replacement must not glue onto a // comment: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn translates_mul_mat_vec_q8_dump() {
+        let translated = translate(include_str!("../examples/mul_mat_vec_q8_dump.ptx"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(translated.kernels[0].name.contains("mul_mat_vec_q"));
+        assert!(translated.kernels[0].fp32);
+    }
+
+    #[test]
     fn translates_ggml_q8_0_vec_dot_soft_half() {
         let translated = translate(include_str!("../examples/ggml_q8_0_vec_dot.ptx"))
             .unwrap_or_else(|error| panic!("{error}"));
@@ -588,7 +668,10 @@ mod tests {
     }
 
     #[test]
-    fn lowers_shfl_sync_bfly_through_shared_scratch() {
+    fn lowers_shfl_sync_bfly_via_subgroup_shuffle_xor() {
+        use rspirv::dr::Operand;
+        use rspirv::spirv::{Capability, ExecutionMode};
+
         const SHFL: &str = r#"
             .version 8.8
             .target sm_80
@@ -617,16 +700,28 @@ mod tests {
             }
         "#;
         let translated = translate(SHFL).unwrap();
-        assert_eq!(translated.kernels[0].shared_bytes, 32 * 4);
+        // Native subgroup shuffle needs no workgroup scratch.
+        assert_eq!(translated.kernels[0].shared_bytes, 0);
         let module = rspirv::dr::load_words(&translated.words).unwrap();
+        assert!(module.capabilities.iter().any(|cap| {
+            matches!(
+                cap.operands.first(),
+                Some(Operand::Capability(Capability::GroupNonUniformShuffle))
+            )
+        }));
+        assert!(module.execution_modes.iter().any(|mode| {
+            mode.operands
+                .iter()
+                .any(|op| matches!(op, Operand::ExecutionMode(ExecutionMode::SubgroupSize)))
+        }));
         let opcodes: Vec<_> = module.functions[0]
             .blocks
             .iter()
             .flat_map(|block| &block.instructions)
             .map(|inst| inst.class.opcode)
             .collect();
-        assert!(opcodes.iter().filter(|&&op| op == Op::ControlBarrier).count() >= 2);
-        assert!(opcodes.contains(&Op::BitwiseXor));
+        assert!(opcodes.contains(&Op::GroupNonUniformShuffleXor));
+        assert!(!opcodes.contains(&Op::ControlBarrier));
         assert!(
             translate(&SHFL.replace("0xffffffff", "0x0000ffff"))
                 .unwrap_err()
