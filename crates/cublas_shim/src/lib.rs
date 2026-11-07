@@ -39,6 +39,10 @@ mod ltplan;
 mod lt;
 #[allow(dead_code)]
 mod xmx;
+#[allow(dead_code)]
+mod xmx_host;
+#[cfg(test)]
+mod xmx_interp;
 
 use libloading::Library;
 use plan::*;
@@ -101,6 +105,9 @@ struct Driver {
     cuStreamSynchronize: unsafe extern "system" fn(CUstream) -> CuResult,
     cuStreamIsCapturing: unsafe extern "system" fn(CUstream, *mut c_int) -> CuResult,
     cuMemcpyDtoH_v2: unsafe extern "system" fn(*mut c_void, u64, usize) -> CuResult,
+    cuMemcpyHtoD_v2: unsafe extern "system" fn(u64, *const c_void, usize) -> CuResult,
+    cuMemAlloc_v2: unsafe extern "system" fn(*mut u64, usize) -> CuResult,
+    cuMemFree_v2: unsafe extern "system" fn(u64) -> CuResult,
 }
 
 fn driver() -> Result<&'static Driver, c_int> {
@@ -134,6 +141,9 @@ fn load_driver() -> Result<Driver, c_int> {
             cuStreamSynchronize: sym!("cuStreamSynchronize"),
             cuStreamIsCapturing: sym!("cuStreamIsCapturing"),
             cuMemcpyDtoH_v2: sym!("cuMemcpyDtoH_v2"),
+            cuMemcpyHtoD_v2: sym!("cuMemcpyHtoD_v2"),
+            cuMemAlloc_v2: sym!("cuMemAlloc_v2"),
+            cuMemFree_v2: sym!("cuMemFree_v2"),
             _lib: lib,
         })
     }
@@ -643,6 +653,16 @@ pub(crate) unsafe fn run_gemm_ex(
         if hook.try_gemm(&call) {
             return finish(drv, h);
         }
+    }
+
+    // Native XMX (DPAS) fast path: CFI_XMX=1 (off by default until validated on hardware).
+    if let Some(status) = unsafe {
+        xmx_host::try_gemm(drv, h.stream, d, alpha_v, beta_v, batch, batching, opts, bias)
+    } {
+        if status != SUCCESS {
+            return status;
+        }
+        return finish(drv, h);
     }
 
     let kernel = match kernel_for(drv, d, pointer_arrays, opts) {
