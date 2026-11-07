@@ -11,6 +11,8 @@ mod discovery;
 #[cfg(windows)]
 mod dxgi_luid;
 mod export_table;
+mod gap_math;
+mod gaps;
 mod graphs;
 #[cfg(windows)]
 mod integrity;
@@ -44,14 +46,19 @@ pub(crate) enum CuResult {
     InvalidImage = 200,
     InvalidContext = 201,
     InvalidPtx = 218,
+    PeerAccessUnsupported = 216,
     FileNotFound = 301,
     OperatingSystem = 304,
     InvalidHandle = 400,
     IllegalState = 401,
     NotFound = 500,
     NotReady = 600,
+    PeerAccessAlreadyEnabled = 704,
+    PeerAccessNotEnabled = 705,
     PrimaryContextActive = 708,
     ContextIsDestroyed = 709,
+    HostMemoryAlreadyRegistered = 712,
+    HostMemoryNotRegistered = 713,
     LaunchFailed = 719,
     NotSupported = 801,
     StreamCaptureUnsupported = 900,
@@ -76,6 +83,8 @@ struct CudaContext {
     teardown_error: Option<CuResult>,
     allocations: BTreeMap<usize, usize>,
     host_allocations: BTreeMap<usize, usize>,
+    /// Application memory registered with cuMemHostRegister (bookkeeping only).
+    host_registered: BTreeMap<usize, usize>,
     modules: HashMap<usize, CudaModule>,
     library_modules: HashMap<usize, usize>,
     functions: HashMap<usize, (usize, CString)>,
@@ -365,6 +374,7 @@ impl State {
                 teardown_error: None,
                 allocations: BTreeMap::new(),
                 host_allocations: BTreeMap::new(),
+                host_registered: BTreeMap::new(),
                 modules: HashMap::new(),
                 library_modules: HashMap::new(),
                 functions: HashMap::new(),
@@ -1488,7 +1498,9 @@ fn attribute(info: &DeviceInfo, attr: c_int) -> Result<c_int, CuResult> {
                 dxgi_luid::adapter_identity(info.vendor_id, info.device_id).ok_or(NotSupported)?;
             return subsystem.map(|id| id as c_int).ok_or(NotSupported);
         }
-        141..=143 => 0, // Host NUMA VMM, memory pools and multinode IPC.
+        // CUDA 12/13 enumerants with no Intel equivalent: decompression,
+        // Vulkan CIG, host NUMA VMM, host pools, host DMA-BUF, partial atomics.
+        135..=138 | 141..=145 => 0,
         _ => {
             if trace::enabled() {
                 trace::record(format_args!(
