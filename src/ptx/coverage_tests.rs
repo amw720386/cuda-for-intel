@@ -966,3 +966,82 @@ fn ldmatrix_matches_reference_fragment_layout() {
         ldmatrix_case(count, true);
     }
 }
+
+#[test]
+fn atomics_fences_and_votes_lower_to_valid_spirv() {
+    let module = lower(&kernel_with_shared(
+        "",
+        ".shared .align 4 .b8 smem[16];",
+        r#"    mov.u32 %r1, 3;
+    mov.u32 %r5, smem;
+    mov.f32 %f2, 0f3f800000;
+    mov.f32 %f1, 0f40000000;
+    atom.global.add.u32 %r2, [%rd15], %r1;
+    atom.global.max.s32 %r2, [%rd15+4], %r1;
+    atom.global.min.u32 %r2, [%rd15+8], %r1;
+    atom.global.and.b32 %r2, [%rd15+12], %r1;
+    atom.global.or.b32 %r2, [%rd15+12], %r1;
+    atom.global.xor.b32 %r2, [%rd15+12], %r1;
+    atom.global.exch.b32 %r2, [%rd15+16], %r1;
+    atom.global.cas.b32 %r3, [%rd15+20], %r1, %r2;
+    atom.relaxed.gpu.global.add.u32 %r4, [%rd15+24], %r1;
+    atom.shared.add.u32 %r4, [%r5], %r1;
+    atom.global.add.f32 %f1, [%rd15+28], %f2;
+    red.global.add.u32 [%rd15+32], %r1;
+    red.global.add.f32 [%rd15+36], %f1;
+    membar.gl;
+    fence.acq_rel.gpu;
+    bar.warp.sync 0xffffffff;
+    setp.gt.u32 %p1, %r1, 2;
+    vote.sync.ballot.b32 %r6, %p1, 0xffffffff;
+    vote.sync.all.pred %p2, %p1, 0xffffffff;
+    vote.sync.any.pred %p3, %p1, 0xffffffff;
+    activemask.b32 %r7;
+    selp.u32 %r8, %r6, %r7, %p2;"#,
+    ));
+    for op in [Op::AtomicSMax, Op::AtomicUMin, Op::AtomicCompareExchange, Op::AtomicFAddEXT, Op::MemoryBarrier, Op::GroupNonUniformBallot, Op::GroupNonUniformAll, Op::GroupNonUniformAny] {
+        assert!(has_op(&module, op), "{op:?}");
+    }
+}
+
+#[test]
+fn shfl_sync_idx_up_down_match_cuda_semantics() {
+    let machine = eval_warp(
+        "",
+        "",
+        r#"    mov.u32 %r1, %laneid;
+    mul.lo.u32 %r2, %r1, 3;
+    shfl.sync.idx.b32 %r3|%p1, %r2, 5, 0x1f, 0xffffffff;
+    shfl.sync.up.b32 %r4|%p2, %r2, 2, 0x0, 0xffffffff;
+    shfl.sync.down.b32 %r5|%p3, %r2, 4, 0x1f, 0xffffffff;
+    shfl.sync.idx.b32 %r6, %r2, %r1, 0x1f, 0xffffffff;
+    shfl.sync.down.b32 %r7|%p4, %r2, 1, 0x181f, 0xffffffff;
+    selp.u32 %r8, 1, 0, %p2;
+    selp.u32 %r9, 1, 0, %p3;
+    mul.wide.u32 %rd11, %r1, 32;
+    add.s64 %rd13, %rd15, %rd11;
+    st.global.u32 [%rd13], %r3;
+    st.global.u32 [%rd13+4], %r4;
+    st.global.u32 [%rd13+8], %r5;
+    st.global.u32 [%rd13+12], %r6;
+    st.global.u32 [%rd13+16], %r8;
+    st.global.u32 [%rd13+20], %r9;
+    st.global.u32 [%rd13+24], %r7;"#,
+        |_| {},
+    );
+    for lane in 0..32u64 {
+        let word = |i: u64| machine.read(OUT + lane * 32 + i * 4, 4) as u64;
+        assert_eq!(word(0), 15, "idx");
+        let up_ok = lane >= 2;
+        assert_eq!(word(1), if up_ok { (lane - 2) * 3 } else { lane * 3 }, "up lane {lane}");
+        assert_eq!(word(4), u64::from(up_ok));
+        let down_ok = lane + 4 <= 31;
+        assert_eq!(word(2), if down_ok { (lane + 4) * 3 } else { lane * 3 }, "down lane {lane}");
+        assert_eq!(word(5), u64::from(down_ok));
+        assert_eq!(word(3), lane * 3, "idx with register source");
+        // 0x181f: segments of 8 lanes (segmask 0x18 keeps the high lane bits).
+        let seg_ok = (lane & 0x18) + (lane & 7) + 1 <= (lane & 0x18) + 7;
+        let expected = if seg_ok { (lane + 1) * 3 } else { lane * 3 };
+        assert_eq!(word(6), expected, "segmented down lane {lane}");
+    }
+}

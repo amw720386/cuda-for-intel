@@ -1,7 +1,7 @@
 use super::flow::Flow;
 use super::rounded;
 use super::{
-    Alu3Op, Alu64Op, Comparison, MmaShape, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
+    Alu3Op, Alu64Op, AtomicOp, Comparison, MmaShape, ShuffleMode, VoteMode, Entry, Error, FloatOp, Instruction, IntegerOp, KernelMetadata, Param, Space,
     Terminator, Translation, Width,
 };
 use rspirv::binary::Assemble;
@@ -81,6 +81,8 @@ struct Emitter<'a> {
     local: Option<(&'a str, Word)>,
     /// Set when the entry uses CUDA warp shuffles / redux (forces SubgroupSize 32).
     warp_ops: bool,
+    /// Capabilities / extensions already declared on the module.
+    declared: HashSet<&'static str>,
     builtin_type: Word,
     builtins: [Word; BUILTINS.len()],
     declarations: HashMap<String, Width>,
@@ -158,6 +160,7 @@ impl<'a> Emitter<'a> {
             shared_offsets: HashMap::new(),
             local: None,
             warp_ops: false,
+            declared: HashSet::new(),
             builtin_type,
             builtins,
             declarations: HashMap::new(),
@@ -1398,9 +1401,196 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    fn declare(&mut self, name: &'static str, capability: Option<Capability>, extension: Option<&str>) {
+        if self.declared.insert(name) {
+            if let Some(capability) = capability {
+                self.builder.capability(capability);
+            }
+            if let Some(extension) = extension {
+                self.builder.extension(extension);
+            }
+        }
+    }
+
+    fn emit_atomic(
+        &mut self,
+        op: AtomicOp,
+        space: Space,
+        float: bool,
+        signed: bool,
+        dst: Option<&'a str>,
+        addr: &str,
+        src: [&str; 2],
+    ) -> Result<(), Error> {
+        if space == Space::Local {
+            return Err(Error::new("atomics on local memory are not supported"));
+        }
+        let pointer = self.word_pointer(space, addr)?;
+        let ty = self.u32_type;
+        let scope_kind = if space == Space::Global { Scope::Device } else { Scope::Workgroup };
+        if space == Space::Global {
+            self.device_atomics = true;
+        }
+        let scope = self.builder.constant_bit32(ty, scope_kind as u32);
+        let relaxed = self.builder.constant_bit32(ty, MemorySemantics::empty().bits());
+        let value = self.integer(src[0], Kind::B32)?;
+        let previous = match op {
+            AtomicOp::Add if float => {
+                self.declare(
+                    "atomic_f32_add",
+                    Some(Capability::AtomicFloat32AddEXT),
+                    Some("SPV_EXT_shader_atomic_float_add"),
+                );
+                let storage = if space == Space::Global {
+                    StorageClass::CrossWorkgroup
+                } else {
+                    StorageClass::Workgroup
+                };
+                let float_ptr = self.builder.type_pointer(None, storage, self.f32_type);
+                let float_ptr = self.builder.bitcast(float_ptr, None, pointer)?;
+                let value = self.builder.bitcast(self.f32_type, None, value)?;
+                let old = self.builder.atomic_f_add_ext(
+                    self.f32_type,
+                    None,
+                    float_ptr,
+                    scope,
+                    relaxed,
+                    value,
+                )?;
+                self.builder.bitcast(ty, None, old)?
+            }
+            AtomicOp::Add => self.builder.atomic_i_add(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Min if signed => {
+                self.builder.atomic_s_min(ty, None, pointer, scope, relaxed, value)?
+            }
+            AtomicOp::Min => self.builder.atomic_u_min(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Max if signed => {
+                self.builder.atomic_s_max(ty, None, pointer, scope, relaxed, value)?
+            }
+            AtomicOp::Max => self.builder.atomic_u_max(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::And => self.builder.atomic_and(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Or => self.builder.atomic_or(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Xor => self.builder.atomic_xor(ty, None, pointer, scope, relaxed, value)?,
+            AtomicOp::Exch => {
+                self.builder.atomic_exchange(ty, None, pointer, scope, relaxed, value)?
+            }
+            AtomicOp::Cas => {
+                let compare = self.integer(src[1], Kind::B32)?;
+                self.builder.atomic_compare_exchange(
+                    ty, None, pointer, scope, relaxed, relaxed, value, compare,
+                )?
+            }
+        };
+        if let Some(dst) = dst {
+            self.write(dst, Value { id: previous, kind: Kind::B32 })?;
+        }
+        Ok(())
+    }
+
+    fn emit_shuffle(
+        &mut self,
+        mode: ShuffleMode,
+        dst: &'a str,
+        pred: Option<&'a str>,
+        src: [&str; 4],
+    ) -> Result<(), Error> {
+        let ty = self.u32_type;
+        let control = Self::parse_u32(src[2]).ok_or_else(|| {
+            Error::new("shfl.sync requires an immediate clamp/segment-mask operand")
+        })?;
+        if Self::parse_u32(src[3]).is_some_and(|mask| mask != u32::MAX) {
+            return Err(Error::new("only full-warp shfl.sync membermask 0xffffffff is supported"));
+        }
+        let (clamp, segment) = (control & 31, (control >> 8) & 31);
+        let value = self.read(src[0])?.require(Kind::B32, src[0])?;
+        let delta = self.integer(src[1], Kind::B32)?;
+        let lane = self.lane_id()?;
+        let segment_mask = self.u32_const(segment);
+        let min_lane = self.builder.bitwise_and(ty, None, lane, segment_mask)?;
+        let (source, valid) = match mode {
+            ShuffleMode::Idx | ShuffleMode::Down => {
+                let upper = self.u32_const(clamp & !segment & 31);
+                let max_lane = self.builder.bitwise_or(ty, None, min_lane, upper)?;
+                let j = if mode == ShuffleMode::Idx {
+                    let keep = self.u32_const(!segment & 31);
+                    let low = self.builder.bitwise_and(ty, None, delta, keep)?;
+                    self.builder.bitwise_or(ty, None, low, min_lane)?
+                } else {
+                    self.builder.i_add(ty, None, lane, delta)?
+                };
+                let valid = self.builder.u_less_than_equal(self.bool_type, None, j, max_lane)?;
+                (j, valid)
+            }
+            ShuffleMode::Up => {
+                let room = self.builder.i_sub(ty, None, lane, min_lane)?;
+                let valid = self.builder.u_less_than_equal(self.bool_type, None, delta, room)?;
+                (self.builder.i_sub(ty, None, lane, delta)?, valid)
+            }
+        };
+        let source = self.builder.select(ty, None, valid, source, lane)?;
+        let result = self.subgroup_shuffle(value, source)?;
+        self.write(dst, Value { id: result, kind: Kind::B32 })?;
+        if let Some(pred) = pred {
+            self.write(pred, Value { id: valid, kind: Kind::Predicate })?;
+        }
+        Ok(())
+    }
+
+    fn emit_vote(&mut self, mode: VoteMode, dst: &'a str, src: &str) -> Result<(), Error> {
+        let predicate = if src == "1" {
+            self.builder.constant_true(self.bool_type)
+        } else {
+            self.read(src)?.require(Kind::Predicate, src)?
+        };
+        let scope = self.builder.constant_bit32(self.u32_type, Scope::Subgroup as u32);
+        match mode {
+            VoteMode::Ballot => {
+                self.declare("ballot", Some(Capability::GroupNonUniformBallot), None);
+                let vec4 = self.builder.type_vector(self.u32_type, 4);
+                let mask = self.builder.group_non_uniform_ballot(vec4, None, scope, predicate)?;
+                let low = self.builder.composite_extract(self.u32_type, None, mask, [0])?;
+                self.write(dst, Value { id: low, kind: Kind::B32 })
+            }
+            VoteMode::All | VoteMode::Any => {
+                self.declare("vote", Some(Capability::GroupNonUniformVote), None);
+                let id = if mode == VoteMode::All {
+                    self.builder.group_non_uniform_all(self.bool_type, None, scope, predicate)?
+                } else {
+                    self.builder.group_non_uniform_any(self.bool_type, None, scope, predicate)?
+                };
+                self.write(dst, Value { id, kind: Kind::Predicate })
+            }
+        }
+    }
+
     fn instruction(&mut self, inst: Instruction<'a>) -> Result<(), Error> {
         let inst = self.resolve_generic(inst);
         let (dst, id, kind) = match inst {
+            Instruction::Atomic { op, space, float, signed, dst, addr, src } => {
+                self.emit_atomic(op, space, float, signed, dst, addr, src)?;
+                return Ok(());
+            }
+            Instruction::Shuffle { mode, dst, pred, src } => {
+                self.emit_shuffle(mode, dst, pred, src)?;
+                return Ok(());
+            }
+            Instruction::Vote { mode, dst, src } => {
+                self.emit_vote(mode, dst, src)?;
+                return Ok(());
+            }
+            Instruction::Fence => {
+                let ty = self.u32_type;
+                let scope = self.builder.constant_bit32(ty, Scope::Device as u32);
+                let semantics = self.builder.constant_bit32(
+                    ty,
+                    (MemorySemantics::ACQUIRE_RELEASE
+                        | MemorySemantics::CROSS_WORKGROUP_MEMORY
+                        | MemorySemantics::WORKGROUP_MEMORY)
+                        .bits(),
+                );
+                self.builder.memory_barrier(scope, semantics)?;
+                return Ok(());
+            }
             Instruction::LoadSigned { space, bits, dst, addr } => {
                 let ty = self.u32_type;
                 let loaded = if bits == 8 {
@@ -2488,6 +2678,8 @@ impl<'a> Emitter<'a> {
                         | Instruction::Mma { .. }
                         | Instruction::LdMatrix { .. }
                         | Instruction::LaneId(..)
+                        | Instruction::Shuffle { .. }
+                        | Instruction::Vote { .. }
                 )
             })
         });

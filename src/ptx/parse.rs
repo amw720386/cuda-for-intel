@@ -1,5 +1,5 @@
 use super::{
-    Alu3Op, Alu64Op, Block, MmaShape, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
+    Alu3Op, Alu64Op, AtomicOp, Block, MmaShape, ShuffleMode, VoteMode, Comparison, Entry, Error, FloatOp, Instruction, IntegerOp, Param, Space, Terminator,
     Width,
 };
 use std::collections::HashMap;
@@ -642,6 +642,121 @@ impl<'a> Parser<'a> {
                     addr,
                 }
             }
+            [op, rest @ ..] if op.starts_with("atom.") || op.starts_with("red.") => {
+                let unsupported = || {
+                    Error::new(format!("unsupported PTX instruction: {}", slice[..end].join(" ")))
+                };
+                let returns = op.starts_with("atom.");
+                let mut space = None;
+                let mut kind = None;
+                let mut ty = None;
+                for part in op.split('.').skip(1) {
+                    match part {
+                        "global" => space = Some(Space::Global),
+                        "shared" => space = Some(Space::Shared),
+                        // Memory-ordering and scope qualifiers do not change the lowering.
+                        "relaxed" | "acquire" | "release" | "acq_rel" | "gpu" | "cta" | "sys"
+                        | "cluster" | "sem" => {}
+                        "add" => kind = Some(AtomicOp::Add),
+                        "min" => kind = Some(AtomicOp::Min),
+                        "max" => kind = Some(AtomicOp::Max),
+                        "and" => kind = Some(AtomicOp::And),
+                        "or" => kind = Some(AtomicOp::Or),
+                        "xor" => kind = Some(AtomicOp::Xor),
+                        "exch" => kind = Some(AtomicOp::Exch),
+                        "cas" => kind = Some(AtomicOp::Cas),
+                        "u32" | "b32" | "s32" | "f32" => ty = Some(part),
+                        _ => return Err(unsupported()),
+                    }
+                }
+                let (Some(space), Some(kind), Some(ty)) = (space, kind, ty) else {
+                    return Err(unsupported());
+                };
+                let float = ty == "f32";
+                if float && kind != AtomicOp::Add {
+                    return Err(unsupported());
+                }
+                let signed = ty == "s32";
+                let (dst, rest) = if returns {
+                    match rest {
+                        [dst, ",", rest @ ..] => (Some(*dst), rest),
+                        _ => return Err(unsupported()),
+                    }
+                } else {
+                    (None, rest)
+                };
+                let src = match rest {
+                    ["[", addr, "]", ",", value] if kind != AtomicOp::Cas => (*addr, [*value, "0"]),
+                    ["[", addr, "]", ",", compare, ",", value] if kind == AtomicOp::Cas => {
+                        (*addr, [*value, *compare])
+                    }
+                    _ => return Err(unsupported()),
+                };
+                if (dst.is_none() && kind == AtomicOp::Cas) || (!returns && kind == AtomicOp::Exch) {
+                    return Err(unsupported());
+                }
+                Instruction::Atomic {
+                    op: kind,
+                    space,
+                    float,
+                    signed,
+                    dst,
+                    addr: src.0,
+                    src: src.1,
+                }
+            }
+            [
+                op @ ("shfl.sync.idx.b32" | "shfl.sync.up.b32" | "shfl.sync.down.b32"),
+                dst,
+                ",",
+                value,
+                ",",
+                delta,
+                ",",
+                clamp,
+                ",",
+                membermask,
+            ] => {
+                let (dst, pred) = match dst.split_once('|') {
+                    Some((dst, pred)) => (dst, Some(pred)),
+                    None => (*dst, None),
+                };
+                let mode = match *op {
+                    "shfl.sync.idx.b32" => ShuffleMode::Idx,
+                    "shfl.sync.up.b32" => ShuffleMode::Up,
+                    _ => ShuffleMode::Down,
+                };
+                Instruction::Shuffle {
+                    mode,
+                    dst,
+                    pred,
+                    src: [value, delta, clamp, membermask],
+                }
+            }
+            ["vote.sync.ballot.b32", dst, ",", pred, ",", _mask] => Instruction::Vote {
+                mode: VoteMode::Ballot,
+                dst,
+                src: pred,
+            },
+            ["vote.sync.all.pred", dst, ",", pred, ",", _mask] => Instruction::Vote {
+                mode: VoteMode::All,
+                dst,
+                src: pred,
+            },
+            ["vote.sync.any.pred", dst, ",", pred, ",", _mask] => Instruction::Vote {
+                mode: VoteMode::Any,
+                dst,
+                src: pred,
+            },
+            ["activemask.b32", dst] => Instruction::Vote {
+                mode: VoteMode::Ballot,
+                dst,
+                src: "1",
+            },
+            ["bar.warp.sync", _]
+            | ["membar.gl" | "membar.cta" | "membar.sys"]
+            | ["fence.sc.gpu" | "fence.acq_rel.gpu" | "fence.sc.cta" | "fence.acq_rel.cta"
+            | "fence.sc.sys" | "fence.acq_rel.sys"] => Instruction::Fence,
             ["xor.b64", dst, ",", a, ",", b] => Instruction::Alu64(Alu64Op::Xor, dst, [a, b, "0"]),
             ["max.s64", dst, ",", a, ",", b] => {
                 Instruction::Alu64(Alu64Op::MaxSigned, dst, [a, b, "0"])

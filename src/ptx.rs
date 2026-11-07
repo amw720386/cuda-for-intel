@@ -154,6 +154,32 @@ enum Alu3Op {
 
 /// 64-bit integer instructions without a dedicated variant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicOp {
+    Add,
+    Min,
+    Max,
+    And,
+    Or,
+    Xor,
+    Exch,
+    Cas,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShuffleMode {
+    Idx,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VoteMode {
+    Ballot,
+    All,
+    Any,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MmaShape {
     /// `m8n8k16` signed/unsigned 8-bit inputs, 32-bit integer accumulators (sm_75).
     M8N8K16I8,
@@ -339,6 +365,32 @@ enum Instruction<'a> {
     Alu64(Alu64Op, &'a str, [&'a str; 3]),
     /// `mov.u32 %r, %laneid`.
     LaneId(&'a str),
+    /// `atom.*` / `red.*` on 32-bit words. `dst` is absent for `red`; `src` is
+    /// `[value, compare]` for `cas` (`[compare, value]` in PTX order) else `[value, "0"]`.
+    Atomic {
+        op: AtomicOp,
+        space: Space,
+        float: bool,
+        signed: bool,
+        dst: Option<&'a str>,
+        addr: &'a str,
+        src: [&'a str; 2],
+    },
+    /// `shfl.sync.{idx,up,down}.b32 d|p, a, b, c, membermask`.
+    Shuffle {
+        mode: ShuffleMode,
+        dst: &'a str,
+        pred: Option<&'a str>,
+        src: [&'a str; 4],
+    },
+    /// `vote.sync.{ballot.b32,all.pred,any.pred}` and `activemask.b32` (`src` = `"1"`).
+    Vote {
+        mode: VoteMode,
+        dst: &'a str,
+        src: &'a str,
+    },
+    /// `bar.warp.sync`, `membar.*`, `fence.*`.
+    Fence,
     /// `mma.sync.aligned` emulated with subgroup shuffles. Sources are
     /// `a[0..4]`, `b[4..6]`, `c[6..10]`; unused entries are `"0"`.
     Mma {
@@ -471,6 +523,22 @@ impl<'a> Instruction<'a> {
                 out.push(*dst);
                 &[]
             }
+            Atomic { dst, addr, src, .. } => {
+                out.extend(dst.iter().copied());
+                // The address and operands are all sources; only the value operands
+                // are slices of `src`, which is enough for definition tracking.
+                let _ = addr;
+                src
+            }
+            Shuffle { dst, pred, src, .. } => {
+                out.push(*dst);
+                out.extend(pred.iter().copied());
+                src
+            }
+            Vote { dst, src, .. } => {
+                out.push(*dst);
+                std::slice::from_ref(src)
+            }
             Mma { shape, dst, src, .. } => {
                 out.extend_from_slice(&dst[..shape.accumulators()]);
                 src
@@ -578,6 +646,7 @@ impl<'a> Instruction<'a> {
             | StoreVecU16(..)
             | StoreVec4U16(..)
             | StoreVec4U8(..)
+            | Fence
             | Barrier => {
                 return None
             }
@@ -595,6 +664,7 @@ impl<'a> Instruction<'a> {
                 | Self::LoadVec { .. }
                 | Self::LoadVecU16 { .. }
                 | Self::AtomicAdd32(..)
+                | Self::Atomic { .. }
         )
     }
 
