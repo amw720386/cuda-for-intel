@@ -768,6 +768,35 @@ unsafe fn gemm_common(
 // GEMM entry points
 // ---------------------------------------------------------------------------
 
+/// Legacy mixed-precision entry (used by PyTorch below compute capability 5.0): GemmEx
+/// with a CUBLAS_COMPUTE_32F accumulator and the default algorithm.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasSgemmEx(
+    handle: *mut c_void,
+    transa: c_int,
+    transb: c_int,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: *const c_void,
+    a_type: c_int,
+    lda: c_int,
+    b: *const c_void,
+    b_type: c_int,
+    ldb: c_int,
+    beta: *const c_void,
+    c: *mut c_void,
+    c_type: c_int,
+    ldc: c_int,
+) -> c_int {
+    unsafe {
+        cublasGemmEx(
+            handle, transa, transb, m, n, k, alpha, a, a_type, lda, b, b_type, ldb, beta, c, c_type, ldc, 68, -1,
+        )
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cublasGemmEx(
     handle: *mut c_void,

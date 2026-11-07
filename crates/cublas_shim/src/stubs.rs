@@ -1378,8 +1378,6 @@ pub extern "system" fn cublasSgemm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSgemmBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSgemmEx() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSgemmEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSgemmGroupedBatched() -> i32 { 15 }

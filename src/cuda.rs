@@ -1207,6 +1207,26 @@ fn diagnose_reject(ptx: &str, error: &ptx::Error) {
     }
 }
 
+/// True for an entry with parameters whose body never touches global or shared
+/// memory and has no atomics or barriers.
+fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
+    let needle = format!(".entry {name} ");
+    let Some(start) = prepared.find(&needle) else { return false };
+    let rest = &prepared[start + needle.len()..];
+    let body = rest.split("\n.entry ").next().unwrap_or(rest);
+    if !body.contains(".param") {
+        return false;
+    }
+    let body = body
+        .replace("st.param", "")
+        .replace("ld.param", "")
+        .replace("st.local", "")
+        .replace("ld.local", "");
+    !["ld.", "st.", "atom.", "red.", "bar.", "cp.async", "mma.", "tex.", "suld", "sust"]
+        .iter()
+        .any(|op| body.contains(op))
+}
+
 /// Translate one kernel of a lazy module and return its function handle.
 pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
     let lazy = state.lazy_modules.get(&module).ok_or(InvalidHandle)?;
@@ -1219,6 +1239,17 @@ pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr
     let context_key = lazy.context;
     if trace::enabled() {
         trace::record(format_args!("lazy kernel {}", name.to_string_lossy()));
+    }
+    if is_arch_guard_stub(&lazy.prepared, &name.to_string_lossy())
+        && std::env::var_os("CFI_ALLOW_EMPTY_KERNELS").is_none()
+    {
+        // `#if __CUDA_ARCH__ >= N` bodies compile to an empty kernel (often a vprintf
+        // complaint) in PTX built for an older arch; running it silently computes nothing.
+        eprintln!(
+            "CUDA for Intel: kernel {} is an architecture-guard stub in this PTX (no memory access); refusing to load it (CFI_ALLOW_EMPTY_KERNELS=1 overrides)",
+            name.to_string_lossy().chars().take(120).collect::<String>()
+        );
+        return Err(NoBinaryForGpu);
     }
     if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {
         let path = std::path::Path::new(&dir).join(format!("module_{module:x}.ptx"));
@@ -1728,6 +1759,20 @@ pub unsafe extern "system" fn cuCtxGetFlags(flags: *mut c_uint) -> CuResult {
 ///
 /// This is a compatibility contract, not a claim of NVIDIA silicon: kernels are
 /// accepted and lowered at this ISA surface (Turing-class PTX used by GGML).
+/// Compute capability reported to applications: 7.5 unless CFI_REPORT_CC=<major>.<minor>.
+fn reported_cc() -> (u32, u32) {
+    static CC: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    *CC.get_or_init(|| {
+        std::env::var("CFI_REPORT_CC")
+            .ok()
+            .and_then(|v| {
+                let (a, b) = v.split_once('.')?;
+                Some((a.parse().ok()?, b.parse().ok()?))
+            })
+            .unwrap_or((COMPUTE_CAPABILITY_MAJOR, COMPUTE_CAPABILITY_MINOR))
+    })
+}
+
 const COMPUTE_CAPABILITY_MAJOR: u32 = 7;
 const COMPUTE_CAPABILITY_MINOR: u32 = 5;
 
@@ -1804,8 +1849,8 @@ fn attribute(info: &DeviceInfo, attr: c_int) -> Result<c_int, CuResult> {
         70 | 71 => 32768,                   // MAXIMUM_TEXTURE2D_LINEAR_WIDTH/HEIGHT
         72 => 1 << 20,                      // MAXIMUM_TEXTURE2D_LINEAR_PITCH
         73 | 74 => 32768,                   // MAXIMUM_TEXTURE2D_MIPMAPPED_*
-        75 => COMPUTE_CAPABILITY_MAJOR,     // COMPUTE_CAPABILITY_MAJOR
-        76 => COMPUTE_CAPABILITY_MINOR,     // COMPUTE_CAPABILITY_MINOR
+        75 => reported_cc().0,     // COMPUTE_CAPABILITY_MAJOR
+        76 => reported_cc().1,     // COMPUTE_CAPABILITY_MINOR
         77 => 32768,                        // MAXIMUM_TEXTURE1D_MIPMAPPED_WIDTH
         78 => 0,                            // STREAM_PRIORITIES_SUPPORTED
         79 => 1,                            // GLOBAL_L1_CACHE_SUPPORTED
