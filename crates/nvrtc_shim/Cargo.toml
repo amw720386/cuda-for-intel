@@ -1,0 +1,13 @@
+[package]
+name = "nvrtc_shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "NVRTC compatibility shim: CUDA C++ to PTX through an external LLVM clang (NVPTX), with a built-in CUDA runtime header subset"
+
+[lib]
+# Matches the CUDA 12 NVRTC DLL name on Windows (nvrtc64_120_0.dll); rename to libnvrtc.so.12 on Linux.
+name = "nvrtc64_120_0"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]

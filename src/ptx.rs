@@ -1121,6 +1121,12 @@ mod tier3_mma_tests;
 mod sim;
 #[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod ggml_ref;
+#[cfg(test)]
+mod ggml_conformance;
+#[cfg(test)]
+mod nvrtc_tests;
 
 #[cfg(test)]
 mod tests {

@@ -676,6 +676,18 @@ impl Sim {
                 }
                 None
             }
+            Op::AtomicFAddEXT => {
+                let (addr, value) = (g!(0), g!(3));
+                let bytes = w.max(8) / 8;
+                let old = Self::mem_read(gpu, shared, priv_mem, addr, bytes);
+                let new = if w == 32 {
+                    u64::from((f32::from_bits(old as u32) + f32::from_bits(value as u32)).to_bits())
+                } else {
+                    (f64::from_bits(old) + f64::from_bits(value)).to_bits()
+                };
+                Self::mem_write(gpu, shared, priv_mem, addr, bytes, new);
+                Some(old)
+            }
             Op::AtomicIAdd | Op::AtomicISub | Op::AtomicExchange | Op::AtomicSMax | Op::AtomicUMax | Op::AtomicSMin
             | Op::AtomicUMin | Op::AtomicAnd | Op::AtomicOr | Op::AtomicXor => {
                 let (addr, value) = (g!(0), g!(3));
@@ -1065,6 +1077,24 @@ impl Sim {
             fb(w, fv(aw(0), arg(0)).ceil())
         } else if is(C::sqrt) {
             fb(w, fv(aw(0), arg(0)).sqrt())
+        } else if is(C::native_exp2) {
+            fb(w, fv(aw(0), arg(0)).exp2())
+        } else if is(C::native_log2) || is(C::log2) {
+            fb(w, fv(aw(0), arg(0)).log2())
+        } else if is(C::log) {
+            fb(w, fv(aw(0), arg(0)).ln())
+        } else if is(C::native_sin) || is(C::sin) {
+            fb(w, fv(aw(0), arg(0)).sin())
+        } else if is(C::native_cos) || is(C::cos) {
+            fb(w, fv(aw(0), arg(0)).cos())
+        } else if is(C::native_sqrt) {
+            fb(w, fv(aw(0), arg(0)).sqrt())
+        } else if is(C::native_rsqrt) || is(C::rsqrt) {
+            fb(w, 1.0 / fv(aw(0), arg(0)).sqrt())
+        } else if is(C::native_recip) {
+            fb(w, 1.0 / fv(aw(0), arg(0)))
+        } else if is(C::native_divide) {
+            fb(w, fv(aw(0), arg(0)) / fv(aw(1), arg(1)))
         } else if is(C::exp2) {
             fb(w, fv(aw(0), arg(0)).exp2())
         } else if is(C::exp) {

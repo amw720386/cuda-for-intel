@@ -21,6 +21,13 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         let ty = format!("b{}", &parts[1][1..]);
         return Some(again(ctx, &inst.guard, &format!("mov.{ty}"), inst.operands.clone()));
     }
+    // `mov.u64 %rd, symbol` (clang 20 NVPTX spelling) is the same as `mov.b64 %rd, symbol`.
+    if op == "mov.u64" && inst.operands.len() == 2 {
+        let src = inst.operand(1).trim();
+        if ctx.t3.shared.iter().any(|n| n == src) {
+            return Some(again(ctx, &inst.guard, "mov.b64", inst.operands.clone()));
+        }
+    }
     // `X.approx.f32.ftz` -> `X.approx.ftz.f32`.
     if parts.len() >= 3 && parts[parts.len() - 1] == "ftz" && parts[parts.len() - 2] == "f32" && parts[0] != "cvt" {
         let mut p = parts.clone();

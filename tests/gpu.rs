@@ -95,6 +95,8 @@ mod hw_cublas_batched;
 mod hw_launch_stress;
 #[path = "gpu/hw_xmx_gemm.rs"]
 mod hw_xmx_gemm;
+#[path = "gpu/hw_nvrtc.rs"]
+mod hw_nvrtc;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {
