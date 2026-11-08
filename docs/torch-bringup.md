@@ -94,11 +94,10 @@ about 16 s. Use `CFI_NO_CACHE=1` to disable the cache.
 
 ## Translator status on the cuda128 build (probe of all 308 sm_120 PTX modules)
 
-19480 of 19529 entries (99.7%) translate. Known remaining gaps:
-
-* 36 entries still rejected by the divergent-barrier rule (the rule cannot prove block
-  uniformity for these tid-dependent conditions; `CFI_STRICT_BARRIERS=1` makes it stricter).
-* 9 huge kernels exceed the 8192-block limit of the flow analysis (raising it makes the
-  O(n^2) analysis exhaust memory); they are unlikely to be launched.
-* 2 entries with a missing register declaration, 2 entries beyond the register-range limit.
+All 19529 entries (100%) translate. The barrier rule now uses a block-uniformity analysis
+(`src/ptx/uniform.rs`: classes uniform / multiple-of-ntid / tid-congruent, per reaching definition),
+which proves the top-k / kthvalue guards `tid >= n - n % ntid` and their block-stride loops under
+`CFI_STRICT_BARRIERS=1` too. The flow analyses are linear (dominator trees, SCCs), the block cap
+is 262144, and inlined register ranges are trimmed. Kernel-level behaviour is unchanged: huge
+kernels (e.g. 460 inlined `igamma` calls) translate in tens of seconds and about 1.3 GB.
 * 48 modules contain only device functions (no `.entry`) and need no translation.
