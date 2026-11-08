@@ -39,6 +39,7 @@ use rspirv::spirv::{
 };
 
 pub const EXTENSION: &str = "SPV_INTEL_subgroup_matrix_multiply_accumulate";
+pub const EXTENSION_2D: &str = "SPV_INTEL_2d_block_io";
 /// DPAS shape for 16-bit inputs on Xe2/Xe3: M' (rows per op), K', N' (= subgroup size).
 pub const DPAS_M: u32 = 8;
 pub const DPAS_K: u32 = 16;
@@ -107,6 +108,13 @@ pub struct Cfg {
     pub jb: u32,
     pub pair_a: bool,
     pub vec_b: bool,
+    /// Load operands with 2D block messages (`SPV_INTEL_2d_block_io`): zero-filled out of bounds,
+    /// so there are no clamps and no K tail. Strided batches only, `op(B) = N`.
+    pub blk: bool,
+    /// With `blk`: A is stored K-contiguous (`op(A) = T`), else M-contiguous.
+    pub blk_ta: bool,
+    /// With `blk`: K steps of 16 per loop iteration.
+    pub ku: u32,
     pub flags: Flags,
 }
 
@@ -147,6 +155,10 @@ impl Cfg {
         if self.vec_b {
             n.push_str("_vb");
         }
+        if self.blk {
+            n.push_str(if self.blk_ta { "_blkt" } else { "_blkn" });
+            n.push_str(&format!("u{}", self.ku));
+        }
         if self.flags == Flags::Bare {
             n.push_str("_bare");
         }
@@ -180,6 +192,9 @@ struct G {
     p_u64: Word,
     p_f32: Word,
     p_v4u32: Word,
+    t_v2u32: Word,
+    pf_v8u16: Word,
+    pf_v8u32: Word,
 }
 
 /// Values shared by every block of the kernel body.
@@ -276,6 +291,35 @@ impl G {
                 self.store(self.p_u16, addr, bits, 2)
             }
         }
+    }
+
+    /// One 2D block message. `kind`: 0 plain, 1 VNNI transform, 2 transpose. `dst` is a Function
+    /// variable; the loaded value is returned. Out-of-surface elements read as zero.
+    #[allow(clippy::too_many_arguments)]
+    fn blk_load(
+        &mut self,
+        kind: u8,
+        esize: u32,
+        bw: u32,
+        bh: u32,
+        base: Word,
+        width_bytes: Word,
+        height: Word,
+        pitch_bytes: Word,
+        x: Word,
+        y: Word,
+        dst: Word,
+        dst_ty: Word,
+    ) -> R<Word> {
+        let (es, bwc, bhc, bcc) = (self.c32(esize), self.c32(bw), self.c32(bh), self.c32(1));
+        let src = self.b.convert_u_to_ptr(self.p_u16, None, base)?;
+        let coord = self.b.composite_construct(self.t_v2u32, None, [x, y])?;
+        match kind {
+            0 => self.b.subgroup2_d_block_load_intel(es, bwc, bhc, bcc, src, width_bytes, height, pitch_bytes, coord, dst)?,
+            1 => self.b.subgroup2_d_block_load_transform_intel(es, bwc, bhc, bcc, src, width_bytes, height, pitch_bytes, coord, dst)?,
+            _ => self.b.subgroup2_d_block_load_transpose_intel(es, bwc, bhc, bcc, src, width_bytes, height, pitch_bytes, coord, dst)?,
+        }
+        self.b.load(dst_ty, None, dst, None, [])
     }
 
     /// DPAS "A" operand for column block `jb`: lane l holds `op(B)(kk+l, j0+8jb+r)`.
@@ -417,10 +461,20 @@ pub fn build(cfg: &Cfg) -> R<Vec<u32>> {
     if need_f16 {
         caps.push(Capability::Float16);
     }
+    if cfg.blk {
+        caps.extend([
+            Capability::Subgroup2DBlockIOINTEL,
+            Capability::Subgroup2DBlockTransformINTEL,
+            Capability::Subgroup2DBlockTransposeINTEL,
+        ]);
+    }
     for c in caps {
         b.capability(c);
     }
     b.extension(EXTENSION);
+    if cfg.blk {
+        b.extension(EXTENSION_2D);
+    }
     b.memory_model(AddressingModel::Physical64, MemoryModel::OpenCL);
     let ocl = b.ext_inst_import("OpenCL.std");
     let t_bool = b.type_bool();
@@ -442,6 +496,15 @@ pub fn build(cfg: &Cfg) -> R<Vec<u32>> {
         gp(&mut b, t_f32),
         gp(&mut b, t_v4u32),
     );
+    let (t_v2u32, pf_v8u16, pf_v8u32) = if cfg.blk {
+        (
+            b.type_vector(t_u32, 2),
+            b.type_pointer(None, StorageClass::Function, t_v8u16),
+            b.type_pointer(None, StorageClass::Function, t_v8u32),
+        )
+    } else {
+        (0, 0, 0)
+    };
     let in_ptr = b.type_pointer(None, StorageClass::Input, t_v3u64);
     let wgid = b.variable(in_ptr, None, StorageClass::Input, None);
     b.decorate(wgid, Decoration::BuiltIn, [Operand::BuiltIn(BuiltIn::WorkgroupId)]);
@@ -450,7 +513,7 @@ pub fn build(cfg: &Cfg) -> R<Vec<u32>> {
 
     let mut g = G {
         b, cfg: *cfg, ocl, t_bool, t_u16, t_u32, t_u64, t_f32, t_f16, t_v4u32, t_v8u16, t_v8u32,
-        t_v8f32, p_u16, p_u32, p_u64, p_f32, p_v4u32,
+        t_v8f32, p_u16, p_u32, p_u64, p_f32, p_v4u32, t_v2u32, pf_v8u16, pf_v8u32,
     };
     let void = g.b.type_void();
     let ptys: Vec<Word> = PARAMS
@@ -478,6 +541,16 @@ pub fn build(cfg: &Cfg) -> R<Vec<u32>> {
     let tail = g.b.id();
     let after = g.b.id();
     g.b.begin_block(Some(entry))?;
+    // Destination variables of the 2D block loads (Function variables open the entry block).
+    let (mut wvars, mut avars) = (Vec::new(), Vec::new());
+    if cfg.blk {
+        for _ in 0..cfg.ku * cfg.ib {
+            wvars.push(g.b.variable(pf_v8u32, None, StorageClass::Function, None));
+        }
+        for _ in 0..cfg.ku * cfg.jb {
+            avars.push(g.b.variable(pf_v8u16, None, StorageClass::Function, None));
+        }
+    }
 
     let wg = g.b.load(t_v3u64, None, wgid, None, [])?;
     let li = g.b.load(t_v3u64, None, lid, None, [])?;
@@ -525,6 +598,71 @@ pub fn build(cfg: &Cfg) -> R<Vec<u32>> {
     let a_si2 = scale2(&mut g, a_si)?;
     let b_sl2 = scale2(&mut g, b_sl)?;
     let b_sj2 = scale2(&mut g, b_sj)?;
+    let accs: Vec<Word> = if cfg.blk {
+        let one32 = g.c32(1);
+        let two32 = g.c32(2);
+        // Surfaces start at the operands (the host guarantees the alignment the messages need);
+        // widths are exact, so reads past K or past M/N come back as zeros.
+        let (a_al, b_al) = (abase, bbase);
+        let (a_wb, a_h, a_pitch) = if cfg.blk_ta {
+            (g.b.shift_left_logical(t_u32, None, k, one32)?, m, g.b.i_mul(t_u32, None, a_si, two32)?)
+        } else {
+            (g.b.shift_left_logical(t_u32, None, m, one32)?, k, g.b.i_mul(t_u32, None, a_sl, two32)?)
+        };
+        let b_wb = g.b.shift_left_logical(t_u32, None, k, one32)?;
+        let b_pitch = g.b.i_mul(t_u32, None, b_sj, two32)?;
+        let nacc = (cfg.ib * cfg.jb) as usize;
+        let step_k = g.c32(DPAS_K * cfg.ku);
+        g.b.branch(header)?;
+        g.b.begin_block(Some(header))?;
+        let zero = g.b.constant_null(t_v8f32);
+        let kk_next = g.b.id();
+        let acc_next: Vec<Word> = (0..nacc).map(|_| g.b.id()).collect();
+        let zero32 = g.c32(0);
+        let kk = g.b.phi(t_u32, None, [(zero32, entry), (kk_next, body)])?;
+        let accs_h: Vec<Word> = (0..nacc)
+            .map(|i| g.b.phi(t_v8f32, None, [(zero, entry), (acc_next[i], body)]))
+            .collect::<R<_>>()?;
+        let go = g.b.u_less_than(t_bool, None, kk, k)?;
+        g.b.loop_merge(merge, body, LoopControl::NONE, [])?;
+        g.b.branch_conditional(go, body, merge, [])?;
+        g.b.begin_block(Some(body))?;
+        let mut cur = accs_h.clone();
+        for st in 0..cfg.ku {
+            let off = g.c32(DPAS_K * st);
+            let kks = g.b.i_add(t_u32, None, kk, off)?;
+            let mut bops = Vec::new();
+            for ib in 0..cfg.ib {
+                let var = wvars[(st * cfg.ib + ib) as usize];
+                let rowoff = g.c32(ib * DPAS_N);
+                let v = if cfg.blk_ta {
+                    let x = g.b.shift_right_logical(t_u32, None, kks, one32)?;
+                    let y = g.b.i_add(t_u32, None, i0, rowoff)?;
+                    g.blk_load(2, 4, 8, 16, a_al, a_wb, a_h, a_pitch, x, y, var, t_v8u32)?
+                } else {
+                    let x = g.b.i_add(t_u32, None, i0, rowoff)?;
+                    g.blk_load(1, 2, 16, 16, a_al, a_wb, a_h, a_pitch, x, kks, var, t_v8u32)?
+                };
+                bops.push(v);
+            }
+            for jb in 0..cfg.jb {
+                let var = avars[(st * cfg.jb + jb) as usize];
+                let x = kks;
+                let roff = g.c32(jb * DPAS_M);
+                let y = g.b.i_add(t_u32, None, j0, roff)?;
+                let a = g.blk_load(0, 2, 16, 8, b_al, b_wb, n, b_pitch, x, y, var, t_v8u16)?;
+                for ib in 0..cfg.ib {
+                    let idx = (jb * cfg.ib + ib) as usize;
+                    let id = (st + 1 == cfg.ku).then(|| acc_next[idx]);
+                    cur[idx] = g.dpas(a, bops[ib as usize], cur[idx], id)?;
+                }
+            }
+        }
+        g.b.i_add(t_u32, Some(kk_next), kk, step_k)?;
+        g.b.branch(header)?;
+        g.b.begin_block(Some(merge))?;
+        accs_h
+    } else {
     let one = g.c32(1);
     let mm1 = g.b.i_sub(t_u32, None, m, one)?;
     let mut a_ic = Vec::new();
@@ -573,9 +711,10 @@ pub fn build(cfg: &Cfg) -> R<Vec<u32>> {
     g.b.branch(after)?;
 
     g.b.begin_block(Some(after))?;
-    let accs: Vec<Word> = (0..nacc)
+    (0..nacc)
         .map(|i| g.b.phi(t_v8f32, None, [(accs_h[i], merge), (tail_accs[i], tail)]))
-        .collect::<R<_>>()?;
+        .collect::<R<Vec<Word>>>()?
+    };
 
     // Epilogue: C(i, j) = act(alpha * acc + beta * C + bias[i]).
     let ldc64 = g.to64(ldc)?;
@@ -676,7 +815,7 @@ pub(crate) mod gen_tests {
                             for bias in [None, Some(Ty::F32), Some(Ty::F16), Some(Ty::Bf16)] {
                                 v.push(Cfg {
                                     input, out, ptrs, beta0, act, bias, ib: 2, jb: 4,
-                                    pair_a: false, vec_b: false, flags: Flags::Packed,
+                                    pair_a: false, vec_b: false, blk: false, blk_ta: false, ku: 1, flags: Flags::Packed,
                                 });
                             }
                         }
@@ -685,9 +824,13 @@ pub(crate) mod gen_tests {
             }
         }
         for (pair_a, vec_b, flags) in [(true, false, Flags::Packed), (false, true, Flags::Packed), (true, true, Flags::Bare)] {
-            v.push(Cfg { input: Input::F16, out: Ty::F32, ptrs: false, beta0: false, act: Act::None, bias: None, ib: 2, jb: 4, pair_a, vec_b, flags });
+            v.push(Cfg { input: Input::F16, out: Ty::F32, ptrs: false, beta0: false, act: Act::None, bias: None, ib: 2, jb: 4, pair_a, vec_b, blk: false, blk_ta: false, ku: 1, flags });
         }
-        v.push(Cfg { input: Input::Bf16, out: Ty::Bf16, ptrs: true, beta0: true, act: Act::Gelu, bias: Some(Ty::F16), ib: 4, jb: 2, pair_a: false, vec_b: false, flags: Flags::Packed });
+        v.push(Cfg { input: Input::Bf16, out: Ty::Bf16, ptrs: true, beta0: true, act: Act::Gelu, bias: Some(Ty::F16), ib: 4, jb: 2, pair_a: false, vec_b: false, blk: false, blk_ta: false, ku: 1, flags: Flags::Packed });
+        for (blk_ta, ku, out, ptrs_free) in [(true, 1, Ty::F32, false), (false, 2, Ty::F16, false)] {
+            let _ = ptrs_free;
+            v.push(Cfg { input: Input::F16, out, ptrs: false, beta0: false, act: Act::None, bias: None, ib: 2, jb: 4, pair_a: false, vec_b: false, blk: true, blk_ta, ku, flags: Flags::Packed });
+        }
         v
     }
 
