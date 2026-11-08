@@ -39,8 +39,17 @@ function Report([bool]$Ok, [string]$Name, [string]$Hint) {
 }
 
 function Invoke-Step([string[]]$CargoArguments) {
-    $output = & cargo @CargoArguments 2>&1 | ForEach-Object { "$_" }
-    [pscustomobject]@{ Code = $LASTEXITCODE; Text = ($output -join "`n") }
+    # Windows PowerShell 5.1 turns any stderr line of a native command (cargo prints its
+    # warnings there) into a terminating error under $ErrorActionPreference = 'Stop'.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & cargo @CargoArguments 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    [pscustomobject]@{ Code = $code; Text = ($output -join "`n") }
 }
 
 Push-Location $repo
