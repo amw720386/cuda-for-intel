@@ -8,7 +8,7 @@ The local OpenSSH destination identity did not apply to the jump process. Separa
 
 Windows rejected the same public key and accepted password authentication. The interactive handoff timed out and one retry lost its temporary WSL directory. The successful connection used a local SSH prompt helper and a private WSL multiplex socket. Source and binary archives went through that connection and their SHA-256 checksums matched on both sides. [Intel Cloud SSH access guide](https://cloud.intel.com/docs/how_to_access.html)
 
-The instance already had Visual Studio Community 18 with MSVC and Vulkan SDK 1.4.363.0. Rust 1.99.0 x86-64 MSVC with Clippy and rustfmt, and portable PowerShell 7.5.13, were installed under the validation directory in the remote user profile. Builds used that directory for Cargo and Rustup state. The selected graphics driver and Level Zero loader were the ones installed on each host.
+The instance already had Visual Studio Community 18 with MSVC and Vulkan SDK 1.4.363.0. Rust 1.99.0 x86-64 MSVC with Clippy and rustfmt, and portable PowerShell 7.5.13, were installed under the validation directory in the remote user profile. Builds used that directory for Cargo and Rustup state. The selected graphics driver and Level Zero loader were the ones installed on each host. <!-- leak-ok: SDK version string -->
 
 ## Measured hardware and capabilities
 
