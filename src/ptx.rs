@@ -1,6 +1,7 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod ext;
 mod flow;
+mod fxhash;
 pub(crate) mod globals;
 mod inline;
 mod normalize;
@@ -955,6 +956,17 @@ pub(crate) fn skipped_entries() -> Vec<(String, String)> {
 }
 
 /// Translate every parsed entry of a prepared module on its own and report per kernel.
+/// Per-entry SPIR-V hash and time, for the perf harness.
+#[allow(dead_code)]
+pub(crate) fn probe_module_hashed(prepared: &str, threads: usize) -> Result<Vec<(String, Result<u64, String>, std::time::Duration)>, Error> {
+    probe::probe_module_hashed(prepared, threads)
+}
+
+#[allow(dead_code)]
+pub(crate) fn probe_lazy_hashed(prepared: &str, threads: usize) -> Result<Vec<(String, Result<u64, String>, std::time::Duration)>, Error> {
+    probe::probe_lazy_hashed(prepared, threads)
+}
+
 #[allow(dead_code)]
 pub(crate) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), String>)>, Error> {
     probe::probe_module(prepared)

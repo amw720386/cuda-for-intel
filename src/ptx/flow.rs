@@ -1,13 +1,12 @@
 use super::{Block, Comparison, Error, Instruction, IntegerOp, Terminator};
-use std::collections::HashSet;
+use super::fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-pub(super) struct Flow<'a> {
+pub(super) struct Flow {
     pub(super) order: Vec<usize>,
-    pub(super) inputs: Vec<HashSet<&'a str>>,
 }
 
-impl<'a> Flow<'a> {
-    pub(super) fn analyze(blocks: &[Block<'a>]) -> Result<Self, Error> {
+impl Flow {
+    pub(super) fn analyze(blocks: &[Block<'_>]) -> Result<Self, Error> {
         if blocks.is_empty() {
             return Err(Error::new("PTX entry has no blocks"));
         }
@@ -56,93 +55,37 @@ impl<'a> Flow<'a> {
             verify_barriers(blocks, &order)?;
         }
 
-        let mut scratch = Vec::new();
-        let definitions: Vec<HashSet<_>> = blocks
-            .iter()
-            .map(|block| {
-                let mut defined = HashSet::new();
-                for inst in &block.instructions {
-                    if inst.collect_definitions(&mut scratch).is_some() {
-                        defined.extend(scratch.iter().copied());
-                    }
-                }
-                defined
-            })
-            .collect();
-        let all: HashSet<_> = definitions.iter().flatten().copied().collect();
-        let mut outputs = vec![all; blocks.len()];
-        let mut inputs = vec![HashSet::new(); blocks.len()];
-        loop {
-            let mut changed = false;
-            for &index in &order {
-                inputs[index] = if index == 0 {
-                    HashSet::new()
-                } else {
-                    let mut pred = predecessors[index].iter().copied();
-                    let mut common = outputs[pred.next().expect("reachable block")].clone();
-                    for prev in pred {
-                        common.retain(|reg| outputs[prev].contains(reg));
-                    }
-                    common
-                };
-                let output = inputs[index].union(&definitions[index]).copied().collect();
-                if outputs[index] != output {
-                    outputs[index] = output;
-                    changed = true;
-                }
-            }
-            if !changed {
-                return Ok(Self { order, inputs });
-            }
-        }
+        Ok(Self { order })
     }
 }
 
-fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
+fn verify_barriers<'a>(blocks: &[Block<'a>], order: &[usize]) -> Result<(), Error> {
     // A branch's strict postdominators are guaranteed reconvergence points.
-    let mut postdominates = vec![vec![true; blocks.len()]; blocks.len()];
-    loop {
-        let mut changed = false;
-        for &index in order.iter().rev() {
-            let end = blocks[index].end;
-            let set: Vec<_> = (0..blocks.len())
-                .map(|candidate| {
-                    candidate == index
-                        || (!matches!(end, Terminator::Return)
-                            && end.successors().all(|next| postdominates[next][candidate]))
-                })
-                .collect();
-            if postdominates[index] != set {
-                postdominates[index] = set;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let postdom = PostDom::new(blocks);
 
     // Treat memory loads and all definitions under divergent control as potentially varying.
     // Repeat because a loop-carried definition can affect an earlier branch.
-    let mut varying = HashSet::new();
+    let mut varying = HashSet::default();
     // Values computed from `%tid.x` by ALU instructions alone (`%tid.y/z` conditions guard
     // rows that PTX programmers keep uniform by launching with `ntid.y == 1` where a block
     // cooperates along x; that cannot be proven statically) (no memory in between): a branch
     // on one of these is provably thread-divergent. Branches that are only "varying" because
     // of an unknown load or a divergent region are assumed to be taken by all threads, as
     // PTX programmers do for `__syncthreads` under data-dependent but block-uniform control.
-    let mut tid_derived: HashSet<&str> = HashSet::new();
-    let mut tid_defs: std::collections::HashMap<&str, (String, Vec<&str>)> = std::collections::HashMap::new();
-    let mut local_derived: HashSet<&str> = HashSet::new();
+    let mut tid_derived: HashSet<&str> = HashSet::default();
+    let mut tid_defs: HashMap<&str, (String, Vec<&str>)> = HashMap::default();
+    let mut local_derived: HashSet<&str> = HashSet::default();
     let mut checked_branches = vec![false; blocks.len()];
+    let barrier_reach = barrier_reachability(blocks);
+    let mut cyclic: Option<Vec<bool>> = None;
     // Value facts for block-uniform bounds. `K = n - n % ntid.x` is a multiple of the block size,
     // so `tid.x >= K` (or `<`) is the same for every thread of a block: all of them (K == 0) or
     // none (K >= ntid.x > tid.x). PyTorch's top-k / kthvalue loops are built on this.
-    let mut tid_regs: HashSet<&str> = HashSet::new();
-    let mut ntid_regs: HashSet<&str> = HashSet::new();
-    let mut rem_of: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    let mut multiple_of_ntid: HashSet<&str> = HashSet::new();
-    let mut uniform_compare: HashSet<&str> = HashSet::new();
+    let mut tid_regs: HashSet<&str> = HashSet::default();
+    let mut ntid_regs: HashSet<&str> = HashSet::default();
+    let mut rem_of: HashMap<&str, &str> = HashMap::default();
+    let mut multiple_of_ntid: HashSet<&str> = HashSet::default();
+    let mut uniform_compare: HashSet<&str> = HashSet::default();
     // 64-bit variant: `for (i = tid; i < K; i += blockDim)` with `K = n - n % blockDim`. Every
     // thread's induction variable is congruent to its tid modulo blockDim, so comparing it with
     // a multiple of blockDim gives the same answer for the whole block.
@@ -239,13 +182,13 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                 }
                 let mut defined = Vec::new();
                 if let Some(inputs) = inst.collect_definitions(&mut defined) {
-                    let base = |src: &&str| src.split('+').next().unwrap_or(src).to_string();
+                    let base = |src: &&'a str| -> &'a str { src.split('+').next().unwrap_or(src) };
                     let thread_dependent = inputs.iter().any(|src| {
                         let b = base(src);
-                        src.starts_with("%tid.") || varying.contains(src) || varying.contains(b.as_str())
+                        src.starts_with("%tid.") || varying.contains(src) || varying.contains(b)
                     });
                     let private = matches!(inst, super::Instruction::LocalSymbol64(..))
-                        || inputs.iter().any(|src| local_derived.contains(base(src).as_str()));
+                        || inputs.iter().any(|src| local_derived.contains(base(src)));
                     if private {
                         local_derived.extend(defined.iter().copied());
                     }
@@ -271,7 +214,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                     let tid_dependent = !inst.is_memory_load()
                         && inputs.iter().any(|src| {
                             let b = base(src);
-                            src.starts_with("%tid.x") || tid_derived.contains(src) || tid_derived.contains(b.as_str())
+                            src.starts_with("%tid.x") || tid_derived.contains(src) || tid_derived.contains(b)
                         });
                     if tid_dependent {
                         if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
@@ -317,20 +260,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             // Generalised early exit: if no barrier is reachable from one side, the threads
             // taking it only run to completion and exit, which the hardware barrier counts
             // as arrived (GGML's `if (col >= ncols) { ...no barrier...; return; }`).
-            let reaches_barrier = |start: usize| {
-                let mut seen = vec![false; blocks.len()];
-                let mut stack = vec![start];
-                while let Some(next) = stack.pop() {
-                    if std::mem::replace(&mut seen[next], true) {
-                        continue;
-                    }
-                    if blocks[next].instructions.iter().any(|inst| inst.is_convergent()) {
-                        return true;
-                    }
-                    stack.extend(blocks[next].end.successors());
-                }
-                false
-            };
+            let reaches_barrier = |start: usize| barrier_reach[start];
             if !reaches_barrier(taken) || !reaches_barrier(other) || !tid_derived.contains(predicate) {
                 continue;
             }
@@ -339,22 +269,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             // iterations, which PyTorch's top-k / sort / scan helpers guarantee by rounding the
             // bound up to a multiple of the block size. Uniformity of the trip count is a
             // value fact we cannot prove, so trust the program as CUDA does.
-            let in_loop = {
-                let mut seen = vec![false; blocks.len()];
-                let mut stack = vec![taken, other];
-                let mut found = false;
-                while let Some(next) = stack.pop() {
-                    if next == index {
-                        found = true;
-                        break;
-                    }
-                    if std::mem::replace(&mut seen[next], true) {
-                        continue;
-                    }
-                    stack.extend(blocks[next].end.successors());
-                }
-                found
-            };
+            let in_loop = cyclic.get_or_insert_with(|| cyclic_blocks(blocks))[index];
             if in_loop && std::env::var_os("CFI_STRICT_BARRIERS").is_none() {
                 continue;
             }
@@ -362,7 +277,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             let mut seen = vec![false; blocks.len()];
             let mut stack = vec![taken, other];
             while let Some(next) = stack.pop() {
-                if (next != index && postdominates[index][next])
+                if (next != index && postdom.postdominates(next, index))
                     || std::mem::replace(&mut seen[next], true)
                 {
                     continue;
@@ -372,7 +287,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
                         if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
                             eprintln!("convergent inst {inst:?} in block {next}");
                             let mut work: Vec<&str> = vec![predicate];
-                            let mut seen_names = HashSet::new();
+                            let mut seen_names = std::collections::HashSet::new();
                             while let Some(n) = work.pop() {
                                 if !seen_names.insert(n) { continue; }
                                 if let Some((text, ins)) = tid_defs.get(n) {
@@ -396,5 +311,209 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
         if old_count == varying.len() {
             return Ok(());
         }
+    }
+}
+
+/// `reach[b]`: some block reachable from `b` (including `b`) holds a convergent instruction.
+fn barrier_reachability(blocks: &[Block<'_>]) -> Vec<bool> {
+    let mut predecessors = vec![Vec::new(); blocks.len()];
+    for (index, block) in blocks.iter().enumerate() {
+        for next in block.end.successors() {
+            predecessors[next].push(index);
+        }
+    }
+    let mut reach = vec![false; blocks.len()];
+    let mut stack: Vec<usize> = (0..blocks.len())
+        .filter(|&b| blocks[b].instructions.iter().any(|inst| inst.is_convergent()))
+        .collect();
+    while let Some(b) = stack.pop() {
+        if !std::mem::replace(&mut reach[b], true) {
+            stack.extend(predecessors[b].iter().copied());
+        }
+    }
+    reach
+}
+
+/// `cyclic[b]`: `b` lies on a control-flow cycle (iterative Tarjan SCC; self-edges count).
+fn cyclic_blocks(blocks: &[Block<'_>]) -> Vec<bool> {
+    let n = blocks.len();
+    let succ: Vec<Vec<usize>> = blocks.iter().map(|b| b.end.successors().collect()).collect();
+    let mut cyclic = vec![false; n];
+    let mut index = vec![usize::MAX; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut scc_stack = Vec::new();
+    let mut counter = 0;
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        let mut call = vec![(root, 0usize)];
+        index[root] = counter;
+        low[root] = counter;
+        counter += 1;
+        scc_stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (v, ref mut at)) = call.last_mut() {
+            if *at < succ[v].len() {
+                let w = succ[v][*at];
+                *at += 1;
+                if w == v {
+                    cyclic[v] = true;
+                }
+                if index[w] == usize::MAX {
+                    index[w] = counter;
+                    low[w] = counter;
+                    counter += 1;
+                    scc_stack.push(w);
+                    on_stack[w] = true;
+                    call.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            } else {
+                call.pop();
+                if let Some(&(parent, _)) = call.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    let mut members = Vec::new();
+                    loop {
+                        let w = scc_stack.pop().unwrap();
+                        on_stack[w] = false;
+                        members.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    if members.len() > 1 {
+                        for w in members {
+                            cyclic[w] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cyclic
+}
+
+/// Post-dominator tree (Cooper-Harvey-Kennedy on the reverse CFG with a virtual exit) with
+/// DFS intervals, so "does `a` post-dominate `b`" is O(1) instead of an N x N bit matrix.
+struct PostDom {
+    tin: Vec<u32>,
+    tout: Vec<u32>,
+}
+
+impl PostDom {
+    fn new(blocks: &[Block<'_>]) -> Self {
+        let n = blocks.len();
+        let exit = n;
+        // Reverse-graph successors of a node are its forward predecessors; the virtual exit
+        // precedes every Return block.
+        let mut predecessors = vec![Vec::new(); n + 1];
+        for (index, block) in blocks.iter().enumerate() {
+            if matches!(block.end, Terminator::Return) {
+                predecessors[exit].push(index);
+            }
+            for next in block.end.successors() {
+                predecessors[next].push(index);
+            }
+        }
+        // Reverse postorder over the reverse graph, rooted at the exit.
+        let mut visited = vec![false; n + 1];
+        let mut post = Vec::with_capacity(n + 1);
+        let mut stack = vec![(exit, 0usize)];
+        visited[exit] = true;
+        while let Some(&mut (v, ref mut at)) = stack.last_mut() {
+            if *at < predecessors[v].len() {
+                let w = predecessors[v][*at];
+                *at += 1;
+                if !std::mem::replace(&mut visited[w], true) {
+                    stack.push((w, 0));
+                }
+            } else {
+                post.push(v);
+                stack.pop();
+            }
+        }
+        let mut number = vec![usize::MAX; n + 1];
+        for (i, &v) in post.iter().enumerate() {
+            number[v] = i;
+        }
+        // Forward successors (plus the exit for Return blocks) are the reverse-graph predecessors.
+        let rev_preds = |v: usize| -> Vec<usize> {
+            match blocks[v].end {
+                Terminator::Return => vec![exit],
+                end => end.successors().collect(),
+            }
+        };
+        let mut idom = vec![usize::MAX; n + 1];
+        idom[exit] = exit;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &v in post.iter().rev() {
+                if v == exit {
+                    continue;
+                }
+                let mut new = usize::MAX;
+                for p in rev_preds(v) {
+                    if idom[p] == usize::MAX {
+                        continue;
+                    }
+                    new = if new == usize::MAX {
+                        p
+                    } else {
+                        let (mut a, mut b) = (p, new);
+                        while a != b {
+                            while number[a] < number[b] {
+                                a = idom[a];
+                            }
+                            while number[b] < number[a] {
+                                b = idom[b];
+                            }
+                        }
+                        a
+                    };
+                }
+                if new != idom[v] {
+                    idom[v] = new;
+                    changed = true;
+                }
+            }
+        }
+        // Tree children, then DFS intervals.
+        let mut children = vec![Vec::new(); n + 1];
+        for v in 0..n {
+            if idom[v] != usize::MAX {
+                children[idom[v]].push(v);
+            }
+        }
+        let mut tin = vec![0u32; n + 1];
+        let mut tout = vec![0u32; n + 1];
+        let mut clock = 0u32;
+        let mut stack = vec![(exit, 0usize)];
+        tin[exit] = clock;
+        clock += 1;
+        while let Some(&mut (v, ref mut at)) = stack.last_mut() {
+            if *at < children[v].len() {
+                let w = children[v][*at];
+                *at += 1;
+                tin[w] = clock;
+                clock += 1;
+                stack.push((w, 0));
+            } else {
+                tout[v] = clock;
+                clock += 1;
+                stack.pop();
+            }
+        }
+        Self { tin, tout }
+    }
+
+    /// `candidate` post-dominates `node` (every block post-dominates itself).
+    fn postdominates(&self, candidate: usize, node: usize) -> bool {
+        self.tin[candidate] <= self.tin[node] && self.tout[node] <= self.tout[candidate]
     }
 }

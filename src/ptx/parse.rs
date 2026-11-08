@@ -42,8 +42,42 @@ pub(super) fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
     }
 }
 
+/// Token cursor with an O(1) clone (checkpoints must not copy the remaining module).
+#[derive(Clone)]
+struct Toks<'a> {
+    data: std::rc::Rc<Vec<&'a str>>,
+    pos: usize,
+}
+
+impl<'a> Toks<'a> {
+    fn new(tokens: Vec<&'a str>) -> Self {
+        Self { data: std::rc::Rc::new(tokens), pos: 0 }
+    }
+
+    fn as_slice(&self) -> &[&'a str] {
+        &self.data[self.pos..]
+    }
+
+    fn len(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    fn next(&mut self) -> Option<&'a str> {
+        let t = self.data.get(self.pos).copied();
+        if t.is_some() {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn nth(&mut self, n: usize) -> Option<&'a str> {
+        self.pos = (self.pos + n).min(self.data.len());
+        self.next()
+    }
+}
+
 struct Parser<'a> {
-    tokens: std::vec::IntoIter<&'a str>,
+    tokens: Toks<'a>,
     /// Module-scope variables declared so far.
     vars: ModuleVars<'a>,
     /// Parameter names of the entry being parsed (for `mov.u64 %rd, param`).
@@ -2133,7 +2167,7 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
 /// Parse every supported kernel together with the module-scope variables.
 pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'_>), Error> {
     let mut parser = Parser {
-        tokens: tokens(source)?.into_iter(),
+        tokens: Toks::new(tokens(source)?),
         vars: ModuleVars::default(),
         param_names: Vec::new(),
         staged_names: Vec::new(),
@@ -2227,7 +2261,7 @@ pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, 
         .ok_or_else(|| Error::new("PTX entry is absent"))?;
     tokens.drain(..start);
     let mut parser = Parser {
-        tokens: tokens.into_iter(),
+        tokens: Toks::new(tokens),
         vars: ModuleVars::default(),
         param_names: Vec::new(),
         staged_names: Vec::new(),
@@ -2374,7 +2408,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     if let Some(snapshot) = snapshot {
         // Module-scope `.shared` arrays are private to each kernel that names them.
         let used_tokens = snapshot.len() - parser.tokens.len();
-        let consumed: Vec<&str> = snapshot.take(used_tokens).collect();
+        let consumed: Vec<&str> = snapshot.as_slice()[..used_tokens].to_vec();
         let used: Vec<_> = parser
             .vars
             .shared
