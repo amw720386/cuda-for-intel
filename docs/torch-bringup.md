@@ -91,3 +91,14 @@ about 16 s. Use `CFI_NO_CACHE=1` to disable the cache.
 * ResNet-18 on random 32x32 images: loss identical (2.35571); fc grad rel err 3.3e-06.
 * MLP, 50 Adam steps (foreach): worst relative loss difference 5e-07.
 * Linear/transformer sets with XMX on and off give identical results.
+
+## Translator status on the cuda128 build (probe of all 308 sm_120 PTX modules)
+
+19480 of 19529 entries (99.7%) translate. Known remaining gaps:
+
+* 36 entries still rejected by the divergent-barrier rule (the rule cannot prove block
+  uniformity for these tid-dependent conditions; `CFI_STRICT_BARRIERS=1` makes it stricter).
+* 9 huge kernels exceed the 8192-block limit of the flow analysis (raising it makes the
+  O(n^2) analysis exhaust memory); they are unlikely to be launched.
+* 2 entries with a missing register declaration, 2 entries beyond the register-range limit.
+* 48 modules contain only device functions (no `.entry`) and need no translation.
