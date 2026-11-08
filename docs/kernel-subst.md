@@ -16,3 +16,4 @@ Opt-in layer that replaces recognised ggml-cuda kernels with hand-written Intel-
   stream-k-split tiles differ in rounding only. The paired `mul_mat_q_stream_k_fixup` is skipped when it follows a native launch (matched by dst/tmp pointers).
   Not done: Q4_K/Q6_K mmq and DPAS (int8 XMX) variant.
 * Hardware: `tests/gpu/hw_subst.rs` (see its header for the command).
+* Debug: `CUDA_FOR_INTEL_SUBST_CHECK=<n>` reruns the translated kernel after the first n native mmvq/mmq launches of each variant into a scratch copy, logs `subst-check:` lines (nmse, shapes) to cuda-for-intel-export.log, and on mismatch restores the translated result and falls back to PTX for that variant.

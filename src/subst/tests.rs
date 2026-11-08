@@ -145,7 +145,7 @@ fn quantize_q8_1_matches_reference() {
 #[test]
 fn device_probe_accepts_native_kernels_and_rejects_corrupt_ones() {
     use super::{Kernel, Plan, Switch, decide};
-    let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0 };
+    let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0, aux: 0 };
     for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
         let p = plan(Kernel::Mmvq { ty, ncols: 3 }, "m");
         let words = p.build(true).unwrap();
@@ -211,7 +211,7 @@ fn switch_parsing_and_decisions() {
 #[test]
 fn geometry_mapping_rejects_unexpected_launches() {
     use super::{Kernel, Plan};
-    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0 };
+    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0, aux: 0 };
     assert_eq!(p.map_geometry([10, 1, 1], [32, 4, 1]), Some(([10, 1, 1], [32, 4, 1])));
     assert_eq!(p.map_geometry([10, 1, 1], [32, 2, 1]), None);
     let wide = Plan { nwarps: Some(8), ..p };
@@ -307,7 +307,7 @@ fn registry_accepts_every_stock_mmvq_instantiation() {
 fn mmq_q8_0_matches_reference() {
     let words = super::mmq::build(true);
     validate(&words);
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0 };
+    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
     // ragged rows/cols, channels with a ratio, two samples, k not a multiple of the 4-block stage
     for (ncols_x, nrows, ncols, nch, ratio, nsamples) in [(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] {
         let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 5 + ncols as u64);
@@ -325,7 +325,7 @@ fn translated_stock_mmq_q8_0_matches_native_on_the_interpreter() {
     let entry = "_Z9mul_mat_qIL9ggml_type8ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     crate::ptx::set_dynamic_shared_bytes(65536);
     let Some((stock, params)) = translated("blob98.ptx", entry) else { return };
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0 };
+    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
     assert!(matches!(
         super::decide(entry, &params, &super::Switch::parse("mmq")),
         super::Decision::Substitute(_)
@@ -380,4 +380,65 @@ fn auto_policy_follows_the_measurements() {
     assert!(matches!(decide(&name(8, 1), &mmvq_layout(), &no_mmq), Decision::Substitute(_)));
     assert_eq!(decide(&name(8, 1), &mmvq_layout(), &Switch::parse("all,-mmvq:q8_0")), Decision::NotApplicable);
     assert!(Switch::parse("auto,-mmq,none").is_none());
+}
+
+/// Multi-tile, ragged shapes (several row/column tiles, channels, samples) against the stock
+/// translated kernel launched with one CTA per tile (no stream-k split, no fixup).
+/// K must be a multiple of 256: the stock kernel consumes 8 Q8_0 blocks per step and ggml zero-pads y
+/// to that, so a shorter K reads unrelated y data (not a kernel bug).
+/// Slow (minutes) on the debug interpreter: run with `--ignored` and CFI_STOCK_PTX_DIR.
+#[test]
+#[ignore = "slow: multi-tile stock mmq on the interpreter; mismatch under investigation"]
+fn translated_stock_mmq_q8_0_multi_tile_shapes() {
+    crate::ptx::set_dynamic_shared_bytes(65536);
+    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let words = super::mmq::build(true);
+    let mut failed = false;
+    // (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples)
+    for (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples) in [(256usize, 130usize, 9usize, 8usize, 1usize, 1usize, 1usize), (256, 130, 9, 8, 2, 2, 2)] {
+        let entry = format!("_Z9mul_mat_qIL9ggml_type8ELi{mmq_x}ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+        let Some(stock) = translated_words("blob98.ptx", &entry) else { return };
+        let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 31 + ncols as u64);
+        let n = case.dst_len();
+        let mut dev = Dev::default();
+        let (xa, ya) = (dev.put(&case.x), dev.put(&case.y));
+        let da = dev.alloc(n * 4);
+        let tmp = dev.alloc(1 << 18);
+        let mut args: Vec<ArgVal> = case
+            .args(xa, ya, da)
+            .iter()
+            .map(|a| match *a {
+                PArg::Ptr(p) => ArgVal::Ptr(p),
+                PArg::U32(v) => ArgVal::U32(v),
+                PArg::U64(v) => ArgVal::U64(v),
+            })
+            .collect();
+        args[5] = ArgVal::Ptr(tmp);
+        let tiles = (ncols.div_ceil(mmq_x) * nrows.div_ceil(128) * nch * nsamples) as u32;
+        interp::run(&mut dev, &stock, &args, [tiles, 1, 1], [32, 8, 1]);
+        let translated_out: Vec<f32> =
+            dev.download(da, n * 4).chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let mut sim = Sim { dev: Dev::default(), words: &words };
+        let native = case.run(&mut sim, &plan).unwrap();
+        let reference = case.reference();
+        println!(
+            "{ncols_x}x{nrows}x{ncols} mmq_x {mmq_x} ch {nch}/{ratio} s {nsamples}: native-vs-stock {:.2e}, stock-vs-ref {:.2e}, native-vs-ref {:.2e}",
+            refs::nmse(&native, &translated_out),
+            refs::nmse(&translated_out, &reference),
+            refs::nmse(&native, &reference)
+        );
+        // where does the stock result differ from the reference? (row, col) of the first few
+        let mut shown = 0;
+        for col in 0..ncols {
+            for row in 0..nrows {
+                let i = col * nrows + row;
+                if translated_out[i].to_bits() != reference[i].to_bits() && shown < 12 {
+                    println!("  stock differs at row {row} col {col}: stock {} ref {} native {}", translated_out[i], reference[i], native[i]);
+                    shown += 1;
+                }
+            }
+        }
+        failed |= refs::nmse(&native, &translated_out) >= 1e-9;
+    }
+    assert!(!failed);
 }

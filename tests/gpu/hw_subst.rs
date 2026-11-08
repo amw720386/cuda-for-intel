@@ -129,7 +129,9 @@ fn make_mmq_case(nrows: usize, ncols_x: usize, ncols: usize, nch: usize, ratio: 
     let mut rng = Rng(seed);
     let nb = ncols_x / 32;
     let nch_x = nch / ratio;
-    let ychan = ncols_x / 128 * ncols * 36;
+    // ggml pads y's K to a multiple of 512 with zeros; the stock kernel consumes 8 Q8_0 blocks per step
+    let kpad = ncols_x.next_multiple_of(512);
+    let ychan = kpad / 128 * ncols * 36;
     let p = refs::Mmq {
         ncols_x,
         nrows_x: nrows,
@@ -148,11 +150,17 @@ fn make_mmq_case(nrows: usize, ncols_x: usize, ncols: usize, nch: usize, ratio: 
         stride_sample_y: ychan * nch,
         stride_sample_dst: nrows * ncols * nch,
     };
-    let x = refs::random_blocks(refs::Q8_0, nrows * nb * nch_x * nsamples, &mut rng);
+    let mut x = refs::random_blocks(refs::Q8_0, nrows * nb * nch_x * nsamples, &mut rng);
+    x.extend(vec![0u8; 34 * 8]); // the stock kernel may read up to 7 blocks past the last row
     let mut y = Vec::new();
     for _ in 0..nch * nsamples {
-        let acts: Vec<f32> = (0..ncols_x * ncols).map(|_| rng.unit() * 2.0).collect();
-        y.extend(refs::quantize_mmq_d4(&acts, ncols_x, ncols));
+        let mut acts = vec![0f32; kpad * ncols];
+        for c in 0..ncols {
+            for k in 0..ncols_x {
+                acts[c * kpad + k] = rng.unit() * 2.0;
+            }
+        }
+        y.extend(refs::quantize_mmq_d4(&acts, kpad, ncols));
     }
     MmqCase { p, x, y }
 }
@@ -214,8 +222,9 @@ fn hw_subst_native_vs_translated() {
         cuMemAlloc_v2(*mut u64, usize),
         cuMemcpyHtoD_v2(u64, *const c_void, usize),
         cuMemcpyDtoH_v2(*mut c_void, u64, usize),
-        cuModuleLoadData(*mut Handle, *const c_void),
-        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuLibraryLoadData(*mut Handle, *const c_void, *mut c_void, *mut c_void, u32, *mut c_void, *mut c_void, u32),
+        cuLibraryGetKernel(*mut Handle, Handle, *const c_char),
+        cuKernelGetFunction(*mut Handle, Handle),
     );
     let launch_fn = unsafe {
         dll.get::<unsafe extern "system" fn(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut *mut c_void, *mut Handle) -> i32>(b"cuLaunchKernel\0")
@@ -232,9 +241,21 @@ fn hw_subst_native_vs_translated() {
     let mut context = null_mut();
     ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
 
-    // Load each library twice: with substitution off (translated PTX) and on (native).
-    let load = |blob: &str, switch: &str, nwarps: Option<u32>| -> Handle {
-        // SAFETY: single-threaded test; the driver reads the variables when it installs entries.
+    // Libraries load lazily (one translated module per resolved kernel), so a huge blob such as the
+    // whole mul_mat_q set is never compiled at once. Substitution is decided when a kernel is
+    // resolved, hence the switch is set around each `function` call; each library is resolved under
+    // exactly one setting (load it twice for plain and native).
+    let load = |blob: &str| -> Handle {
+        let src = std::ffi::CString::new(blob).unwrap();
+        let mut library = null_mut();
+        let status = unsafe {
+            cuLibraryLoadData(&mut library, src.as_ptr().cast(), null_mut(), null_mut(), 0, null_mut(), null_mut(), 0)
+        };
+        assert_eq!(status, 0, "cuLibraryLoadData");
+        library
+    };
+    let function = |library: Handle, name: &str, switch: &str, nwarps: Option<u32>| -> Handle {
+        // SAFETY: single-threaded test; the driver reads the variables when it resolves the kernel.
         unsafe {
             if switch.is_empty() {
                 std::env::remove_var("CUDA_FOR_INTEL_SUBST");
@@ -246,31 +267,23 @@ fn hw_subst_native_vs_translated() {
                 None => std::env::remove_var("CUDA_FOR_INTEL_SUBST_NWARPS"),
             }
         }
-        let src = std::ffi::CString::new(blob).unwrap();
-        let mut module = null_mut();
-        let status = unsafe { cuModuleLoadData(&mut module, src.as_ptr().cast()) };
-        assert_eq!(status, 0, "cuModuleLoadData");
-        module
-    };
-    let function = |module: Handle, name: &str| -> Handle {
         let c = std::ffi::CString::new(name).unwrap();
+        let mut kernel = null_mut();
+        assert_eq!(unsafe { cuLibraryGetKernel(&mut kernel, library, c.as_ptr()) }, 0, "cuLibraryGetKernel({name})");
         let mut f = null_mut();
-        let status = unsafe { cuModuleGetFunction(&mut f, module, c.as_ptr()) };
-        assert_eq!(status, 0, "cuModuleGetFunction({name})");
+        assert_eq!(unsafe { cuKernelGetFunction(&mut f, kernel) }, 0, "cuKernelGetFunction({name})");
+        unsafe {
+            std::env::remove_var("CUDA_FOR_INTEL_SUBST");
+            std::env::remove_var("CUDA_FOR_INTEL_SUBST_NWARPS");
+        }
         f
     };
-    let plain_mmvq = load(mmvq_blob, "", None);
-    let native_mmvq = load(mmvq_blob, "mmvq", None);
-    let wide_mmvq = sweep.then(|| load(mmvq_blob, "mmvq", Some(8)));
+    let plain_mmvq = load(mmvq_blob);
+    let native_mmvq = load(mmvq_blob);
+    let wide_mmvq = sweep.then(|| load(mmvq_blob));
     let mmq_blob = blobs.iter().find(|b| b.contains(".entry _Z9mul_mat_qIL9ggml_type8ELi64ELb0E")).expect("mmq blob");
-    let skip_mmq = std::env::var_os("CFI_SUBST_SKIP_MMQ").is_some();
-    let (plain_mmq, native_mmq) = if skip_mmq { (null_mut(), null_mut()) } else { (load(mmq_blob, "", None), load(mmq_blob, "mmq", None)) };
-    let plain_quant = load(quant_blob, "", None);
-    let native_quant = load(quant_blob, "quantize_q8_1", None);
-    unsafe {
-        std::env::remove_var("CUDA_FOR_INTEL_SUBST");
-        std::env::remove_var("CUDA_FOR_INTEL_SUBST_NWARPS");
-    }
+    let (plain_mmq, native_mmq) = (load(mmq_blob), load(mmq_blob));
+    let (plain_quant, native_quant) = (load(quant_blob), load(quant_blob));
 
     let mut worst_nmse = 0f64;
     let mut failures = Vec::new();
@@ -281,7 +294,7 @@ fn hw_subst_native_vs_translated() {
         }
         for ncols in 1..=8usize {
             let entry = format!("_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{ncols}EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj");
-            let (fp, fnat) = (function(plain_mmvq, &entry), function(native_mmvq, &entry));
+            let (fp, fnat) = (function(plain_mmvq, &entry, "", None), function(native_mmvq, &entry, "mmvq", None));
             // plain shape, then channels/samples (ratio 2, 2 samples); ids only exists for ncols == 1
             let mut shapes = vec![(1usize, 1u32, 1usize, false), (4, 2, 2, false)];
             if ncols == 1 {
@@ -332,8 +345,8 @@ fn hw_subst_native_vs_translated() {
         let xa = upload(&api, &xb);
         let name = "_Z13quantize_q8_1PKfPvxxxxxj5uint3";
         let mut outs = Vec::new();
-        for module in [plain_quant, native_quant] {
-            let f = function(module, name);
+        for (module, switch) in [(plain_quant, ""), (native_quant, "quantize_q8_1")] {
+            let f = function(module, name, switch, None);
             let ya = upload(&api, &vec![0u8; want.len()]);
             let q = |v: usize| (v as u64).to_le_bytes().to_vec();
             let params = vec![
@@ -362,13 +375,21 @@ fn hw_subst_native_vs_translated() {
     }
 
     println!("== mul_mat_q Q8_0 (prefill): native vs translated vs host reference");
-    if !skip_mmq {
+    {
         let cases = [
             // (nrows, ncols_x, ncols, mmq_x, need_check, nch, ratio, nsamples)
             (256usize, 1024usize, 64usize, 64usize, 0u32, 1usize, 1usize, 1usize),
             (300, 1024, 40, 64, 1, 2, 1, 1),
             (384, 512, 17, 32, 1, 4, 2, 2),
         ];
+        // Qwen2.5-0.5B shapes (k = 896 is not a multiple of the stock kernel's 256-value step)
+        let mut cases = cases.to_vec();
+        for (m, k) in [(896usize, 896usize), (896, 4864), (4864, 896), (1024, 896)] {
+            for n in [1usize, 2, 7, 16, 33, 64] {
+                let mmq_x = n.next_multiple_of(8).clamp(8, 64);
+                cases.push((m, k, n, mmq_x, if m % 128 == 0 { 0 } else { 1 }, 1, 1, 1));
+            }
+        }
         for (nrows, ncols_x, ncols, mmq_x, need_check, nch, ratio, nsamples) in cases {
             let entry = format!("_Z9mul_mat_qIL9ggml_type8ELi{mmq_x}ELb{need_check}EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
             let c = make_mmq_case(nrows, ncols_x, ncols, nch, ratio, nsamples, 7 + nrows as u64);
@@ -378,8 +399,8 @@ fn hw_subst_native_vs_translated() {
             let (xa, ya) = (upload(&api, &c.x), upload(&api, &c.y));
             let tmp = upload(&api, &vec![0u8; 1 << 22]);
             let mut outs = Vec::new();
-            for module in [plain_mmq, native_mmq] {
-                let f = function(module, &entry);
+            for (module, switch) in [(plain_mmq, ""), (native_mmq, "mmq")] {
+                let f = function(module, &entry, switch, None);
                 let da = upload(&api, &vec![0u8; n * 4]);
                 let params = mmq_params(&c.p, xa, ya, da, tmp);
                 // one stock CTA per tile: no stream-k split, no fixup kernel
@@ -407,8 +428,8 @@ fn hw_subst_native_vs_translated() {
         let flops = 2.0 * nrows as f64 * ncols as f64 * ncols_x as f64;
         println!("type  translated TOPS  native TOPS  speedup  (m={nrows} k={ncols_x} n={ncols}, stock one CTA per tile)");
         let mut rates = Vec::new();
-        for module in [plain_mmq, native_mmq] {
-            let f = function(module, &entry);
+        for (module, switch) in [(plain_mmq, ""), (native_mmq, "mmq")] {
+            let f = function(module, &entry, switch, None);
             for _ in 0..2 {
                 assert_eq!(launch(&api, f, [tiles, 1, 1], [32, 8, 1], &params), 0);
             }
@@ -448,9 +469,9 @@ fn hw_subst_native_vs_translated() {
                 assert_eq!(unsafe { (api.sync)() }, 0);
                 bytes * reps as f64 / start.elapsed().as_secs_f64() / 1e9
             };
-            let t = time(function(plain_mmvq, &entry), c.p.block());
-            let n = time(function(native_mmvq, &entry), c.p.block());
-            let wide = wide_mmvq.map(|m| time(function(m, &entry), c.p.block()));
+            let t = time(function(plain_mmvq, &entry, "", None), c.p.block());
+            let n = time(function(native_mmvq, &entry, "mmvq", None), c.p.block());
+            let wide = wide_mmvq.map(|m| time(function(m, &entry, "mmvq", Some(8)), c.p.block()));
             println!(
                 "{:5} {ncols:5}  {t:15.1}  {n:11.1}  {:6.2}x{}",
                 type_label(ty),
