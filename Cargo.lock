@@ -77,6 +77,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cudnn_shim"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
