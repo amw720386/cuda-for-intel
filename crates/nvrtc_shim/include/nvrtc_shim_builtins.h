@@ -456,6 +456,51 @@ __device__ __forceinline__ double frexp(double x, int* e) { return (double)frexp
 __device__ __forceinline__ double modf(double x, double* ip) { double t = trunc(x); *ip = t; return x - t; }
 __device__ __forceinline__ double remainder(double x, double y) { return (double)remainderf((float)x, (float)y); }
 
+// ---- C99 stragglers (names only referenced through `using ::name;`) ----
+__device__ __forceinline__ float fdim(float a, float b) { return fdimf(a, b); }
+__device__ __forceinline__ double fdim(double a, double b) { return a > b ? a - b : 0.0; }
+__device__ __forceinline__ int ilogbf(float x) { int e; frexpf(x, &e); return e - 1; }
+__device__ __forceinline__ int ilogb(float x) { return ilogbf(x); }
+__device__ __forceinline__ int ilogb(double x) { return ilogbf((float)x); }
+__device__ __forceinline__ float logbf(float x) { return (float)ilogbf(x); }
+__device__ __forceinline__ float logb(float x) { return logbf(x); }
+__device__ __forceinline__ double logb(double x) { return (double)logbf((float)x); }
+__device__ __forceinline__ long long llrintf(float x) { return (long long)rintf(x); }
+__device__ __forceinline__ long long llrint(float x) { return (long long)rintf(x); }
+__device__ __forceinline__ long long llrint(double x) { return (long long)rint(x); }
+__device__ __forceinline__ long long llroundf(float x) { return (long long)roundf(x); }
+__device__ __forceinline__ long long llround(float x) { return (long long)roundf(x); }
+__device__ __forceinline__ long long llround(double x) { return (long long)round(x); }
+__device__ __forceinline__ long lrintf(float x) { return (long)rintf(x); }
+__device__ __forceinline__ long lrint(float x) { return (long)rintf(x); }
+__device__ __forceinline__ long lrint(double x) { return (long)rint(x); }
+__device__ __forceinline__ long lroundf(float x) { return (long)roundf(x); }
+__device__ __forceinline__ long lround(float x) { return (long)roundf(x); }
+__device__ __forceinline__ long lround(double x) { return (long)round(x); }
+__device__ __forceinline__ float nearbyint(float x) { return nearbyintf(x); }
+__device__ __forceinline__ double nearbyint(double x) { return (double)nearbyintf((float)x); }
+__device__ __forceinline__ float nextafterf(float x, float y) {
+  if (x != x || y != y) return x + y;
+  if (x == y) return y;
+  if (x == 0.0f) return __uint_as_float(1u) * (y > 0.0f ? 1.0f : -1.0f);
+  unsigned u = __float_as_uint(x);
+  if ((x < y) == (x > 0.0f)) u += 1u; else u -= 1u;
+  return __uint_as_float(u);
+}
+__device__ __forceinline__ float nextafter(float x, float y) { return nextafterf(x, y); }
+__device__ __forceinline__ double nextafter(double x, double y) { return (double)nextafterf((float)x, (float)y); }
+__device__ __forceinline__ float remquof(float x, float y, int* q) { float n = rintf(x / y); *q = (int)n; return x - n * y; }
+__device__ __forceinline__ float remquo(float x, float y, int* q) { return remquof(x, y, q); }
+__device__ __forceinline__ double remquo(double x, double y, int* q) { return (double)remquof((float)x, (float)y, q); }
+__device__ __forceinline__ float scalbnf(float x, int n) { return ldexpf(x, n); }
+__device__ __forceinline__ float scalbn(float x, int n) { return ldexpf(x, n); }
+__device__ __forceinline__ double scalbn(double x, int n) { return ldexp(x, n); }
+__device__ __forceinline__ float scalblnf(float x, long n) { return ldexpf(x, (int)n); }
+__device__ __forceinline__ float scalbln(float x, long n) { return ldexpf(x, (int)n); }
+__device__ __forceinline__ double scalbln(double x, long n) { return ldexp(x, (int)n); }
+__device__ __forceinline__ float nanf(const char*) { return __uint_as_float(0x7fc00000u); }
+__device__ __forceinline__ double nan(const char*) { return (double)__uint_as_float(0x7fc00000u); }
+
 #ifdef __USE_FAST_MATH__
 #endif
 
