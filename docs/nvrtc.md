@@ -23,15 +23,31 @@ Build: `cargo build -p nvrtc_shim --release`. The library is named `nvrtc64_120_
 
 A stock LLVM distribution is enough: `clang -x cuda --cuda-device-only --cuda-gpu-arch=sm_75
 -nocudainc -nocudalib -nostdinc -nostdinc++ -O2 -S`. No CUDA SDK, libdevice or host libc headers
-are needed. Clang is not vendored or committed; it is found at run time:
+are needed. Clang is not vendored or committed; it is found at run time. The clang **must have the NVPTX
+backend** (`clang --print-targets` lists `nvptx64`). Official LLVM release archives, Homebrew `llvm` and
+distro `clang` packages have it; some vendor clangs (e.g. oneAPI/icx-based ones) do not.
 
-1. `NVRTC_SHIM_CLANG` (path to a clang binary; must list `nvptx64` in `--print-targets`),
-2. `clang` / `clang-NN` on `PATH`,
-3. standard install locations (Homebrew `llvm`, `/usr/lib/llvm-NN`, `C:\Program Files\LLVM`).
+Lookup order, first usable binary wins (`crates/nvrtc_shim/src/toolchain.rs`):
 
-Windows: install LLVM from the official installer (`winget install LLVM.LLVM`) or point
-`NVRTC_SHIM_CLANG` at an existing `clang.exe`. If nothing usable is found `nvrtcCompileProgram`
-returns `NVRTC_ERROR_BUILTIN_OPERATION_FAILURE` and the program log explains how to fix it.
+1. `NVRTC_SHIM_CLANG`: path to a clang binary (or to an LLVM directory containing `clang` or `bin/clang`).
+2. `NVRTC_SHIM_CLANG_DIR`: an LLVM directory (`<dir>/clang` or `<dir>/bin/clang`).
+3. A bundled `clang/` directory beside the shim library, then beside the host executable
+   (`<dir>/clang/clang` or `<dir>/clang/bin/clang`): ship an LLVM tree next to `nvrtc64_120_0.dll`.
+4. `clang` / `clang-NN` on `PATH`.
+5. Standard install locations (Homebrew `llvm`, `/usr/lib/llvm-NN`, `C:\Program Files\LLVM`).
+
+Steps 1 and 2 are explicit: if set but unusable the lookup fails (naming the variable) rather than
+silently using another clang. Every candidate is probed with `--print-targets`; a clang that runs but lacks
+`nvptx64` is skipped and reported.
+
+Windows without admin: download the official `clang+llvm-<ver>-x86_64-pc-windows-msvc` archive from the
+LLVM GitHub releases (verified with LLVM 20.1.8), extract it anywhere, and set `NVRTC_SHIM_CLANG` to its
+`bin\clang.exe` (or `NVRTC_SHIM_CLANG_DIR` to the extracted directory, or extract it to `clang\` beside
+the DLL). The `winget install LLVM.LLVM` installer also works.
+
+If no usable clang exists, or a compile fails because the backend is missing, `nvrtcCompileProgram`
+returns `NVRTC_ERROR_BUILTIN_OPERATION_FAILURE` and `nvrtcGetProgramLog` holds a message listing what was
+tried and how to fix it (no crash or panic; internal panics are also caught and reported the same way).
 
 ### PTX version and architecture
 
@@ -106,7 +122,7 @@ single precision. Do not use this path for numerics that need correctly rounded 
 
 ## Tests
 
-* `cargo test -p nvrtc_shim` (compile, log, options, headers, name expressions, cache, C ABI;
+* `cargo test -p nvrtc_shim` (clang lookup logic with a faked environment, missing-NVPTX error, compile, log, options, headers, name expressions, cache, C ABI;
   skips when no clang).
 * `cargo test --lib nvrtc_tests` (macOS-safe): compile each kernel in
   `crates/nvrtc_shim/tests/kernels`, translate the PTX and execute it in `src/ptx/sim.rs`
@@ -122,7 +138,7 @@ cargo test --test gpu hw_nvrtc -- --ignored --nocapture
 
 ## Environment variables
 
-`NVRTC_SHIM_CLANG`, `NVRTC_SHIM_MAX_ARCH`, `NVRTC_SHIM_CACHE_DIR`, `NVRTC_SHIM_NO_CACHE`,
+`NVRTC_SHIM_CLANG`, `NVRTC_SHIM_CLANG_DIR`, `NVRTC_SHIM_MAX_ARCH`, `NVRTC_SHIM_CACHE_DIR`, `NVRTC_SHIM_NO_CACHE`,
 `NVRTC_SHIM_CUBIN_IS_PTX`.
 
 ## Known gaps

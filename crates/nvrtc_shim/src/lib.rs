@@ -9,6 +9,7 @@ pub mod compiler;
 mod hash;
 mod headers;
 pub mod options;
+pub mod toolchain;
 
 use compiler::{Failure, Output, Request};
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -182,7 +183,9 @@ pub unsafe extern "C" fn nvrtcCompileProgram(p: NvrtcProgram, num_options: c_int
     }
     r.request.options = opts;
     r.lowered_c.clear();
-    match compiler::compile(&r.request) {
+    let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compiler::compile(&r.request)))
+        .unwrap_or_else(|_| Err(Failure::NoToolchain("error: internal failure in the NVRTC shim while invoking clang (panic caught)".into())));
+    match compiled {
         Ok(out) => {
             r.lowered_c = out
                 .lowered
