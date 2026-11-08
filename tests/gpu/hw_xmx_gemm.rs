@@ -47,6 +47,7 @@ const R_32F: i32 = 0;
 const R_16F: i32 = 2;
 const R_16BF: i32 = 14;
 const COMPUTE_32F: i32 = 68;
+const COMPUTE_16F: i32 = 64;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Dt {
@@ -102,6 +103,8 @@ fn val(rng: &mut Rng) -> f32 {
 enum Kind {
     Plain,
     Strided(usize),
+    /// Strided batch whose A has stride 0 (one A for every batch entry).
+    Bcast(usize),
     /// Pointer tables; A is shared by `ratio` consecutive batch entries (GQA broadcast).
     Ptrs { batch: usize, ratio: usize },
 }
@@ -119,6 +122,8 @@ struct Case {
     pad: usize,
     alpha: f32,
     beta: f32,
+    /// CUBLAS_COMPUTE_16F with f16 alpha/beta (ggml KQV); f16 in/out only.
+    c16: bool,
 }
 
 struct Ctx {
@@ -225,6 +230,7 @@ fn make_data(c: &Case, rng: &mut Rng) -> Data {
     let (batch, a_mats) = match c.kind {
         Kind::Plain => (1, 1),
         Kind::Strided(b) => (b, b),
+        Kind::Bcast(b) => (b, 1),
         Kind::Ptrs { batch, ratio } => (batch, batch.div_ceil(ratio)),
     };
     let (mut a, mut b, mut c0) = (Vec::new(), Vec::new(), Vec::new());
@@ -244,6 +250,7 @@ fn reference(c: &Case, d: &Data) -> Vec<u8> {
     let mut want = d.c0.clone();
     let ratio = match c.kind {
         Kind::Ptrs { ratio, .. } => ratio,
+        Kind::Bcast(b) => b,
         _ => 1,
     };
     let _ = d.a_mats;
@@ -277,21 +284,32 @@ fn run(ctx: &Ctx, c: &Case, d: &Data) -> Vec<u8> {
     let (ta, tb) = (c.ta as i32, c.tb as i32);
     let (m, n, k) = (c.m as i32, c.n as i32, c.k as i32);
     let (alpha, beta) = (c.alpha, c.beta);
+    let (al16, be16) = (f32_to_f16(alpha), f32_to_f16(beta));
+    let ct = if c.c16 { COMPUTE_16F } else { COMPUTE_32F };
+    let (ap, bp) = if c.c16 { (p(&al16), p(&be16)) } else { (p(&alpha), p(&beta)) };
     let status = match c.kind {
         Kind::Plain => {
             let f: libloading::Symbol<GemmEx> = unsafe { ctx.lib.get(b"cublasGemmEx\0") }.unwrap();
             unsafe {
-                f(ctx.handle, ta, tb, m, n, k, p(&alpha), da as *const c_void, c.inp.code(), d.lda as i32,
-                  db as *const c_void, c.inp.code(), d.ldb as i32, p(&beta), dc as *mut c_void, c.out.code(),
-                  d.ldc as i32, COMPUTE_32F, -1)
+                f(ctx.handle, ta, tb, m, n, k, ap, da as *const c_void, c.inp.code(), d.lda as i32,
+                  db as *const c_void, c.inp.code(), d.ldb as i32, bp, dc as *mut c_void, c.out.code(),
+                  d.ldc as i32, ct, -1)
             }
         }
         Kind::Strided(batch) => {
             let f: libloading::Symbol<Strided> = unsafe { ctx.lib.get(b"cublasGemmStridedBatchedEx\0") }.unwrap();
             unsafe {
-                f(ctx.handle, ta, tb, m, n, k, p(&alpha), da as *const c_void, c.inp.code(), d.lda as i32,
-                  d.ea as i64, db as *const c_void, c.inp.code(), d.ldb as i32, d.eb as i64, p(&beta),
-                  dc as *mut c_void, c.out.code(), d.ldc as i32, d.ec as i64, batch as i32, COMPUTE_32F, -1)
+                f(ctx.handle, ta, tb, m, n, k, ap, da as *const c_void, c.inp.code(), d.lda as i32,
+                  d.ea as i64, db as *const c_void, c.inp.code(), d.ldb as i32, d.eb as i64, bp,
+                  dc as *mut c_void, c.out.code(), d.ldc as i32, d.ec as i64, batch as i32, ct, -1)
+            }
+        }
+        Kind::Bcast(batch) => {
+            let f: libloading::Symbol<Strided> = unsafe { ctx.lib.get(b"cublasGemmStridedBatchedEx\0") }.unwrap();
+            unsafe {
+                f(ctx.handle, ta, tb, m, n, k, ap, da as *const c_void, c.inp.code(), d.lda as i32,
+                  0, db as *const c_void, c.inp.code(), d.ldb as i32, d.eb as i64, bp,
+                  dc as *mut c_void, c.out.code(), d.ldc as i32, d.ec as i64, batch as i32, ct, -1)
             }
         }
         Kind::Ptrs { batch, ratio } => {
@@ -304,9 +322,9 @@ fn run(ctx: &Ctx, c: &Case, d: &Data) -> Vec<u8> {
             let tc_ = table(dc, d.ec * c.out.size(), 1);
             let f: libloading::Symbol<Batched> = unsafe { ctx.lib.get(b"cublasGemmBatchedEx\0") }.unwrap();
             let s = unsafe {
-                f(ctx.handle, ta, tb, m, n, k, p(&alpha), ta_ as *const *const c_void, c.inp.code(), d.lda as i32,
-                  tb_ as *const *const c_void, c.inp.code(), d.ldb as i32, p(&beta), tc_ as *const *mut c_void,
-                  c.out.code(), d.ldc as i32, batch as i32, COMPUTE_32F, -1)
+                f(ctx.handle, ta, tb, m, n, k, ap, ta_ as *const *const c_void, c.inp.code(), d.lda as i32,
+                  tb_ as *const *const c_void, c.inp.code(), d.ldb as i32, bp, tc_ as *const *mut c_void,
+                  c.out.code(), d.ldc as i32, batch as i32, ct, -1)
             };
             for t in [ta_, tb_, tc_] {
                 unsafe { (ctx.free)(t) };
@@ -378,6 +396,7 @@ fn table() -> Vec<Case> {
                     pad: [0, 0, 1, 3][idx % 4],
                     alpha: if idx % 5 == 0 { 0.5 } else { 1.0 },
                     beta: if idx % 7 == 0 { 0.25 } else { 0.0 },
+                    c16: false,
                 });
                 idx += 1;
             }
@@ -389,7 +408,7 @@ fn table() -> Vec<Case> {
             for tb in [false, true] {
                 for (inp, out) in [(Dt::F16, Dt::F32), (Dt::F16, Dt::F16), (Dt::Bf16, Dt::F32), (Dt::Bf16, Dt::Bf16)] {
                     for pad in [0usize, 2] {
-                        cases.push(Case { m, n, k, ta, tb, inp, out, kind: Kind::Plain, pad, alpha: 1.0, beta: if pad == 2 { 0.5 } else { 0.0 } });
+                        cases.push(Case { m, n, k, ta, tb, inp, out, kind: Kind::Plain, pad, alpha: 1.0, beta: if pad == 2 { 0.5 } else { 0.0 }, c16: false });
                     }
                 }
             }
@@ -398,7 +417,7 @@ fn table() -> Vec<Case> {
     // 3. Larger exact checks (full CPU reference).
     for &(m, n, k) in &[(512usize, 512usize, 512usize), (1024, 256, 2048), (2048, 16, 256)] {
         for (ta, tb) in [(true, false), (false, false)] {
-            cases.push(Case { m, n, k, ta, tb, inp: Dt::F16, out: Dt::F32, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0 });
+            cases.push(Case { m, n, k, ta, tb, inp: Dt::F16, out: Dt::F32, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0, c16: false });
         }
     }
     // 4. Batched: strided and pointer tables (attention shapes, GQA broadcast of A).
@@ -406,15 +425,86 @@ fn table() -> Vec<Case> {
         for (ta, tb) in [(true, false), (false, false), (true, true)] {
             for inp in [Dt::F16, Dt::Bf16] {
                 for out in [Dt::F32, if inp == Dt::F16 { Dt::F16 } else { Dt::Bf16 }] {
-                    cases.push(Case { m, n, k, ta, tb, inp, out, kind: Kind::Strided(6), pad: 1, alpha: 1.0, beta: 0.0 });
-                    cases.push(Case { m, n, k, ta, tb, inp, out, kind: Kind::Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0 });
+                    cases.push(Case { m, n, k, ta, tb, inp, out, kind: Kind::Strided(6), pad: 1, alpha: 1.0, beta: 0.0, c16: false });
+                    cases.push(Case { m, n, k, ta, tb, inp, out, kind: Kind::Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false });
                 }
             }
         }
     }
-    cases.push(Case { m: 70, n: 50, k: 90, ta: true, tb: false, inp: Dt::F16, out: Dt::F32, kind: Kind::Ptrs { batch: 9, ratio: 3 }, pad: 2, alpha: 0.5, beta: 0.25 });
+    cases.push(Case { m: 70, n: 50, k: 90, ta: true, tb: false, inp: Dt::F16, out: Dt::F32, kind: Kind::Ptrs { batch: 9, ratio: 3 }, pad: 2, alpha: 0.5, beta: 0.25, c16: false });
     let _ = &mut rng;
     cases
+}
+
+/// llama.cpp's per-layer attention GEMMs for Qwen2.5-0.5B (14 query heads, 2 kv heads: ratio 7)
+/// and Llama-3.2-1B (32 / 8: ratio 4), head dim 64. QK: A = K^T view (op T), f16 in, f32 out;
+/// KQV: A = V, f16 in/out with `CUBLAS_COMPUTE_16F`. Both are pointer-table batched.
+fn ggml_cases() -> Vec<Case> {
+    let mut v = Vec::new();
+    for &(heads, ratio) in &[(14usize, 7usize), (32, 4)] {
+        for &(n_kv, n_tok) in &[(512usize, 512usize), (512, 33), (256, 256), (1024, 128)] {
+            v.push(Case { m: n_kv, n: n_tok, k: 64, ta: true, tb: false, inp: Dt::F16, out: Dt::F32,
+                kind: Kind::Ptrs { batch: heads, ratio }, pad: 0, alpha: 1.0, beta: 0.0, c16: false });
+            v.push(Case { m: 64, n: n_tok, k: n_kv, ta: false, tb: false, inp: Dt::F16, out: Dt::F16,
+                kind: Kind::Ptrs { batch: heads, ratio }, pad: 0, alpha: 1.0, beta: 0.0, c16: true });
+        }
+        // Broadcast through stride 0 instead of a table (single kv head) and a strided KQV.
+        v.push(Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: Dt::F16, out: Dt::F16,
+            kind: Kind::Bcast(heads), pad: 0, alpha: 1.0, beta: 0.0, c16: true });
+        v.push(Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: Dt::F16, out: Dt::F16,
+            kind: Kind::Strided(heads), pad: 0, alpha: 1.0, beta: 0.0, c16: true });
+    }
+    v
+}
+
+/// Mirrors `xmx_host::qualify` in Auto mode (`CFI_XMX` unset or `1`).
+fn expect_auto_xmx(c: &Case) -> bool {
+    let batch = match c.kind {
+        Kind::Plain => 1,
+        Kind::Strided(b) | Kind::Bcast(b) => b,
+        Kind::Ptrs { batch, .. } => batch,
+    };
+    let (m, n, k) = (c.m as u64, c.n as u64, c.k as u64);
+    m >= 16 && n >= 8 && k >= 16 && m.min(n) >= 16 && m * n * k * batch as u64 >= 1 << 26
+}
+
+#[test]
+#[ignore = "requires nvcuda.dll, cublas64_12.dll and an Intel GPU with SPV_INTEL_subgroup_matrix_multiply_accumulate"]
+fn hw_xmx_ggml_attention() {
+    let ctx = setup();
+    let mut rng = Rng(0x6767_6d6c);
+    let (mut engaged, mut skipped) = (0, 0);
+    for c in ggml_cases() {
+        let d = make_data(&c, &mut rng);
+        let want = reference(&c, &d);
+        if !c.c16 {
+            set_mode("0");
+            let ptx = run(&ctx, &c, &d);
+            compare(&c, &d, &ptx, &want, "ptx");
+        }
+        // Default (Auto) mode: the shipped decision, no forcing.
+        set_mode("1");
+        let before = ctx.xmx_launches();
+        let got = run(&ctx, &c, &d);
+        let launched = ctx.xmx_launches() > before;
+        let (worst, inexact) = compare(&c, &d, &got, &want, "xmx");
+        println!("GGML {c:?}: xmx launched={launched} max abs err {worst:.3e} inexact {inexact}");
+        assert_eq!(launched, expect_auto_xmx(&c), "{c:?}: XMX engagement differs from the threshold rule");
+        if launched { engaged += 1 } else { skipped += 1 }
+        if c.c16 {
+            // f32 accumulators, one rounding: bit-exact against the reference (exact-valued data).
+            assert_eq!(inexact, 0, "{c:?}: 16F result is not the single-rounded f32 sum");
+            // Opting out restores the PTX 16F path (which rounds the accumulator per operation).
+            unsafe { std::env::set_var("CFI_XMX_ACC16", "0") };
+            let b2 = ctx.xmx_launches();
+            let _ = run(&ctx, &c, &d);
+            assert_eq!(ctx.xmx_launches(), b2, "CFI_XMX_ACC16=0 must decline");
+            unsafe { std::env::remove_var("CFI_XMX_ACC16") };
+        }
+    }
+    println!("GGML summary: {engaged} calls on XMX, {skipped} below the threshold");
+    assert!(engaged >= 8);
+    set_mode("0");
 }
 
 #[test]
@@ -425,7 +515,7 @@ fn hw_xmx_probe() {
     set_mode("2");
     let mut rng = Rng(7);
     for inp in [Dt::F16, Dt::Bf16] {
-        let c = Case { m: 33, n: 24, k: 40, ta: true, tb: true, inp, out: Dt::F32, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0 };
+        let c = Case { m: 33, n: 24, k: 40, ta: true, tb: true, inp, out: Dt::F32, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0, c16: false };
         let d = make_data(&c, &mut rng);
         let before = ctx.xmx_launches();
         let got = run(&ctx, &c, &d);
@@ -488,7 +578,7 @@ fn hw_xmx_gemm_table() {
 }
 
 fn gflops(ctx: &Ctx, m: usize, n: usize, k: usize, ta: bool, tb: bool, reps: usize) -> f64 {
-    let c = Case { m, n, k, ta, tb, inp: Dt::F16, out: Dt::F32, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0 };
+    let c = Case { m, n, k, ta, tb, inp: Dt::F16, out: Dt::F32, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0, c16: false };
     let mut rng = Rng(99);
     let d = make_data(&c, &mut rng);
     let (da, db, dc) = (ctx.up(&d.a), ctx.up(&d.b), ctx.up(&d.c0));
