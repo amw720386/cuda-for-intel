@@ -221,6 +221,8 @@ fn gen_fwd(s: &mut String, e: Elem) {
     let _ = writeln!(s, "setp.ge.u32 %p1, %r60, %r44;");
     let _ = writeln!(s, "@%p1 bra $L_cdone;");
     let _ = writeln!(s, "add.s32 %r61, %r56, %r60;"); // cabs
+    emit_addr(s, "%rd13", "%rd1", &[("%r54", "%r22"), ("%r61", "%r23")], e.shift());
+    emit_addr(s, "%rd14", "%rd2", &[("%r53", "%r26"), ("%r60", "%r27")], e.shift());
     let _ = writeln!(s, "mov.u32 %r62, 0;"); // r
     let _ = writeln!(s, "$L_r:");
     let _ = writeln!(s, "setp.ge.u32 %p1, %r62, %r10;");
@@ -245,8 +247,10 @@ fn gen_fwd(s: &mut String, e: Elem) {
     let _ = writeln!(s, "sub.s32 %r67, %r11, 1;");
     let _ = writeln!(s, "sub.s32 %r67, %r67, %r65;");
     let _ = writeln!(s, "selp.u32 %r67, %r67, %r65, %p2;"); // sw
-    emit_addr(s, "%rd11", "%rd1", &[("%r54", "%r22"), ("%r61", "%r23"), ("%r63", "%r24"), ("%r66", "%r25")], e.shift());
-    emit_addr(s, "%rd12", "%rd2", &[("%r53", "%r26"), ("%r60", "%r27"), ("%r64", "%r28"), ("%r67", "%r29")], e.shift());
+    let _ = writeln!(s, "mul.lo.u32 %r71, %r63, %r24;\nmad.lo.u32 %r71, %r66, %r25, %r71;");
+    let _ = writeln!(s, "mul.lo.u32 %r72, %r64, %r28;\nmad.lo.u32 %r72, %r67, %r29, %r72;");
+    let _ = writeln!(s, "mul.wide.u32 %rd61, %r71, {};\nadd.s64 %rd11, %rd13, %rd61;", 1u32 << e.shift());
+    let _ = writeln!(s, "mul.wide.u32 %rd61, %r72, {};\nadd.s64 %rd12, %rd14, %rd61;", 1u32 << e.shift());
     emit_load(s, e, "%rd11", "%f10");
     emit_load(s, e, "%rd12", "%f11");
     let _ = writeln!(s, "fma.rn.ftz.f32 %f3, %f10, %f11, %f3;");
