@@ -381,6 +381,81 @@ __device__ __forceinline__ double erf(double x) { return (double)erff((float)x);
 __device__ __forceinline__ double fmod(double x, double y) { return __builtin_fmod(x, y); }
 __device__ __forceinline__ float fmod(float x, float y) { return __builtin_fmodf(x, y); }
 
+// ---- remaining C math names (jiterator and most user code do `using ::name;`) ----
+// Double versions evaluate in single precision (documented limitation); sm_75-class hardware
+// has no fast fp64 anyway.
+__device__ __forceinline__ float sinhf_nvs(float x) { float e = expf(x); return 0.5f * (e - 1.0f / e); }
+__device__ __forceinline__ float asinhf(float x) { float a = __builtin_fabsf(x); return __builtin_copysignf(logf(a + __builtin_sqrtf(a * a + 1.0f)), x); }
+__device__ __forceinline__ float acoshf(float x) { return logf(x + __builtin_sqrtf((x - 1.0f) * (x + 1.0f))); }
+__device__ __forceinline__ float atanhf(float x) { return 0.5f * logf((1.0f + x) / (1.0f - x)); }
+__device__ __forceinline__ float frexpf(float x, int* e) {
+  if (x == 0.0f || !(x == x) || __builtin_fabsf(x) == __builtin_inff()) { *e = 0; return x; }
+  unsigned u = __float_as_uint(x); int ex = (int)((u >> 23) & 0xff);
+  if (ex == 0) { x *= 16777216.0f; u = __float_as_uint(x); ex = (int)((u >> 23) & 0xff) - 24; }
+  *e = ex - 126; return __uint_as_float((u & 0x807fffffu) | 0x3f000000u);
+}
+__device__ __forceinline__ float modff(float x, float* ip) { float t = truncf(x); *ip = t; return x - t; }
+__device__ __forceinline__ float remainderf(float x, float y) { float q = rintf(x / y); return x - q * y; }
+__device__ __forceinline__ float lgammaf(float x) {
+  if (x < 0.5f) return logf(__NVS_PI_F / __builtin_fabsf(sinf(__NVS_PI_F * x))) - lgammaf(1.0f - x);
+  x -= 1.0f;
+  float a = 0.99999999999980993f;
+  const float g[8] = {676.5203681218851f, -1259.1392167224028f, 771.32342877765313f, -176.61502916214059f,
+                      12.507343278686905f, -0.13857109526572012f, 9.9843695780195716e-6f, 1.5056327351493116e-7f};
+  for (int i = 0; i < 8; i++) a += g[i] / (x + (float)(i + 1));
+  float t = x + 7.5f;
+  return 0.91893853320467274f + (x + 0.5f) * logf(t) - t + logf(a);
+}
+__device__ __forceinline__ float tgammaf(float x) {
+  if (x < 0.5f) return __NVS_PI_F / (sinf(__NVS_PI_F * x) * tgammaf(1.0f - x));
+  return expf(lgammaf(x));
+}
+__device__ __forceinline__ float acos(float x) { return acosf(x); }
+__device__ __forceinline__ float asin(float x) { return asinf(x); }
+__device__ __forceinline__ float atan(float x) { return atanf(x); }
+__device__ __forceinline__ float atan2(float y, float x) { return atan2f(y, x); }
+__device__ __forceinline__ float cosh(float x) { return coshf(x); }
+__device__ __forceinline__ float sinh(float x) { return sinhf(x); }
+__device__ __forceinline__ float log10(float x) { return log10f(x); }
+__device__ __forceinline__ float log1p(float x) { return log1pf(x); }
+__device__ __forceinline__ float expm1(float x) { return expm1f(x); }
+__device__ __forceinline__ float cbrt(float x) { return cbrtf(x); }
+__device__ __forceinline__ float hypot(float x, float y) { return hypotf(x, y); }
+__device__ __forceinline__ float asinh(float x) { return asinhf(x); }
+__device__ __forceinline__ float acosh(float x) { return acoshf(x); }
+__device__ __forceinline__ float atanh(float x) { return atanhf(x); }
+__device__ __forceinline__ float erfc(float x) { return erfcf(x); }
+__device__ __forceinline__ float lgamma(float x) { return lgammaf(x); }
+__device__ __forceinline__ float tgamma(float x) { return tgammaf(x); }
+__device__ __forceinline__ float ldexp(float x, int e) { return ldexpf(x, e); }
+__device__ __forceinline__ float frexp(float x, int* e) { return frexpf(x, e); }
+__device__ __forceinline__ float modf(float x, float* ip) { return modff(x, ip); }
+__device__ __forceinline__ float remainder(float x, float y) { return remainderf(x, y); }
+__device__ __forceinline__ double acos(double x) { return (double)acosf((float)x); }
+__device__ __forceinline__ double asin(double x) { return (double)asinf((float)x); }
+__device__ __forceinline__ double atan(double x) { return (double)atanf((float)x); }
+__device__ __forceinline__ double atan2(double y, double x) { return (double)atan2f((float)y, (float)x); }
+__device__ __forceinline__ double cosh(double x) { return (double)coshf((float)x); }
+__device__ __forceinline__ double sinh(double x) { return (double)sinhf((float)x); }
+__device__ __forceinline__ double tan(double x) { return (double)tanf((float)x); }
+__device__ __forceinline__ double log10(double x) { return (double)log10f((float)x); }
+__device__ __forceinline__ double log2(double x) { return (double)log2f((float)x); }
+__device__ __forceinline__ double exp2(double x) { return (double)exp2f((float)x); }
+__device__ __forceinline__ double log1p(double x) { return (double)log1pf((float)x); }
+__device__ __forceinline__ double expm1(double x) { return (double)expm1f((float)x); }
+__device__ __forceinline__ double cbrt(double x) { return (double)cbrtf((float)x); }
+__device__ __forceinline__ double hypot(double x, double y) { return (double)hypotf((float)x, (float)y); }
+__device__ __forceinline__ double asinh(double x) { return (double)asinhf((float)x); }
+__device__ __forceinline__ double acosh(double x) { return (double)acoshf((float)x); }
+__device__ __forceinline__ double atanh(double x) { return (double)atanhf((float)x); }
+__device__ __forceinline__ double erfc(double x) { return (double)erfcf((float)x); }
+__device__ __forceinline__ double lgamma(double x) { return (double)lgammaf((float)x); }
+__device__ __forceinline__ double tgamma(double x) { return (double)tgammaf((float)x); }
+__device__ __forceinline__ double ldexp(double x, int e) { return x * (double)__nvvm_ex2_approx_f((float)e); }
+__device__ __forceinline__ double frexp(double x, int* e) { return (double)frexpf((float)x, e); }
+__device__ __forceinline__ double modf(double x, double* ip) { double t = trunc(x); *ip = t; return x - t; }
+__device__ __forceinline__ double remainder(double x, double y) { return (double)remainderf((float)x, (float)y); }
+
 #ifdef __USE_FAST_MATH__
 #endif
 
