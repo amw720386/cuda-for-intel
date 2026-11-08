@@ -129,7 +129,9 @@ fn make_mmq_case(nrows: usize, ncols_x: usize, ncols: usize, nch: usize, ratio: 
     let mut rng = Rng(seed);
     let nb = ncols_x / 32;
     let nch_x = nch / ratio;
-    let ychan = ncols_x / 128 * ncols * 36;
+    // ggml pads y's K to a multiple of 512 with zeros; the stock kernel consumes 8 Q8_0 blocks per step
+    let kpad = ncols_x.next_multiple_of(512);
+    let ychan = kpad / 128 * ncols * 36;
     let p = refs::Mmq {
         ncols_x,
         nrows_x: nrows,
@@ -148,11 +150,17 @@ fn make_mmq_case(nrows: usize, ncols_x: usize, ncols: usize, nch: usize, ratio: 
         stride_sample_y: ychan * nch,
         stride_sample_dst: nrows * ncols * nch,
     };
-    let x = refs::random_blocks(refs::Q8_0, nrows * nb * nch_x * nsamples, &mut rng);
+    let mut x = refs::random_blocks(refs::Q8_0, nrows * nb * nch_x * nsamples, &mut rng);
+    x.extend(vec![0u8; 34 * 8]); // the stock kernel may read up to 7 blocks past the last row
     let mut y = Vec::new();
     for _ in 0..nch * nsamples {
-        let acts: Vec<f32> = (0..ncols_x * ncols).map(|_| rng.unit() * 2.0).collect();
-        y.extend(refs::quantize_mmq_d4(&acts, ncols_x, ncols));
+        let mut acts = vec![0f32; kpad * ncols];
+        for c in 0..ncols {
+            for k in 0..ncols_x {
+                acts[c * kpad + k] = rng.unit() * 2.0;
+            }
+        }
+        y.extend(refs::quantize_mmq_d4(&acts, kpad, ncols));
     }
     MmqCase { p, x, y }
 }
@@ -374,6 +382,14 @@ fn hw_subst_native_vs_translated() {
             (300, 1024, 40, 64, 1, 2, 1, 1),
             (384, 512, 17, 32, 1, 4, 2, 2),
         ];
+        // Qwen2.5-0.5B shapes (k = 896 is not a multiple of the stock kernel's 256-value step)
+        let mut cases = cases.to_vec();
+        for (m, k) in [(896usize, 896usize), (896, 4864), (4864, 896), (1024, 896)] {
+            for n in [1usize, 2, 7, 16, 33, 64] {
+                let mmq_x = n.next_multiple_of(8).clamp(8, 64);
+                cases.push((m, k, n, mmq_x, if m % 128 == 0 { 0 } else { 1 }, 1, 1, 1));
+            }
+        }
         for (nrows, ncols_x, ncols, mmq_x, need_check, nch, ratio, nsamples) in cases {
             let entry = format!("_Z9mul_mat_qIL9ggml_type8ELi{mmq_x}ELb{need_check}EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
             let c = make_mmq_case(nrows, ncols_x, ncols, nch, ratio, nsamples, 7 + nrows as u64);

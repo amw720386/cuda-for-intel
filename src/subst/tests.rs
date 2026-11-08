@@ -381,6 +381,8 @@ fn auto_policy_follows_the_measurements() {
 
 /// Multi-tile, ragged shapes (several row/column tiles, channels, samples) against the stock
 /// translated kernel launched with one CTA per tile (no stream-k split, no fixup).
+/// K must be a multiple of 256: the stock kernel consumes 8 Q8_0 blocks per step and ggml zero-pads y
+/// to that, so a shorter K reads unrelated y data (not a kernel bug).
 /// Slow (minutes) on the debug interpreter: run with `--ignored` and CFI_STOCK_PTX_DIR.
 #[test]
 #[ignore = "slow: multi-tile stock mmq on the interpreter; mismatch under investigation"]
@@ -390,7 +392,7 @@ fn translated_stock_mmq_q8_0_multi_tile_shapes() {
     let words = super::mmq::build(true);
     let mut failed = false;
     // (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples)
-    for (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples) in [(128usize, 130usize, 9usize, 8usize, 1usize, 1usize, 1usize), (128, 130, 9, 8, 2, 1, 1), (128, 130, 9, 8, 2, 2, 2)] {
+    for (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples) in [(256usize, 130usize, 9usize, 8usize, 1usize, 1usize, 1usize), (256, 130, 9, 8, 2, 2, 2)] {
         let entry = format!("_Z9mul_mat_qIL9ggml_type8ELi{mmq_x}ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
         let Some(stock) = translated_words("blob98.ptx", &entry) else { return };
         let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 31 + ncols as u64);
@@ -422,6 +424,17 @@ fn translated_stock_mmq_q8_0_multi_tile_shapes() {
             refs::nmse(&translated_out, &reference),
             refs::nmse(&native, &reference)
         );
+        // where does the stock result differ from the reference? (row, col) of the first few
+        let mut shown = 0;
+        for col in 0..ncols {
+            for row in 0..nrows {
+                let i = col * nrows + row;
+                if translated_out[i].to_bits() != reference[i].to_bits() && shown < 12 {
+                    println!("  stock differs at row {row} col {col}: stock {} ref {} native {}", translated_out[i], reference[i], native[i]);
+                    shown += 1;
+                }
+            }
+        }
         failed |= refs::nmse(&native, &translated_out) >= 1e-9;
     }
     assert!(!failed);
