@@ -21,6 +21,7 @@ mod globals;
 mod graphs;
 #[cfg(windows)]
 mod integrity;
+mod copyback;
 mod launch_args;
 mod library;
 mod primary;
@@ -1795,6 +1796,11 @@ pub unsafe extern "system" fn cuLaunchKernel(
             }
             let timed = trace::kernel_profile_enabled().then(std::time::Instant::now);
             launched = name.to_string_lossy().into_owned();
+            let copyback = if copyback::enabled() {
+                copyback::before(&runtime.api, context, stream, &launched, &params, &args)
+            } else {
+                None
+            };
             let launch_result = subst_hook::launch(
                 &runtime.api,
                 context,
@@ -1804,6 +1810,11 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 (grid, block),
                 &args,
             );
+            if let Some(pending) = copyback {
+                launch_result?;
+                copyback::after(&runtime.api, context, stream, pending, &launched, (grid, block), &args);
+                return Ok(());
+            }
             if let Some(started) = timed {
                 // CUDA_FOR_INTEL_PROFILE_KERNELS=1 serialises every launch so its wall time is
                 // GPU time plus a constant submission latency; use it to rank kernels only.
