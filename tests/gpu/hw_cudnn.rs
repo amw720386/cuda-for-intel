@@ -42,10 +42,15 @@ const NOT_SUPPORTED: i32 = 3000;
 enum Dt {
     F32,
     F16,
+    Bf16,
 }
 impl Dt {
     fn code(self) -> i32 {
-        if self == Dt::F32 { 0 } else { 2 }
+        match self {
+            Dt::F32 => 0,
+            Dt::F16 => 2,
+            Dt::Bf16 => 9,
+        }
     }
     fn bytes(self) -> usize {
         if self == Dt::F32 { 4 } else { 2 }
@@ -54,14 +59,22 @@ impl Dt {
         match self {
             Dt::F32 => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             Dt::F16 => v.iter().flat_map(|x| f32_to_f16(*x).to_le_bytes()).collect(),
+            Dt::Bf16 => v.iter().flat_map(|x| f32_to_bf16(*x).to_le_bytes()).collect(),
         }
     }
     fn dec(self, b: &[u8]) -> Vec<f32> {
         match self {
             Dt::F32 => b.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
             Dt::F16 => b.chunks(2).map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
+            Dt::Bf16 => b.chunks(2).map(|c| f32::from_bits((u16::from_le_bytes([c[0], c[1]]) as u32) << 16)).collect(),
         }
     }
+}
+
+/// Round to nearest even.
+fn f32_to_bf16(x: f32) -> u16 {
+    let b = x.to_bits();
+    ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
 }
 
 struct Cu {
@@ -104,6 +117,8 @@ fn check(name: &str, got: &[f32], want: &[f32], rel: f32) {
 struct Api<'a> {
     cudnn: &'a Dll,
     h: *mut c_void,
+    /// Build descriptors with the Nd entry points, as PyTorch does.
+    nd: std::cell::Cell<bool>,
 }
 
 impl Api<'_> {
@@ -112,6 +127,12 @@ impl Api<'_> {
         let set = dnn!(self.cudnn, "cudnnSetTensor4dDescriptor", fn(*mut c_void, i32, i32, i32, i32, i32, i32));
         let mut t = null_mut();
         assert_eq!(unsafe { create(&mut t) }, 0);
+        if self.nd.get() {
+            let setnd = dnn!(self.cudnn, "cudnnSetTensorNdDescriptor", fn(*mut c_void, i32, i32, *const i32, *const i32));
+            let st = if nhwc { [d[1] * d[2] * d[3], 1, d[3] * d[1], d[1]] } else { [d[1] * d[2] * d[3], d[2] * d[3], d[3], 1] };
+            assert_eq!(unsafe { setnd(t, dt.code(), 4, d.as_ptr(), st.as_ptr()) }, 0);
+            return t;
+        }
         assert_eq!(unsafe { set(t, nhwc as i32, dt.code(), d[0], d[1], d[2], d[3]) }, 0);
         t
     }
@@ -120,6 +141,11 @@ impl Api<'_> {
         let set = dnn!(self.cudnn, "cudnnSetFilter4dDescriptor", fn(*mut c_void, i32, i32, i32, i32, i32, i32));
         let mut f = null_mut();
         assert_eq!(unsafe { create(&mut f) }, 0);
+        if self.nd.get() {
+            let setnd = dnn!(self.cudnn, "cudnnSetFilterNdDescriptor", fn(*mut c_void, i32, i32, i32, *const i32));
+            assert_eq!(unsafe { setnd(f, dt.code(), nhwc as i32, 4, d.as_ptr()) }, 0);
+            return f;
+        }
         assert_eq!(unsafe { set(f, dt.code(), nhwc as i32, d[0], d[1], d[2], d[3]) }, 0);
         f
     }
@@ -129,6 +155,12 @@ impl Api<'_> {
         let grp = dnn!(self.cudnn, "cudnnSetConvolutionGroupCount", fn(*mut c_void, i32));
         let mut c = null_mut();
         assert_eq!(unsafe { create(&mut c) }, 0);
+        if self.nd.get() {
+            let setnd = dnn!(self.cudnn, "cudnnSetConvolutionNdDescriptor", fn(*mut c_void, i32, *const i32, *const i32, *const i32, i32, i32));
+            assert_eq!(unsafe { setnd(c, 2, [pad; 2].as_ptr(), [stride; 2].as_ptr(), [dil; 2].as_ptr(), if flip { 0 } else { 1 }, 0) }, 0);
+            assert_eq!(unsafe { grp(c, groups) }, 0);
+            return c;
+        }
         assert_eq!(unsafe { set(c, pad, pad, stride, stride, dil, dil, if flip { 0 } else { 1 }, 0) }, 0);
         assert_eq!(unsafe { grp(c, groups) }, 0);
         c
@@ -143,10 +175,11 @@ struct Case {
     stride: u32,
     pad: u32,
     flip: bool,
+    ks: u32,
 }
 
 fn run_conv_case(cu: &Cu, api: &Api, c: &Case) {
-    let (n, ch, h, w, k, r, s) = (2u32, 8u32, 17u32, 13u32, 16u32, 3u32, 3u32);
+    let (n, ch, h, w, k, r, s) = (2u32, 8u32, 17u32, 13u32, 16u32, c.ks, c.ks);
     let p = out_dim(h, c.pad, r, c.dil, c.stride).unwrap();
     let q = out_dim(w, c.pad, s, c.dil, c.stride).unwrap();
     let cg = ch / c.groups;
@@ -167,7 +200,11 @@ fn run_conv_case(cu: &Cu, api: &Api, c: &Case) {
     let (dx_ptr, dw_ptr, y_ptr) = (cu.up(&vec![0u8; g.x_len() * c.dt.bytes()]), cu.up(&vec![0u8; g.w_len() * c.dt.bytes()]), cu.up(&vec![0u8; g.y_len() * c.dt.bytes()]));
     let (x_ptr, w_ptr, dy_ptr) = (cu.up(&c.dt.enc(&x)), cu.up(&c.dt.enc(&wv)), cu.up(&c.dt.enc(&dy)));
     let (alpha, beta) = (1f32, 0f32);
-    let tol = if c.dt == Dt::F32 { 1e-4 } else { 2e-2 };
+    let tol = match c.dt {
+        Dt::F32 => 1e-4,
+        Dt::F16 => 2e-2,
+        Dt::Bf16 => 8e-2,
+    };
     let label = format!("{:?} nhwc={} g={} dil={} str={} pad={} flip={}", c.dt, c.nhwc, c.groups, c.dil, c.stride, c.pad, c.flip);
     println!("conv {label}");
 
@@ -303,22 +340,39 @@ fn dense() {
     let create = dnn!(cudnn, "cudnnCreate", fn(*mut *mut c_void));
     let mut h = null_mut();
     assert_eq!(unsafe { create(&mut h) }, 0);
-    let api = Api { cudnn: &cudnn, h };
+    let api = Api { cudnn: &cudnn, h, nd: std::cell::Cell::new(false) };
     let softmax = dnn!(cudnn, "cudnnSoftmaxForward", fn());
     assert_eq!(unsafe { softmax() }, NOT_SUPPORTED, "softmax must report NOT_SUPPORTED");
 
     // --- convolutions -----------------------------------------------------
     let cases = [
-        Case { nhwc: false, dt: Dt::F32, groups: 1, dil: 1, stride: 1, pad: 1, flip: false },
-        Case { nhwc: true, dt: Dt::F32, groups: 1, dil: 1, stride: 2, pad: 1, flip: false },
-        Case { nhwc: false, dt: Dt::F32, groups: 2, dil: 2, stride: 1, pad: 2, flip: true },
-        Case { nhwc: true, dt: Dt::F32, groups: 8, dil: 1, stride: 1, pad: 0, flip: false }, // depthwise
-        Case { nhwc: false, dt: Dt::F16, groups: 1, dil: 1, stride: 1, pad: 1, flip: false },
-        Case { nhwc: true, dt: Dt::F16, groups: 4, dil: 1, stride: 2, pad: 1, flip: false },
+        Case { nhwc: false, dt: Dt::F32, groups: 1, dil: 1, stride: 1, pad: 1, flip: false, ks: 3 },
+        Case { nhwc: true, dt: Dt::F32, groups: 1, dil: 1, stride: 2, pad: 1, flip: false, ks: 3 },
+        Case { nhwc: false, dt: Dt::F32, groups: 2, dil: 2, stride: 1, pad: 2, flip: true, ks: 3 },
+        Case { nhwc: true, dt: Dt::F32, groups: 8, dil: 1, stride: 1, pad: 0, flip: false, ks: 3 }, // depthwise
+        Case { nhwc: false, dt: Dt::F16, groups: 1, dil: 1, stride: 1, pad: 1, flip: false, ks: 3 },
+        Case { nhwc: true, dt: Dt::F16, groups: 4, dil: 1, stride: 2, pad: 1, flip: false, ks: 3 },
+        // kernel sizes real networks use: 1x1, 5x5, 7x7 stem (stride 2, pad 3), dilated + strided
+        Case { nhwc: false, dt: Dt::F32, groups: 1, dil: 1, stride: 1, pad: 0, flip: false, ks: 1 },
+        Case { nhwc: true, dt: Dt::F16, groups: 1, dil: 1, stride: 2, pad: 0, flip: false, ks: 1 },
+        Case { nhwc: false, dt: Dt::F32, groups: 1, dil: 1, stride: 1, pad: 2, flip: false, ks: 5 },
+        Case { nhwc: false, dt: Dt::F32, groups: 1, dil: 1, stride: 2, pad: 3, flip: false, ks: 7 },
+        Case { nhwc: true, dt: Dt::F16, groups: 1, dil: 1, stride: 2, pad: 3, flip: false, ks: 7 },
+        Case { nhwc: false, dt: Dt::F16, groups: 2, dil: 2, stride: 2, pad: 2, flip: false, ks: 3 },
+        Case { nhwc: true, dt: Dt::F32, groups: 2, dil: 2, stride: 2, pad: 2, flip: false, ks: 3 },
+        Case { nhwc: false, dt: Dt::Bf16, groups: 1, dil: 1, stride: 1, pad: 1, flip: false, ks: 3 },
+        Case { nhwc: true, dt: Dt::Bf16, groups: 1, dil: 1, stride: 2, pad: 1, flip: false, ks: 3 },
     ];
     for c in &cases {
         run_conv_case(&cu, &api, c);
     }
+    // The same through the Nd entry points (what PyTorch calls), including non-default layouts.
+    api.nd.set(true);
+    for c in &cases {
+        run_conv_case(&cu, &api, c);
+    }
+    api.nd.set(false);
+    unsupported_probes(&cudnn, &cu, &api);
     let gemm_cases = GEMM_PATH_CASES.load(std::sync::atomic::Ordering::SeqCst);
     println!("cases that used the explicit-GEMM workspace: {gemm_cases}");
     assert!(gemm_cases > 0 || !cublas_loaded, "cuBLAS shim preloaded but no case reported a workspace");
@@ -538,4 +592,97 @@ fn backend_flow(cudnn: &Dll, cu: &Cu, h: *mut c_void) {
     // a pointwise op must not produce an engine (frontend then reports no plan)
     let pw = mk(13);
     assert_ne!(unsafe { fin(pw) }, 0, "pointwise op alone must not finalize");
+}
+
+/// Configurations without a kernel must answer NOT_SUPPORTED (or BAD_PARAM for malformed ones) from every
+/// entry point that sees them: never crash, never SUCCESS with garbage.
+fn unsupported_probes(cudnn: &Dll, cu: &Cu, api: &Api) {
+    let tnd = dnn!(cudnn, "cudnnSetTensorNdDescriptor", fn(*mut c_void, i32, i32, *const i32, *const i32));
+    let fnd = dnn!(cudnn, "cudnnSetFilterNdDescriptor", fn(*mut c_void, i32, i32, i32, *const i32));
+    let cnd = dnn!(cudnn, "cudnnSetConvolutionNdDescriptor", fn(*mut c_void, i32, *const i32, *const i32, *const i32, i32, i32));
+    let mk_t = || {
+        let create = dnn!(cudnn, "cudnnCreateTensorDescriptor", fn(*mut *mut c_void));
+        let mut t = null_mut();
+        assert_eq!(unsafe { create(&mut t) }, 0);
+        t
+    };
+    let mk_f = || {
+        let create = dnn!(cudnn, "cudnnCreateFilterDescriptor", fn(*mut *mut c_void));
+        let mut t = null_mut();
+        assert_eq!(unsafe { create(&mut t) }, 0);
+        t
+    };
+    let mk_c = || {
+        let create = dnn!(cudnn, "cudnnCreateConvolutionDescriptor", fn(*mut *mut c_void));
+        let mut t = null_mut();
+        assert_eq!(unsafe { create(&mut t) }, 0);
+        t
+    };
+    let fwd = dnn!(cudnn, "cudnnConvolutionForward", fn(*mut c_void, *const f32, *mut c_void, u64, *mut c_void, u64, *mut c_void, i32, *mut c_void, usize, *const f32, *mut c_void, u64));
+    let bwd_d = dnn!(cudnn, "cudnnConvolutionBackwardData", fn(*mut c_void, *const f32, *mut c_void, u64, *mut c_void, u64, *mut c_void, i32, *mut c_void, usize, *const f32, *mut c_void, u64));
+    let bwd_f = dnn!(cudnn, "cudnnConvolutionBackwardFilter", fn(*mut c_void, *const f32, *mut c_void, u64, *mut c_void, u64, *mut c_void, i32, *mut c_void, usize, *const f32, *mut c_void, u64));
+    let get_algo = dnn!(cudnn, "cudnnGetConvolutionForwardAlgorithm_v7", fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void, i32, *mut i32, *mut c_void));
+    let ws_fwd = dnn!(cudnn, "cudnnGetConvolutionForwardWorkspaceSize", fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void, i32, *mut usize));
+    let buf = cu.up(&vec![0u8; 1 << 16]);
+    let (one, zero) = (1f32, 0f32);
+
+    // (label, x dtype, w dtype, y dtype, spatial dims (1 = 3-D conv adds a depth axis), conv compute type)
+    struct Probe {
+        label: &'static str,
+        xdt: i32,
+        wdt: i32,
+        ydt: i32,
+        depth: bool,
+    }
+    let probes = [
+        Probe { label: "3-D convolution (conv3d)", xdt: 0, wdt: 0, ydt: 0, depth: true },
+        Probe { label: "3-D convolution fp16", xdt: 2, wdt: 2, ydt: 2, depth: true },
+        Probe { label: "fp64", xdt: 1, wdt: 1, ydt: 1, depth: false },
+        Probe { label: "int8", xdt: 3, wdt: 3, ydt: 3, depth: false },
+        Probe { label: "mixed x f32 / w f16", xdt: 0, wdt: 2, ydt: 0, depth: false },
+        Probe { label: "mixed y f16", xdt: 0, wdt: 0, ydt: 2, depth: false },
+    ];
+    for p in &probes {
+        let (xd, wd, yd, cd) = (mk_t(), mk_f(), mk_t(), mk_c());
+        if p.depth {
+            let (xdims, xst) = ([1, 4, 4, 5, 5], [400, 100, 25, 5, 1]);
+            let (ydims, yst) = ([1, 4, 4, 5, 5], [400, 100, 25, 5, 1]);
+            assert_eq!(unsafe { tnd(xd, p.xdt, 5, xdims.as_ptr(), xst.as_ptr()) }, 0);
+            assert_eq!(unsafe { tnd(yd, p.ydt, 5, ydims.as_ptr(), yst.as_ptr()) }, 0);
+            assert_eq!(unsafe { fnd(wd, p.wdt, 0, 5, [4, 4, 3, 3, 3].as_ptr()) }, 0);
+            assert_eq!(unsafe { cnd(cd, 3, [1; 3].as_ptr(), [1; 3].as_ptr(), [1; 3].as_ptr(), 1, 0) }, 0);
+        } else {
+            let (dims, st) = ([1, 4, 5, 5], [100, 25, 5, 1]);
+            assert_eq!(unsafe { tnd(xd, p.xdt, 4, dims.as_ptr(), st.as_ptr()) }, 0);
+            assert_eq!(unsafe { tnd(yd, p.ydt, 4, dims.as_ptr(), st.as_ptr()) }, 0);
+            assert_eq!(unsafe { fnd(wd, p.wdt, 0, 4, [4, 4, 3, 3].as_ptr()) }, 0);
+            assert_eq!(unsafe { cnd(cd, 2, [1; 2].as_ptr(), [1; 2].as_ptr(), [1; 2].as_ptr(), 1, 0) }, 0);
+        }
+        let b = buf as *mut c_void;
+        assert_eq!(unsafe { fwd(api.h, &one, xd, buf, wd, buf, cd, 0, null_mut(), 0, &zero, yd, buf) }, NOT_SUPPORTED, "{} fwd", p.label);
+        assert_eq!(unsafe { bwd_d(api.h, &one, wd, buf, yd, buf, cd, 0, null_mut(), 0, &zero, xd, buf) }, NOT_SUPPORTED, "{} bwd data", p.label);
+        assert_eq!(unsafe { bwd_f(api.h, &one, xd, buf, yd, buf, cd, 0, null_mut(), 0, &zero, wd, buf) }, NOT_SUPPORTED, "{} bwd filter", p.label);
+        let (mut cnt, mut perf, mut ws) = (-1i32, [0u8; 48 * 4], 7usize);
+        assert_eq!(unsafe { get_algo(api.h, xd, wd, cd, yd, 4, &mut cnt, perf.as_mut_ptr().cast()) }, NOT_SUPPORTED, "{} algo query", p.label);
+        assert_eq!(cnt, 0, "{} algo count", p.label);
+        assert_eq!(unsafe { ws_fwd(api.h, xd, wd, cd, yd, 0, &mut ws) }, NOT_SUPPORTED, "{} workspace query", p.label);
+        let _ = b;
+        println!("  unsupported OK: {}", p.label);
+    }
+
+    // Malformed descriptors: output extent that disagrees with the geometry, filter/channel mismatch, zero batch of stale descriptors.
+    let (xd, wd, yd, cd) = (api.tensor(false, Dt::F32, [1, 4, 5, 5]), api.filter(false, Dt::F32, [4, 4, 3, 3]), api.tensor(false, Dt::F32, [1, 4, 9, 9]), api.conv(1, 1, 1, 1, false));
+    let st = unsafe { fwd(api.h, &one, xd, buf, wd, buf, cd, 0, null_mut(), 0, &zero, yd, buf) };
+    assert!(st == 2000 || st == NOT_SUPPORTED, "wrong output extent -> BAD_PARAM, got {st}");
+    let wd2 = api.filter(false, Dt::F32, [4, 3, 3, 3]);
+    let yd2 = api.tensor(false, Dt::F32, [1, 4, 5, 5]);
+    let st = unsafe { fwd(api.h, &one, xd, buf, wd2, buf, cd, 0, null_mut(), 0, &zero, yd2, buf) };
+    assert!(st == 2000 || st == NOT_SUPPORTED, "channel mismatch -> BAD_PARAM, got {st}");
+    let st = unsafe { fwd(api.h, &one, xd, 0, wd, buf, cd, 0, null_mut(), 0, &zero, yd2, buf) };
+    assert_ne!(st, 0, "null operand pointer must not succeed");
+    // fresh (never set) descriptors and a null handle
+    let (xe, we, ye, ce) = (mk_t(), mk_f(), mk_t(), mk_c());
+    assert_ne!(unsafe { fwd(api.h, &one, xe, buf, we, buf, ce, 0, null_mut(), 0, &zero, ye, buf) }, 0, "unset descriptors");
+    assert_ne!(unsafe { fwd(null_mut(), &one, xd, buf, wd, buf, cd, 0, null_mut(), 0, &zero, yd2, buf) }, 0, "null handle");
+    println!("  malformed descriptors rejected");
 }
