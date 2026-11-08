@@ -1123,6 +1123,80 @@ pub unsafe extern "system" fn cudnnBatchNormalizationBackward(
     launch_status(driver::launch(Kid::BnBwd(plan.elem), plan.c, ptxgen::BN_BLOCK, hd.stream, &args), "bn_bwd")
 }
 
+
+// Torch drives batch norm through the *Ex entry points with CUDNN_BATCHNORM_OPS_BN (0).
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudnnGetBatchNormalizationTrainingExReserveSpaceSize(
+    _h: *mut Handle, _mode: c_int, ops: c_int, _act: *mut ActivationDesc, _x: Td, size: *mut usize,
+) -> Status {
+    if ops != 0 {
+        return abi::NOT_SUPPORTED;
+    }
+    unsafe { put(size, 0) };
+    abi::SUCCESS
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudnnGetBatchNormalizationForwardTrainingExWorkspaceSize(
+    _h: *mut Handle, _mode: c_int, ops: c_int, _x: Td, _z: Td, _y: Td, _bn: Td, _act: *mut ActivationDesc, size: *mut usize,
+) -> Status {
+    if ops != 0 {
+        return abi::NOT_SUPPORTED;
+    }
+    unsafe { put(size, 0) };
+    abi::SUCCESS
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudnnGetBatchNormalizationBackwardExWorkspaceSize(
+    _h: *mut Handle, _mode: c_int, ops: c_int, _x: Td, _y: Td, _dy: Td, _dz: Td, _dx: Td, _bn: Td, _act: *mut ActivationDesc,
+    size: *mut usize,
+) -> Status {
+    if ops != 0 {
+        return abi::NOT_SUPPORTED;
+    }
+    unsafe { put(size, 0) };
+    abi::SUCCESS
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudnnBatchNormalizationForwardTrainingEx(
+    h: *mut Handle, mode: c_int, ops: c_int, alpha: *const c_void, beta: *const c_void, x: Td, xp: *const c_void, _z: Td,
+    _zp: *const c_void, y: Td, yp: *mut c_void, bnd: Td, scale: *const c_void, bias: *const c_void, factor: f64,
+    run_mean: *mut c_void, run_var: *mut c_void, eps: f64, save_mean: *mut c_void, save_inv: *mut c_void,
+    _act: *mut ActivationDesc, _ws: *mut c_void, _wsb: usize, _rs: *mut c_void, _rsb: usize,
+) -> Status {
+    if ops != 0 {
+        return abi::NOT_SUPPORTED;
+    }
+    unsafe {
+        cudnnBatchNormalizationForwardTraining(h, mode, alpha, beta, x, xp, y, yp, bnd, scale, bias, factor, run_mean, run_var, eps, save_mean, save_inv)
+    }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cudnnBatchNormalizationBackwardEx(
+    h: *mut Handle, mode: c_int, ops: c_int, a_data: *const c_void, b_data: *const c_void, a_param: *const c_void,
+    b_param: *const c_void, x: Td, xp: *const c_void, _y: Td, _yp: *const c_void, dy: Td, dyp: *const c_void, _dz: Td,
+    _dzp: *mut c_void, dx: Td, dxp: *mut c_void, bnd: Td, scale: *const c_void, _bias: *const c_void, d_scale: *mut c_void,
+    d_bias: *mut c_void, eps: f64, saved_mean: *const c_void, saved_inv: *const c_void, _act: *mut ActivationDesc,
+    _ws: *mut c_void, _wsb: usize, _rs: *mut c_void, _rsb: usize,
+) -> Status {
+    if ops != 0 {
+        return abi::NOT_SUPPORTED;
+    }
+    unsafe {
+        cudnnBatchNormalizationBackward(h, mode, a_data, b_data, a_param, b_param, x, xp, dy, dyp, dx, dxp, bnd, scale, d_scale, d_bias, eps, saved_mean, saved_inv)
+    }
+}
+
+/// Never unwind across the C ABI: a panic becomes INTERNAL_ERROR.
+fn guard(what: &str, f: impl FnOnce() -> Status) -> Status {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("CUDA for Intel cudnn: internal panic in {what}");
+            abi::INTERNAL_ERROR
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // v8 backend API
 // ---------------------------------------------------------------------------
@@ -1145,30 +1219,45 @@ pub unsafe extern "system" fn cudnnBackendDestroyDescriptor(d: backend::BPtr) ->
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBackendFinalize(d: backend::BPtr) -> Status {
-    let st = unsafe { backend::finalize(tri!(reference(d))) };
-    trace!("backend finalize type={} -> {st}", unsafe { (*d).ty });
-    st
+    guard("cudnnBackendFinalize", || {
+        let st = unsafe { backend::finalize(tri!(reference(d))) };
+        trace!("backend finalize type={} -> {st}", unsafe { (*d).ty });
+        st
+    })
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBackendSetAttribute(d: backend::BPtr, name: c_int, ty: c_int, count: i64, data: *const c_void) -> Status {
-    unsafe { backend::set_attribute(tri!(reference(d)), name, ty, count, data as *const u8) }
+    guard("cudnnBackendSetAttribute", || {
+        let st = unsafe { backend::set_attribute(tri!(reference(d)), name, ty, count, data as *const u8) };
+        trace!("backend set type={} attr={name} atype={ty} n={count} -> {st}", unsafe { (*d).ty });
+        st
+    })
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBackendGetAttribute(
     d: backend::BPtr, name: c_int, ty: c_int, requested: i64, count: *mut i64, out: *mut c_void,
 ) -> Status {
-    unsafe { backend::get_attribute(tri!(creference(d as *const backend::BDesc)), name, ty, requested, count, out as *mut u8) }
+    guard("cudnnBackendGetAttribute", || {
+        let st = unsafe { backend::get_attribute(tri!(creference(d as *const backend::BDesc)), name, ty, requested, count, out as *mut u8) };
+        trace!("backend get type={} attr={name} atype={ty} req={requested} -> {st}", unsafe { (*d).ty });
+        st
+    })
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBackendExecute(h: *mut Handle, plan: backend::BPtr, vp: backend::BPtr) -> Status {
-    let hd = tri!(reference(h));
-    let (plan, vp) = (tri!(reference(plan)), tri!(reference(vp)));
-    if plan.ty != abi::BD_EXECUTION_PLAN || vp.ty != abi::BD_VARIANT_PACK || !plan.finalized || !vp.finalized {
-        return abi::BAD_PARAM;
-    }
-    let Some(e) = plan.exec else { return abi::BAD_PARAM };
-    let ptrs = tri!(backend::resolve_pointers(vp, &e.uids));
-    run_conv(hd.stream, &e.plan, ptrs[0], ptrs[1], ptrs[2], e.alpha, e.beta)
+    guard("cudnnBackendExecute", || {
+        let hd = tri!(reference(h));
+        let (plan, vp) = (tri!(reference(plan)), tri!(reference(vp)));
+        if plan.ty != abi::BD_EXECUTION_PLAN || vp.ty != abi::BD_VARIANT_PACK || !plan.finalized || !vp.finalized {
+            return abi::BAD_PARAM;
+        }
+        let Some(e) = plan.exec else { return abi::BAD_PARAM };
+        let ptrs = tri!(backend::resolve_pointers(vp, &e.uids));
+        run_conv(hd.stream, &plan_exec_plan(&e), ptrs[0], ptrs[1], ptrs[2], e.alpha, e.beta)
+    })
+}
+fn plan_exec_plan(e: &backend::PlanExec) -> ConvPlan {
+    e.plan
 }
 
 #[cfg(test)]

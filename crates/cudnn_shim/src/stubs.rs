@@ -5,870 +5,1352 @@ use crate::abi;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnActivationBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnActivationBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnActivationForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnActivationForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBackendInitialize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnBackendInitialize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBackendPopulateCudaGraph() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnBackendPopulateCudaGraph");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBackendUpdateCudaGraph() -> i32 {
-    abi::NOT_SUPPORTED
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cudnnBatchNormalizationBackwardEx() -> i32 {
-    abi::NOT_SUPPORTED
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cudnnBatchNormalizationForwardTrainingEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnBackendUpdateCudaGraph");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnBuildRNNDynamic() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnBuildRNNDynamic");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCTCLoss() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCTCLoss");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCTCLoss_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCTCLoss_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnConvolutionBackwardBias() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnConvolutionBackwardBias");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCopyAlgorithmDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCopyAlgorithmDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateAlgorithmDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateAlgorithmDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateAlgorithmPerformance() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateAlgorithmPerformance");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateAttnDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateAttnDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateCTCLossDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateCTCLossDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateFusedOpsConstParamPack() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateFusedOpsConstParamPack");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateFusedOpsPlan() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateFusedOpsPlan");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateFusedOpsVariantParamPack() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateFusedOpsVariantParamPack");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateLRNDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateLRNDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateOpTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateOpTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreatePersistentRNNPlan() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreatePersistentRNNPlan");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateRNNDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateRNNDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateRNNDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateRNNDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateReduceTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateReduceTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateSeqDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateSeqDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateSpatialTransformerDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateSpatialTransformerDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnCreateTensorTransformDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnCreateTensorTransformDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDeriveNormTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDeriveNormTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyAlgorithmDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyAlgorithmDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyAlgorithmPerformance() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyAlgorithmPerformance");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyAttnDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyAttnDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyCTCLossDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyCTCLossDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyFusedOpsConstParamPack() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyFusedOpsConstParamPack");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyFusedOpsPlan() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyFusedOpsPlan");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyFusedOpsVariantParamPack() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyFusedOpsVariantParamPack");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyLRNDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyLRNDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyOpTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyOpTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyPersistentRNNPlan() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyPersistentRNNPlan");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyRNNDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyRNNDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyRNNDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyRNNDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyReduceTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyReduceTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroySeqDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroySeqDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroySpatialTransformerDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroySpatialTransformerDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDestroyTensorTransformDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDestroyTensorTransformDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDivisiveNormalizationBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDivisiveNormalizationBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDivisiveNormalizationForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDivisiveNormalizationForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDropoutBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDropoutBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnDropoutForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnDropoutForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnFindRNNBackwardDataAlgorithmEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnFindRNNBackwardDataAlgorithmEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnFindRNNBackwardWeightsAlgorithmEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnFindRNNBackwardWeightsAlgorithmEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnFindRNNForwardInferenceAlgorithmEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnFindRNNForwardInferenceAlgorithmEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnFindRNNForwardTrainingAlgorithmEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnFindRNNForwardTrainingAlgorithmEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnFusedOpsExecute() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnFusedOpsExecute");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetAlgorithmDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetAlgorithmDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetAlgorithmPerformance() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetAlgorithmPerformance");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetAlgorithmSpaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetAlgorithmSpaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetAttnDescriptor() -> i32 {
-    abi::NOT_SUPPORTED
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cudnnGetBatchNormalizationBackwardExWorkspaceSize() -> i32 {
-    abi::NOT_SUPPORTED
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cudnnGetBatchNormalizationForwardTrainingExWorkspaceSize() -> i32 {
-    abi::NOT_SUPPORTED
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cudnnGetBatchNormalizationTrainingExReserveSpaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetAttnDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetCTCLossDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetCTCLossDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetCTCLossDescriptorEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetCTCLossDescriptorEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetCTCLossDescriptor_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetCTCLossDescriptor_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetCTCLossDescriptor_v9() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetCTCLossDescriptor_v9");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetCTCLossWorkspaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetCTCLossWorkspaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetCTCLossWorkspaceSize_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetCTCLossWorkspaceSize_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetCallback() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetCallback");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetFoldedConvBackwardDataDescriptors() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetFoldedConvBackwardDataDescriptors");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetFusedOpsConstParamPackAttribute() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetFusedOpsConstParamPackAttribute");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetFusedOpsVariantParamPackAttribute() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetFusedOpsVariantParamPackAttribute");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetLRNDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetLRNDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetMultiHeadAttnBuffers() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetMultiHeadAttnBuffers");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetMultiHeadAttnWeights() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetMultiHeadAttnWeights");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetNormalizationBackwardWorkspaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetNormalizationBackwardWorkspaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetNormalizationForwardTrainingWorkspaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetNormalizationForwardTrainingWorkspaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetNormalizationTrainingReserveSpaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetNormalizationTrainingReserveSpaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetOpTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetOpTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNBackwardDataAlgorithmMaxCount() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNBackwardDataAlgorithmMaxCount");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNBackwardWeightsAlgorithmMaxCount() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNBackwardWeightsAlgorithmMaxCount");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNBiasMode() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNBiasMode");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNDescriptor_v6() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNDescriptor_v6");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNDescriptor_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNDescriptor_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNForwardInferenceAlgorithmMaxCount() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNForwardInferenceAlgorithmMaxCount");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNForwardTrainingAlgorithmMaxCount() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNForwardTrainingAlgorithmMaxCount");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNLinLayerBiasParams() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNLinLayerBiasParams");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNLinLayerMatrixParams() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNLinLayerMatrixParams");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNMatrixMathType() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNMatrixMathType");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNPaddingMode() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNPaddingMode");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNParamsSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNParamsSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNProjectionLayers() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNProjectionLayers");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNTempSpaceSizes() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNTempSpaceSizes");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNTrainingReserveSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNTrainingReserveSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNWeightParams() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNWeightParams");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNWeightSpaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNWeightSpaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetRNNWorkspaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetRNNWorkspaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetReduceTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetReduceTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetReductionIndicesSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetReductionIndicesSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetReductionWorkspaceSize() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetReductionWorkspaceSize");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetSeqDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetSeqDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnGetTensorTransformDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnGetTensorTransformDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnIm2Col() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnIm2Col");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnInitTransformDest() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnInitTransformDest");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnLRNCrossChannelBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnLRNCrossChannelBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnLRNCrossChannelForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnLRNCrossChannelForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnMakeFusedOpsPlan() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnMakeFusedOpsPlan");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnMultiHeadAttnBackwardData() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnMultiHeadAttnBackwardData");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnMultiHeadAttnBackwardWeights() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnMultiHeadAttnBackwardWeights");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnMultiHeadAttnForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnMultiHeadAttnForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnNormalizationBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnNormalizationBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnNormalizationForwardInference() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnNormalizationForwardInference");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnNormalizationForwardTraining() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnNormalizationForwardTraining");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnOpTensor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnOpTensor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnPoolingBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnPoolingBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnPoolingForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnPoolingForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNBackwardData() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNBackwardData");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNBackwardDataEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNBackwardDataEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNBackwardData_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNBackwardData_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNBackwardWeights() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNBackwardWeights");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNBackwardWeightsEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNBackwardWeightsEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNBackwardWeights_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNBackwardWeights_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNForwardInference() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNForwardInference");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNForwardInferenceEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNForwardInferenceEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNForwardTraining() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNForwardTraining");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNForwardTrainingEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNForwardTrainingEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNGetClip() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNGetClip");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNGetClip_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNGetClip_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNGetClip_v9() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNGetClip_v9");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNSetClip() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNSetClip");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNSetClip_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNSetClip_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRNNSetClip_v9() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRNNSetClip_v9");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnReduceTensor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnReduceTensor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnReorderFilterAndBias() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnReorderFilterAndBias");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRestoreAlgorithm() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRestoreAlgorithm");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnRestoreDropoutDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnRestoreDropoutDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSaveAlgorithm() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSaveAlgorithm");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnScaleTensor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnScaleTensor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetAlgorithmDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetAlgorithmDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetAlgorithmPerformance() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetAlgorithmPerformance");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetAttnDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetAttnDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetCTCLossDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetCTCLossDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetCTCLossDescriptorEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetCTCLossDescriptorEx");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetCTCLossDescriptor_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetCTCLossDescriptor_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetCTCLossDescriptor_v9() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetCTCLossDescriptor_v9");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetCallback() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetCallback");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetFusedOpsConstParamPackAttribute() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetFusedOpsConstParamPackAttribute");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetFusedOpsVariantParamPackAttribute() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetFusedOpsVariantParamPackAttribute");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetLRNDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetLRNDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetOpTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetOpTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetPersistentRNNPlan() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetPersistentRNNPlan");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNAlgorithmDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNAlgorithmDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNBiasMode() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNBiasMode");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNDescriptor_v6() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNDescriptor_v6");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNDescriptor_v8() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNDescriptor_v8");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNMatrixMathType() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNMatrixMathType");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNPaddingMode() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNPaddingMode");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetRNNProjectionLayers() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetRNNProjectionLayers");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetReduceTensorDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetReduceTensorDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetSeqDataDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetSeqDataDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetSpatialTransformerNdDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetSpatialTransformerNdDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetTensor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetTensor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSetTensorTransformDescriptor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSetTensorTransformDescriptor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSoftmaxBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSoftmaxBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSoftmaxForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSoftmaxForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSpatialTfGridGeneratorBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSpatialTfGridGeneratorBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSpatialTfGridGeneratorForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSpatialTfGridGeneratorForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSpatialTfSamplerBackward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSpatialTfSamplerBackward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnSpatialTfSamplerForward() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnSpatialTfSamplerForward");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnTransformFilter() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnTransformFilter");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnTransformTensor() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnTransformTensor");
+    }
     abi::NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnTransformTensorEx() -> i32 {
+    if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        eprintln!("CUDA for Intel cudnn: unsupported call cudnnTransformTensorEx");
+    }
     abi::NOT_SUPPORTED
 }

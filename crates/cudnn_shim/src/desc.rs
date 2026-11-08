@@ -328,7 +328,9 @@ pub struct BnPlan {
 }
 
 pub fn plan_bn(mode: i32, x: &TensorDesc, y: &TensorDesc, p: &TensorDesc) -> Result<BnPlan, Status> {
-    if mode != abi::BN_SPATIAL && mode != abi::BN_SPATIAL_PERSISTENT {
+    // Per-activation statistics equal spatial ones when H*W == 1 (torch's 2-D BatchNorm1d input).
+    let per_act_ok = mode == abi::BN_PER_ACTIVATION && x.dims.len() == 4 && x.dims[2] * x.dims[3] == 1;
+    if mode != abi::BN_SPATIAL && mode != abi::BN_SPATIAL_PERSISTENT && !per_act_ok {
         return Err(abi::NOT_SUPPORTED); // per-activation mode has no kernel
     }
     if x.dims.len() != 4 || y.dims != x.dims || y.strides != x.strides || y.dtype != x.dtype {

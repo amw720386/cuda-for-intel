@@ -265,7 +265,12 @@ pub unsafe fn finalize(d: &mut BDesc) -> Status {
                     }
                 }
                 // A graph is runnable only when it is exactly one supported convolution.
-                d.engine_count = if ops.count == 1 && unsafe { plan_of_op(&*(ptrs(ops)[0] as BPtr)) }.is_ok() { 1 } else { 0 };
+                // Everything derived is copied by value: cudnn_frontend destroys the op, tensor and
+                // convolution descriptors (and the graph itself) while plans built from the
+                // configs are still alive, so later finalizes must not dereference them.
+                let exec = if ops.count == 1 { unsafe { plan_of_op(&*(ptrs(ops)[0] as BPtr)) }.ok() } else { None };
+                d.engine_count = exec.is_some() as i64;
+                d.exec = exec;
             }
             BD_ENGINEHEUR => {
                 let g = unsafe { target(d, A_HEUR_GRAPH, BD_OPERATIONGRAPH)? };
@@ -274,6 +279,7 @@ pub unsafe fn finalize(d: &mut BDesc) -> Status {
                     return Err(NOT_SUPPORTED_GRAPH_PATTERN);
                 }
                 d.engine_count = g.engine_count;
+                d.exec = g.exec;
             }
             BD_ENGINE => {
                 let g = unsafe { target(d, A_ENGINE_GRAPH, BD_OPERATIONGRAPH)? };
@@ -281,19 +287,24 @@ pub unsafe fn finalize(d: &mut BDesc) -> Status {
                 if idx < 0 || idx >= g.engine_count {
                     return Err(if g.engine_count == 0 { NOT_SUPPORTED_GRAPH_PATTERN } else { BAD_PARAM_OUT_OF_BOUND });
                 }
+                d.exec = g.exec;
+                d.engine_count = g.engine_count;
             }
             BD_ENGINECFG => {
-                unsafe { target(d, A_CFG_ENGINE, BD_ENGINE)? };
+                let eng = unsafe { target(d, A_CFG_ENGINE, BD_ENGINE)? };
+                d.exec = eng.exec;
+                // keep a private copy of the engine: the frontend may free its own
+                let own = Box::into_raw(Box::new(eng.clone()));
+                if let Some(a) = d.attrs.get_mut(&A_CFG_ENGINE) {
+                    a.bytes = (own as usize).to_le_bytes().to_vec();
+                }
             }
             BD_EXECUTION_PLAN => {
                 if !d.attrs.contains_key(&A_PLAN_HANDLE) && !d.attrs.contains_key(&A_PLAN_DEVICEPROP) {
                     return Err(BAD_PARAM);
                 }
                 let cfg = unsafe { target(d, A_PLAN_CFG, BD_ENGINECFG)? };
-                let eng = unsafe { target(cfg, A_CFG_ENGINE, BD_ENGINE)? };
-                let g = unsafe { target(eng, A_ENGINE_GRAPH, BD_OPERATIONGRAPH)? };
-                let op = unsafe { &*(ptrs(&g.attrs[&A_GRAPH_OPS])[0] as BPtr) };
-                d.exec = Some(unsafe { plan_of_op(op) }?);
+                d.exec = Some(cfg.exec.ok_or(NOT_SUPPORTED_GRAPH_PATTERN)?);
             }
             BD_VARIANT_PACK => {
                 let u = d.attrs.get(&A_VP_UIDS).ok_or(BAD_PARAM)?;
@@ -361,32 +372,12 @@ pub unsafe fn get_attribute(d: &BDesc, name: i32, ty: i32, requested: i64, count
                 if cfg.ty != BD_ENGINECFG {
                     return BAD_PARAM_DESCRIPTOR_TYPE;
                 }
-                // Materialize engine `i` for this config descriptor.
-                let graph_ptr = ptrs(&d.attrs[&A_HEUR_GRAPH])[0];
-                let eng = match create(BD_ENGINE) {
-                    Ok(e) => e,
-                    Err(s) => return s,
-                };
-                let e = unsafe { &mut *eng };
-                let gp = graph_ptr.to_le_bytes();
-                let idx = (i as i64).to_le_bytes();
-                unsafe {
-                    set_attribute(e, A_ENGINE_GRAPH, AT_BACKEND_DESCRIPTOR, 1, gp.as_ptr());
-                    set_attribute(e, A_ENGINE_INDEX, AT_INT64, 1, idx.as_ptr());
-                }
-                let st = unsafe { finalize(e) };
-                if st != SUCCESS {
-                    return st;
-                }
-                // the config owns the engine for the rest of the process (leaked by design: tiny)
-                let ep = (eng as usize).to_le_bytes();
-                cfg.finalized = false;
-                cfg.attrs.clear();
-                unsafe { set_attribute(cfg, A_CFG_ENGINE, AT_BACKEND_DESCRIPTOR, 1, ep.as_ptr()) };
-                let st = unsafe { finalize(cfg) };
-                if st != SUCCESS {
-                    return st;
-                }
+                // Materialize engine `i` (by value; no graph pointer is kept).
+                let mut eng = BDesc { ty: BD_ENGINE, finalized: true, attrs: HashMap::new(), engine_count: d.engine_count, exec: d.exec };
+                eng.attrs.insert(A_ENGINE_INDEX, Attr { ty: AT_INT64, count: 1, bytes: (i as i64).to_le_bytes().to_vec() });
+                let ep = (Box::into_raw(Box::new(eng)) as usize).to_le_bytes();
+                *cfg = BDesc { ty: BD_ENGINECFG, finalized: true, attrs: HashMap::new(), engine_count: d.engine_count, exec: d.exec };
+                cfg.attrs.insert(A_CFG_ENGINE, Attr { ty: AT_BACKEND_DESCRIPTOR, count: 1, bytes: ep.to_vec() });
             }
             put_count(n);
             return SUCCESS;
@@ -650,6 +641,13 @@ mod tests {
                     n = -1;
                     assert_eq!(get_attribute(&*eng, 1302, AT_BACKEND_DESCRIPTOR, 1, &mut n, knobs.as_ptr() as *mut u8), SUCCESS);
                     assert_eq!(n, 0);
+                    if mode == 3 {
+                        // cudnn_frontend frees the graph, ops, tensors and conv desc before the
+                        // plan is built from the (kept) engine config.
+                        for d in [h, g, op, x, w, y, c] {
+                            destroy(d);
+                        }
+                    }
                     // ExecutionPlanBuilder
                     let p = create(BD_EXECUTION_PLAN).unwrap();
                     assert_eq!(set(p, A_PLAN_HANDLE, AT_HANDLE, &1usize.to_le_bytes(), 1), SUCCESS);
