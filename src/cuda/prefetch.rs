@@ -11,7 +11,9 @@
 //! The SPIR-V is exactly what the foreground path would produce (same translator, same keys).
 //!
 //! Environment:
-//! * `CUDA_FOR_INTEL_PREFETCH=0` disables everything here.
+//! * Background prefetch is OFF by default (measured on Qwen2.5-0.5B Q8_0: no gain in cold time to
+//!   first token, 72.9 s with it vs 73.3 s without). `CUDA_FOR_INTEL_PREFETCH=1` enables it;
+//!   `CUDA_FOR_INTEL_WARMUP=1` also enables it (one-off cache fill).
 //! * `CUDA_FOR_INTEL_PREFETCH_THREADS=N` pool size (default `min(8, cores - 2)`, at least 1).
 //! * `CUDA_FOR_INTEL_PREFETCH_COMPILE=N` per-library cap on background Intel-compiler jobs
 //!   (default 48; 0 translates only).
@@ -80,7 +82,9 @@ struct Pool {
 
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_PREFETCH").as_deref() != Some(std::ffi::OsStr::new("0")))
+    *ON.get_or_init(|| {
+        std::env::var_os("CUDA_FOR_INTEL_PREFETCH").as_deref() == Some(std::ffi::OsStr::new("1")) || warmup()
+    })
 }
 
 fn warmup() -> bool {
