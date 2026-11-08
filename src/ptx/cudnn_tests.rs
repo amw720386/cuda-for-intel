@@ -267,3 +267,25 @@ fn sim_batchnorm_train_infer_backward() {
         close(&gpu.download_f32(dbd, c), &wdb, "dbias");
     }
 }
+
+#[test]
+fn sim_relu_inplace_strided() {
+    // NHWC-strided 4-D tensor: logical (2,3,2,2), channels-last strides.
+    let (n, c, h, w) = (2u32, 3u32, 2u32, 2u32);
+    let st = ConvGeom::packed_nhwc(c, h, w);
+    let total = n * c * h * w;
+    let y0 = sample(total as usize, 11);
+    for e in Elem::all() {
+        let mut gpu = Gpu::default();
+        let y = gpu.upload(&encode(e, &y0));
+        let mut args = vec![y];
+        for v in [n, c, h, w, st[0], st[1], st[2], st[3], total] {
+            args.push(u64::from(v));
+        }
+        run(&pg::generate_relu(e), &pg::relu_entry(e), &mut gpu, [1, 1, 1], [256, 1, 1], args);
+        let got = decode(e, &gpu.download(y, total as usize * (1 << e.shift())));
+        for (i, (g, v)) in got.iter().zip(&y0).enumerate() {
+            assert_eq!(*g, v.max(0.0), "{e:?} elem {i}");
+        }
+    }
+}
