@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/cudart_shim", "crates/cublas_shim", "crates/fatbin"]
+members = [".", "crates/cudart_shim", "crates/cublas_shim", "crates/cudnn_shim", "crates/fatbin"]
 resolver = "2"
 
 [package]
