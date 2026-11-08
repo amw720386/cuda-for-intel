@@ -104,6 +104,8 @@ struct Emitter<'a> {
     /// SPIR-V ids of registers set from immediates (`mov.u32 %r, imm`).
     const_ids: HashSet<Word>,
     locals: Vec<SpirvInstruction>,
+    /// Explicit zero stores for registers read before any write (see `undefined_slot`).
+    undef_stores: Vec<SpirvInstruction>,
     params: HashMap<(&'a str, usize), Value>,
     /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
     param_array: Option<Word>,
@@ -199,6 +201,7 @@ impl<'a> Emitter<'a> {
             const_regs: HashMap::new(),
             const_ids: HashSet::new(),
             locals: Vec::new(),
+            undef_stores: Vec::new(),
             params: HashMap::new(),
             param_array: None,
             param_global_mode: false,
@@ -282,6 +285,15 @@ impl<'a> Emitter<'a> {
             Some(pointer),
             Some(slot),
             vec![Operand::StorageClass(StorageClass::Function), Operand::IdRef(zero)],
+        ));
+        // The variable initialiser alone is not honoured by the Intel compiler for slots that a
+        // later loop iteration overwrites (ggml flash_attn_ext_vec read `%f538` before its first
+        // write and the softmax denominator came out 0), so also store the zero explicitly at entry.
+        self.undef_stores.push(SpirvInstruction::new(
+            Op::Store,
+            None,
+            None,
+            vec![Operand::IdRef(slot), Operand::IdRef(zero)],
         ));
         let value = Value { id: slot, kind };
         self.undef_slots.insert(operand.to_string(), value);
@@ -3405,7 +3417,7 @@ impl<'a> Emitter<'a> {
             .unwrap()
             .blocks[0]
             .instructions
-            .splice(0..0, self.locals.drain(..));
+            .splice(0..0, self.locals.drain(..).chain(self.undef_stores.drain(..)));
         Ok(KernelMetadata {
             name: entry.name.to_owned(),
             params: entry.params.into_iter().map(|(_, param)| param).collect(),

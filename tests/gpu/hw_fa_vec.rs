@@ -33,7 +33,7 @@ struct Out {
     v: Vec<f32>,
 }
 
-fn run(visible: usize, parallel_blocks: u32, q_scale: f32) -> Out {
+fn run(visible: usize, parallel_blocks: u32, q_scale: f32, ptx_src: &str) -> Out {
     let mut rng = Rng(0x5eed_u64 + visible as u64);
     let q: Vec<f32> = (0..HEADS * D).map(|_| unit(&mut rng) * q_scale).collect();
     // Ollama layout: position stride KV_HEADS*D, head stride D (f16 elements).
@@ -65,7 +65,8 @@ fn run(visible: usize, parallel_blocks: u32, q_scale: f32) -> Out {
         u32_arg(kvp), u32_arg(1), u32_arg(1),
         u32_arg(kvp * 2), u32_arg(kvp * 2 * 64), i64_arg((kvp * 2 * 64) as i64),
     ];
-    launch_args(PTX, KERNEL, [1, parallel_blocks, HEADS as u32], [32, 4, 1], 0, &mut bufs, &args).expect("launch");
+    let ptx = format!(".version 8.0\n.target sm_80\n.address_size 64\n{ptx_src}");
+    launch_args(&ptx, KERNEL, [1, parallel_blocks, HEADS as u32], [32, 4, 1], 0, &mut bufs, &args).expect("launch");
     let to_f32 = |b: &[u8]| -> Vec<f32> { b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect() };
     Out { tmp: to_f32(&bufs[4]), meta: to_f32(&bufs[5]), q, k: k16, v: v16 }
 }
@@ -75,7 +76,7 @@ fn run(visible: usize, parallel_blocks: u32, q_scale: f32) -> Out {
 fn flash_attn_vec_writes_softmax_denominator() {
     let mut failures = Vec::new();
     for &(visible, pb) in &[(4usize, 4u32), (12, 4), (40, 4), (4, 1), (200, 4)] {
-        let Out { tmp, meta, q, k, v } = run(visible, pb, 4.0);
+        let Out { tmp, meta, q, k, v } = run(visible, pb, 4.0, PTX);
         let pb = pb as usize;
         for h in 0..HEADS {
             let kv = h / (HEADS / KV_HEADS);
@@ -104,4 +105,37 @@ fn flash_attn_vec_writes_softmax_denominator() {
         }
     }
     assert!(failures.is_empty(), "{} failures, first: {:?}", failures.len(), &failures[..failures.len().min(6)]);
+}
+
+/// Bring-up probe: patched kernel variants, prints head-0 `dst_meta` per variant.
+#[test]
+#[ignore = "bring-up probe"]
+fn flash_attn_vec_probe_variants() {
+    let m = "mov.f32 %f544, 0f00000000;";
+    let variants: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("base", vec![]),
+        ("init f538=0 both sites", vec![(m, "mov.f32 %f544, 0f00000000;\nmov.f32 %f538, 0f00000000;")]),
+        ("init f538=1.0 both sites", vec![(m, "mov.f32 %f544, 0f00000000;\nmov.f32 %f538, 0f3F800000;")]),
+        ("init f538=0 first site only", vec![("@@1", "")]),
+        ("init f538=0 second site only", vec![("@@2", "")]),
+        ("init f538 at kernel start", vec![("mov.u64 %SPL, __local_depot0;", "mov.u64 %SPL, __local_depot0;\nmov.f32 %f538, 0f00000000;")]),
+    ];
+    for (name, patches) in variants {
+        let mut ptx = PTX.to_owned();
+        for (old, new) in patches {
+            if old == "@@1" || old == "@@2" {
+                let add = "mov.f32 %f538, 0f00000000;";
+                let first = ptx.find(m).unwrap();
+                let second = first + m.len() + ptx[first + m.len()..].find(m).unwrap();
+                let at = if old == "@@1" { first } else { second } + m.len();
+                ptx.insert_str(at, &format!("\n{add}"));
+                continue;
+            }
+            assert!(ptx.contains(old), "{old}");
+            ptx = ptx.replace(old, new);
+        }
+        let out = run(12, 4, 4.0, &ptx);
+        let m: Vec<f32> = (0..4).flat_map(|b| [out.meta[b * 2], out.meta[b * 2 + 1]]).collect();
+        eprintln!("PROBE {name}: head0 meta {m:?}");
+    }
 }
