@@ -289,3 +289,183 @@ fn sim_relu_inplace_strided() {
         }
     }
 }
+
+// --- Explicit-GEMM path: planner + im2col/col2im kernels in the simulator, GEMM on the CPU --------
+
+mod gemm_path {
+    use super::super::cudnn_gemmconv::{self as gc, Buf};
+    use super::*;
+
+    pub struct SimExec<'a> {
+        pub gpu: &'a mut Gpu,
+        pub e: Elem,
+        pub g: ConvGeom,
+        pub ops: [u64; 3],
+        pub ws: u64,
+        pub gemms: usize,
+    }
+    impl SimExec<'_> {
+        fn addr(&self, b: Buf, off: usize) -> u64 {
+            let esz = 1u64 << self.e.shift();
+            match b {
+                Buf::A => self.ops[0] + off as u64 * esz,
+                Buf::B => self.ops[1] + off as u64 * esz,
+                Buf::Out => self.ops[2] + off as u64 * esz,
+                Buf::Ws(byte) => self.ws + byte as u64 + off as u64 * esz,
+            }
+        }
+    }
+    impl gc::Exec for SimExec<'_> {
+        type Err = String;
+        fn im2col(&mut self, src: Buf, dst: Buf, dst_off: usize, p: &gc::Im2col) -> Result<(), String> {
+            let g = self.g;
+            let mut a = vec![self.addr(src, 0), self.addr(dst, dst_off)];
+            let cg = g.c / g.groups;
+            for v in [
+                p.total, p.n0, p.nl, cg, g.h, g.w, g.r, g.s, g.p, g.q, g.pad_h, g.pad_w, g.str_h, g.str_w, g.dil_h, g.dil_w, p.order,
+                g.xs[0], g.xs[1], g.xs[2], g.xs[3], p.col_strides[0], p.col_strides[1], p.col_strides[2], p.col_strides[3],
+            ] {
+                a.push(u64::from(v));
+            }
+            run(&pg::generate_im2col(self.e, p.kc_fast), &pg::im2col_entry(self.e, p.kc_fast), self.gpu, [p.total.div_ceil(64), 1, 1], [64, 1, 1], a);
+            Ok(())
+        }
+        fn col2im(&mut self, src: Buf, src_off: usize, dst: Buf, p: &gc::Col2im) -> Result<(), String> {
+            let g = self.g;
+            let mut a = vec![self.addr(src, src_off), self.addr(dst, 0), Arg::f(p.alpha), Arg::f(p.beta)];
+            let cg = g.c / g.groups;
+            for v in [
+                p.total, p.n0, p.nl, cg, g.h, g.w, g.r, g.s, g.p, g.q, g.pad_h, g.pad_w, g.str_h, g.str_w, g.dil_h, g.dil_w, p.order,
+                g.xs[0], g.xs[1], g.xs[2], g.xs[3], p.col_strides[0], p.col_strides[1], p.col_strides[2], p.col_strides[3], g.c,
+            ] {
+                a.push(u64::from(v));
+            }
+            run(&pg::generate_col2im(self.e, p.c_fast), &pg::col2im_entry(self.e, p.c_fast), self.gpu, [p.total.div_ceil(64), 1, 1], [64, 1, 1], a);
+            Ok(())
+        }
+        fn permute(&mut self, src: Buf, so: usize, ss: [u32; 4], dst: Buf, dof: usize, ds: [u32; 4], dims: [u32; 4]) -> Result<(), String> {
+            let total: u32 = dims.iter().product();
+            let mut a = vec![self.addr(src, so), self.addr(dst, dof), Arg::f(1.0), Arg::f(0.0)];
+            for v in dims.iter().chain(&ss).chain(&ds) {
+                a.push(u64::from(*v));
+            }
+            a.push(u64::from(total));
+            run(&pg::generate_add_tensor(self.e), &pg::add_tensor_entry(self.e), self.gpu, [total.div_ceil(64), 1, 1], [64, 1, 1], a);
+            Ok(())
+        }
+        fn gemm(&mut self, q: &gc::Gemm) -> Result<(), String> {
+            self.gemms += 1;
+            let esz = 1usize << self.e.shift();
+            for z in 0..q.batch as usize {
+                let (a0, b0, c0) = (
+                    self.addr(q.a.0, q.a.1 + z * q.sa),
+                    self.addr(q.b.0, q.b.1 + z * q.sb),
+                    self.addr(q.c.0, q.c.1 + z * q.sc),
+                );
+                let (m, n, k) = (q.m as usize, q.n as usize, q.k as usize);
+                let rd = |gpu: &Gpu, base: u64, idx: usize| decode(self.e, &gpu.download(base + (idx * esz) as u64, esz))[0];
+                for j in 0..n {
+                    for i in 0..m {
+                        let mut acc = 0.0f32;
+                        for l in 0..k {
+                            let av = if q.ta { rd(self.gpu, a0, l + i * q.lda as usize) } else { rd(self.gpu, a0, i + l * q.lda as usize) };
+                            let bv = if q.tb { rd(self.gpu, b0, j + l * q.ldb as usize) } else { rd(self.gpu, b0, l + j * q.ldb as usize) };
+                            acc += av * bv;
+                        }
+                        let ci = i + j * q.ldc as usize;
+                        let mut v = q.alpha * acc;
+                        if q.beta != 0.0 {
+                            v += q.beta * rd(self.gpu, c0, ci);
+                        }
+                        let bytes = encode(self.e, &[v]);
+                        for (o, b) in bytes.iter().enumerate() {
+                            self.gpu.mem.write(c0 + (ci * esz + o) as u64, 1, u64::from(*b));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    pub fn geom(nhwc_x: bool, nhwc_y: bool, w_order: u32, groups: u32, stride: u32, dil: u32, pad: u32, n: u32) -> ConvGeom {
+        let (c, h, w, k, r, s) = (16u32, 5u32, 4u32, 16u32, 3u32, 2u32);
+        let p = rm::out_dim(h, pad, r, dil, stride).unwrap();
+        let q = rm::out_dim(w, pad, s, dil, stride).unwrap();
+        let cg = c / groups;
+        let xs = if nhwc_x { ConvGeom::packed_nhwc(c, h, w) } else { ConvGeom::packed_nchw(c, h, w) };
+        let ys = if nhwc_y { ConvGeom::packed_nhwc(k, p, q) } else { ConvGeom::packed_nchw(k, p, q) };
+        let ws = if w_order == 1 { [r * s * cg, 1, s * cg, cg] } else { [cg * r * s, r * s, s, 1] };
+        ConvGeom { n, c, h, w, k, r, s, p, q, pad_h: pad, pad_w: pad, str_h: stride, str_w: stride, dil_h: dil, dil_w: dil, groups, flip: false, xs, ws, ys }
+    }
+
+    pub fn check(g: &ConvGeom, kind: Kind, e: Elem, tol: f32, ws_images: u32) {
+        let (x, w, y0) = (sample(g.x_len(), 1), sample(g.w_len(), 2), sample(g.y_len(), 3));
+        let (alpha, beta) = (1.5f32, 0.5f32);
+        let rt = |v: &[f32]| decode(e, &encode(e, v));
+        let (x, w, y0) = (rt(&x), rt(&w), rt(&y0));
+        let (a_host, b_host, out_host, out_len) = match kind {
+            Kind::Fwd => (x.clone(), w.clone(), y0.clone(), g.y_len()),
+            Kind::BwdData => (y0.clone(), w.clone(), x.clone(), g.x_len()),
+            Kind::BwdFilter => (x.clone(), y0.clone(), w.clone(), g.w_len()),
+        };
+        let mut gpu = Gpu::default();
+        let a = gpu.upload(&encode(e, &a_host));
+        let b = gpu.upload(&encode(e, &b_host));
+        let out = gpu.upload(&encode(e, &out_host));
+        let full = gc::workspace_bytes(g, kind, e);
+        assert!(full > 0, "no workspace for {g:?}");
+        // `ws_images` > 0 restricts the workspace to that many images to exercise chunking
+        let ws_len = if ws_images > 0 { full / g.n as usize * ws_images as usize } else { full };
+        let ws = gpu.alloc(ws_len + 4096);
+        let mut ex = SimExec { gpu: &mut gpu, e, g: *g, ops: [a, b, out], ws, gemms: 0 };
+        let used = gc::run(&mut ex, g, kind, e, alpha, beta, ws_len).unwrap();
+        assert!(used, "path not taken for {g:?}");
+        let got = decode(e, &gpu.download(out, out_len * (1 << e.shift())));
+        let mut want = out_host.clone();
+        match kind {
+            Kind::Fwd => rm::conv_fwd(g, &a_host, &b_host, &mut want, alpha, beta),
+            Kind::BwdData => rm::conv_bwd_data(g, &b_host, &a_host, &mut want, alpha, beta),
+            Kind::BwdFilter => rm::conv_bwd_filter(g, &a_host, &b_host, &mut want, alpha, beta),
+        }
+        for (i, (g_, w_)) in got.iter().zip(&rt(&want)).enumerate() {
+            assert!((g_ - w_).abs() <= tol * (1.0 + w_.abs()), "{kind:?} {e:?} elem {i}: got {g_} want {w_} ({g:?})");
+        }
+    }
+}
+
+#[test]
+fn sim_gemm_path_all_layouts_f32() {
+    // (x nhwc, y nhwc, filter order, groups, stride, dilation, pad, n)
+    let cases = [
+        (false, false, 0, 1, 1, 1, 1, 2),
+        (true, true, 1, 1, 1, 1, 1, 2),
+        (false, true, 1, 1, 2, 1, 0, 3),
+        (true, false, 0, 1, 1, 2, 2, 2),
+        (false, false, 0, 2, 1, 1, 1, 2),
+        (true, true, 1, 2, 2, 1, 1, 3),
+    ];
+    for (xn, yn, ord, gr, st, dil, pad, n) in cases {
+        let g = gemm_path::geom(xn, yn, ord, gr, st, dil, pad, n);
+        assert!(g.validate(), "{g:?}");
+        for kind in [Kind::Fwd, Kind::BwdData, Kind::BwdFilter] {
+            gemm_path::check(&g, kind, Elem::F32, 1e-4, 0);
+            if n > 2 {
+                gemm_path::check(&g, kind, Elem::F32, 1e-4, 2); // chunks of 2 images, last one partial
+            }
+        }
+    }
+}
+
+#[test]
+fn sim_gemm_path_half_types() {
+    let g = gemm_path::geom(true, true, 1, 1, 1, 1, 1, 2);
+    let g2 = gemm_path::geom(false, false, 0, 1, 2, 1, 1, 2);
+    for e in [Elem::F16, Elem::Bf16] {
+        for gg in [&g, &g2] {
+            for kind in [Kind::Fwd, Kind::BwdData, Kind::BwdFilter] {
+                gemm_path::check(gg, kind, e, 3e-2, 0);
+            }
+        }
+    }
+}

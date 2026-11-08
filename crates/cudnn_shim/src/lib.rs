@@ -12,8 +12,10 @@
 
 pub mod abi;
 pub mod backend;
+pub mod blas;
 pub mod desc;
 pub mod driver;
+pub mod gemmconv;
 pub mod ptxgen;
 pub mod refmath;
 mod stubs;
@@ -704,8 +706,127 @@ fn conv_kind(d: Dir) -> (ConvKind, refmath::Kind) {
     }
 }
 
-/// Run one convolution kernel. Operand roles follow `ptxgen::generate_conv`.
-fn run_conv(stream: CUstream, plan: &ConvPlan, a: u64, b: u64, out: u64, alpha: f32, beta: f32) -> Status {
+/// Executes [`gemmconv`] plans on the device: PTX im2col/col2im kernels plus cuBLAS GEMMs.
+struct GpuExec<'a> {
+    stream: CUstream,
+    elem: ptxgen::Elem,
+    ops: [u64; 3],
+    ws: u64,
+    blas: &'a mut blas::Blas,
+}
+
+impl GpuExec<'_> {
+    fn addr(&self, b: gemmconv::Buf, off: usize) -> u64 {
+        let esz = 1u64 << self.elem.shift();
+        match b {
+            gemmconv::Buf::A => self.ops[0] + off as u64 * esz,
+            gemmconv::Buf::B => self.ops[1] + off as u64 * esz,
+            gemmconv::Buf::Out => self.ops[2] + off as u64 * esz,
+            gemmconv::Buf::Ws(byte) => self.ws + byte as u64 + off as u64 * esz,
+        }
+    }
+    fn dt(&self) -> c_int {
+        match self.elem {
+            ptxgen::Elem::F32 => blas::R_32F,
+            ptxgen::Elem::F16 => blas::R_16F,
+            ptxgen::Elem::Bf16 => blas::R_16BF,
+        }
+    }
+}
+
+impl gemmconv::Exec for GpuExec<'_> {
+    type Err = Status;
+    fn im2col(&mut self, src: gemmconv::Buf, dst: gemmconv::Buf, dst_off: usize, p: &gemmconv::Im2col) -> Result<(), Status> {
+        let g = CUR_GEOM.with(|c| c.get());
+        let mut a = vec![Arg::P(self.addr(src, 0)), Arg::P(self.addr(dst, dst_off))];
+        let cg = g.c / g.groups;
+        for v in [
+            p.total, p.n0, p.nl, cg, g.h, g.w, g.r, g.s, g.p, g.q, g.pad_h, g.pad_w, g.str_h, g.str_w, g.dil_h, g.dil_w, p.order,
+            g.xs[0], g.xs[1], g.xs[2], g.xs[3], p.col_strides[0], p.col_strides[1], p.col_strides[2], p.col_strides[3],
+        ] {
+            a.push(Arg::U(v));
+        }
+        if p.total == 0 {
+            return Ok(());
+        }
+        trace!("im2col {:?}", p);
+        let r = driver::launch(Kid::Im2col(self.elem, p.kc_fast), p.total.div_ceil(256), 256, self.stream, &a);
+        match launch_status(r, "im2col") {
+            abi::SUCCESS => Ok(()),
+            s => Err(s),
+        }
+    }
+    fn col2im(&mut self, src: gemmconv::Buf, src_off: usize, dst: gemmconv::Buf, p: &gemmconv::Col2im) -> Result<(), Status> {
+        let g = CUR_GEOM.with(|c| c.get());
+        let mut a = vec![Arg::P(self.addr(src, src_off)), Arg::P(self.addr(dst, 0)), Arg::F(p.alpha), Arg::F(p.beta)];
+        let cg = g.c / g.groups;
+        for v in [
+            p.total, p.n0, p.nl, cg, g.h, g.w, g.r, g.s, g.p, g.q, g.pad_h, g.pad_w, g.str_h, g.str_w, g.dil_h, g.dil_w, p.order,
+            g.xs[0], g.xs[1], g.xs[2], g.xs[3], p.col_strides[0], p.col_strides[1], p.col_strides[2], p.col_strides[3], g.c,
+        ] {
+            a.push(Arg::U(v));
+        }
+        if p.total == 0 {
+            return Ok(());
+        }
+        trace!("col2im {:?}", p);
+        let r = driver::launch(Kid::Col2im(self.elem, p.c_fast), p.total.div_ceil(256), 256, self.stream, &a);
+        match launch_status(r, "col2im") {
+            abi::SUCCESS => Ok(()),
+            s => Err(s),
+        }
+    }
+    fn permute(
+        &mut self, src: gemmconv::Buf, src_off: usize, src_strides: [u32; 4], dst: gemmconv::Buf, dst_off: usize, dst_strides: [u32; 4], dims: [u32; 4],
+    ) -> Result<(), Status> {
+        let total: u64 = dims.iter().map(|v| *v as u64).product();
+        if total == 0 {
+            return Ok(());
+        }
+        let mut a = vec![Arg::P(self.addr(src, src_off)), Arg::P(self.addr(dst, dst_off)), Arg::F(1.0), Arg::F(0.0)];
+        for v in dims.iter().chain(&src_strides).chain(&dst_strides) {
+            a.push(Arg::U(*v));
+        }
+        a.push(Arg::U(total as u32));
+        let r = driver::launch(Kid::Add(self.elem), (total as u32).div_ceil(256), 256, self.stream, &a);
+        match launch_status(r, "permute") {
+            abi::SUCCESS => Ok(()),
+            s => Err(s),
+        }
+    }
+    fn gemm(&mut self, g: &gemmconv::Gemm) -> Result<(), Status> {
+        if g.m == 0 || g.n == 0 || g.k == 0 {
+            return Ok(());
+        }
+        trace!("gemm {:?}", g);
+        let (a, b, c) = (self.addr(g.a.0, g.a.1), self.addr(g.b.0, g.b.1), self.addr(g.c.0, g.c.1));
+        let st = self.blas.gemm(
+            g.ta, g.tb, g.m as i32, g.n as i32, g.k as i32, g.alpha, a, g.lda as i32, b, g.ldb as i32, g.beta, c, g.ldc as i32, self.dt(),
+            g.batch as i32, g.sa as i64, g.sb as i64, g.sc as i64,
+        );
+        if st != 0 {
+            eprintln!("CUDA for Intel cudnn: cublas gemm failed status={st} {g:?}");
+            return Err(abi::EXECUTION_FAILED);
+        }
+        Ok(())
+    }
+}
+
+thread_local! {
+    static CUR_GEOM: std::cell::Cell<refmath::ConvGeom> = std::cell::Cell::new(refmath::ConvGeom::default());
+}
+
+/// Workspace the chosen algorithm needs for `plan` (0: the direct kernel runs and needs none).
+pub(crate) fn conv_workspace(plan: &ConvPlan) -> usize {
+    if blas::global().is_none() {
+        return 0;
+    }
+    gemmconv::workspace_bytes(&plan.geom, conv_kind(plan.dir).1, plan.elem)
+}
+
+/// Run one convolution. Operand roles follow `ptxgen::generate_conv`. With a workspace the
+/// explicit-GEMM path (im2col + cuBLAS) runs when the layouts allow it, else the direct kernel.
+fn run_conv(stream: CUstream, plan: &ConvPlan, a: u64, b: u64, out: u64, alpha: f32, beta: f32, ws: u64, ws_bytes: usize) -> Status {
     if a == 0 || b == 0 || out == 0 {
         return abi::BAD_PARAM;
     }
@@ -714,9 +835,23 @@ fn run_conv(stream: CUstream, plan: &ConvPlan, a: u64, b: u64, out: u64, alpha: 
     if total == 0 {
         return abi::SUCCESS;
     }
+    if ws != 0 && ws_bytes != 0 {
+        if let Some(blas) = blas::global() {
+            let mut guard = blas.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.set_stream(stream) == 0 {
+                CUR_GEOM.with(|c| c.set(plan.geom));
+                let mut ex = GpuExec { stream, elem: plan.elem, ops: [a, b, out], ws, blas: &mut guard };
+                match gemmconv::run(&mut ex, &plan.geom, rk, plan.elem, alpha, beta, ws_bytes) {
+                    Ok(true) => return abi::SUCCESS,
+                    Ok(false) => {}
+                    Err(st) => return st,
+                }
+            }
+        }
+    }
     let mut args = vec![Arg::P(a), Arg::P(b), Arg::P(out), Arg::F(alpha), Arg::F(beta)];
     args.extend(plan.geom.kernel_args(rk).iter().map(|v| Arg::U(*v)));
-    trace!("conv {:?} {:?} {:?}", plan.dir, plan.elem, plan.geom);
+    trace!("conv direct {:?} {:?} {:?}", plan.dir, plan.elem, plan.geom);
     launch_status(driver::launch(Kid::Conv(gk, plan.elem), total.div_ceil(256), 256, stream, &args), "conv")
 }
 
@@ -928,8 +1063,8 @@ pub unsafe extern "system" fn cudnnGetConvolutionForwardWorkspaceSize(
     if size.is_null() || !(0..abi::FWD_ALGO_COUNT).contains(&algo) {
         return abi::BAD_PARAM;
     }
-    tri!(plan_conv(Dir::Fwd, tri!(reference(x)), tri!(reference(w)), tri!(reference(conv)), tri!(reference(y))));
-    unsafe { *size = 0 };
+    let plan = tri!(plan_conv(Dir::Fwd, tri!(reference(x)), tri!(reference(w)), tri!(reference(conv)), tri!(reference(y))));
+    unsafe { *size = conv_workspace(&plan) };
     abi::SUCCESS
 }
 #[unsafe(no_mangle)]
@@ -940,8 +1075,8 @@ pub unsafe extern "system" fn cudnnGetConvolutionBackwardDataWorkspaceSize(
     if size.is_null() || !(0..abi::BWD_DATA_ALGO_COUNT).contains(&algo) {
         return abi::BAD_PARAM;
     }
-    tri!(plan_conv(Dir::BwdData, tri!(reference(dx)), tri!(reference(w)), tri!(reference(conv)), tri!(reference(dy))));
-    unsafe { *size = 0 };
+    let plan = tri!(plan_conv(Dir::BwdData, tri!(reference(dx)), tri!(reference(w)), tri!(reference(conv)), tri!(reference(dy))));
+    unsafe { *size = conv_workspace(&plan) };
     abi::SUCCESS
 }
 #[unsafe(no_mangle)]
@@ -952,47 +1087,47 @@ pub unsafe extern "system" fn cudnnGetConvolutionBackwardFilterWorkspaceSize(
     if size.is_null() || !(0..abi::BWD_FILTER_ALGO_COUNT).contains(&algo) {
         return abi::BAD_PARAM;
     }
-    tri!(plan_conv(Dir::BwdFilter, tri!(reference(x)), tri!(reference(dw)), tri!(reference(conv)), tri!(reference(dy))));
-    unsafe { *size = 0 };
+    let plan = tri!(plan_conv(Dir::BwdFilter, tri!(reference(x)), tri!(reference(dw)), tri!(reference(conv)), tri!(reference(dy))));
+    unsafe { *size = conv_workspace(&plan) };
     abi::SUCCESS
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnConvolutionForward(
     h: *mut Handle, alpha: *const c_void, x: Td, xp: *const c_void, w: Fd, wp: *const c_void, conv: Cd, _algo: c_int,
-    _ws: *mut c_void, _wsb: usize, beta: *const c_void, y: Td, yp: *mut c_void,
+    ws: *mut c_void, wsb: usize, beta: *const c_void, y: Td, yp: *mut c_void,
 ) -> Status {
     let hd = tri!(reference(h));
     let (al, be) = (tri!(scalar(alpha)), tri!(scalar(beta)));
     let plan = tri!(plan_conv(Dir::Fwd, tri!(reference(x)), tri!(reference(w)), tri!(reference(conv)), tri!(reference(y))));
-    run_conv(hd.stream, &plan, xp as u64, wp as u64, yp as u64, al, be)
+    run_conv(hd.stream, &plan, xp as u64, wp as u64, yp as u64, al, be, ws as u64, wsb)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnConvolutionBackwardData(
     h: *mut Handle, alpha: *const c_void, w: Fd, wp: *const c_void, dy: Td, dyp: *const c_void, conv: Cd, _algo: c_int,
-    _ws: *mut c_void, _wsb: usize, beta: *const c_void, dx: Td, dxp: *mut c_void,
+    ws: *mut c_void, wsb: usize, beta: *const c_void, dx: Td, dxp: *mut c_void,
 ) -> Status {
     let hd = tri!(reference(h));
     let (al, be) = (tri!(scalar(alpha)), tri!(scalar(beta)));
     let plan = tri!(plan_conv(Dir::BwdData, tri!(reference(dx)), tri!(reference(w)), tri!(reference(conv)), tri!(reference(dy))));
-    run_conv(hd.stream, &plan, dyp as u64, wp as u64, dxp as u64, al, be)
+    run_conv(hd.stream, &plan, dyp as u64, wp as u64, dxp as u64, al, be, ws as u64, wsb)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnConvolutionBackwardFilter(
     h: *mut Handle, alpha: *const c_void, x: Td, xp: *const c_void, dy: Td, dyp: *const c_void, conv: Cd, _algo: c_int,
-    _ws: *mut c_void, _wsb: usize, beta: *const c_void, dw: Fd, dwp: *mut c_void,
+    ws: *mut c_void, wsb: usize, beta: *const c_void, dw: Fd, dwp: *mut c_void,
 ) -> Status {
     let hd = tri!(reference(h));
     let (al, be) = (tri!(scalar(alpha)), tri!(scalar(beta)));
     let plan = tri!(plan_conv(Dir::BwdFilter, tri!(reference(x)), tri!(reference(dw)), tri!(reference(conv)), tri!(reference(dy))));
-    run_conv(hd.stream, &plan, xp as u64, dyp as u64, dwp as u64, al, be)
+    run_conv(hd.stream, &plan, xp as u64, dyp as u64, dwp as u64, al, be, ws as u64, wsb)
 }
 
 /// y = act(alpha1 * conv(x, w) + alpha2 * z + bias), act in {identity, relu}.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudnnConvolutionBiasActivationForward(
     h: *mut Handle, alpha1: *const c_void, x: Td, xp: *const c_void, w: Fd, wp: *const c_void, conv: Cd, _algo: c_int,
-    _ws: *mut c_void, _wsb: usize, alpha2: *const c_void, z: Td, zp: *const c_void, bias: Td, biasp: *const c_void,
+    ws: *mut c_void, wsb: usize, alpha2: *const c_void, z: Td, zp: *const c_void, bias: Td, biasp: *const c_void,
     act: *mut ActivationDesc, y: Td, yp: *mut c_void,
 ) -> Status {
     let hd = tri!(reference(h));
@@ -1005,7 +1140,7 @@ pub unsafe extern "system" fn cudnnConvolutionBiasActivationForward(
     let plan = tri!(plan_conv(Dir::Fwd, xd, tri!(reference(w)), tri!(reference(conv)), yd));
     let use_z = a2 != 0.0 && !zp.is_null();
     let aliased = use_z && zp as u64 == yp as u64;
-    let st = run_conv(hd.stream, &plan, xp as u64, wp as u64, yp as u64, a1, if aliased { a2 } else { 0.0 });
+    let st = run_conv(hd.stream, &plan, xp as u64, wp as u64, yp as u64, a1, if aliased { a2 } else { 0.0 }, ws as u64, wsb);
     if st != abi::SUCCESS {
         return st;
     }
@@ -1253,7 +1388,9 @@ pub unsafe extern "system" fn cudnnBackendExecute(h: *mut Handle, plan: backend:
         }
         let Some(e) = plan.exec else { return abi::BAD_PARAM };
         let ptrs = tri!(backend::resolve_pointers(vp, &e.uids));
-        run_conv(hd.stream, &plan_exec_plan(&e), ptrs[0], ptrs[1], ptrs[2], e.alpha, e.beta)
+        let wsp = backend::resolve_workspace(vp);
+        let need = conv_workspace(&plan_exec_plan(&e));
+        run_conv(hd.stream, &plan_exec_plan(&e), ptrs[0], ptrs[1], ptrs[2], e.alpha, e.beta, wsp, if wsp != 0 { need } else { 0 })
     })
 }
 fn plan_exec_plan(e: &backend::PlanExec) -> ConvPlan {

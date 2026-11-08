@@ -65,6 +65,8 @@ pub enum Kid {
     BnTrain(Elem),
     BnInfer(Elem),
     BnBwd(Elem),
+    Im2col(Elem, bool),
+    Col2im(Elem, bool),
 }
 
 impl Kid {
@@ -76,6 +78,8 @@ impl Kid {
             Kid::BnTrain(e) => ptxgen::bn_train_entry(e),
             Kid::BnInfer(e) => ptxgen::bn_infer_entry(e),
             Kid::BnBwd(e) => ptxgen::bn_bwd_entry(e),
+            Kid::Im2col(e, f) => ptxgen::im2col_entry(e, f),
+            Kid::Col2im(e, f) => ptxgen::col2im_entry(e, f),
         }
     }
     pub fn ptx(self) -> String {
@@ -86,6 +90,8 @@ impl Kid {
             Kid::BnTrain(e) => ptxgen::generate_bn_train(e),
             Kid::BnInfer(e) => ptxgen::generate_bn_infer(e),
             Kid::BnBwd(e) => ptxgen::generate_bn_bwd(e),
+            Kid::Im2col(e, f) => ptxgen::generate_im2col(e, f),
+            Kid::Col2im(e, f) => ptxgen::generate_col2im(e, f),
         }
     }
 }

@@ -386,7 +386,8 @@ pub unsafe fn get_attribute(d: &BDesc, name: i32, ty: i32, requested: i64, count
             }
             put_count(1);
             if requested > 0 && out_ok {
-                unsafe { (out as *mut i64).write_unaligned(0) };
+                let ws = d.exec.map_or(0, |e| crate::conv_workspace(&e.plan)) as i64;
+                unsafe { (out as *mut i64).write_unaligned(ws) };
             }
             return SUCCESS;
         }
@@ -438,6 +439,11 @@ pub fn resolve_pointers(vp: &BDesc, uids: &[i64; 3]) -> Result<[u64; 3], Status>
         out[i] = p[pos] as u64;
     }
     Ok(out)
+}
+
+/// Workspace pointer of a variant pack (0 when none was set).
+pub fn resolve_workspace(vp: &BDesc) -> u64 {
+    vp.attrs.get(&abi::A_VP_WORKSPACE).and_then(|a| a.bytes.get(..8)).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
 }
 
 #[cfg(test)]

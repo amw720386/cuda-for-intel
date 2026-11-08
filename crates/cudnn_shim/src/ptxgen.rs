@@ -395,6 +395,150 @@ fn gen_bwd_filter(s: &mut String, e: Elem) {
     emit_addr(s, "%rd10", "%rd3", &[("%r54", "%r26"), ("%r53", "%r27"), ("%r52", "%r28"), ("%r50", "%r29")], e.shift());
 }
 
+// --- Explicit-GEMM convolution helpers: im2col / col2im ------------------------------------
+// The column buffer is addressed through four element strides (group, image, kc row, pq column)
+// so one kernel serves every GEMM layout; `kc` is the flattened (c,r,s) index (`order` 0) or the
+// (r,s,c) index (`order` 1, matches channels-last filters).
+
+pub fn im2col_entry(e: Elem, kc_fast: bool) -> String {
+    format!("cfi_cudnn_im2col_{}_{}", if kc_fast { "kc" } else { "pq" }, e.tag())
+}
+pub fn col2im_entry(e: Elem, c_fast: bool) -> String {
+    format!("cfi_cudnn_col2im_{}_{}", if c_fast { "c" } else { "w" }, e.tag())
+}
+pub const IM2COL_PARAMS: usize = 27;
+pub const COL2IM_PARAMS: usize = 30;
+
+/// `col[g*cs_g + n*cs_n + kc*cs_kc + pq*cs_pq] = x[(n0+n), g*Cg + c, p*str - pad + r*dil, ...]` (0 outside).
+/// Params: 0 x, 1 col (u64); u32: 2 total (G*nl*Kc*PQ), 3 n0, 4 nl, 5 Cg, 6 H, 7 W, 8 R, 9 S, 10 P, 11 Q,
+/// 12 padh, 13 padw, 14 strh, 15 strw, 16 dilh, 17 dilw, 18 order, 19..=22 x strides n,c,h,w,
+/// 23..=26 col strides g,n,kc,pq. Thread index: `kc_fast` makes kc the fastest dimension, else pq.
+pub fn generate_im2col(e: Elem, kc_fast: bool) -> String {
+    let name = im2col_entry(e, kc_fast);
+    let mut s = String::new();
+    let mut tys = vec!["u64", "u64"];
+    tys.extend(std::iter::repeat_n("u32", IM2COL_PARAMS - 2));
+    header(&mut s, &name, &tys);
+    let p = |i: usize| format!("[{name}_param_{i}]");
+    for (i, rd) in [(0, 1), (1, 2)] {
+        let _ = writeln!(s, "ld.param.u64 %rd{rd}, {};\ncvta.to.global.u64 %rd{rd}, %rd{rd};", p(i));
+    }
+    for i in 2..IM2COL_PARAMS {
+        let _ = writeln!(s, "ld.param.u32 %r{i}, {};", p(i));
+    }
+    let _ = writeln!(s, "mov.u32 %r40, %ctaid.x;\nmov.u32 %r41, %ntid.x;\nmov.u32 %r42, %tid.x;");
+    let _ = writeln!(s, "mad.lo.s32 %r43, %r40, %r41, %r42;"); // idx
+    let _ = writeln!(s, "setp.ge.u32 %p1, %r43, %r2;\n@%p1 bra $L_out;");
+    let _ = writeln!(s, "mul.lo.u32 %r44, %r10, %r11;"); // PQ
+    let _ = writeln!(s, "mul.lo.u32 %r45, %r5, %r8;\nmul.lo.u32 %r45, %r45, %r9;"); // Kc
+    // decompose idx -> pq %r46, kc %r47, n %r48, g %r49
+    if kc_fast {
+        let _ = writeln!(s, "rem.u32 %r47, %r43, %r45;\ndiv.u32 %r50, %r43, %r45;");
+        let _ = writeln!(s, "rem.u32 %r46, %r50, %r44;\ndiv.u32 %r50, %r50, %r44;");
+    } else {
+        let _ = writeln!(s, "rem.u32 %r46, %r43, %r44;\ndiv.u32 %r50, %r43, %r44;");
+        let _ = writeln!(s, "rem.u32 %r47, %r50, %r45;\ndiv.u32 %r50, %r50, %r45;");
+    }
+    let _ = writeln!(s, "rem.u32 %r48, %r50, %r4;\ndiv.u32 %r49, %r50, %r4;");
+    let _ = writeln!(s, "rem.u32 %r51, %r46, %r11;\ndiv.u32 %r52, %r46, %r11;"); // q, p
+    // kc -> r %r53, s %r54, c %r55
+    let _ = writeln!(s, "setp.ne.u32 %p2, %r18, 0;\n@%p2 bra $L_rsc;");
+    let _ = writeln!(s, "rem.u32 %r54, %r47, %r9;\ndiv.u32 %r56, %r47, %r9;");
+    let _ = writeln!(s, "rem.u32 %r53, %r56, %r8;\ndiv.u32 %r55, %r56, %r8;");
+    let _ = writeln!(s, "bra $L_decoded;\n$L_rsc:");
+    let _ = writeln!(s, "rem.u32 %r55, %r47, %r5;\ndiv.u32 %r56, %r47, %r5;");
+    let _ = writeln!(s, "rem.u32 %r54, %r56, %r9;\ndiv.u32 %r53, %r56, %r9;");
+    let _ = writeln!(s, "$L_decoded:");
+    // ih %r57, iw %r58
+    let _ = writeln!(s, "mul.lo.s32 %r57, %r52, %r14;\nsub.s32 %r57, %r57, %r12;\nmad.lo.s32 %r57, %r53, %r16, %r57;");
+    let _ = writeln!(s, "mul.lo.s32 %r58, %r51, %r15;\nsub.s32 %r58, %r58, %r13;\nmad.lo.s32 %r58, %r54, %r17, %r58;");
+    let _ = writeln!(s, "mov.f32 %f10, 0f00000000;");
+    let _ = writeln!(s, "setp.lt.u32 %p3, %r57, %r6;\nsetp.lt.u32 %p4, %r58, %r7;\nand.pred %p3, %p3, %p4;");
+    let _ = writeln!(s, "@!%p3 bra $L_store;");
+    let _ = writeln!(s, "add.u32 %r59, %r48, %r3;\nmad.lo.u32 %r60, %r49, %r5, %r55;"); // image, absolute channel
+    emit_addr(&mut s, "%rd10", "%rd1", &[("%r59", "%r19"), ("%r60", "%r20"), ("%r57", "%r21"), ("%r58", "%r22")], e.shift());
+    emit_load(&mut s, e, "%rd10", "%f10");
+    let _ = writeln!(s, "$L_store:");
+    emit_addr(&mut s, "%rd11", "%rd2", &[("%r49", "%r23"), ("%r48", "%r24"), ("%r47", "%r25"), ("%r46", "%r26")], e.shift());
+    emit_store(&mut s, e, "%rd11", "%f10");
+    let _ = writeln!(s, "$L_out:\nret;\n}}");
+    s
+}
+
+/// Gather form of col2im for the data gradient:
+/// `dx[n0+n, c, h, w] = alpha * sum_{r,s} dcol[..] + beta * dx[..]`.
+/// Params: 0 dcol, 1 dx (u64); 2 alpha, 3 beta (f32); u32: 4 total (nl*C*H*W), 5 n0, 6 nl, 7 Cg, 8 H, 9 W,
+/// 10 R, 11 S, 12 P, 13 Q, 14 padh, 15 padw, 16 strh, 17 strw, 18 dilh, 19 dilw, 20 order, 21..=24 dx strides
+/// n,c,h,w, 25..=28 col strides g,n,kc,pq, 29 C. `c_fast`: channel is the fastest thread dimension, else w.
+pub fn generate_col2im(e: Elem, c_fast: bool) -> String {
+    let name = col2im_entry(e, c_fast);
+    let mut s = String::new();
+    let mut tys = vec!["u64", "u64", "f32", "f32"];
+    tys.extend(std::iter::repeat_n("u32", COL2IM_PARAMS - 4));
+    header(&mut s, &name, &tys);
+    let p = |i: usize| format!("[{name}_param_{i}]");
+    for (i, rd) in [(0, 1), (1, 2)] {
+        let _ = writeln!(s, "ld.param.u64 %rd{rd}, {};\ncvta.to.global.u64 %rd{rd}, %rd{rd};", p(i));
+    }
+    let _ = writeln!(s, "ld.param.f32 %f1, {};\nld.param.f32 %f2, {};", p(2), p(3));
+    for i in 4..COL2IM_PARAMS {
+        let _ = writeln!(s, "ld.param.u32 %r{i}, {};", p(i));
+    }
+    let _ = writeln!(s, "mov.u32 %r40, %ctaid.x;\nmov.u32 %r41, %ntid.x;\nmov.u32 %r42, %tid.x;");
+    let _ = writeln!(s, "mad.lo.s32 %r43, %r40, %r41, %r42;");
+    let _ = writeln!(s, "setp.ge.u32 %p1, %r43, %r4;\n@%p1 bra $L_out;");
+    // decompose idx -> c %r46, w %r47, h %r48, n %r49
+    if c_fast {
+        let _ = writeln!(s, "rem.u32 %r46, %r43, %r29;\ndiv.u32 %r50, %r43, %r29;");
+        let _ = writeln!(s, "rem.u32 %r47, %r50, %r9;\ndiv.u32 %r50, %r50, %r9;");
+        let _ = writeln!(s, "rem.u32 %r48, %r50, %r8;\ndiv.u32 %r49, %r50, %r8;");
+    } else {
+        let _ = writeln!(s, "rem.u32 %r47, %r43, %r9;\ndiv.u32 %r50, %r43, %r9;");
+        let _ = writeln!(s, "rem.u32 %r48, %r50, %r8;\ndiv.u32 %r50, %r50, %r8;");
+        let _ = writeln!(s, "rem.u32 %r46, %r50, %r29;\ndiv.u32 %r49, %r50, %r29;");
+    }
+    let _ = writeln!(s, "rem.u32 %r51, %r46, %r7;\ndiv.u32 %r52, %r46, %r7;"); // c local, g
+    let _ = writeln!(s, "mul.lo.u32 %r53, %r52, %r25;"); // g * cs_g
+    let _ = writeln!(s, "mad.lo.u32 %r53, %r49, %r26, %r53;"); // + n * cs_n
+    let _ = writeln!(s, "mov.f32 %f3, 0f00000000;");
+    let _ = writeln!(s, "setp.ne.u32 %p2, %r20, 0;");
+    let _ = writeln!(s, "mov.u32 %r60, 0;"); // r
+    let _ = writeln!(s, "$L_r:\nsetp.ge.u32 %p1, %r60, %r10;\n@%p1 bra $L_rdone;");
+    let _ = writeln!(s, "add.s32 %r61, %r48, %r14;\nmul.lo.s32 %r62, %r60, %r18;\nsub.s32 %r61, %r61, %r62;"); // numh
+    let _ = writeln!(s, "setp.lt.s32 %p3, %r61, 0;\nrem.u32 %r62, %r61, %r16;\nsetp.ne.u32 %p5, %r62, 0;");
+    let _ = writeln!(s, "div.u32 %r63, %r61, %r16;\nsetp.ge.u32 %p6, %r63, %r12;"); // p
+    let _ = writeln!(s, "or.pred %p3, %p3, %p5;\nor.pred %p3, %p3, %p6;");
+    let _ = writeln!(s, "mov.u32 %r64, 0;"); // s
+    let _ = writeln!(s, "$L_s:\nsetp.ge.u32 %p1, %r64, %r11;\n@%p1 bra $L_sdone;\n@%p3 bra $L_sn;");
+    let _ = writeln!(s, "add.s32 %r65, %r47, %r15;\nmul.lo.s32 %r66, %r64, %r19;\nsub.s32 %r65, %r65, %r66;"); // numw
+    let _ = writeln!(s, "setp.lt.s32 %p4, %r65, 0;\nrem.u32 %r66, %r65, %r17;\nsetp.ne.u32 %p5, %r66, 0;");
+    let _ = writeln!(s, "div.u32 %r67, %r65, %r17;\nsetp.ge.u32 %p6, %r67, %r13;"); // q
+    let _ = writeln!(s, "or.pred %p4, %p4, %p5;\nor.pred %p4, %p4, %p6;\n@%p4 bra $L_sn;");
+    // kc
+    let _ = writeln!(s, "@%p2 bra $L_kc_rsc;");
+    let _ = writeln!(s, "mad.lo.u32 %r68, %r51, %r10, %r60;\nmad.lo.u32 %r68, %r68, %r11, %r64;\nbra $L_kc_done;");
+    let _ = writeln!(s, "$L_kc_rsc:\nmad.lo.u32 %r68, %r60, %r11, %r64;\nmad.lo.u32 %r68, %r68, %r7, %r51;");
+    let _ = writeln!(s, "$L_kc_done:");
+    let _ = writeln!(s, "mad.lo.u32 %r69, %r63, %r13, %r67;"); // pq
+    emit_addr(&mut s, "%rd11", "%rd1", &[("%r68", "%r27"), ("%r69", "%r28")], e.shift());
+    // + (g*cs_g + n*cs_n) precomputed in %r53
+    let _ = writeln!(s, "mul.wide.u32 %rd62, %r53, {};\nadd.s64 %rd11, %rd11, %rd62;", 1u32 << e.shift());
+    emit_load(&mut s, e, "%rd11", "%f10");
+    let _ = writeln!(s, "add.ftz.f32 %f3, %f3, %f10;");
+    let _ = writeln!(s, "$L_sn:\nadd.s32 %r64, %r64, 1;\nbra $L_s;\n$L_sdone:");
+    let _ = writeln!(s, "add.s32 %r60, %r60, 1;\nbra $L_r;\n$L_rdone:");
+    let _ = writeln!(s, "add.u32 %r59, %r49, %r5;");
+    emit_addr(&mut s, "%rd10", "%rd2", &[("%r59", "%r21"), ("%r46", "%r22"), ("%r48", "%r23"), ("%r47", "%r24")], e.shift());
+    let _ = writeln!(s, "mul.ftz.f32 %f3, %f3, %f1;");
+    let _ = writeln!(s, "setp.eq.ftz.f32 %p7, %f2, 0f00000000;\n@%p7 bra $L_store;");
+    emit_load(&mut s, e, "%rd10", "%f14");
+    let _ = writeln!(s, "fma.rn.ftz.f32 %f3, %f2, %f14, %f3;");
+    let _ = writeln!(s, "$L_store:");
+    emit_store(&mut s, e, "%rd10", "%f3");
+    let _ = writeln!(s, "$L_out:\nret;\n}}");
+    s
+}
+
 /// `C = alpha * broadcast(A) + beta * C` over a 4-D logical shape (cudnnAddTensor).
 /// Params: 0 A, 1 C (u64), 2 alpha, 3 beta (f32), 4..7 dims n,c,h,w, 8..11 A strides
 /// (0 where A's dim is 1), 12..14 C strides n,c,h (w stride in 15 -> see below).
@@ -760,6 +904,10 @@ pub fn all_entries() -> Vec<(String, String, usize)> {
     for e in Elem::all() {
         for k in [ConvKind::Fwd, ConvKind::BwdData, ConvKind::BwdFilter] {
             v.push((conv_entry(k, e), generate_conv(k, e), CONV_PARAMS));
+        }
+        for f in [false, true] {
+            v.push((im2col_entry(e, f), generate_im2col(e, f), IM2COL_PARAMS));
+            v.push((col2im_entry(e, f), generate_col2im(e, f), COL2IM_PARAMS));
         }
         v.push((add_tensor_entry(e), generate_add_tensor(e), ADD_PARAMS));
         v.push((relu_entry(e), generate_relu(e), RELU_PARAMS));
