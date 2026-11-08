@@ -132,37 +132,24 @@ impl<'a> Flow<'a> {
     }
 }
 
-/// Postdominator tree (Cooper-Harvey-Kennedy on the reverse CFG with a virtual exit) with
-/// Euler-interval numbering for O(1) ancestor queries.
-struct PostDom {
+/// Dominator tree (Cooper-Harvey-Kennedy) with Euler-interval numbering for O(1) ancestor
+/// queries. Built over an explicit graph so the same code serves dominators of the CFG and
+/// postdominators (the reverse CFG rooted at a virtual exit).
+pub(super) struct DomTree {
     tin: Vec<u32>,
     tout: Vec<u32>,
 }
 
-impl PostDom {
-    fn build(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<usize>]) -> Self {
-        let n = blocks.len();
-        let exit = n;
-        // Reverse postorder of the reverse CFG: DFS from the virtual exit along predecessors.
-        let mut rpo_index = vec![u32::MAX; n + 1];
-        let mut post = Vec::with_capacity(n + 1);
-        let mut seen = vec![false; n + 1];
-        let mut stack: Vec<(usize, usize)> = vec![(exit, 0)];
-        seen[exit] = true;
-        let ret_blocks: Vec<usize> = order
-            .iter()
-            .copied()
-            .filter(|&b| matches!(blocks[b].end, Terminator::Return))
-            .collect();
-        let rev_succ = |node: usize, i: usize| -> Option<usize> {
-            if node == exit {
-                ret_blocks.get(i).copied()
-            } else {
-                predecessors[node].get(i).copied()
-            }
-        };
+impl DomTree {
+    /// `succ[v]` are the graph successors of `v`, `pred[v]` its graph predecessors.
+    fn build(root: usize, succ: &[Vec<usize>], pred: &[Vec<usize>]) -> Self {
+        let n = succ.len();
+        let mut seen = vec![false; n];
+        let mut post = Vec::with_capacity(n);
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        seen[root] = true;
         while let Some(&mut (node, ref mut i)) = stack.last_mut() {
-            if let Some(next) = rev_succ(node, *i) {
+            if let Some(&next) = succ[node].get(*i) {
                 *i += 1;
                 if !std::mem::replace(&mut seen[next], true) {
                     stack.push((next, 0));
@@ -173,41 +160,34 @@ impl PostDom {
             }
         }
         post.reverse();
+        let mut rpo = vec![u32::MAX; n];
         for (i, &node) in post.iter().enumerate() {
-            rpo_index[node] = i as u32;
+            rpo[node] = i as u32;
         }
-        let mut idom = vec![usize::MAX; n + 1];
-        idom[exit] = exit;
-        let succs = |node: usize| -> [Option<usize>; 2] {
-            let mut it = blocks[node].end.successors();
-            let a = it.next();
-            let b = it.next();
-            if matches!(blocks[node].end, Terminator::Return) {
-                [Some(exit), None]
-            } else {
-                [a, b]
-            }
-        };
-        let intersect = |idom: &[usize], mut a: usize, mut b: usize| {
-            while a != b {
-                while rpo_index[a] > rpo_index[b] {
-                    a = idom[a];
-                }
-                while rpo_index[b] > rpo_index[a] {
-                    b = idom[b];
-                }
-            }
-            a
-        };
+        let mut idom = vec![usize::MAX; n];
+        idom[root] = root;
         loop {
             let mut changed = false;
             for &node in post.iter().skip(1) {
                 let mut new = usize::MAX;
-                for s in succs(node).into_iter().flatten() {
-                    if idom[s] == usize::MAX {
+                for &p in &pred[node] {
+                    if idom[p] == usize::MAX {
                         continue;
                     }
-                    new = if new == usize::MAX { s } else { intersect(&idom, s, new) };
+                    new = if new == usize::MAX {
+                        p
+                    } else {
+                        let (mut a, mut b) = (p, new);
+                        while a != b {
+                            while rpo[a] > rpo[b] {
+                                a = idom[a];
+                            }
+                            while rpo[b] > rpo[a] {
+                                b = idom[b];
+                            }
+                        }
+                        a
+                    };
                 }
                 if new != idom[node] {
                     idom[node] = new;
@@ -218,20 +198,19 @@ impl PostDom {
                 break;
             }
         }
-        // Children lists and Euler tour.
-        let mut head = vec![usize::MAX; n + 1];
-        let mut next_sibling = vec![usize::MAX; n + 1];
+        let mut head = vec![usize::MAX; n];
+        let mut next_sibling = vec![usize::MAX; n];
         for node in 0..n {
             let parent = idom[node];
-            if parent != usize::MAX {
+            if parent != usize::MAX && node != root {
                 next_sibling[node] = head[parent];
                 head[parent] = node;
             }
         }
-        let mut tin = vec![0u32; n + 1];
-        let mut tout = vec![0u32; n + 1];
+        let mut tin = vec![u32::MAX; n];
+        let mut tout = vec![0u32; n];
         let mut clock = 0u32;
-        let mut stack = vec![(exit, false)];
+        let mut stack = vec![(root, false)];
         while let Some((node, done)) = stack.pop() {
             if done {
                 tout[node] = clock;
@@ -250,9 +229,39 @@ impl PostDom {
         Self { tin, tout }
     }
 
+    /// True when `ancestor` is an ancestor of (or equal to) `node` in the tree.
+    pub(super) fn dominates(&self, ancestor: usize, node: usize) -> bool {
+        self.tin[ancestor] <= self.tin[node] && self.tout[node] <= self.tout[ancestor]
+    }
+}
+
+pub(super) struct Graphs {
+    pub(super) dom: DomTree,
+    post: DomTree,
+}
+
+impl Graphs {
+    pub(super) fn build(blocks: &[Block<'_>], predecessors: &[Vec<usize>]) -> Self {
+        let n = blocks.len();
+        let forward: Vec<Vec<usize>> = blocks.iter().map(|b| b.end.successors().collect()).collect();
+        let dom = DomTree::build(0, &forward, predecessors);
+        // Reverse graph with a virtual exit node `n`.
+        let mut rsucc: Vec<Vec<usize>> = predecessors.to_vec();
+        let mut rpred: Vec<Vec<usize>> = forward.clone();
+        rsucc.push(Vec::new());
+        rpred.push(Vec::new());
+        for (i, b) in blocks.iter().enumerate() {
+            if matches!(b.end, Terminator::Return) {
+                rsucc[n].push(i);
+                rpred[i].push(n);
+            }
+        }
+        Self { dom, post: DomTree::build(n, &rsucc, &rpred) }
+    }
+
     /// True when `candidate` postdominates `block` (reflexive).
-    fn postdominates(&self, block: usize, candidate: usize) -> bool {
-        self.tin[candidate] <= self.tin[block] && self.tout[block] <= self.tout[candidate]
+    pub(super) fn postdominates(&self, block: usize, candidate: usize) -> bool {
+        self.post.dominates(candidate, block)
     }
 }
 
@@ -321,7 +330,8 @@ fn cyclic_blocks(blocks: &[Block<'_>]) -> Vec<bool> {
 
 fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<usize>]) -> Result<(), Error> {
     // A branch's strict postdominators are guaranteed reconvergence points.
-    let postdom = PostDom::build(blocks, order, predecessors);
+    let postdom = Graphs::build(blocks, predecessors);
+    let uniformity = super::uniform::analyze(blocks, predecessors, &postdom);
     let in_cycle = cyclic_blocks(blocks);
     // Blocks from which a convergent instruction is reachable (backward closure, linear).
     let mut reaches_conv = vec![false; blocks.len()];
@@ -466,7 +476,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
             if exit_only(taken) || exit_only(other) {
                 continue;
             }
-            if uniform_compare.contains(predicate) {
+            if uniform_compare.contains(predicate) || uniformity.predicate_uniform(predicate) {
                 continue;
             }
             // Generalised early exit: if no barrier is reachable from one side, the threads

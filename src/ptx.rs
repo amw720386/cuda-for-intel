@@ -1,6 +1,7 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod ext;
 mod flow;
+mod uniform;
 pub(crate) mod globals;
 mod inline;
 mod normalize;
