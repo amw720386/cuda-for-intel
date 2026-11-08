@@ -18,6 +18,7 @@ param(
     [int]$Check = 0
 )
 $ErrorActionPreference = 'Stop'
+$Configs = @($Configs | ForEach-Object { $_ -split ';' })   # 'none;auto,-mmq' also works through -File
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $g = "$RunDir\lib\ollama\cuda_v13"
 $facts = @(
@@ -66,7 +67,9 @@ foreach ($cfg in $Configs) {
     try {
         Start-Sleep 8
         "FROM $Gguf" | Set-Content "$wd\Mf"
+        $ErrorActionPreference = 'Continue'
         & $exe create "kq-$Tag" -f "$wd\Mf" 2>&1 | Out-Null
+        $ErrorActionPreference = 'Stop'
         # calibrate the prompt length once (first config)
         for ($k = 0; $k -lt 4; $k++) {
             $r = Invoke-Gen "kq-$Tag" (Make-Prompt $words 90) 1
