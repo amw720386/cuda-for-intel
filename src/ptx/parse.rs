@@ -2371,7 +2371,7 @@ fn entry_span(source: &str, name: &str) -> Option<(usize, usize)> {
 /// `None` when the text is not in normalised form (callers then use the whole module).
 pub(super) fn narrow_to_entry(source: &str, name: &str) -> Option<String> {
     let index = module_index(source)?;
-    let (line_start, start, end) = *index.entries.get(name)?;
+    let (line_start, _, end) = *index.entries.get(name)?;
     let mut out = String::new();
     for &(from, to) in index.scope.iter().take_while(|(from, _)| *from < line_start) {
         out.push_str(&source[from..to]);

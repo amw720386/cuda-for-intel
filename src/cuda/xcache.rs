@@ -38,8 +38,32 @@ fn dir() -> Option<PathBuf> {
 /// entry, the crate and translator versions, and every process-wide `CFI_*` translator
 /// switch (peepholes, dp4a lowering, ...), excluding tracing and cache controls.
 pub(crate) fn key(prepared: &str, entry: &str) -> u64 {
+    key_for_hash(module_hash(prepared), entry)
+}
+
+/// Fast content hash of a module's text (computed once per module, not once per kernel).
+pub(crate) fn module_hash(text: &str) -> u64 {
+    let bytes = text.as_bytes();
+    let (mut a, mut b) = (0x243f_6a88_85a3_08d3u64, 0x1319_8a2e_0370_7344u64);
+    let mut word = |w: u64| {
+        a = (a ^ w).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
+        b = b.wrapping_add(w).wrapping_mul(0xc2b2_ae3d_27d4_eb4f).rotate_left(31) ^ a;
+    };
+    let mut chunks = bytes.chunks_exact(8);
+    for c in &mut chunks {
+        word(u64::from_le_bytes(c.try_into().unwrap()));
+    }
+    let rest = chunks.remainder();
+    let mut tail = [0u8; 8];
+    tail[..rest.len()].copy_from_slice(rest);
+    word(u64::from_le_bytes(tail) ^ ((rest.len() as u64) << 56));
+    word(bytes.len() as u64);
+    a ^ b.rotate_left(17)
+}
+
+pub(crate) fn key_for_hash(module: u64, entry: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    prepared.hash(&mut h);
+    module.hash(&mut h);
     entry.hash(&mut h);
     env!("CARGO_PKG_VERSION").hash(&mut h);
     TRANSLATOR_VERSION.hash(&mut h);
