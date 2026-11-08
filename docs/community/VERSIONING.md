@@ -9,7 +9,7 @@ Semantic Versioning 2.0, in the 0.x phase: `0.MINOR.PATCH`.
 ## What counts as breaking (the public contract)
 1. **Environment switches**: the documented `CUDA_FOR_INTEL_*` variables (name, meaning, accepted values, default). Changing a default (for example SUBST auto, PREFETCH off) is breaking if it changes results or can break a working setup; it must be listed. Undocumented or `*_BENCH_*`/debug variables are not covered.
 2. **DLL ABI and file layout**: exported symbols of the shipped DLLs (`nvcuda`, cudart/cublas shims, nvrtc shim), their names, and the staged directory layout the setup scripts produce.
-3. **Translation cache**: on-disk format and the translator version stamp that keys it (today's code has a cache under `CUDA_FOR_INTEL_CACHE_DIR`; confirm the version constant name, the repo has no symbol literally named `TRANSLATOR_VERSION` at c065736). Any change to translator output or the cache format must bump that stamp so old caches are ignored. A bump is not breaking for users (the cache rebuilds) but is called out in the CHANGELOG because first runs are slower.
+3. **Translation cache**: on-disk format and the translator version stamp that keys it (the cache lives under `CFI_CACHE_DIR` or the per-user cache folder and is keyed by the private `TRANSLATOR_VERSION` constant in `src/cuda/xcache.rs`). Any change to translator output or the cache format must bump that stamp so old caches are ignored. A bump is not breaking for users (the cache rebuilds) but is called out in the CHANGELOG because first runs are slower.
 4. **Documented behaviour of scripts** in `scripts/` (parameters).
 5. **Reported device properties** (compute capability reported to apps) when they change which code path an app takes.
 
