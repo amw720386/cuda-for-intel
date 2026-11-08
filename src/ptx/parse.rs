@@ -42,8 +42,42 @@ pub(super) fn tokens(mut source: &str) -> Result<Vec<&str>, Error> {
     }
 }
 
+/// Token cursor with an O(1) clone (checkpoints must not copy the remaining module).
+#[derive(Clone)]
+struct Toks<'a> {
+    data: std::rc::Rc<Vec<&'a str>>,
+    pos: usize,
+}
+
+impl<'a> Toks<'a> {
+    fn new(tokens: Vec<&'a str>) -> Self {
+        Self { data: std::rc::Rc::new(tokens), pos: 0 }
+    }
+
+    fn as_slice(&self) -> &[&'a str] {
+        &self.data[self.pos..]
+    }
+
+    fn len(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    fn next(&mut self) -> Option<&'a str> {
+        let t = self.data.get(self.pos).copied();
+        if t.is_some() {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn nth(&mut self, n: usize) -> Option<&'a str> {
+        self.pos = (self.pos + n).min(self.data.len());
+        self.next()
+    }
+}
+
 struct Parser<'a> {
-    tokens: std::vec::IntoIter<&'a str>,
+    tokens: Toks<'a>,
     /// Module-scope variables declared so far.
     vars: ModuleVars<'a>,
     /// Parameter names of the entry being parsed (for `mov.u64 %rd, param`).
@@ -1808,8 +1842,10 @@ fn rewrite_half_extract_scopes(source: &str) -> String {
             i += caps.consumed;
             continue;
         }
-        out.push(source[i..].chars().next().unwrap());
-        i += source[i..].chars().next().unwrap().len_utf8();
+        // Copy the run up to the next `{` in one go.
+        let run = bytes[i + 1..].iter().position(|&b| b == b'{').map_or(bytes.len(), |n| i + 1 + n);
+        out.push_str(&source[i..run]);
+        i = run;
     }
     out
 }
@@ -1981,9 +2017,10 @@ fn rewrite_register_scopes(source: &str) -> String {
             i = close + 1;
             continue;
         }
-        let ch = source[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
+        // Copy the run up to the next comment start or `{` in one go.
+        let run = bytes[i + 1..].iter().position(|&b| b == b'{' || b == b'/').map_or(bytes.len(), |n| i + 1 + n);
+        out.push_str(&source[i..run]);
+        i = run;
     }
     out
 }
@@ -2136,7 +2173,7 @@ pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
 /// Parse every supported kernel together with the module-scope variables.
 pub(super) fn parse_module(source: &str) -> Result<(Vec<Entry<'_>>, ModuleVars<'_>), Error> {
     let mut parser = Parser {
-        tokens: tokens(source)?.into_iter(),
+        tokens: Toks::new(tokens(source)?),
         vars: ModuleVars::default(),
         param_names: Vec::new(),
         staged_names: Vec::new(),
@@ -2222,7 +2259,129 @@ fn canonical_setp(op: &str) -> Option<&'static str> {
     })
 }
 
+/// Offsets of the entries and module-scope statements of a normalised module (one statement
+/// per line, no comments), built in one pass so per-kernel lookups never rescan the module.
+struct ModuleIndex {
+    ptr: usize,
+    len: usize,
+    signature: u64,
+    /// Entry name -> (header line start, `.entry` start, end of `}`); the text between the first two
+    /// is the `.visible`-style prefix.
+    entries: HashMap<String, (usize, usize, usize)>,
+    /// Module-scope text in source order: balanced lines outside every block.
+    scope: Vec<(usize, usize)>,
+}
+
+/// Cheap content fingerprint (sampled bytes), guarding the cache against a reused address.
+fn module_signature(source: &str) -> u64 {
+    let bytes = source.as_bytes();
+    let mut hash = 0xcbf29ce484222325u64 ^ bytes.len() as u64;
+    let mut mix = |b: u8| hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3);
+    let step = (bytes.len() / 512).max(1);
+    for &b in bytes.iter().take(256) {
+        mix(b);
+    }
+    for &b in bytes.iter().rev().take(256) {
+        mix(b);
+    }
+    let mut at = 0;
+    while at < bytes.len() {
+        for &b in &bytes[at..(at + 8).min(bytes.len())] {
+            mix(b);
+        }
+        at += step;
+    }
+    hash
+}
+
+impl ModuleIndex {
+    fn build(source: &str) -> Option<Self> {
+        let mut entries: HashMap<String, (usize, usize, usize)> = HashMap::new();
+        let mut scope: Vec<(usize, usize)> = Vec::new();
+        let mut depth = 0i64;
+        let mut open: Option<(String, usize, usize)> = None;
+        let mut at = 0;
+        for line in source.split_inclusive('\n') {
+            let delta = line.bytes().filter(|&b| b == b'{').count() as i64 - line.bytes().filter(|&b| b == b'}').count() as i64;
+            if depth == 0 {
+                if delta == 0 {
+                    scope.push((at, at + line.len()));
+                } else if delta > 0 {
+                    // A block opens: remember a kernel's start. Everything before `.entry` on the
+                    // line (`.visible`) belongs to the module scope.
+                    open = None;
+                    let mut from = 0;
+                    while let Some(found) = line[from..].find(".entry ") {
+                        let pos = from + found;
+                        if pos == 0 || line.as_bytes()[pos - 1].is_ascii_whitespace() {
+                            let rest = &line[pos + 7..];
+                            if let Some((name, tail)) = rest.split_once(' ')
+                                && tail.starts_with('(')
+                            {
+                                open = Some((name.to_owned(), at, at + pos));
+                            }
+                            break;
+                        }
+                        from = pos + 1;
+                    }
+                }
+            }
+            depth += delta;
+            if depth < 0 {
+                return None;
+            }
+            if depth == 0 && delta < 0 {
+                if let Some((name, line_start, start)) = open.take() {
+                    let close = at + line.rfind('}')? + 1;
+                    entries.entry(name).or_insert((line_start, start, close));
+                }
+            }
+            at += line.len();
+        }
+        (depth == 0).then(|| Self { ptr: source.as_ptr() as usize, len: source.len(), signature: module_signature(source), entries, scope })
+    }
+}
+
+fn module_index(source: &str) -> Option<std::sync::Arc<ModuleIndex>> {
+    use std::sync::{Arc, Mutex};
+    static CACHE: Mutex<Vec<Arc<ModuleIndex>>> = Mutex::new(Vec::new());
+    let signature = module_signature(source);
+    let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(hit) = cache
+        .iter()
+        .find(|c| c.ptr == source.as_ptr() as usize && c.len == source.len() && c.signature == signature)
+    {
+        return Some(Arc::clone(hit));
+    }
+    let built = Arc::new(ModuleIndex::build(source)?);
+    if cache.len() >= 4 {
+        cache.remove(0);
+    }
+    cache.push(Arc::clone(&built));
+    Some(built)
+}
+
+/// Byte range of `.entry NAME ( ... ) { ... }` in normalised PTX.
+fn entry_span(source: &str, name: &str) -> Option<(usize, usize)> {
+    module_index(source)?.entries.get(name).map(|&(_, start, end)| (start, end))
+}
+
+/// A module made of the module-scope statements that precede `name` plus that entry alone.
+/// `None` when the text is not in normalised form (callers then use the whole module).
+pub(super) fn narrow_to_entry(source: &str, name: &str) -> Option<String> {
+    let index = module_index(source)?;
+    let (line_start, _, end) = *index.entries.get(name)?;
+    let mut out = String::new();
+    for &(from, to) in index.scope.iter().take_while(|(from, _)| *from < line_start) {
+        out.push_str(&source[from..to]);
+    }
+    out.push_str(&source[line_start..end]);
+    out.push('\n');
+    Some(out)
+}
+
 pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, Error> {
+    let source = entry_span(source, name).map_or(source, |(start, end)| &source[start..end]);
     let mut tokens = tokens(source)?;
     let start = tokens
         .windows(3)
@@ -2230,7 +2389,7 @@ pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, 
         .ok_or_else(|| Error::new("PTX entry is absent"))?;
     tokens.drain(..start);
     let mut parser = Parser {
-        tokens: tokens.into_iter(),
+        tokens: Toks::new(tokens),
         vars: ModuleVars::default(),
         param_names: Vec::new(),
         staged_names: Vec::new(),
@@ -2377,7 +2536,7 @@ fn parse_entry<'a>(parser: &mut Parser<'a>) -> Result<Entry<'a>, Error> {
     if let Some(snapshot) = snapshot {
         // Module-scope `.shared` arrays are private to each kernel that names them.
         let used_tokens = snapshot.len() - parser.tokens.len();
-        let consumed: Vec<&str> = snapshot.take(used_tokens).collect();
+        let consumed: Vec<&str> = snapshot.as_slice()[..used_tokens].to_vec();
         let used: Vec<_> = parser
             .vars
             .shared

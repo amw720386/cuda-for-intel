@@ -108,8 +108,45 @@ fn hash(path: &str) {
     }
 }
 
+/// `--time <file> [threads]`: per-phase timing, then per-entry `name<TAB>hash|error<TAB>ms` on stdout (sorted).
+fn time_file(path: &str, threads: usize, mode: &str) {
+    use std::time::Instant;
+    ptx::set_lenient_undefined(true);
+    std::panic::set_hook(Box::new(|_| {}));
+    let t = Instant::now();
+    let raw = String::from_utf8_lossy(&fs::read(path).unwrap()).into_owned();
+    let prepared = match ptx::prepare_module(&raw) { Ok(p) => p, Err(e) => { println!("PREPARE_FAIL\t{e}"); return } };
+    eprintln!("prepare {:.2?} ({} bytes -> {})", t.elapsed(), raw.len(), prepared.len());
+    let t = Instant::now();
+    if mode == "lenient" {
+        let t = Instant::now();
+        let r = ptx::translate_lenient(&raw);
+        match r { Ok(t2) => { let mut h: u64 = 0xcbf29ce484222325; for w in &t2.words { for b in w.to_le_bytes() { h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3); } } println!("LENIENT\t{h:016x}\t{}", t2.kernels.len()) } Err(e) => println!("LENIENT\tERR {e}") }
+        eprintln!("translate_lenient whole module {:.2?}", t.elapsed());
+        return;
+    }
+    let t = Instant::now();
+    let r = match if mode == "lazy" { ptx::probe_lazy_hashed(&prepared, threads) } else if mode == "prepared" { ptx::probe_prepared_hashed(&prepared, threads) } else { ptx::probe_module_hashed(&prepared, threads) } { Ok(r) => r, Err(e) => { println!("PARSE_FAIL\t{e}"); return } };
+    eprintln!("parse+translate all entries ({threads} threads) {:.2?}", t.elapsed());
+    let mut worst: Vec<_> = r.iter().map(|(n, _, d)| (*d, n.clone())).collect();
+    worst.sort(); worst.reverse();
+    for (d, n) in worst.iter().take(3) { eprintln!("  slowest {:.2?} {}", d, &n[..n.len().min(70)]); }
+    let mut lines: Vec<String> = r.iter().map(|(n, h, d)| match h {
+        Ok(h) => format!("{n}\t{h:016x}\t{}", d.as_millis()),
+        Err(e) => format!("{n}\tERR {}\t{}", e.replace('\n', " "), d.as_millis()),
+    }).collect();
+    lines.sort();
+    for l in lines { println!("{l}"); }
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--hash") { hash(&std::env::args().nth(2).expect("ptx file")); return; }
+    if std::env::args().nth(1).as_deref() == Some("--time") {
+        let th = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let mode = std::env::var("MODE").unwrap_or_default();
+        time_file(&std::env::args().nth(2).expect("ptx file"), th, &mode);
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--prep") {
         let raw = fs::read_to_string(std::env::args().nth(2).unwrap()).unwrap();
         print!("{}", ptx::prepare_module(&raw).unwrap());

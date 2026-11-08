@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
 mod current_stack;
+mod prefetch;
 mod xcache;
 mod discovery;
 pub(crate) mod devices;
