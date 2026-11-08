@@ -247,12 +247,14 @@ fn fake_multi_device_context_isolation() {
         let function_b = function(module());
         let (device_b, host_b) = allocations();
         assert_eq!(unsafe { cuMemAlloc_v2(&mut large, 256) }, OutOfMemory);
-        assert_eq!(cuMemFree_v2(device_a), InvalidValue);
+        // CUDA frees by pointer, whichever device's context is current.
+        assert_eq!(cuMemFree_v2(device_a), Success);
         assert_eq!(cuMemFreeHost(host_a), InvalidValue);
         assert_eq!(launch(function_a, stream_b, device_b), InvalidHandle);
         assert_eq!(launch(function_b, stream_a, device_b), InvalidHandle);
         assert_eq!(launch(function_b, stream_b, device_a), InvalidValue);
-        assert_eq!(cuStreamWaitEvent(stream_b, event_a, 0), InvalidHandle);
+        // Events of another device are waited for on the host.
+        assert_eq!(cuStreamWaitEvent(stream_b, event_a, 0), Success);
         assert_eq!(cuStreamSynchronize(stream_a), Success);
 
         // A can release its native objects while B has submitted work pending.
