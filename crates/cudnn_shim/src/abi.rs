@@ -27,7 +27,7 @@ mod st {
     pub const INTERNAL_ERROR: i32 = 4000;
     pub const ALLOC_FAILED: i32 = 4003;
     pub const EXECUTION_FAILED: i32 = 5000;
-    pub const VERSION: usize = 90701;
+    pub const VERSION: usize = 91002; // torch cu128 (cuDNN 9.10.2) refuses older runtimes
     pub const MAJOR: i32 = 9;
     pub const MINOR: i32 = 7;
     pub const PATCH: i32 = 1;
