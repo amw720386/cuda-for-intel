@@ -118,8 +118,8 @@ Build: `cargo build --release --locked -p cuda-for-intel -p cublas_shim`. Output
 
 First use compiles kernels with the Intel compiler, minutes for the large quantised matrix-multiply kernels.
 Set `CUDA_FOR_INTEL_CACHE_DIR` (or leave the default, `%LOCALAPPDATA%\cuda-for-intel`) so later processes
-reuse them; the verified run took 12.1 s to load and 1.06 s for 8 tokens. In a cold run without a kernel
-cache the log recorded 5.1 tok/s decode on the GPU against 119 tok/s on the CPU backend. The GPU path is not currently faster than the CPU
+reuse them; the verified run took 12.1 s to load and 1.06 s for 8 tokens. With logging off the logs recorded 30 to 46 tok/s
+decode on the GPU against 119 tok/s on the CPU backend (`docs/hw-logs/perf-matrix.md`). The GPU path is not currently faster than the CPU
 for this model; see "Performance guidance" in the README.
 
 ## Troubleshooting

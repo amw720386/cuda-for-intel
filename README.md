@@ -53,7 +53,7 @@ What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a transl
   `nvcudart_hybrid64.dll` in `CUDA_FOR_INTEL_HYBRID_DIR`. It is proprietary, not distributed here, and you obtain it yourself ([docs/ollama.md](docs/ollama.md)).
 - **First run is slow.** Large kernels (quantised matrix multiplication in ggml, big ATen modules) take minutes to compile; later runs use the caches.
 - **Speed.** Correctness first: the GPU path is currently slower than the CPU backend for the Qwen2.5-0.5B decode measured in the logs
-  (cold run: 5.1 tok/s GPU vs 119 tok/s CPU; llama-bench tg128 18.3 tok/s with large variance). Do not expect native-Vulkan speed.
+  (logging off: 30 to 46 tok/s decode on the GPU vs 119 tok/s on the CPU backend, see [docs/hw-logs/perf-matrix.md](docs/hw-logs/perf-matrix.md); llama-bench tg128 18.3 tok/s with large variance). Do not expect native-Vulkan speed.
 - **Flash attention** kernels (`flash_attn_ext_*`) do not all translate (87 entries in the stock Ollama scan); disable flash attention.
 - **No cuDNN, NCCL, cuFFT, cuSOLVER.** Convolutions use PyTorch's native kernels (`torch.backends.cudnn.enabled = False`).
 - **Not implemented:** SASS execution, VMM (`cuMemCreate` family reports no capability), multi-GPU peer access, conditional and memory-allocation graph nodes,
