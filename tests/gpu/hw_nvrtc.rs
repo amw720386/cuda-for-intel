@@ -105,7 +105,8 @@ fn hw_nvrtc_all_kernels() {
         launch_args(&out.ptx, &out.lowered["axpy<float>"], [3, 1, 1], [128, 1, 1], 0, &mut bufs,
             &[Arg::Bytes(2.5f32.to_le_bytes().to_vec()), Arg::Buf(0), Arg::Buf(1), u32_arg(n as u32)])?;
         let got = as_f32(&bufs[1]);
-        if let Some(i) = (0..n).find(|&i| got[i] != 2.5 * x[i] + y[i]) {
+        // NVRTC contracts a*x+y into an fma by default (--fmad=true): accept the fused or unfused result.
+        if let Some(i) = (0..n).find(|&i| got[i] != 2.5f32.mul_add(x[i], y[i]) && got[i] != 2.5 * x[i] + y[i]) {
             return Err(format!("axpy i={i}: {} vs {}", got[i], 2.5 * x[i] + y[i]));
         }
         let mut bufs = vec![f32s(&x)];
