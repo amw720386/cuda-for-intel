@@ -90,7 +90,26 @@ fn probe(path: &str) {
     if std::env::var_os("PROBE_ALL").is_some() { for (e, v) in &by_error { for n in v { println!("FAIL\t{e}\t{n}"); } } }
 }
 
+/// `--hash file.ptx`: one line per entry, `name<TAB>fnv64(SPIR-V words)` or `name<TAB>ERR`.
+fn hash(path: &str) {
+    ptx::set_lenient_undefined(true);
+    std::panic::set_hook(Box::new(|_| {}));
+    let raw = fs::read_to_string(path).unwrap();
+    let prepared = ptx::prepare_module(&raw).unwrap_or_else(|e| { println!("prepare failed: {e}"); std::process::exit(1) });
+    let mut names: Vec<String> = ptx::entry_names(&prepared).map(|n| n.into_iter().map(String::from).collect()).unwrap_or_default();
+    names.sort();
+    for n in names {
+        let r = std::panic::catch_unwind(|| ptx::translate_prepared_entry(&prepared, &n).map(|t| {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for w in &t.words { for b in w.to_le_bytes() { h = (h ^ b as u64).wrapping_mul(0x100000001b3); } }
+            h
+        }));
+        match r { Ok(Ok(h)) => println!("{n}\t{h:016x}"), _ => println!("{n}\tERR") }
+    }
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--hash") { hash(&std::env::args().nth(2).expect("ptx file")); return; }
     if std::env::args().nth(1).as_deref() == Some("--prep") {
         let raw = fs::read_to_string(std::env::args().nth(2).unwrap()).unwrap();
         print!("{}", ptx::prepare_module(&raw).unwrap());
