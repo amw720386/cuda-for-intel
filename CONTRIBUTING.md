@@ -23,7 +23,7 @@ The default test set uses the fake Level Zero backend and runs everywhere.
 
 | OS | Command | Notes |
 | --- | --- | --- |
-| macOS | `cargo test --lib` | 226 passed, 7 ignored on a recent checkout (verified on macOS). The Level Zero loader targets Windows and Linux, so use the library tests here rather than the GPU test target. |
+| macOS | `cargo test --lib` | 229 passed on the Windows box; the macOS count is UNVERIFIED. The Level Zero loader targets Windows and Linux, so use the library tests here rather than the GPU test target. |
 | Linux | `cargo test --locked --workspace` | The Linux path is not hardware-verified; `--lib` needs no GPU. Untested here. |
 | Windows | `cargo test --locked --workspace` | Same command, plus the opt-in GPU tests below. |
 

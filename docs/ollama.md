@@ -112,7 +112,7 @@ Build: `cargo build --release --locked -p cuda-for-intel -p cublas_shim`. Output
 - Qwen2.5-0.5B-Instruct Q8_0, prompt `Say hi.`, raw, temperature 0, 8 tokens: identical text on GPU and with `num_gpu 0`.
 - 12 prompts, greedy, 24 tokens: 10 identical. Two open-ended prompts diverge (`docs/hw-logs/stock-scan.md`):
   attributed in the log to float reordering at near-ties, not confirmed by a logprob comparison.
-- Other models, longer generation and multi-user serving: not verified.
+- Eleven other models and quants load and answer coherently (`docs/hw-logs/model-matrix.md`). Longer generation quality and multi-user serving: not verified.
 
 ## Performance expectations
 

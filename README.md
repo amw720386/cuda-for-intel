@@ -30,13 +30,13 @@ Everything in this table was run, and the evidence is linked. "Untested" means n
 | Other Intel GPUs (Arc A-series, other Arc B-series, Lunar Lake, Data Center) | Untested. | |
 | XMX (DPAS) GEMM path | Needs Xe2/Xe3 with `SPV_INTEL_subgroup_matrix_multiply_accumulate`; verified on Arc B390 only. Other GPUs fall back to the tiled PTX GEMM. | commit `57b9fa5`, `tests/gpu/hw_xmx_gemm.rs` |
 | Linux | The Level Zero loader path is included for portability. Untested on hardware. | |
-| macOS | Build and library unit tests only (no GPU). | `cargo test --lib`: 226 passed |
+| macOS | Build and library unit tests only (no GPU). | `cargo test --lib`: 229 passed on the Windows box; the count on macOS is UNVERIFIED |
 
 ### Software
 
 | Software | Status on Arc B390 | Recipe | Evidence |
 | --- | --- | --- | --- |
-| Stock Ollama v0.12.6 (unchanged `ollama.exe` and `cuda_v13/ggml-cuda.dll`) | Qwen2.5-0.5B-Instruct Q8_0 fully on the GPU, 8 greedy tokens equal to the CPU backend; 10 of 12 prompts identical over 24 tokens. Other models untested. | [docs/ollama.md](docs/ollama.md) | [ollama-stock-v0.12.6.md](docs/hw-logs/ollama-stock-v0.12.6.md), [stock-scan.md](docs/hw-logs/stock-scan.md) |
+| Stock Ollama v0.12.6 (unchanged `ollama.exe` and `cuda_v13/ggml-cuda.dll`) | Qwen2.5-0.5B-Instruct Q8_0 fully on the GPU, 8 greedy tokens equal to the CPU backend; 10 of 12 prompts identical over 24 tokens. Eleven more models and quants run coherently (table in [model-matrix.md](docs/hw-logs/model-matrix.md)); K-quant models diverge earlier from the CPU output, which is expected. | [docs/ollama.md](docs/ollama.md) | [ollama-stock-v0.12.6.md](docs/hw-logs/ollama-stock-v0.12.6.md), [stock-scan.md](docs/hw-logs/stock-scan.md), [model-matrix.md](docs/hw-logs/model-matrix.md) |
 | llama.cpp (ggml CUDA backend built for `75-virtual`) | `llama-completion` GPU equals CPU on 8 tokens; Qwen-shaped `MUL_MAT` passes (157 of 161 cases); perplexity within 0.11 % of CPU. Flash attention off. | [docs/llama-cpp.md](docs/llama-cpp.md) | [ggml-test-backend-ops.md](docs/hw-logs/ggml-test-backend-ops.md) |
 | PyTorch `2.2.2+cu118` Windows wheel (PTX compute_37) | Works: tensor ops, Linear/conv/transformer layer forward and backward, optimizers, autocast fp16, streams and events, equal to CPU. | [docs/pytorch.md](docs/pytorch.md) | [torch-round1.md](docs/hw-logs/torch-round1.md), [torch-bringup.md](docs/torch-bringup.md) |
 | PyTorch 2.13.0 conda-forge `cuda128` build (PTX compute_120) | Works: matmul, Linear, softmax, layer_norm, gelu, conv2d forward and backward, SDPA math, autocast fp16, SGD loop. About 6 % of probed kernels still fail to translate. | [docs/pytorch.md](docs/pytorch.md) | [torch-bringup.md](docs/torch-bringup.md), [torch-arch-guard-stubs.md](docs/torch-arch-guard-stubs.md) |
