@@ -378,3 +378,51 @@ fn auto_policy_follows_the_measurements() {
     // explicit list items still force a kernel in addition to auto
     assert!(matches!(decide(mmq, &mmq_layout(), &Switch::parse("auto,mmq")), Decision::Substitute(_)));
 }
+
+/// Multi-tile, ragged shapes (several row/column tiles, channels, samples) against the stock
+/// translated kernel launched with one CTA per tile (no stream-k split, no fixup).
+/// Slow (minutes) on the debug interpreter: run with `--ignored` and CFI_STOCK_PTX_DIR.
+#[test]
+#[ignore = "slow: multi-tile stock mmq on the interpreter; mismatch under investigation"]
+fn translated_stock_mmq_q8_0_multi_tile_shapes() {
+    crate::ptx::set_dynamic_shared_bytes(65536);
+    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0 };
+    let words = super::mmq::build(true);
+    let mut failed = false;
+    // (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples)
+    for (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples) in [(128usize, 130usize, 9usize, 8usize, 1usize, 1usize, 1usize), (128, 130, 9, 8, 2, 1, 1), (128, 130, 9, 8, 2, 2, 2)] {
+        let entry = format!("_Z9mul_mat_qIL9ggml_type8ELi{mmq_x}ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+        let Some(stock) = translated_words("blob98.ptx", &entry) else { return };
+        let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 31 + ncols as u64);
+        let n = case.dst_len();
+        let mut dev = Dev::default();
+        let (xa, ya) = (dev.put(&case.x), dev.put(&case.y));
+        let da = dev.alloc(n * 4);
+        let tmp = dev.alloc(1 << 18);
+        let mut args: Vec<ArgVal> = case
+            .args(xa, ya, da)
+            .iter()
+            .map(|a| match *a {
+                PArg::Ptr(p) => ArgVal::Ptr(p),
+                PArg::U32(v) => ArgVal::U32(v),
+                PArg::U64(v) => ArgVal::U64(v),
+            })
+            .collect();
+        args[5] = ArgVal::Ptr(tmp);
+        let tiles = (ncols.div_ceil(mmq_x) * nrows.div_ceil(128) * nch * nsamples) as u32;
+        interp::run(&mut dev, &stock, &args, [tiles, 1, 1], [32, 8, 1]);
+        let translated_out: Vec<f32> =
+            dev.download(da, n * 4).chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let mut sim = Sim { dev: Dev::default(), words: &words };
+        let native = case.run(&mut sim, &plan).unwrap();
+        let reference = case.reference();
+        println!(
+            "{ncols_x}x{nrows}x{ncols} mmq_x {mmq_x} ch {nch}/{ratio} s {nsamples}: native-vs-stock {:.2e}, stock-vs-ref {:.2e}, native-vs-ref {:.2e}",
+            refs::nmse(&native, &translated_out),
+            refs::nmse(&translated_out, &reference),
+            refs::nmse(&native, &reference)
+        );
+        failed |= refs::nmse(&native, &translated_out) >= 1e-9;
+    }
+    assert!(!failed);
+}
