@@ -1,33 +1,12 @@
 use super::{Block, Comparison, Error, Instruction, IntegerOp, Terminator};
 use std::collections::HashSet;
 
-/// Memory ceiling for the definite-assignment bit matrices.
-const MAX_FLOW_BYTES: usize = 1 << 30;
-
-pub(super) struct Flow<'a> {
+pub(super) struct Flow {
     pub(super) order: Vec<usize>,
-    names: Vec<&'a str>,
-    words: usize,
-    /// Row-major bitsets: registers definitely written on every path into each block.
-    inputs: Vec<u64>,
 }
 
-impl<'a> Flow<'a> {
-    /// Fills `into` with the registers definitely initialized on entry to `index`.
-    pub(super) fn load_inputs(&self, index: usize, into: &mut HashSet<&'a str>) {
-        into.clear();
-        let row = &self.inputs[index * self.words..(index + 1) * self.words];
-        for (w, &word) in row.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                into.insert(self.names[w * 64 + bit]);
-            }
-        }
-    }
-
-    pub(super) fn analyze(blocks: &[Block<'a>]) -> Result<Self, Error> {
+impl Flow {
+    pub(super) fn analyze(blocks: &[Block<'_>]) -> Result<Self, Error> {
         if blocks.is_empty() {
             return Err(Error::new("PTX entry has no blocks"));
         }
@@ -76,66 +55,7 @@ impl<'a> Flow<'a> {
             verify_barriers(blocks, &order, &predecessors)?;
         }
 
-        // Definite assignment: forward must-analysis over interned registers. Definitions only
-        // generate, so out = in | gen, and the join is intersection.
-        let mut ids: std::collections::HashMap<&'a str, usize> = std::collections::HashMap::new();
-        let mut names: Vec<&'a str> = Vec::new();
-        let mut scratch = Vec::new();
-        let mut gen_lists: Vec<Vec<usize>> = Vec::with_capacity(blocks.len());
-        for block in blocks {
-            let mut list = Vec::new();
-            for inst in &block.instructions {
-                if inst.collect_definitions(&mut scratch).is_some() {
-                    for &name in &scratch {
-                        let next = names.len();
-                        let id = *ids.entry(name).or_insert(next);
-                        if id == next {
-                            names.push(name);
-                        }
-                        list.push(id);
-                    }
-                }
-            }
-            list.sort_unstable();
-            list.dedup();
-            gen_lists.push(list);
-        }
-        let words = names.len().div_ceil(64).max(1);
-        // Two bit matrices of blocks x registers; refuse inputs that would not fit a sane budget.
-        if blocks.len().saturating_mul(words).saturating_mul(16) > MAX_FLOW_BYTES {
-            return Err(Error::new("PTX entry too large for flow analysis"));
-        }
-        let mut inputs = vec![0u64; blocks.len() * words];
-        let mut outputs = vec![!0u64; blocks.len() * words];
-        let mut row = vec![0u64; words];
-        loop {
-            let mut changed = false;
-            for &index in &order {
-                if index == 0 {
-                    row.fill(0);
-                } else {
-                    row.fill(!0);
-                    for &prev in &predecessors[index] {
-                        let out = &outputs[prev * words..(prev + 1) * words];
-                        for (r, o) in row.iter_mut().zip(out) {
-                            *r &= o;
-                        }
-                    }
-                }
-                inputs[index * words..(index + 1) * words].copy_from_slice(&row);
-                for &id in &gen_lists[index] {
-                    row[id / 64] |= 1 << (id % 64);
-                }
-                let out = &mut outputs[index * words..(index + 1) * words];
-                if out != row.as_slice() {
-                    out.copy_from_slice(&row);
-                    changed = true;
-                }
-            }
-            if !changed {
-                return Ok(Self { order, names, words, inputs });
-            }
-        }
+        Ok(Self { order })
     }
 }
 
