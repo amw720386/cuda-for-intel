@@ -35,7 +35,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
     let mut depth = 0i32;
     let mut uses_dynamic = false;
     for stmt in statements {
-        if let Some((name, _)) = &dynamic {
+        if let (false, Some((name, _))) = (uses_dynamic, &dynamic) {
             if stmt.iter().any(|t| t == name || t.strip_prefix(name.as_str()).is_some_and(|r| r.starts_with('+'))) {
                 uses_dynamic = true;
             }
@@ -49,7 +49,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
                 // drop the unreferenced ones, give a referenced one a `ret`.
                 while entry_open.is_some() && out.last().is_some_and(|l| l.ends_with(" :")) {
                     let label = out.last().unwrap().trim_end_matches(" :").to_owned();
-                    let used = out[..out.len() - 1].iter().any(|l| !l.ends_with(" :") && l.split_whitespace().any(|t| t == label));
+                    let used = out[entry_open.unwrap_or(0)..out.len() - 1].iter().any(|l| !l.ends_with(" :") && l.split_whitespace().any(|t| t == label));
                     if used {
                         out.push("ret ;".into());
                         break;
@@ -73,9 +73,7 @@ pub(super) fn run(source: &str) -> Result<String, Error> {
                     uses_dynamic = false;
                     if !decls.is_empty() {
                         let at = decl_insert_position(&out, open);
-                        for (i, decl) in decls.into_iter().enumerate() {
-                            out.insert(at + i, decl);
-                        }
+                        out.splice(at..at, decls);
                     }
                 }
                 ctx.block_threads = None;
@@ -1507,6 +1505,9 @@ fn rewrite_wmma(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
 
 /// Bytes of a normalized `.shared ... name [ N ] ;` declaration line (0 for any other line).
 fn static_shared_bytes(line: &str) -> u64 {
+    if !line.trim_start().starts_with(".shared") {
+        return 0;
+    }
     let tokens: Vec<&str> = line.split_whitespace().collect();
     if tokens.first() != Some(&".shared") || line.contains("/*dyn*/") {
         return 0;

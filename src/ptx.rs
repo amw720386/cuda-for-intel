@@ -983,9 +983,11 @@ pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Tra
         .into_iter()
         .find(|entry| entry.name == name)
         .ok_or_else(|| Error::new("PTX entry is absent or unsupported"))?;
-    let body = format!("{:?}", entry.blocks);
     let mut device = vars.device.clone();
-    device.retain(|data| body.contains(&format!("{:?}", data.name)));
+    if !device.is_empty() {
+        let body = format!("{:?}", entry.blocks);
+        device.retain(|data| body.contains(&format!("{:?}", data.name)));
+    }
     spirv::emit(vec![entry], device)
 }
 

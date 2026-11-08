@@ -98,7 +98,8 @@ about 16 s. Use `CFI_NO_CACHE=1` to disable the cache.
 
 * 36 entries still rejected by the divergent-barrier rule (the rule cannot prove block
   uniformity for these tid-dependent conditions; `CFI_STRICT_BARRIERS=1` makes it stricter).
-* 9 huge kernels exceed the 8192-block limit of the flow analysis (raising it makes the
-  O(n^2) analysis exhaust memory); they are unlikely to be launched.
+* Huge kernels no longer hit the old 8192-block limit: the flow analysis is linear now (no
+  per-block register sets, post-dominator tree instead of an N x N matrix), and the limit is
+  1M blocks.
 * 2 entries with a missing register declaration, 2 entries beyond the register-range limit.
 * 48 modules contain only device functions (no `.entry`) and need no translation.
