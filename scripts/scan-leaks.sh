@@ -14,7 +14,7 @@ E='($|[^0-9A-Za-z_])'    # right boundary
 PAT_IP="${B}([0-9]{1,3}\.){3}[0-9]{1,3}${E}"
 PAT_MAIL='[A-Za-z0-9._-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 PAT_KEY='BEGIN [A-Z ]*PRIVATE|AKIA[0-9A-Z]{8,}|ghp_[A-Za-z0-9]{10,}|sk-[A-Za-z0-9]{16,}'
-PAT_HOST="USER|pdxNN|${B}csc-[a-z]"
+PAT_HOST="dev[c]loud|pdx[8]8|${B}csc-[a-z]"
 PAT_WINUSER='[A-Za-z]:\\{1,2}Users\\{1,2}[A-Za-z0-9._-]+'
 PAT="${PAT_IP}|${PAT_MAIL}|${PAT_KEY}|${PAT_HOST}|${PAT_WINUSER}"
 
