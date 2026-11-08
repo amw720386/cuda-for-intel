@@ -1,12 +1,13 @@
 MIT License
 
-Copyright (c) 2026 CUDA for Intel contributors
+Copyright (c) 2026 Ahamed Wajibu and Jerry Zhu
 
 Level Zero ABI declarations are based on ze_api.h.
 Copyright (C) 2019-2026 Intel Corporation
 
 The CUDA Runtime integrity digest and private export table layouts draw from
-ZLUDA (https://github.com/vosen/ZLUDA), used under the MIT license.
+ZLUDA (https://github.com/vosen/ZLUDA), used under the MIT license (ZLUDA's
+LICENSE-MIT carries no copyright line of its own; attribution is by project).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
