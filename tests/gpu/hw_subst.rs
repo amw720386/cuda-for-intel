@@ -263,8 +263,8 @@ fn hw_subst_native_vs_translated() {
     let native_mmvq = load(mmvq_blob, "mmvq", None);
     let wide_mmvq = sweep.then(|| load(mmvq_blob, "mmvq", Some(8)));
     let mmq_blob = blobs.iter().find(|b| b.contains(".entry _Z9mul_mat_qIL9ggml_type8ELi64ELb0E")).expect("mmq blob");
-    let plain_mmq = load(mmq_blob, "", None);
-    let native_mmq = load(mmq_blob, "mmq", None);
+    let skip_mmq = std::env::var_os("CFI_SUBST_SKIP_MMQ").is_some();
+    let (plain_mmq, native_mmq) = if skip_mmq { (null_mut(), null_mut()) } else { (load(mmq_blob, "", None), load(mmq_blob, "mmq", None)) };
     let plain_quant = load(quant_blob, "", None);
     let native_quant = load(quant_blob, "quantize_q8_1", None);
     unsafe {
@@ -362,7 +362,7 @@ fn hw_subst_native_vs_translated() {
     }
 
     println!("== mul_mat_q Q8_0 (prefill): native vs translated vs host reference");
-    {
+    if !skip_mmq {
         let cases = [
             // (nrows, ncols_x, ncols, mmq_x, need_check, nch, ratio, nsamples)
             (256usize, 1024usize, 64usize, 64usize, 0u32, 1usize, 1usize, 1usize),
