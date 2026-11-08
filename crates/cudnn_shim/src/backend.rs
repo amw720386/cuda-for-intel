@@ -6,6 +6,10 @@ use crate::abi::{self, Status};
 use crate::desc::{self, ConvDesc, ConvPlan, Dir, FilterDesc, TensorDesc};
 use std::collections::HashMap;
 
+/// OPERATIONGRAPH has no deviceprop attribute in v8/v9 headers we know; kept for forward compatibility.
+const A_DEVICEPROP_ANY: i32 = -1;
+const A_PLAN_DEVICEPROP: i32 = 407;
+
 #[derive(Clone, Debug, Default)]
 pub struct Attr {
     pub ty: i32,
@@ -13,7 +17,7 @@ pub struct Attr {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BDesc {
     pub ty: i32,
     pub finalized: bool,
@@ -247,7 +251,9 @@ pub unsafe fn finalize(d: &mut BDesc) -> Status {
                 unsafe { plan_of_op(d) }.map(|_| ())?;
             }
             BD_OPERATIONGRAPH => {
-                d.attrs.get(&A_GRAPH_HANDLE).ok_or(BAD_PARAM)?;
+                if !d.attrs.contains_key(&A_GRAPH_HANDLE) && !d.attrs.contains_key(&A_DEVICEPROP_ANY) {
+                    return Err(BAD_PARAM);
+                }
                 let ops = d.attrs.get(&A_GRAPH_OPS).ok_or(BAD_PARAM)?;
                 if ops.count == 0 {
                     return Err(BAD_PARAM);
@@ -280,7 +286,9 @@ pub unsafe fn finalize(d: &mut BDesc) -> Status {
                 unsafe { target(d, A_CFG_ENGINE, BD_ENGINE)? };
             }
             BD_EXECUTION_PLAN => {
-                d.attrs.get(&A_PLAN_HANDLE).ok_or(BAD_PARAM)?;
+                if !d.attrs.contains_key(&A_PLAN_HANDLE) && !d.attrs.contains_key(&A_PLAN_DEVICEPROP) {
+                    return Err(BAD_PARAM);
+                }
                 let cfg = unsafe { target(d, A_PLAN_CFG, BD_ENGINECFG)? };
                 let eng = unsafe { target(cfg, A_CFG_ENGINE, BD_ENGINE)? };
                 let g = unsafe { target(eng, A_ENGINE_GRAPH, BD_OPERATIONGRAPH)? };
@@ -312,9 +320,11 @@ pub unsafe fn finalize(d: &mut BDesc) -> Status {
 /// descriptor handles in `out` (ENGINEHEUR_RESULTS) must be live ENGINECFG descriptors.
 pub unsafe fn get_attribute(d: &BDesc, name: i32, ty: i32, requested: i64, count: *mut i64, out: *mut u8) -> Status {
     use abi::*;
-    if requested < 0 || (requested > 0 && out.is_null()) {
+    // cudnn_frontend queries counts with a null `out` (and requested 0 or the max count).
+    if requested < 0 {
         return BAD_PARAM;
     }
+    let out_ok = !out.is_null();
     let put_count = |n: i64| {
         if !count.is_null() {
             unsafe { *count = n };
@@ -330,7 +340,7 @@ pub unsafe fn get_attribute(d: &BDesc, name: i32, ty: i32, requested: i64, count
                 return BAD_PARAM_ATTRIBUTE_TYPE;
             }
             put_count(1);
-            if requested > 0 {
+            if requested > 0 && out_ok {
                 unsafe { (out as *mut i64).write_unaligned(d.engine_count) };
             }
             return SUCCESS;
@@ -338,6 +348,11 @@ pub unsafe fn get_attribute(d: &BDesc, name: i32, ty: i32, requested: i64, count
         A_HEUR_RESULTS if d.ty == BD_ENGINEHEUR => {
             if !d.finalized {
                 return BAD_PARAM_NOT_FINALIZED;
+            }
+            // requested == 0 (or no output array) is the count query.
+            if requested == 0 || !out_ok {
+                put_count(d.engine_count);
+                return SUCCESS;
             }
             let n = d.engine_count.min(requested);
             for i in 0..n as usize {
@@ -381,7 +396,7 @@ pub unsafe fn get_attribute(d: &BDesc, name: i32, ty: i32, requested: i64, count
                 return BAD_PARAM_NOT_FINALIZED;
             }
             put_count(1);
-            if requested > 0 {
+            if requested > 0 && out_ok {
                 unsafe { (out as *mut i64).write_unaligned(0) };
             }
             return SUCCESS;
@@ -398,10 +413,29 @@ pub unsafe fn get_attribute(d: &BDesc, name: i32, ty: i32, requested: i64, count
         return BAD_PARAM_ATTRIBUTE_TYPE;
     }
     put_count(a.count);
-    let n = (requested.min(a.count)) as usize * elem_size(ty);
-    if n > 0 {
-        unsafe { std::ptr::copy_nonoverlapping(a.bytes.as_ptr(), out, n) };
+    let take = requested.min(a.count) as usize;
+    if take == 0 || !out_ok {
+        return SUCCESS;
     }
+    if ty == AT_BACKEND_DESCRIPTOR {
+        // The caller pre-creates the destination descriptors; real cuDNN fills them in place
+        // (cudnn_frontend relies on this for ENGINECFG_ENGINE and knob lists).
+        for (i, src) in ptrs(a).into_iter().take(take).enumerate() {
+            let dst = unsafe { *(out as *const BPtr).add(i) };
+            match (unsafe { dst.as_mut() }, unsafe { (src as BPtr).as_ref() }) {
+                (Some(dst), Some(src)) => {
+                    if dst.ty != src.ty {
+                        return BAD_PARAM_DESCRIPTOR_TYPE;
+                    }
+                    *dst = src.clone();
+                }
+                (None, Some(_)) => unsafe { (out as *mut usize).add(i).write_unaligned(src) },
+                _ => return BAD_PARAM,
+            }
+        }
+        return SUCCESS;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(a.bytes.as_ptr(), out, take * elem_size(ty)) };
     SUCCESS
 }
 
@@ -552,6 +586,104 @@ mod tests {
             set(op, A_FWD_Y, AT_BACKEND_DESCRIPTOR, &desc_ptr(y), 1);
             set(op, A_FWD_CONV, AT_BACKEND_DESCRIPTOR, &desc_ptr(c), 1);
             assert_eq!(finalize(&mut *op), NOT_SUPPORTED_GRAPH_PATTERN);
+        }
+    }
+
+    /// Replays the call sequence of cudnn_frontend 1.x as used by PyTorch's Conv_v8.cpp
+    /// (read from EngineHeuristics, Engine, EngineConfig, ExecutionPlan, Filters headers):
+    /// heuristics -> count query (requested 0, null out) -> ENGINECFG results -> hasNumericalNote
+    /// (ENGINECFG_ENGINE into a pre-created ENGINE, notes with null out) -> plan build
+    /// (ENGINECFG_ENGINE again, GLOBAL_INDEX, KNOB_CHOICES, notes, workspace) -> variant pack.
+    #[test]
+    fn mock_frontend_pytorch_sequence() {
+        unsafe {
+            for (opty, dt) in [(BD_OP_CONV_FWD, DT_HALF), (BD_OP_CONV_BWD_DATA, DT_FLOAT), (BD_OP_CONV_BWD_FILTER, DT_BFLOAT16)] {
+                let x = tensor(b'x' as i64, &[2, 4, 8, 8], &[256, 64, 8, 1], dt);
+                let w = tensor(b'w' as i64, &[6, 4, 3, 3], &[36, 9, 3, 1], dt);
+                let y = tensor(b'y' as i64, &[2, 6, 8, 8], &[384, 64, 8, 1], dt);
+                let c = conv_desc();
+                let op = create(opty).unwrap();
+                let (xn, yn, wn, cn) = match opty {
+                    BD_OP_CONV_FWD => (A_FWD_X, A_FWD_Y, A_FWD_W, A_FWD_CONV),
+                    BD_OP_CONV_BWD_DATA => (A_BWDD_DX, A_BWDD_DY, A_BWDD_W, A_BWDD_CONV),
+                    _ => (A_BWDF_X, A_BWDF_DY, A_BWDF_DW, A_BWDF_CONV),
+                };
+                for (n, t) in [(xn, x), (yn, y), (wn, w), (cn, c)] {
+                    assert_eq!(set(op, n, AT_BACKEND_DESCRIPTOR, &desc_ptr(t), 1), SUCCESS);
+                }
+                assert_eq!(finalize(&mut *op), SUCCESS, "op {opty}");
+                let g = create(BD_OPERATIONGRAPH).unwrap();
+                assert_eq!(set(g, A_GRAPH_HANDLE, AT_HANDLE, &1usize.to_le_bytes(), 1), SUCCESS);
+                assert_eq!(set(g, A_GRAPH_OPS, AT_BACKEND_DESCRIPTOR, &desc_ptr(op), 1), SUCCESS);
+                assert_eq!(set(g, 803, AT_BOOLEAN, &[0], 1), SUCCESS); // IS_DYNAMIC_SHAPE_ENABLED
+                assert_eq!(finalize(&mut *g), SUCCESS);
+                for mode in [0i32, 1, 2, 3] {
+                    let h = create(BD_ENGINEHEUR).unwrap();
+                    assert_eq!(set(h, A_HEUR_GRAPH, AT_BACKEND_DESCRIPTOR, &desc_ptr(g), 1), SUCCESS);
+                    assert_eq!(set(h, A_HEUR_MODE, 8, &mode.to_le_bytes(), 1), SUCCESS);
+                    assert_eq!(finalize(&mut *h), SUCCESS, "heur mode {mode}");
+                    // getEngineConfigCount: requested 0, out null
+                    let mut n = -1i64;
+                    assert_eq!(get_attribute(&*h, A_HEUR_RESULTS, AT_BACKEND_DESCRIPTOR, 0, &mut n, std::ptr::null_mut()), SUCCESS);
+                    assert_eq!(n, 1);
+                    let cfgs = [create(BD_ENGINECFG).unwrap()];
+                    n = -1;
+                    assert_eq!(get_attribute(&*h, A_HEUR_RESULTS, AT_BACKEND_DESCRIPTOR, 1, &mut n, cfgs.as_ptr() as *mut u8), SUCCESS);
+                    assert_eq!(n, 1);
+                    // hasNumericalNote: fetch ENGINE into a fresh descriptor, query notes (null out, then array)
+                    let eng = create(BD_ENGINE).unwrap();
+                    n = -1;
+                    assert_eq!(get_attribute(&*cfgs[0], A_CFG_ENGINE, AT_BACKEND_DESCRIPTOR, 1, &mut n, [eng].as_ptr() as *mut u8), SUCCESS);
+                    assert_eq!(n, 1);
+                    assert!((*eng).finalized, "engine descriptor filled in place");
+                    let mut notes = [99i32; 8];
+                    for out in [std::ptr::null_mut(), notes.as_mut_ptr() as *mut u8] {
+                        n = -1;
+                        assert_eq!(get_attribute(&*eng, 1303, 11, 8, &mut n, out), SUCCESS); // NUMERICAL_NOTE
+                        assert_eq!(n, 0);
+                        n = -1;
+                        assert_eq!(get_attribute(&*eng, 1305, 19, 8, &mut n, out), SUCCESS); // BEHAVIOR_NOTE
+                        assert_eq!(n, 0);
+                    }
+                    // Engine::build knob query
+                    let knobs = [create(8).unwrap(); 1];
+                    n = -1;
+                    assert_eq!(get_attribute(&*eng, 1302, AT_BACKEND_DESCRIPTOR, 1, &mut n, knobs.as_ptr() as *mut u8), SUCCESS);
+                    assert_eq!(n, 0);
+                    // ExecutionPlanBuilder
+                    let p = create(BD_EXECUTION_PLAN).unwrap();
+                    assert_eq!(set(p, A_PLAN_HANDLE, AT_HANDLE, &1usize.to_le_bytes(), 1), SUCCESS);
+                    assert_eq!(set(p, A_PLAN_CFG, AT_BACKEND_DESCRIPTOR, &desc_ptr(cfgs[0]), 1), SUCCESS);
+                    assert_eq!(finalize(&mut *p), SUCCESS);
+                    let eng2 = create(BD_ENGINE).unwrap();
+                    assert_eq!(get_attribute(&*cfgs[0], A_CFG_ENGINE, AT_BACKEND_DESCRIPTOR, 1, &mut n, [eng2].as_ptr() as *mut u8), SUCCESS);
+                    let mut idx = [0u8; 8];
+                    assert_eq!(get_attribute(&*eng2, A_ENGINE_INDEX, AT_INT64, 1, &mut n, idx.as_mut_ptr()), SUCCESS);
+                    assert_eq!((n, i64::from_le_bytes(idx)), (1, 0));
+                    n = -1;
+                    assert_eq!(get_attribute(&*cfgs[0], A_CFG_KNOBS, AT_BACKEND_DESCRIPTOR, 16, &mut n, [std::ptr::null_mut::<BDesc>(); 16].as_ptr() as *mut u8), SUCCESS);
+                    assert_eq!(n, 0);
+                    let mut ws = -1i64;
+                    assert_eq!(get_attribute(&*p, A_PLAN_WORKSPACE, AT_INT64, 1, std::ptr::null_mut(), (&mut ws as *mut i64).cast()), SUCCESS);
+                    assert_eq!(ws, 0);
+                    // VariantPack uids 'x','y','w' with null workspace
+                    let vp = create(BD_VARIANT_PACK).unwrap();
+                    set(vp, A_VP_UIDS, AT_INT64, &b64(&[b'x' as i64, b'y' as i64, b'w' as i64]), 3);
+                    let pv: Vec<u8> = [0x10usize, 0x20, 0x30].iter().flat_map(|v| v.to_le_bytes()).collect();
+                    set(vp, A_VP_PTRS, AT_VOID_PTR, &pv, 3);
+                    set(vp, A_VP_WORKSPACE, AT_VOID_PTR, &0usize.to_le_bytes(), 1);
+                    assert_eq!(finalize(&mut *vp), SUCCESS);
+                    let e = (*p).exec.unwrap();
+                    let ptrs = resolve_pointers(&*vp, &e.uids).unwrap();
+                    // kernel roles (a, b, out): fwd x,w,y; bwd data dy,w,dx; bwd filter x,dy,dw
+                    let want = match opty {
+                        BD_OP_CONV_FWD => [0x10, 0x30, 0x20],
+                        BD_OP_CONV_BWD_DATA => [0x20, 0x30, 0x10],
+                        _ => [0x10, 0x20, 0x30],
+                    };
+                    assert_eq!(ptrs, want, "op {opty}");
+                }
+            }
         }
     }
 }
