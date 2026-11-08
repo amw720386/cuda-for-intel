@@ -1,4 +1,4 @@
-use super::flow::Flow;
+use super::flow::{Flow, Graphs};
 use super::globals::GlobalVar;
 use super::rounded;
 use super::{
@@ -104,6 +104,13 @@ struct Emitter<'a> {
     /// SPIR-V ids of registers set from immediates (`mov.u32 %r, imm`).
     const_ids: HashSet<Word>,
     locals: Vec<SpirvInstruction>,
+    /// Explicit zero stores for registers read before any write (see `undefined_slot`).
+    undef_stores: Vec<SpirvInstruction>,
+    /// (slot, zero constant, PTX block of the first read) for every undefined-register slot.
+    undef_slots_info: Vec<(u32, u32, usize)>,
+    current_block: usize,
+    /// (entry, register, is 64-bit) for registers read before any write, reported to `emit`.
+    undefined_seen: Vec<(String, String, bool)>,
     params: HashMap<(&'a str, usize), Value>,
     /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
     param_array: Option<Word>,
@@ -199,6 +206,10 @@ impl<'a> Emitter<'a> {
             const_regs: HashMap::new(),
             const_ids: HashSet::new(),
             locals: Vec::new(),
+            undef_stores: Vec::new(),
+            undef_slots_info: Vec::new(),
+            current_block: 0,
+            undefined_seen: Vec::new(),
             params: HashMap::new(),
             param_array: None,
             param_global_mode: false,
@@ -281,8 +292,21 @@ impl<'a> Emitter<'a> {
             Op::Variable,
             Some(pointer),
             Some(slot),
-            vec![Operand::StorageClass(StorageClass::Function), Operand::IdRef(zero)],
+            vec![Operand::StorageClass(StorageClass::Function)],
         ));
+        // The variable initialiser alone is not honoured by the Intel compiler for slots that a
+        // later loop iteration overwrites (ggml flash_attn_ext_vec read `%f538` before its first
+        // write and the softmax denominator came out 0), so also store the zero explicitly at entry.
+        self.undef_stores.push(SpirvInstruction::new(
+            Op::Store,
+            None,
+            None,
+            vec![Operand::IdRef(slot), Operand::IdRef(zero)],
+        ));
+        self.undef_slots_info.push((slot, zero, self.current_block));
+        if kind != Kind::Predicate {
+            self.undefined_seen.push((self.current_entry.clone(), operand.to_string(), kind == Kind::B64));
+        }
         let value = Value { id: slot, kind };
         self.undef_slots.insert(operand.to_string(), value);
         Ok(value)
@@ -3138,6 +3162,10 @@ pub(super) fn emit(
     globals: Vec<GlobalVar>,
 ) -> Result<Translation, Error> {
     let mut hints: HashMap<(String, String), Space> = HashMap::new();
+    // Registers read before any write, per entry: lowered again with a real `mov r, 0` at the
+    // top of the entry block. The Intel compiler honours that, but not a slot initialiser or a
+    // store inserted behind the translator's back (ggml flash_attn_ext_vec, `%f538`).
+    let mut zeroed: HashMap<String, Vec<(String, bool)>> = HashMap::new();
     loop {
         let mut emitter = Emitter::new();
         emitter.address_hints = hints.clone();
@@ -3145,10 +3173,34 @@ pub(super) fn emit(
         let result = entries
             .iter()
             .cloned()
-            .map(|entry| emitter.emit_entry(entry))
+            .map(|mut entry| {
+                if let Some(regs) = zeroed.get(entry.name) {
+                    let mut init: Vec<Instruction<'static>> = Vec::new();
+                    for (name, wide) in regs {
+                        // A few bytes per affected kernel; the instruction needs a `'static` name.
+                        let key: &'static str = Box::leak(name.clone().into_boxed_str());
+                        init.push(if *wide { Instruction::Move64(key, "0") } else { Instruction::Move32(key, "0") });
+                    }
+                    if let Some(first) = entry.blocks.first_mut() {
+                        first.instructions.splice(0..0, init);
+                    }
+                }
+                emitter.emit_entry(entry)
+            })
             .collect::<Result<Vec<_>, _>>();
         match result {
             Ok(kernels) => {
+                let mut fresh = false;
+                for (entry, reg, wide) in emitter.undefined_seen.drain(..) {
+                    let list = zeroed.entry(entry).or_default();
+                    if !list.iter().any(|(r, _)| *r == reg) {
+                        list.push((reg, wide));
+                        fresh = true;
+                    }
+                }
+                if fresh {
+                    continue;
+                }
                 return Ok(Translation {
                     words: emitter.builder.module().assemble(),
                     kernels,
@@ -3180,12 +3232,67 @@ pub(super) fn emit(
 }
 
 impl<'a> Emitter<'a> {
+    /// A register that a loop reads before it writes (ggml's `flash_attn_ext_vec` reads `%f538`
+    /// in the first iteration) gets a zero-initialised slot, but the Intel compiler treats that
+    /// slot as undefined unless the zero is stored on the edge into the loop. Store it at the
+    /// end of every non-back-edge predecessor of the innermost loop header that dominates the
+    /// first reading block; entry-block stores (added separately) stay as a fallback.
+    fn store_undefined_in_preheaders(&mut self, blocks: &[crate::ptx::Block<'a>], labels: &[u32]) {
+        if self.undef_slots_info.is_empty() {
+            return;
+        }
+        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
+        for (index, block) in blocks.iter().enumerate() {
+            for next in block.end.successors() {
+                predecessors[next].push(index);
+            }
+        }
+        let graphs = Graphs::build(blocks, &predecessors);
+        let mut inserts: Vec<(u32, u32, u32)> = Vec::new();
+        for &(slot, zero, read_block) in &self.undef_slots_info {
+            let headers: Vec<usize> = (0..blocks.len())
+                .filter(|&h| {
+                    graphs.dom.dominates(h, read_block)
+                        && predecessors[h].iter().any(|&p| graphs.dom.dominates(h, p))
+                })
+                .collect();
+            // The headers dominating one block form a chain; take the innermost.
+            let Some(&header) = headers
+                .iter()
+                .find(|&&h| !headers.iter().any(|&o| o != h && graphs.dom.dominates(h, o)))
+            else {
+                continue;
+            };
+            for &p in &predecessors[header] {
+                if !graphs.dom.dominates(header, p) {
+                    inserts.push((labels[p], slot, zero));
+                }
+            }
+        }
+        let function = self.builder.module_mut().functions.last_mut().unwrap();
+        for (label, slot, zero) in inserts {
+            if let Some(block) = function
+                .blocks
+                .iter_mut()
+                .find(|b| b.label.as_ref().and_then(|l| l.result_id) == Some(label))
+            {
+                let at = block.instructions.len().saturating_sub(1);
+                block.instructions.insert(
+                    at,
+                    SpirvInstruction::new(Op::Store, None, None, vec![Operand::IdRef(slot), Operand::IdRef(zero)]),
+                );
+            }
+        }
+        self.undef_slots_info.clear();
+    }
+
     fn emit_entry(&mut self, entry: Entry<'a>) -> Result<KernelMetadata, Error> {
         self.current_entry = entry.name.to_string();
         let flow = Flow::analyze(&entry.blocks)?;
         self.declarations = entry.registers;
         self.registers.clear();
         self.undef_slots.clear();
+        self.undef_slots_info.clear();
         self.written_somewhere.clear();
         {
             let mut defined = Vec::new();
@@ -3375,6 +3482,7 @@ impl<'a> Emitter<'a> {
         self.builder.branch(labels[0])?;
         for &index in &flow.order {
             self.builder.begin_block(Some(labels[index]))?;
+            self.current_block = index;
             let block = &entry.blocks[index];
             for &inst in &block.instructions {
                 self.instruction(inst)?;
@@ -3394,6 +3502,7 @@ impl<'a> Emitter<'a> {
             }
         }
         self.builder.end_function()?;
+        self.store_undefined_in_preheaders(&entry.blocks, &labels);
         if self.fp32 {
             self.builder
                 .execution_mode(function, ExecutionMode::ContractionOff, []);
@@ -3405,7 +3514,7 @@ impl<'a> Emitter<'a> {
             .unwrap()
             .blocks[0]
             .instructions
-            .splice(0..0, self.locals.drain(..));
+            .splice(0..0, self.locals.drain(..).chain(self.undef_stores.drain(..)));
         Ok(KernelMetadata {
             name: entry.name.to_owned(),
             params: entry.params.into_iter().map(|(_, param)| param).collect(),
