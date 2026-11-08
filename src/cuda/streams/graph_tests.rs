@@ -158,9 +158,10 @@ fn fake_capture_modes_and_state_errors() {
         StreamCaptureInvalidated
     );
 
-    // Out-of-range allocations are rejected at capture time.
+    // Out-of-range copies are rejected at capture time. Kernel pointer arguments are not:
+    // GGML captures with dummy pointers and never replays them.
     begin(s, RELAXED);
-    assert_eq!(launch(f, s, 0xdead_0000), InvalidValue);
+    assert_eq!(launch(f, s, 0xdead_0000), Success);
     assert_eq!(cuMemsetD8Async(0xdead_0000, 0, 8, s), InvalidValue);
     assert_eq!(cuGraphDestroy(end(s)), Success);
 
