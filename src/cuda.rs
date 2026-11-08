@@ -76,6 +76,7 @@ pub(crate) enum CuResult {
     HostMemoryAlreadyRegistered = 712,
     HostMemoryNotRegistered = 713,
     LaunchFailed = 719,
+    CooperativeLaunchTooLarge = 720,
     NotSupported = 801,
     StreamCaptureUnsupported = 900,
     StreamCaptureInvalidated = 901,

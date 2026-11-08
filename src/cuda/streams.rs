@@ -16,6 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod batch;
+pub(super) mod extra;
 #[cfg(all(test, windows))]
 mod batch_tests;
 mod batch_wake;
@@ -717,6 +718,7 @@ pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> Cu
             )?;
             streams.live.insert(key, stream);
             state.stream_owners.insert(key, owner);
+            extra::note_stream(key, flags);
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))
