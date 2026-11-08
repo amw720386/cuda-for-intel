@@ -2279,7 +2279,12 @@ mod tests {
 
     #[test]
     fn device_queries_require_initialization() {
-        let _serial = TEST_RUNTIME.lock().unwrap();
+        let _serial = TEST_RUNTIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Independent of test order: earlier tests may have left an initialised runtime behind.
+        let previous = RUNTIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        drop(previous);
         let mut out = -1;
         assert_eq!(unsafe { cuDeviceGetCount(&mut out) }, NotInitialized);
         assert_eq!(out, -1);
