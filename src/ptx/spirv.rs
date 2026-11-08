@@ -3377,8 +3377,8 @@ impl<'a> Emitter<'a> {
         }
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
         self.builder.branch(labels[0])?;
-        for index in flow.order {
-            self.initialized.clone_from(&flow.inputs[index]);
+        for &index in &flow.order {
+            flow.load_inputs(index, &mut self.initialized);
             self.builder.begin_block(Some(labels[index]))?;
             let block = &entry.blocks[index];
             for &inst in &block.instructions {

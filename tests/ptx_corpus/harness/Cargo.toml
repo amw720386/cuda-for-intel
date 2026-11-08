@@ -10,4 +10,7 @@ autobenches = false
 [dependencies]
 rspirv = "0.13"
 
+[dev-dependencies]
+cfi-fatbin = { path = "../../../crates/fatbin" }
+
 [workspace]

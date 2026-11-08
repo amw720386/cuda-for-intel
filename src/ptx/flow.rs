@@ -3,10 +3,27 @@ use std::collections::HashSet;
 
 pub(super) struct Flow<'a> {
     pub(super) order: Vec<usize>,
-    pub(super) inputs: Vec<HashSet<&'a str>>,
+    names: Vec<&'a str>,
+    words: usize,
+    /// Row-major bitsets: registers definitely written on every path into each block.
+    inputs: Vec<u64>,
 }
 
 impl<'a> Flow<'a> {
+    /// Fills `into` with the registers definitely initialized on entry to `index`.
+    pub(super) fn load_inputs(&self, index: usize, into: &mut HashSet<&'a str>) {
+        into.clear();
+        let row = &self.inputs[index * self.words..(index + 1) * self.words];
+        for (w, &word) in row.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                into.insert(self.names[w * 64 + bit]);
+            }
+        }
+    }
+
     pub(super) fn analyze(blocks: &[Block<'a>]) -> Result<Self, Error> {
         if blocks.is_empty() {
             return Err(Error::new("PTX entry has no blocks"));
@@ -53,74 +70,277 @@ impl<'a> Flow<'a> {
             .flat_map(|block| &block.instructions)
             .any(|inst| matches!(inst, Instruction::Barrier))
         {
-            verify_barriers(blocks, &order)?;
+            verify_barriers(blocks, &order, &predecessors)?;
         }
 
+        // Definite assignment: forward must-analysis over interned registers. Definitions only
+        // generate, so out = in | gen, and the join is intersection.
+        let mut ids: std::collections::HashMap<&'a str, usize> = std::collections::HashMap::new();
+        let mut names: Vec<&'a str> = Vec::new();
         let mut scratch = Vec::new();
-        let definitions: Vec<HashSet<_>> = blocks
-            .iter()
-            .map(|block| {
-                let mut defined = HashSet::new();
-                for inst in &block.instructions {
-                    if inst.collect_definitions(&mut scratch).is_some() {
-                        defined.extend(scratch.iter().copied());
+        let mut gen_lists: Vec<Vec<usize>> = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let mut list = Vec::new();
+            for inst in &block.instructions {
+                if inst.collect_definitions(&mut scratch).is_some() {
+                    for &name in &scratch {
+                        let next = names.len();
+                        let id = *ids.entry(name).or_insert(next);
+                        if id == next {
+                            names.push(name);
+                        }
+                        list.push(id);
                     }
                 }
-                defined
-            })
-            .collect();
-        let all: HashSet<_> = definitions.iter().flatten().copied().collect();
-        let mut outputs = vec![all; blocks.len()];
-        let mut inputs = vec![HashSet::new(); blocks.len()];
+            }
+            list.sort_unstable();
+            list.dedup();
+            gen_lists.push(list);
+        }
+        let words = names.len().div_ceil(64).max(1);
+        let mut inputs = vec![0u64; blocks.len() * words];
+        let mut outputs = vec![!0u64; blocks.len() * words];
+        let mut row = vec![0u64; words];
         loop {
             let mut changed = false;
             for &index in &order {
-                inputs[index] = if index == 0 {
-                    HashSet::new()
+                if index == 0 {
+                    row.fill(0);
                 } else {
-                    let mut pred = predecessors[index].iter().copied();
-                    let mut common = outputs[pred.next().expect("reachable block")].clone();
-                    for prev in pred {
-                        common.retain(|reg| outputs[prev].contains(reg));
+                    row.fill(!0);
+                    for &prev in &predecessors[index] {
+                        let out = &outputs[prev * words..(prev + 1) * words];
+                        for (r, o) in row.iter_mut().zip(out) {
+                            *r &= o;
+                        }
                     }
-                    common
-                };
-                let output = inputs[index].union(&definitions[index]).copied().collect();
-                if outputs[index] != output {
-                    outputs[index] = output;
+                }
+                inputs[index * words..(index + 1) * words].copy_from_slice(&row);
+                for &id in &gen_lists[index] {
+                    row[id / 64] |= 1 << (id % 64);
+                }
+                let out = &mut outputs[index * words..(index + 1) * words];
+                if out != row.as_slice() {
+                    out.copy_from_slice(&row);
                     changed = true;
                 }
             }
             if !changed {
-                return Ok(Self { order, inputs });
+                return Ok(Self { order, names, words, inputs });
             }
         }
     }
 }
 
-fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
-    // A branch's strict postdominators are guaranteed reconvergence points.
-    let mut postdominates = vec![vec![true; blocks.len()]; blocks.len()];
-    loop {
-        let mut changed = false;
-        for &index in order.iter().rev() {
-            let end = blocks[index].end;
-            let set: Vec<_> = (0..blocks.len())
-                .map(|candidate| {
-                    candidate == index
-                        || (!matches!(end, Terminator::Return)
-                            && end.successors().all(|next| postdominates[next][candidate]))
-                })
-                .collect();
-            if postdominates[index] != set {
-                postdominates[index] = set;
-                changed = true;
+/// Postdominator tree (Cooper-Harvey-Kennedy on the reverse CFG with a virtual exit) with
+/// Euler-interval numbering for O(1) ancestor queries.
+struct PostDom {
+    tin: Vec<u32>,
+    tout: Vec<u32>,
+}
+
+impl PostDom {
+    fn build(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<usize>]) -> Self {
+        let n = blocks.len();
+        let exit = n;
+        // Reverse postorder of the reverse CFG: DFS from the virtual exit along predecessors.
+        let mut rpo_index = vec![u32::MAX; n + 1];
+        let mut post = Vec::with_capacity(n + 1);
+        let mut seen = vec![false; n + 1];
+        let mut stack: Vec<(usize, usize)> = vec![(exit, 0)];
+        seen[exit] = true;
+        let ret_blocks: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|&b| matches!(blocks[b].end, Terminator::Return))
+            .collect();
+        let rev_succ = |node: usize, i: usize| -> Option<usize> {
+            if node == exit {
+                ret_blocks.get(i).copied()
+            } else {
+                predecessors[node].get(i).copied()
+            }
+        };
+        while let Some(&mut (node, ref mut i)) = stack.last_mut() {
+            if let Some(next) = rev_succ(node, *i) {
+                *i += 1;
+                if !std::mem::replace(&mut seen[next], true) {
+                    stack.push((next, 0));
+                }
+            } else {
+                post.push(node);
+                stack.pop();
             }
         }
-        if !changed {
-            break;
+        post.reverse();
+        for (i, &node) in post.iter().enumerate() {
+            rpo_index[node] = i as u32;
+        }
+        let mut idom = vec![usize::MAX; n + 1];
+        idom[exit] = exit;
+        let succs = |node: usize| -> [Option<usize>; 2] {
+            let mut it = blocks[node].end.successors();
+            let a = it.next();
+            let b = it.next();
+            if matches!(blocks[node].end, Terminator::Return) {
+                [Some(exit), None]
+            } else {
+                [a, b]
+            }
+        };
+        let intersect = |idom: &[usize], mut a: usize, mut b: usize| {
+            while a != b {
+                while rpo_index[a] > rpo_index[b] {
+                    a = idom[a];
+                }
+                while rpo_index[b] > rpo_index[a] {
+                    b = idom[b];
+                }
+            }
+            a
+        };
+        loop {
+            let mut changed = false;
+            for &node in post.iter().skip(1) {
+                let mut new = usize::MAX;
+                for s in succs(node).into_iter().flatten() {
+                    if idom[s] == usize::MAX {
+                        continue;
+                    }
+                    new = if new == usize::MAX { s } else { intersect(&idom, s, new) };
+                }
+                if new != idom[node] {
+                    idom[node] = new;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Children lists and Euler tour.
+        let mut head = vec![usize::MAX; n + 1];
+        let mut next_sibling = vec![usize::MAX; n + 1];
+        for node in 0..n {
+            let parent = idom[node];
+            if parent != usize::MAX {
+                next_sibling[node] = head[parent];
+                head[parent] = node;
+            }
+        }
+        let mut tin = vec![0u32; n + 1];
+        let mut tout = vec![0u32; n + 1];
+        let mut clock = 0u32;
+        let mut stack = vec![(exit, false)];
+        while let Some((node, done)) = stack.pop() {
+            if done {
+                tout[node] = clock;
+                clock += 1;
+                continue;
+            }
+            tin[node] = clock;
+            clock += 1;
+            stack.push((node, true));
+            let mut child = head[node];
+            while child != usize::MAX {
+                stack.push((child, false));
+                child = next_sibling[child];
+            }
+        }
+        Self { tin, tout }
+    }
+
+    /// True when `candidate` postdominates `block` (reflexive).
+    fn postdominates(&self, block: usize, candidate: usize) -> bool {
+        self.tin[candidate] <= self.tin[block] && self.tout[block] <= self.tout[candidate]
+    }
+}
+
+/// Strongly connected components; `in_cycle[b]` is true when `b` lies on a cycle.
+fn cyclic_blocks(blocks: &[Block<'_>]) -> Vec<bool> {
+    let n = blocks.len();
+    let mut index_of = vec![u32::MAX; n];
+    let mut low = vec![0u32; n];
+    let mut on_stack = vec![false; n];
+    let mut in_cycle = vec![false; n];
+    let mut scc_stack = Vec::new();
+    let mut counter = 0u32;
+    for root in 0..n {
+        if index_of[root] != u32::MAX {
+            continue;
+        }
+        let mut call: Vec<(usize, usize)> = vec![(root, 0)];
+        index_of[root] = counter;
+        low[root] = counter;
+        counter += 1;
+        scc_stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut i)) = call.last_mut() {
+            let succ = blocks[node].end.successors().nth(*i);
+            if let Some(next) = succ {
+                *i += 1;
+                if next == node {
+                    in_cycle[node] = true;
+                }
+                if index_of[next] == u32::MAX {
+                    index_of[next] = counter;
+                    low[next] = counter;
+                    counter += 1;
+                    scc_stack.push(next);
+                    on_stack[next] = true;
+                    call.push((next, 0));
+                } else if on_stack[next] {
+                    low[node] = low[node].min(index_of[next]);
+                }
+            } else {
+                call.pop();
+                if let Some(&(parent, _)) = call.last() {
+                    low[parent] = low[parent].min(low[node]);
+                }
+                if low[node] == index_of[node] {
+                    let mut members = Vec::new();
+                    loop {
+                        let m = scc_stack.pop().unwrap();
+                        on_stack[m] = false;
+                        members.push(m);
+                        if m == node {
+                            break;
+                        }
+                    }
+                    if members.len() > 1 {
+                        for m in members {
+                            in_cycle[m] = true;
+                        }
+                    }
+                }
+            }
         }
     }
+    in_cycle
+}
+
+fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<usize>]) -> Result<(), Error> {
+    // A branch's strict postdominators are guaranteed reconvergence points.
+    let postdom = PostDom::build(blocks, order, predecessors);
+    let in_cycle = cyclic_blocks(blocks);
+    // Blocks from which a convergent instruction is reachable (backward closure, linear).
+    let mut reaches_conv = vec![false; blocks.len()];
+    let mut work: Vec<usize> = Vec::new();
+    for (i, block) in blocks.iter().enumerate() {
+        if block.instructions.iter().any(|inst| inst.is_convergent()) {
+            reaches_conv[i] = true;
+            work.push(i);
+        }
+    }
+    while let Some(i) = work.pop() {
+        for &p in &predecessors[i] {
+            if !std::mem::replace(&mut reaches_conv[p], true) {
+                work.push(p);
+            }
+        }
+    }
+    let mut stamp = vec![0u32; blocks.len()];
+    let mut generation = 0u32;
 
     // Treat memory loads and all definitions under divergent control as potentially varying.
     // Repeat because a loop-carried definition can affect an earlier branch.
@@ -252,20 +472,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             // Generalised early exit: if no barrier is reachable from one side, the threads
             // taking it only run to completion and exit, which the hardware barrier counts
             // as arrived (GGML's `if (col >= ncols) { ...no barrier...; return; }`).
-            let reaches_barrier = |start: usize| {
-                let mut seen = vec![false; blocks.len()];
-                let mut stack = vec![start];
-                while let Some(next) = stack.pop() {
-                    if std::mem::replace(&mut seen[next], true) {
-                        continue;
-                    }
-                    if blocks[next].instructions.iter().any(|inst| inst.is_convergent()) {
-                        return true;
-                    }
-                    stack.extend(blocks[next].end.successors());
-                }
-                false
-            };
+            let reaches_barrier = |start: usize| reaches_conv[start];
             if !reaches_barrier(taken) || !reaches_barrier(other) || !tid_derived.contains(predicate) {
                 continue;
             }
@@ -274,31 +481,16 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize]) -> Result<(), Error> {
             // iterations, which PyTorch's top-k / sort / scan helpers guarantee by rounding the
             // bound up to a multiple of the block size. Uniformity of the trip count is a
             // value fact we cannot prove, so trust the program as CUDA does.
-            let in_loop = {
-                let mut seen = vec![false; blocks.len()];
-                let mut stack = vec![taken, other];
-                let mut found = false;
-                while let Some(next) = stack.pop() {
-                    if next == index {
-                        found = true;
-                        break;
-                    }
-                    if std::mem::replace(&mut seen[next], true) {
-                        continue;
-                    }
-                    stack.extend(blocks[next].end.successors());
-                }
-                found
-            };
+            let in_loop = in_cycle[index];
             if in_loop && std::env::var_os("CFI_STRICT_BARRIERS").is_none() {
                 continue;
             }
             checked_branches[index] = true;
-            let mut seen = vec![false; blocks.len()];
+            generation += 1;
             let mut stack = vec![taken, other];
             while let Some(next) = stack.pop() {
-                if (next != index && postdominates[index][next])
-                    || std::mem::replace(&mut seen[next], true)
+                if (next != index && postdom.postdominates(index, next))
+                    || std::mem::replace(&mut stamp[next], generation) == generation
                 {
                     continue;
                 }
