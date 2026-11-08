@@ -1,0 +1,37 @@
+name: Bug report
+description: Something fails or gives wrong results on an Intel GPU
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. This project is experimental and Windows only. Please read docs/troubleshooting.md first.
+        Do not paste hostnames, user names, IP addresses, keys or model files.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Run `pwsh -File scripts\cfi-doctor.ps1` and paste the whole output. It is redacted, but check it once.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What did you run, what did you expect, what happened
+      description: Application and version (for example Ollama v0.12.6 and model name), exact command, and the error text.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log with CUDA_FOR_INTEL_LOG=1 and CUDA_FOR_INTEL_TRACE=1
+      description: Only the relevant lines (first error plus 20 lines before it). Remove private paths.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checked
+      options:
+        - label: The self-test (`scripts\cfi.ps1 selftest`) result is included above or described
+        - label: This is not a SASS-only (no PTX) program; see docs/compatibility.md

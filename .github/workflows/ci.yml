@@ -1,0 +1,83 @@
+name: ci
+# Everything here runs without a GPU. Hardware tests (tests/gpu, scripts/validate-gpu.ps1) are
+# run by hand on an Intel Arc machine; see docs/release-checklist.md.
+on:
+  push:
+    branches: [main, integration, release-cand]
+  pull_request:
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Build workspace
+        run: cargo build --locked --workspace
+      - name: Library tests (includes the SPIR-V simulator and translator tests)
+        run: cargo test --locked --lib --workspace
+  simulator:
+    name: spir-v simulator and translator tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: sim, flow, coverage, tier2/3 and ggml conformance tests (fake Level Zero backend)
+        run: cargo test --locked --lib -p cuda-for-intel -- ptx::
+      - name: XMX interpreter and generators
+        run: cargo test --locked -p cublas_shim
+  lints:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Advisory until the existing formatting and lint backlog is cleared: these report but do
+      # not fail the run. Remove continue-on-error once `cargo fmt --check` and clippy are clean.
+      - name: cargo fmt --check
+        continue-on-error: true
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        continue-on-error: true
+        run: cargo clippy --locked --lib --workspace -- -D warnings
+  leak-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scan tracked files for IPs, hosts, user paths, keys
+        run: bash scripts/scan-leaks.sh
+  powershell-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: parse installer scripts
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errs)
+            if ($errs) { $errs | ForEach-Object { Write-Host "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" }; $bad++ }
+          }
+          if ($bad) { exit 1 }
+      - name: installer dry run (no GPU needed)
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'cfi-dry'
+          pwsh -File scripts/cfi.ps1 install -InstallDir $d -DryRun -Force -BinDir scripts
+          if (Test-Path $d) { throw 'dry run created the install directory' }
+          pwsh -File scripts/cfi-doctor.ps1 -InstallDir $d

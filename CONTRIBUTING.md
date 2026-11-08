@@ -89,3 +89,12 @@ clang --cuda-device-only --cuda-gpu-arch=sm_52 -nocudainc -nocudalib -O2 -fno-un
 ```
 
 `block_reduce`, `forge_residual` and `forge_reduce` use `-fno-unroll-loops` (the last two also `-ffp-contract=off`); `atomic_tickets` uses the plain flags.
+
+## Before you open a pull request
+
+- Run `bash scripts/scan-leaks.sh staged` before each commit and `cargo test --lib`; CI runs the build, library and simulator tests, the leak scan and a PowerShell parse
+  check (`.github/workflows/ci.yml`). `cargo fmt` and clippy are advisory until the existing backlog is cleared: do not add new findings.
+- Describe what you ran in the PR template, including the GPU and driver for hardware tests (paste `scripts\cfi-doctor.ps1` output).
+- Installer and diagnostics live in `scripts/cfi.ps1`, `cfi-doctor.ps1`, `cfi-selftest.ps1` and `cfi-common.ps1`. Keep them working in Windows PowerShell 5.1 and
+  PowerShell 7, ASCII only, and keep the doctor output free of host names, user names and IP addresses.
+- Release steps: [docs/release-checklist.md](docs/release-checklist.md). Security reports: [SECURITY.md](SECURITY.md).
