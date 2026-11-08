@@ -97,7 +97,6 @@ struct Emitter<'a> {
     builtins: [Word; BUILTINS.len()],
     declarations: HashMap<String, Width>,
     registers: HashMap<&'a str, Value>,
-    initialized: HashSet<&'a str>,
     /// Registers assigned somewhere in the entry; others read as zero (undefined in PTX).
     ever_defined: HashSet<&'a str>,
     /// Registers with a single definition, `mov.u32 %r, <immediate>`: their value is known.
@@ -196,7 +195,6 @@ impl<'a> Emitter<'a> {
             builtins,
             declarations: HashMap::new(),
             registers: HashMap::new(),
-            initialized: HashSet::new(),
             ever_defined: HashSet::new(),
             const_regs: HashMap::new(),
             const_ids: HashSet::new(),
@@ -349,7 +347,6 @@ impl<'a> Emitter<'a> {
             slot
         };
         self.builder.store(slot, value.id, None, [])?;
-        self.initialized.insert(dst);
         Ok(())
     }
 
@@ -3198,7 +3195,6 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        self.initialized.clear();
         self.params.clear();
         self.local = None;
         self.device_atomics = false;
@@ -3378,7 +3374,6 @@ impl<'a> Emitter<'a> {
         let labels: Vec<_> = entry.blocks.iter().map(|_| self.builder.id()).collect();
         self.builder.branch(labels[0])?;
         for index in flow.order {
-            self.initialized.clone_from(&flow.inputs[index]);
             self.builder.begin_block(Some(labels[index]))?;
             let block = &entry.blocks[index];
             for &inst in &block.instructions {
