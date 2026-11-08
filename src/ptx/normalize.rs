@@ -1597,7 +1597,10 @@ fn merge_u16_load_pairs(out: &mut Vec<String>, open: usize, ctx: &mut Ctx) {
             continue;
         };
         let used = |reg: &str| out[open..].iter().map(|l| l.split_whitespace().filter(|t| *t == reg).count()).sum::<usize>();
-        let straight = out[i..=k].iter().all(|l| !l.ends_with(" :") && !l.contains(" bra ") && !l.starts_with('@') && !l.starts_with("ret") && !l.starts_with("bar"));
+        let straight = out[i..=k].iter().all(|l| !l.ends_with(" :") && !l.contains(" bra ") && !l.starts_with('@') && !l.starts_with("ret") && !l.starts_with("bar")
+            // The second load is hoisted to the first one: nothing in between may write memory
+            // or order it (a store/atomic to the same dword would otherwise be read stale).
+            && !["st.", "atom", "red.", "membar", "fence", "call", "cp.async", "multimem"].iter().any(|p| l.starts_with(p)));
         if !straight || used(lo) != 2 || used(hi) != 2 || low_offset % 2 != 0 {
             i += 1;
             continue;
@@ -1679,5 +1682,79 @@ mod load_pair_tests {
         let before = out.clone();
         merge_u16_load_pairs(&mut out, 0, &mut Ctx::default());
         assert_eq!(out, before);
+    }
+
+    #[test]
+    fn leaves_pairs_alone_when_a_store_sits_between_the_loads() {
+        let mut out: Vec<String> = [
+            "{",
+            "ld.global.u16 %rs4 , [ %rd31 ] ;",
+            "st.global.u32 [ %rd31 ] , %r9 ;",
+            "ld.global.u16 %rs5 , [ %rd31+2 ] ;",
+            "mov.b32 %r77 , { %rs4 , %rs5 } ;",
+            "}",
+        ]
+        .map(String::from)
+        .to_vec();
+        let before = out.clone();
+        merge_u16_load_pairs(&mut out, 0, &mut Ctx::default());
+        assert_eq!(out, before);
+    }
+
+    /// Runs the kernel `out[t] = pack(ld.u16 [p+off], ld.u16 [p+off+2])` (or reversed order) with and
+    /// without the rewrite on the SPIR-V simulator at every 2-byte alignment.
+    #[test]
+    fn merged_loads_equal_the_original_on_the_simulator() {
+        use crate::ptx::sim::{Gpu, Launch, Sim};
+        for (nc, reversed) in [(false, false), (true, false), (false, true), (true, true)] {
+            let ld = if nc { "ld.global.nc.u16" } else { "ld.global.u16" };
+            for off in (0..8i64).step_by(2) {
+                let (o1, o2) = if reversed { (off + 2, off) } else { (off, off + 2) };
+                let (r1, r2) = if reversed { ("%rs5", "%rs4") } else { ("%rs4", "%rs5") };
+                let body: Vec<String> = [
+                    "ld.param.u64 %rd1 , [ k_param_0 ] ;".to_string(),
+                    "ld.param.u64 %rd2 , [ k_param_1 ] ;".to_string(),
+                    "cvta.to.global.u64 %rd3 , %rd1 ;".to_string(),
+                    "cvta.to.global.u64 %rd4 , %rd2 ;".to_string(),
+                    format!("{ld} {r1} , [ %rd3+{o1} ] ;"),
+                    format!("{ld} {r2} , [ %rd3+{o2} ] ;"),
+                    "mov.b32 %r7 , { %rs4 , %rs5 } ;".to_string(),
+                    "st.global.u32 [ %rd4 ] , %r7 ;".to_string(),
+                    "ret ;".to_string(),
+                ]
+                .to_vec();
+                let build = |lines: &[String], decls: &[String]| {
+                    format!(
+                        ".version 8.8\n.target sm_80\n.address_size 64\n.visible .entry k(\n.param .u64 k_param_0,\n.param .u64 k_param_1\n)\n{{\n.reg .b16 %rs<8>;\n.reg .b32 %r<8>;\n.reg .b64 %rd<8>;\n{}\n{}\n}}\n",
+                        decls.join("\n"),
+                        lines.join("\n")
+                    )
+                };
+                // Base is 4-aligned (allocation) so `off` covers both dword alignments.
+                let data: Vec<u8> = (0..32u8).map(|b| b.wrapping_mul(37).wrapping_add(11)).collect();
+                let run = |src: &str| {
+                    let t = crate::ptx::translate(src).unwrap();
+                    let module = rspirv::dr::load_words(&t.words).unwrap();
+                    let mut gpu = Gpu::default();
+                    let inp = gpu.upload(&data);
+                    let out = gpu.alloc(4);
+                    Sim::new(&module).run(&mut gpu, &Launch::new([1, 1, 1], [1, 1, 1], vec![inp, out])).unwrap();
+                    gpu.download(out, 4)
+                };
+                let mut merged = body.clone();
+                let mut ctx = Ctx::default();
+                let mut framed = vec!["{".to_string()];
+                framed.extend(merged.drain(..));
+                merge_u16_load_pairs(&mut framed, 0, &mut ctx);
+                let decls = ctx.take_decls();
+                framed.remove(0);
+                assert!(!framed.iter().any(|l| l.contains(".u16")), "not merged: {framed:?}");
+                let a = run(&build(&body, &[]));
+                let b = run(&build(&framed, &decls));
+                let want = [data[off as usize], data[off as usize + 1], data[off as usize + 2], data[off as usize + 3]];
+                assert_eq!(a, want, "reference nc={nc} rev={reversed} off={off}");
+                assert_eq!(b, want, "merged nc={nc} rev={reversed} off={off}");
+            }
+        }
     }
 }
