@@ -43,6 +43,7 @@ mod xmx;
 mod xmx_host;
 #[cfg(test)]
 mod xmx_interp;
+mod extra;
 mod stubs;
 
 use libloading::Library;

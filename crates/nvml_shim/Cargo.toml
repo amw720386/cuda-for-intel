@@ -1,0 +1,13 @@
+[package]
+name = "nvml_shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "NVML shim over cuda-for-intel's Driver API: nvidia-smi style queries answer or return NVML_ERROR_NOT_SUPPORTED, never crash"
+
+[lib]
+name = "nvml"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libloading = "0.8"
