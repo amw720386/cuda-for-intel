@@ -272,7 +272,7 @@ fn run_clang(req: &Request, parsed: &options::Parsed, clang: &Path, arch: u32) -
     let mut cmd = Command::new(clang);
     cmd.args(["-x", "cuda", "--cuda-device-only"])
         .arg(format!("--cuda-gpu-arch=sm_{arch}"))
-        .args(["-nocudainc", "-nocudalib", "-nostdinc", "-nostdinc++", "-O2"])
+        .args(["-nocudainc", "-nocudalib", "-nostdinc", "-nostdinc++", "-O2", "-fno-jump-tables"])
         .args(["-Xclang", "-target-feature", "-Xclang", ptx_isa_for(arch)])
         .arg(format!("-std={}", parsed.std))
         .args(["-fno-exceptions", "-fno-rtti", "-fno-color-diagnostics", "-fno-diagnostics-show-note-include-stack"])

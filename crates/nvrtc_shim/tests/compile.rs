@@ -159,3 +159,18 @@ fn c_abi_roundtrip() {
         assert_eq!(CStr::from_ptr(nvrtc::nvrtcGetErrorString(6)).to_str().unwrap(), "NVRTC_ERROR_COMPILATION");
     }
 }
+
+#[test]
+fn large_switch_does_not_emit_jump_tables() {
+    if !have_clang() {
+        return;
+    }
+    // A 100-way switch makes NVPTX emit `brx.idx` unless jump tables are disabled; the translator
+    // has no indirect branch (PyTorch's erfcx jiterator kernel hits this).
+    let cases: String = (0..100).map(|k| format!("case {k}: r = x * {k}.5f + {}.f; break;\n", k * k + 1)).collect();
+    let src = format!(
+        "extern \"C\" __global__ void k(float* a, float* o) {{ int i = threadIdx.x; float x = a[i]; float r; switch ((int)x) {{ {cases} default: r = 0.f; }} o[i] = r; }}"
+    );
+    let out = compiler::compile(&req(&src)).unwrap();
+    assert!(!out.ptx.contains("brx.idx"), "jump table emitted");
+}
