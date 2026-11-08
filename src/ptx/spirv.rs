@@ -289,7 +289,7 @@ impl<'a> Emitter<'a> {
             Op::Variable,
             Some(pointer),
             Some(slot),
-            vec![Operand::StorageClass(StorageClass::Function), Operand::IdRef(zero)],
+            vec![Operand::StorageClass(StorageClass::Function)],
         ));
         // The variable initialiser alone is not honoured by the Intel compiler for slots that a
         // later loop iteration overwrites (ggml flash_attn_ext_vec read `%f538` before its first
