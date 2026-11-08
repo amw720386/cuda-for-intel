@@ -133,6 +133,8 @@ pub struct FilterDesc {
     pub dtype: i32,
     pub format: i32,
     pub dims: Vec<i32>,
+    /// Explicit element strides (backend tensors); `None` means packed in `format`.
+    pub strides_override: Option<Vec<i32>>,
 }
 
 impl FilterDesc {
@@ -143,11 +145,11 @@ impl FilterDesc {
         if !valid_dtype(dtype) || (format != abi::NCHW && format != abi::NHWC) {
             return abi::BAD_PARAM;
         }
-        *self = Self { dtype, format, dims: dims.to_vec() };
+        *self = Self { dtype, format, dims: dims.to_vec(), strides_override: None };
         abi::SUCCESS
     }
     pub fn strides(&self) -> Vec<i32> {
-        packed_strides(&self.dims, self.format)
+        self.strides_override.clone().unwrap_or_else(|| packed_strides(&self.dims, self.format))
     }
     pub fn size_in_bytes(&self) -> usize {
         self.dims.iter().map(|d| *d as usize).product::<usize>() * dtype_bytes(self.dtype)

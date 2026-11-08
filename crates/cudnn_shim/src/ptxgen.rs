@@ -13,7 +13,7 @@
 
 use std::fmt::Write;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Elem {
     F32,
     F16,
@@ -39,7 +39,7 @@ impl Elem {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ConvKind {
     Fwd,
     BwdData,
@@ -62,6 +62,9 @@ pub fn conv_entry(kind: ConvKind, e: Elem) -> String {
 pub fn add_tensor_entry(e: Elem) -> String {
     format!("cfi_cudnn_add_tensor_{}", e.tag())
 }
+pub fn relu_entry(e: Elem) -> String {
+    format!("cfi_cudnn_relu_{}", e.tag())
+}
 pub fn bn_train_entry(e: Elem) -> String {
     format!("cfi_cudnn_bn_train_{}", e.tag())
 }
@@ -78,6 +81,7 @@ pub const ADD_PARAMS: usize = 17;
 pub const BN_TRAIN_PARAMS: usize = 20;
 pub const BN_INFER_PARAMS: usize = 17;
 pub const BN_BWD_PARAMS: usize = 21;
+pub const RELU_PARAMS: usize = 10;
 pub const BN_BLOCK: u32 = 256;
 
 fn header(s: &mut String, name: &str, tys: &[&str]) {
@@ -429,6 +433,34 @@ pub fn generate_add_tensor(e: Elem) -> String {
     s
 }
 
+/// In-place `y = max(y, 0)` over a 4-D logical shape (used by ConvolutionBiasActivationForward).
+/// Params: 0 y (u64), 1..=4 dims n,c,h,w, 5..=8 strides, 9 total.
+pub fn generate_relu(e: Elem) -> String {
+    let name = relu_entry(e);
+    let mut s = String::new();
+    let mut tys = vec!["u64"];
+    tys.extend(["u32"; 9]);
+    header(&mut s, &name, &tys);
+    let p = |i: usize| format!("[{name}_param_{i}]");
+    let _ = writeln!(s, "ld.param.u64 %rd1, {};\ncvta.to.global.u64 %rd1, %rd1;", p(0));
+    for i in 1..10 {
+        let _ = writeln!(s, "ld.param.u32 %r{i}, {};", p(i));
+    }
+    let _ = writeln!(s, "mov.f32 %f0, 0f00000000;");
+    let _ = writeln!(s, "mov.u32 %r40, %ctaid.x;\nmov.u32 %r41, %ntid.x;\nmov.u32 %r42, %tid.x;");
+    let _ = writeln!(s, "mad.lo.s32 %r43, %r40, %r41, %r42;");
+    let _ = writeln!(s, "setp.ge.u32 %p1, %r43, %r9;\n@%p1 bra $L_out;");
+    let _ = writeln!(s, "rem.u32 %r50, %r43, %r4;\ndiv.u32 %r51, %r43, %r4;");
+    let _ = writeln!(s, "rem.u32 %r52, %r51, %r3;\ndiv.u32 %r51, %r51, %r3;");
+    let _ = writeln!(s, "rem.u32 %r53, %r51, %r2;\ndiv.u32 %r54, %r51, %r2;");
+    emit_addr(&mut s, "%rd10", "%rd1", &[("%r54", "%r5"), ("%r53", "%r6"), ("%r52", "%r7"), ("%r50", "%r8")], e.shift());
+    emit_load(&mut s, e, "%rd10", "%f10");
+    let _ = writeln!(s, "max.ftz.f32 %f10, %f10, %f0;");
+    emit_store(&mut s, e, "%rd10", "%f10");
+    let _ = writeln!(s, "$L_out:\nret;\n}}");
+    s
+}
+
 // --- Batch normalization (spatial) ---------------------------------------
 // Element (n, c, i) with i in 0..HW (h*W+w flattened) lives at
 // n*sn + c*sc + (i / W)*sh + (i % W)*sw (elements). M = N*HW.
@@ -730,6 +762,7 @@ pub fn all_entries() -> Vec<(String, String, usize)> {
             v.push((conv_entry(k, e), generate_conv(k, e), CONV_PARAMS));
         }
         v.push((add_tensor_entry(e), generate_add_tensor(e), ADD_PARAMS));
+        v.push((relu_entry(e), generate_relu(e), RELU_PARAMS));
         v.push((bn_train_entry(e), generate_bn_train(e), BN_TRAIN_PARAMS));
         v.push((bn_infer_entry(e), generate_bn_infer(e), BN_INFER_PARAMS));
         v.push((bn_bwd_entry(e), generate_bn_bwd(e), BN_BWD_PARAMS));
