@@ -514,20 +514,26 @@ fn backend_flow(cudnn: &Dll, cu: &Cu, h: *mut c_void) {
     assert_eq!(unsafe { fin(plan) }, 0, "plan finalize");
     let mut ws = -1i64;
     assert_eq!(unsafe { get(plan, 402, 3, 1, &mut n, (&mut ws as *mut i64).cast()) }, 0);
-    assert_eq!(ws, 0);
+    assert!(ws >= 0);
+    println!("backend plan workspace: {ws} bytes");
 
     let g = ConvGeom { n: 2, c: 4, h: 8, w: 8, k: 6, r: 3, s: 3, p: 8, q: 8, pad_h: 1, pad_w: 1, str_h: 1, str_w: 1, dil_h: 1, dil_w: 1, groups: 1, flip: false, xs: ConvGeom::packed_nchw(4, 8, 8), ws: [36, 9, 3, 1], ys: ConvGeom::packed_nchw(6, 8, 8) };
     let (xv, wv) = (sample(g.x_len(), 1), sample(g.w_len(), 2));
     let (xp, wp, yp) = (cu.up(&Dt::F32.enc(&xv)), cu.up(&Dt::F32.enc(&wv)), cu.up(&vec![0u8; g.y_len() * 4]));
-    let vp = mk(16);
-    seti64(vp, 1000, &[1, 2, 3]);
-    assert_eq!(unsafe { set(vp, 1001, 6, 3, [xp, wp, yp].as_ptr().cast()) }, 0);
-    assert_eq!(unsafe { set(vp, 1003, 6, 1, [0u64].as_ptr().cast()) }, 0);
-    assert_eq!(unsafe { fin(vp) }, 0, "variant pack finalize");
-    assert_eq!(unsafe { exec(h, plan, vp) }, 0, "backend execute");
-    let mut want = vec![0f32; g.y_len()];
-    refmath::conv_fwd(&g, &xv, &wv, &mut want, 1.0, 0.0);
-    check("backend conv fwd", &Dt::F32.dec(&cu.down(yp, g.y_len() * 4)), &want, 1e-4);
+    // First without a workspace (must fall back to the direct kernel), then with the advertised one.
+    for with_ws in [false, true] {
+        let wsp: u64 = if with_ws && ws > 0 { cu.up(&vec![0u8; ws as usize]) } else { 0 };
+        let yp = cu.up(&vec![0u8; g.y_len() * 4]);
+        let vp = mk(16);
+        seti64(vp, 1000, &[1, 2, 3]);
+        assert_eq!(unsafe { set(vp, 1001, 6, 3, [xp, wp, yp].as_ptr().cast()) }, 0);
+        assert_eq!(unsafe { set(vp, 1003, 6, 1, [wsp].as_ptr().cast()) }, 0);
+        assert_eq!(unsafe { fin(vp) }, 0, "variant pack finalize");
+        assert_eq!(unsafe { exec(h, plan, vp) }, 0, "backend execute");
+        let mut want = vec![0f32; g.y_len()];
+        refmath::conv_fwd(&g, &xv, &wv, &mut want, 1.0, 0.0);
+        check(if with_ws { "backend conv fwd (workspace)" } else { "backend conv fwd (no workspace)" }, &Dt::F32.dec(&cu.down(yp, g.y_len() * 4)), &want, 1e-4);
+    }
 
     // a pointwise op must not produce an engine (frontend then reports no plan)
     let pw = mk(13);
