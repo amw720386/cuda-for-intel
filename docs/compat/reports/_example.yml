@@ -1,0 +1,14 @@
+schema: 1
+app: ExampleApp
+app_version: "1.0"
+workload: "example workload (not a real result)"
+project_version: "0.0.0"
+gpu: "Example GPU"
+driver: "0.0.0"
+os: "Example OS"
+result: partial
+detail: "template only"
+doctor: |
+  example output
+reported_by: "example"
+verified: false

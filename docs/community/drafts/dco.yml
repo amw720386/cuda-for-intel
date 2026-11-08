@@ -1,0 +1,31 @@
+# DRAFT, NOT ENABLED. To enable: copy to .github/workflows/dco.yml
+name: DCO
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by on every non-merge commit in the PR
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -u
+          bad=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            if ! git log -1 --format=%B "$c" | grep -qiE '^Signed-off-by: .+ <.+>$'; then
+              echo "missing Signed-off-by: $(git log -1 --format='%h %s' "$c")"
+              bad=1
+            fi
+          done
+          if [ "$bad" = 1 ]; then
+            echo "Fix with: git rebase --signoff origin/<base>  (then force-push your PR branch)"
+            exit 1
+          fi
