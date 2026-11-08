@@ -1,0 +1,26 @@
+# DRAFT cargo-deny config. Not enabled. Untested: cargo-deny was not installed when this was written.
+# To try: cp docs/community/deny.toml.draft deny.toml && cargo install cargo-deny && cargo deny check
+[graph]
+all-features = true
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+  "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib", "0BSD", "Unicode-3.0",
+]
+# Anything not listed (GPL, AGPL, LGPL-only, SSPL, proprietary) fails.
+# OR-expressions pass when one alternative is allowed (e.g. r-efi).
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
