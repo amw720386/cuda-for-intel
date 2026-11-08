@@ -109,6 +109,8 @@ struct Emitter<'a> {
     /// (slot, zero constant, PTX block of the first read) for every undefined-register slot.
     undef_slots_info: Vec<(u32, u32, usize)>,
     current_block: usize,
+    /// (entry, register, is 64-bit) for registers read before any write, reported to `emit`.
+    undefined_seen: Vec<(String, String, bool)>,
     params: HashMap<(&'a str, usize), Value>,
     /// Workgroup copy of the kernel parameters, when addressed by computed offsets.
     param_array: Option<Word>,
@@ -207,6 +209,7 @@ impl<'a> Emitter<'a> {
             undef_stores: Vec::new(),
             undef_slots_info: Vec::new(),
             current_block: 0,
+            undefined_seen: Vec::new(),
             params: HashMap::new(),
             param_array: None,
             param_global_mode: false,
@@ -301,6 +304,9 @@ impl<'a> Emitter<'a> {
             vec![Operand::IdRef(slot), Operand::IdRef(zero)],
         ));
         self.undef_slots_info.push((slot, zero, self.current_block));
+        if kind != Kind::Predicate {
+            self.undefined_seen.push((self.current_entry.clone(), operand.to_string(), kind == Kind::B64));
+        }
         let value = Value { id: slot, kind };
         self.undef_slots.insert(operand.to_string(), value);
         Ok(value)
@@ -3156,6 +3162,10 @@ pub(super) fn emit(
     globals: Vec<GlobalVar>,
 ) -> Result<Translation, Error> {
     let mut hints: HashMap<(String, String), Space> = HashMap::new();
+    // Registers read before any write, per entry: lowered again with a real `mov r, 0` at the
+    // top of the entry block. The Intel compiler honours that, but not a slot initialiser or a
+    // store inserted behind the translator's back (ggml flash_attn_ext_vec, `%f538`).
+    let mut zeroed: HashMap<String, Vec<(String, bool)>> = HashMap::new();
     loop {
         let mut emitter = Emitter::new();
         emitter.address_hints = hints.clone();
@@ -3163,10 +3173,34 @@ pub(super) fn emit(
         let result = entries
             .iter()
             .cloned()
-            .map(|entry| emitter.emit_entry(entry))
+            .map(|mut entry| {
+                if let Some(regs) = zeroed.get(entry.name) {
+                    let mut init: Vec<Instruction<'static>> = Vec::new();
+                    for (name, wide) in regs {
+                        // A few bytes per affected kernel; the instruction needs a `'static` name.
+                        let key: &'static str = Box::leak(name.clone().into_boxed_str());
+                        init.push(if *wide { Instruction::Move64(key, "0") } else { Instruction::Move32(key, "0") });
+                    }
+                    if let Some(first) = entry.blocks.first_mut() {
+                        first.instructions.splice(0..0, init);
+                    }
+                }
+                emitter.emit_entry(entry)
+            })
             .collect::<Result<Vec<_>, _>>();
         match result {
             Ok(kernels) => {
+                let mut fresh = false;
+                for (entry, reg, wide) in emitter.undefined_seen.drain(..) {
+                    let list = zeroed.entry(entry).or_default();
+                    if !list.iter().any(|(r, _)| *r == reg) {
+                        list.push((reg, wide));
+                        fresh = true;
+                    }
+                }
+                if fresh {
+                    continue;
+                }
                 return Ok(Translation {
                     words: emitter.builder.module().assemble(),
                     kernels,
