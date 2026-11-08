@@ -448,6 +448,57 @@ fn rename_token(token: &str, suffix: &str, labels: &HashSet<String>) -> String {
     out
 }
 
+/// Shrinks the callee's `.reg %x<N>;` ranges to the registers the inlined copy actually uses
+/// (and drops unused ranges). Without this every call site re-declares the callee's full
+/// register file, so a large device function called hundreds of times exceeds the register cap.
+fn trim_register_ranges(out: &mut Vec<Stmt>, suffix: &str) {
+    let mut used: HashMap<String, usize> = HashMap::new();
+    for stmt in out.iter() {
+        if stmt.first().is_some_and(|t| t == ".reg") {
+            continue;
+        }
+        for token in stmt {
+            let mut rest = token.as_str();
+            while let Some(at) = rest.find('%') {
+                rest = &rest[at + 1..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                    .unwrap_or(rest.len());
+                let name = &rest[..end];
+                if let Some(local) = name.strip_prefix(suffix) {
+                    let digits = local.len() - local.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+                    if digits > 0 {
+                        let (prefix, number) = local.split_at(local.len() - digits);
+                        if let Ok(n) = number.parse::<usize>() {
+                            let slot = used.entry(prefix.to_owned()).or_insert(0);
+                            *slot = (*slot).max(n + 1);
+                        }
+                    }
+                }
+                rest = &rest[end..];
+            }
+        }
+    }
+    out.retain_mut(|stmt| {
+        if stmt.first().map(String::as_str) != Some(".reg") {
+            return true;
+        }
+        let Some(open) = stmt.iter().position(|t| t == "<") else { return true };
+        let Some(name) = open.checked_sub(1).and_then(|i| stmt.get(i)) else { return true };
+        let Some(local) = name.strip_prefix('%').and_then(|n| n.strip_prefix(suffix)) else { return true };
+        let count = used.get(local).copied().unwrap_or(0);
+        if count == 0 {
+            return false;
+        }
+        if let Some(slot) = stmt.get_mut(open + 1) {
+            if slot.parse::<usize>().is_ok_and(|n| n > count) {
+                *slot = count.to_string();
+            }
+        }
+        true
+    });
+}
+
 fn mov_for(ty: &str) -> &'static str {
     if element_bytes(ty) == 8 { "mov.b64" } else { "mov.b32" }
 }
@@ -545,6 +596,7 @@ fn inline_body(
     }
     out.push(vec![end_label, ":".into()]);
     out.push(vec!["}".into()]);
+    trim_register_ranges(&mut out, &suffix);
     if hoisted.is_empty() {
         return Ok(out);
     }

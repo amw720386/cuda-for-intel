@@ -1,6 +1,7 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod ext;
 mod flow;
+mod uniform;
 pub(crate) mod globals;
 mod inline;
 mod normalize;
@@ -1038,6 +1039,10 @@ mod tier2_tests;
 mod tier3_tests;
 #[cfg(test)]
 mod tier3_mma_tests;
+#[cfg(test)]
+mod sim;
+#[cfg(test)]
+mod flow_tests;
 
 #[cfg(test)]
 mod tests {
