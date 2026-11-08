@@ -51,7 +51,28 @@ pwsh -File scripts\run-ollama.ps1    -TargetDir C:\cfi
 The setup script builds with `cargo build --release --locked`, refuses a companion or
 `ggml-cuda.dll` whose SHA-256 differs from the pinned values (override with `-AllowUnknownHash`,
 unsupported), copies the Ollama tree (your download is not modified) and patches the copy as described next.
-In a second shell, `. C:\cfi\cfi-env.ps1` and then run `ollama-cfi.exe run <model>` or call the HTTP API on port 11434.
+The scripts run in Windows PowerShell 5.1 (`powershell -ExecutionPolicy Bypass -File ...`) as well as in
+PowerShell 7 (`pwsh`). `cargo` must be on `PATH` (install Rust with the MSVC x64 toolchain first).
+
+The staged Ollama listens on **127.0.0.1:11435**, not on Ollama's default 11434 (`setup-windows.ps1 -Port`
+changes it). An installed Ollama (tray app or service) normally owns 11434, and a client that used that port
+would talk to the other instance and never touch the Intel GPU. `run-ollama.ps1` refuses to start when the
+port is busy. Keep the server window open and use a second shell for the client:
+
+```powershell
+. C:\cfi\cfi-env.ps1                       # sets PATH, OLLAMA_HOST, OLLAMA_MODELS, CUDA_FOR_INTEL_*
+Set-Content Modelfile 'FROM D:\models\qwen2.5-0.5b-instruct-q8_0.gguf'
+ollama-cfi.exe create mymodel -f Modelfile  # register the GGUF once
+ollama-cfi.exe run mymodel "Say hi."
+# or the HTTP API:
+Invoke-RestMethod http://127.0.0.1:11435/api/generate -Method Post -ContentType application/json `
+  -Body '{"model":"mymodel","prompt":"Say hi.","stream":false,"options":{"num_predict":8,"temperature":0}}'
+```
+
+The first request JIT-compiles kernels and can take minutes (the compiled kernels are cached in
+`C:\cfi\kernel-cache`). To stop the server press Ctrl+C in its window. The server and its runner processes
+are named `ollama-cfi.exe`, so stop them by that name (`Stop-Process -Name ollama-cfi`); that never touches an
+installed Ollama.
 
 ## Manual staging (what the script does)
 
@@ -73,13 +94,16 @@ Build: `cargo build --release --locked -p cuda-for-intel -p cublas_shim`. Output
    | `CUDA_FOR_INTEL_HYBRID_DIR` | absolute path of the companion directory | see above |
    | `OLLAMA_LIBRARY_PATH` | `<ollama>\lib\ollama;<ollama>\lib\ollama\cuda_v13` | make the runner load the patched plug-in |
    | `PATH` | `<ollama>`, `<ollama>\lib\ollama`, `<ollama>\lib\ollama\cuda_v13` first | DLL resolution |
+   | `OLLAMA_HOST` | `127.0.0.1:11435` | not Ollama's default port, which an installed Ollama usually owns |
+   | `OLLAMA_MODELS` | `<target>\models` | private model store |
+   | `CUDA_FOR_INTEL_CACHE_DIR` | `<target>\kernel-cache` | reuse compiled kernels between runs |
    | `OLLAMA_VULKAN` | `0` | keep Ollama's own Vulkan backend from taking the GPU |
    | `OLLAMA_FLASH_ATTENTION` | `0` | flash-attention kernels do not all translate yet (`docs/hw-logs/stock-scan.md`) |
    | `OLLAMA_NUM_PARALLEL` | `1` | as in the verified run |
    | `OLLAMA_LOAD_TIMEOUT` | `60m` | the first load JIT-compiles large kernels, minutes |
 
-5. Quit any installed Ollama (tray app or service) so port 11434 is free, then run `ollama.exe serve`.
-   The launcher runs a copy named `ollama-cfi.exe` so it does not collide with the installed one.
+5. Choose a port nobody else uses (`OLLAMA_HOST=127.0.0.1:11435`) and run `ollama.exe serve` from a copy named
+   `ollama-cfi.exe`, so it neither collides with nor can be confused with an installed Ollama.
    Creating a model from a GGUF and calling `/api/generate` worked in the verified run
    with options `num_gpu 99`, `num_ctx 128`, `num_batch 1`, `temperature 0`.
 

@@ -47,13 +47,26 @@ if (-not $env:CUDA_FOR_INTEL_HYBRID_DIR -or -not (Test-Path -LiteralPath (Join-P
 }
 if ($Trace) { $env:CUDA_FOR_INTEL_TRACE = '1' }
 
-$running = Get-Process -Name 'ollama', 'ollama app' -ErrorAction SilentlyContinue
-if ($running) {
-    Write-Warning 'An Ollama process is already running. Quit it (tray icon, Exit) so port 11434 is free for this instance.'
+# Refuse to start when the port is taken: otherwise `ollama run` and the HTTP API would quietly
+# talk to the other Ollama instance (an installed tray app or service) and the GPU is never used.
+$hostPort = if ($env:OLLAMA_HOST) { $env:OLLAMA_HOST } else { '127.0.0.1:11434' }
+$portNumber = [int]($hostPort -replace '^.*:', '')
+$busy = $false
+try {
+    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $portNumber)
+    $listener.Start()
+    $listener.Stop()
+} catch {
+    $busy = $true
+}
+if ($busy) {
+    throw "Port $portNumber ($hostPort) is already in use, probably by an installed Ollama. Stop that instance, or re-run scripts\setup-windows.ps1 with another -Port."
 }
 
 $exe = Join-Path $ollamaDir 'ollama-cfi.exe'
-Copy-Item -LiteralPath (Join-Path $ollamaDir 'ollama.exe') -Destination $exe -Force
+if (-not (Get-Process -Name 'ollama-cfi' -ErrorAction SilentlyContinue)) {
+    Copy-Item -LiteralPath (Join-Path $ollamaDir 'ollama.exe') -Destination $exe -Force
+}
 
 Write-Host "Starting $exe $($Arguments -join ' ')"
 Write-Host "CUDA_FOR_INTEL_HYBRID_DIR=$env:CUDA_FOR_INTEL_HYBRID_DIR"

@@ -30,6 +30,10 @@
   Also build and stage cudart64_12.dll (the project's own minimal CUDA Runtime, used by the
   controlled llama.cpp bring-up builds; not needed with the genuine NVIDIA runtime).
 
+.PARAMETER Port
+  TCP port for the staged Ollama (default 11435). The default Ollama port 11434 is usually taken by
+  an installed Ollama (tray app or service); a client call would then silently reach that instance.
+
 .PARAMETER AllowUnknownHash
   Continue (with a warning) when a third-party file does not match the pinned SHA-256.
   Off by default: an unexpected hash usually means an unsupported Ollama version.
@@ -45,7 +49,8 @@ param(
     [string]$OllamaDir,
     [switch]$SkipBuild,
     [switch]$WithCudartShim,
-    [switch]$AllowUnknownHash
+    [switch]$AllowUnknownHash,
+    [int]$Port = 11435
 )
 
 $ErrorActionPreference = 'Stop'
@@ -170,10 +175,13 @@ if ($ollamaStage) {
         '$libs = (Join-Path $ollama ''lib\ollama'') + '';'' + (Join-Path $ollama ''lib\ollama\cuda_v13'')',
         '$env:OLLAMA_LIBRARY_PATH = $libs',
         '$env:PATH = $ollama + '';'' + $libs + '';'' + $env:PATH',
+        "`$env:OLLAMA_HOST = '127.0.0.1:$Port'",
+        '$env:OLLAMA_MODELS = Join-Path $here ''models''',
         '$env:OLLAMA_VULKAN = ''0''',
         '$env:OLLAMA_FLASH_ATTENTION = ''0''',
         '$env:OLLAMA_NUM_PARALLEL = ''1''',
-        '$env:OLLAMA_LOAD_TIMEOUT = ''60m'''
+        '$env:OLLAMA_LOAD_TIMEOUT = ''60m''',
+        '$env:CUDA_FOR_INTEL_CACHE_DIR = Join-Path $here ''kernel-cache'''
     )
 }
 $envFile = Join-Path $target 'cfi-env.ps1'
