@@ -67,58 +67,11 @@ pub fn is_ptx(source: &str) -> bool {
     rest.starts_with(".version")
 }
 
-fn llvm_has_nvptx(clang: &Path) -> bool {
-    Command::new(clang)
-        .arg("--print-targets")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("nvptx64"))
-        .unwrap_or(false)
-}
-
-/// Locates a clang with NVPTX support: `NVRTC_SHIM_CLANG`, then PATH, then standard install dirs.
+/// Locates a clang with NVPTX support; see `toolchain` for the lookup order. The `Err` text is an
+/// actionable message that ends up in the program log.
 pub fn find_clang() -> Result<PathBuf, String> {
     static FOUND: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    FOUND
-        .get_or_init(|| {
-            if let Some(p) = std::env::var_os("NVRTC_SHIM_CLANG") {
-                let p = PathBuf::from(p);
-                return if llvm_has_nvptx(&p) {
-                    Ok(p)
-                } else {
-                    Err(format!("NVRTC_SHIM_CLANG={} is not a clang with the NVPTX backend", p.display()))
-                };
-            }
-            let exe = if cfg!(windows) { ".exe" } else { "" };
-            let mut cands: Vec<PathBuf> = Vec::new();
-            let mut names = vec!["clang".to_owned()];
-            names.extend((15..=25).rev().map(|v| format!("clang-{v}")));
-            if let Some(path) = std::env::var_os("PATH") {
-                for dir in std::env::split_paths(&path) {
-                    for n in &names {
-                        cands.push(dir.join(format!("{n}{exe}")));
-                    }
-                }
-            }
-            for dir in [
-                "/opt/homebrew/opt/llvm/bin",
-                "/usr/local/opt/llvm/bin",
-                "C:\\Program Files\\LLVM\\bin",
-            ] {
-                cands.push(Path::new(dir).join(format!("clang{exe}")));
-            }
-            for v in (15..=25).rev() {
-                cands.push(PathBuf::from(format!("/usr/lib/llvm-{v}/bin/clang")));
-            }
-            for c in cands {
-                if c.is_file() && llvm_has_nvptx(&c) {
-                    return Ok(c);
-                }
-            }
-            Err("no clang with the NVPTX backend found; install LLVM (e.g. `brew install llvm`, `apt install clang`, \
-                 or the Windows LLVM installer) or set NVRTC_SHIM_CLANG to its clang binary"
-                .into())
-        })
-        .clone()
+    FOUND.get_or_init(|| crate::toolchain::resolve(&crate::toolchain::Env::from_process(), &crate::toolchain::probe_binary)).clone()
 }
 
 fn clang_version(clang: &Path) -> String {
@@ -294,8 +247,11 @@ fn run_clang(req: &Request, parsed: &options::Parsed, clang: &Path, arch: u32) -
     }
     cmd.args(&parsed.clang_args).arg("-S").arg("-o").arg(&out).arg(&main);
 
-    let output = cmd.output().map_err(|e| Failure::NoToolchain(format!("cannot run {}: {e}", clang.display())))?;
+    let output = cmd.output().map_err(|e| Failure::NoToolchain(format!("error: cannot run clang {}: {e}. Check NVRTC_SHIM_CLANG / NVRTC_SHIM_CLANG_DIR (docs/nvrtc.md).", clang.display())))?;
     let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() && crate::toolchain::indicates_missing_nvptx(&log) {
+        return Err(Failure::NoToolchain(format!("{}\nclang ({}) said:\n{log}", crate::toolchain::MISSING_NVPTX_MESSAGE, clang.display())));
+    }
     // Hide staging paths so logs read like NVRTC's.
     for (needle, repl) in [
         (tmp.0.join("program.cu").display().to_string(), display.clone()),
