@@ -262,7 +262,7 @@ fn hw_cudnn_dense() {
         dense();
         let _ = tx.send(());
     });
-    match rx.recv_timeout(std::time::Duration::from_secs(900)) {
+    match rx.recv_timeout(std::time::Duration::from_secs(std::env::var("CFI_HW_WATCHDOG_S").ok().and_then(|v| v.parse().ok()).unwrap_or(900))) {
         Ok(()) => handle.join().unwrap(),
         Err(_) => {
             eprintln!("WATCHDOG: cudnn hardware test hung");
