@@ -1,0 +1,50 @@
+# Compatibility matrix
+
+Experimental software. Every "works" below was run and has a log; "untested" means nobody has run it.
+Report your own results with the compatibility issue template (it asks for `scripts\cfi-doctor.ps1` output).
+
+## GPUs and drivers
+
+| GPU | Driver | Status |
+| --- | --- | --- |
+| Intel Arc B390 (Xe3) | 32.0.101.9033 | **Tested.** All results in this repository come from this part. |
+| Other Arc B-series, Arc A-series, Lunar Lake, Iris Xe, data-center parts | any | Untested by the current release. Older notes for an Iris Xe laptop are in [milestone-12.md](milestone-12.md); do not assume the current features work there. |
+| Machines with two Intel GPUs | any | Untested. |
+| Non-Intel GPUs | n/a | Not a goal. |
+
+Operating system: **Windows x64 only.** There is no Linux hardware test box, so Linux is out of scope even
+though the Level Zero loader code compiles there. macOS builds and runs library unit tests only.
+
+## Applications
+
+| Application | Status | Notes and recipe |
+| --- | --- | --- |
+| Ollama v0.12.6 (stock `ollama.exe` and stock `cuda_v13\ggml-cuda.dll`) | Works with the models listed in [hw-logs/model-matrix.md](hw-logs/model-matrix.md) | Needs NVIDIA's signed companion DLL that you obtain yourself: [ollama.md](ollama.md). Other Ollama versions are untested. Slower than the CPU backend for small models. |
+| llama.cpp (build for `75-virtual`) | Works on the logged runs | [llama-cpp.md](llama-cpp.md); flash attention off |
+| PyTorch | In progress | Built-up results: [pytorch.md](pytorch.md). A consolidated `pytorch-status.md` is planned; until it lands, `pytorch.md` is the reference. Wheels cu121 and newer carry SASS only and cannot run. |
+| CUDA C programs with embedded PTX | Works for the bundled samples | [cuda-programs.md](cuda-programs.md) |
+| cuDNN | Opt-in, experimental | Not part of the default install. Convolutions use PyTorch's native kernels with `torch.backends.cudnn.enabled = False`. |
+| NCCL, cuFFT, cuSOLVER | Not implemented | |
+
+## Feature status
+
+| Feature | Status |
+| --- | --- |
+| PTX to SPIR-V translation | Supported; coverage and gaps in [ptx-gap-report.md](ptx-gap-report.md) |
+| SASS / cubin only binaries | **Unsupported.** The program must embed PTX |
+| cuBLAS / cuBLASLt | Entry points for the names exercised by the tested apps |
+| XMX (DPAS) GEMM | Present, on by default only for large fp16/bf16 shapes. **No speedup over the tiled path was demonstrated** in end-to-end decode; switch off with `CFI_XMX=0` to compare |
+| Quantised ggml kernels substitution | `CUDA_FOR_INTEL_SUBST=auto` by default; `none` turns it off |
+| VMM, multi-GPU peer access, conditional graph nodes, texture/surface | Not implemented |
+
+## Known issues (honest list)
+
+- Experimental. Do not use for anything where wrong output matters.
+- Windows only. SASS-only binaries cannot run.
+- XMX gives no demonstrated end-to-end speed-up; the GPU path is currently slower than the CPU backend for small models.
+- First run of a model compiles kernels, taking minutes; caches make later runs fast.
+- Greedy output can differ from the CPU backend at near-ties; K-quant models diverge earlier (expected).
+- About 6 percent of probed PyTorch 2.13 kernels fail to translate.
+- Not all `flash_attn_ext_*` kernels translate: disable flash attention.
+- Architecture-guard stub kernels in PTX built for another architecture report error 209.
+- Only one GPU model has ever been tested.

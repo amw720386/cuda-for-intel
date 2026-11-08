@@ -19,6 +19,8 @@ Architecture details: [docs/architecture.md](docs/architecture.md).
 
 ## Status and compatibility
 
+A condensed matrix with the known-issues list is in [docs/compatibility.md](docs/compatibility.md).
+
 Everything in this table was run, and the evidence is linked. "Untested" means nobody has run it, not that it is expected to fail.
 
 ### Hardware and OS
@@ -63,21 +65,43 @@ What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a transl
   (see Troubleshooting).
 - Systems with two Intel GPUs are untested (both logged hosts had one root GPU).
 
-## Build
+## Quick start (Windows x64, Intel Arc)
+
+Experimental. Needs an Intel GPU with the current Intel graphics driver (it ships the Level Zero loader) and the Microsoft Visual C++ x64 runtime.
+
+```powershell
+git clone https://github.com/amw720386/cuda-for-intel; cd cuda-for-intel
+pwsh -File scripts\cfi.ps1 check       # prerequisites: GPU, driver, Level Zero, VC runtime, Ollama version
+pwsh -File scripts\cfi.ps1 install     # places the DLLs, then runs the self-test: PASS or FAIL with next steps
+. "$env:LOCALAPPDATA\cuda-for-intel\install\cfi-env.ps1"   # environment for THIS shell only
+```
+
+`install` builds from source with `cargo` (Rust, MSVC x64 toolchain) unless you give it prebuilt DLLs
+(`-BinDir <folder>` or `-ZipPath/-ZipUrl` with `-ZipSha256`). Add `-DryRun` to see the plan first.
+
+What it does and does not do:
+
+- Writes only inside its install directory (default `%LOCALAPPDATA%\cuda-for-intel\install`). It never touches System32, your NVIDIA driver, or an existing Ollama installation, and sets no machine or user environment variables.
+- Backs up any file it would replace (`.bak-<timestamp>`) and records hashes in `manifest.json`. `pwsh -File scripts\cfi.ps1 uninstall` removes its files and restores backups.
+- The self-test runs a small vector add (PTX to SPIR-V to Level Zero) on the GPU and prints `SELFTEST: PASS` or `FAIL` with a next step.
+
+Something wrong? `pwsh -File scripts\cfi-doctor.ps1` prints a redacted report (GPU, driver, Level Zero, shim and translator versions, switches) that is meant to be pasted into an issue.
+Guides: [compatibility](docs/compatibility.md), [troubleshooting](docs/troubleshooting.md), [security](SECURITY.md), [contributing](CONTRIBUTING.md).
+Stock Ollama needs third-party files you supply yourself: [docs/ollama.md](docs/ollama.md).
+
+### Build from source only
 
 Requirements: Rust stable (edition 2024, cargo >= 1.85) with the MSVC x64 toolchain on Windows. Cargo builds and the hardware-independent tests need no CUDA toolkit and no GPU.
-Running on a GPU needs the current Intel graphics driver (it ships the Level Zero loader).
 
 ```powershell
 cargo build --release --locked -p cuda-for-intel -p cublas_shim   # add -p cudart_shim for cudart64_12.dll
-cargo test --locked                                              # hardware-independent tests
+cargo test --locked --lib                                        # hardware-independent tests
 pwsh -File scripts\check-install.ps1                             # device query + vector add, PASS/FAIL
 ```
 
 Outputs in `target\release`: `nvcuda.dll` (Driver API), `cublas64_12.dll` (cuBLAS and cuBLASLt entry points in one DLL; copy it under the name the
 application imports, for example also as `cublasLt64_12.dll`), `cudart64_12.dll` (optional minimal runtime).
-
-Guided setup (builds, stages, verifies hashes of the third-party files you supply, writes an environment script):
+For stock Ollama staging (builds, verifies the hashes of the third-party files you supply, writes an environment script):
 
 ```powershell
 pwsh -File scripts\setup-windows.ps1 -TargetDir C:\cfi -HybridDll <path\to\nvcudart_hybrid64.dll> [-OllamaDir <extracted ollama v0.12.6>]
@@ -206,6 +230,7 @@ Set `CUDA_FOR_INTEL_TRACE=1` and `CUDA_FOR_INTEL_LOG=1` first; most failures nam
 | PyTorch | [docs/pytorch.md](docs/pytorch.md) |
 | CUDA C programs | [docs/cuda-programs.md](docs/cuda-programs.md) |
 | Contributing, tests, GPU lock | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Compatibility, troubleshooting, release checklist | [compatibility](docs/compatibility.md), [troubleshooting](docs/troubleshooting.md), [release checklist](docs/release-checklist.md) |
 | Hardware logs | [docs/hw-logs/](docs/hw-logs/README.md) |
 | Development history | [milestone 12](docs/milestone-12.md), [13](docs/milestone-13.md), [14](docs/milestone-14.md), [agent handoff](docs/agent-handoff.md), [PTX gap report](docs/ptx-gap-report.md) |
 
