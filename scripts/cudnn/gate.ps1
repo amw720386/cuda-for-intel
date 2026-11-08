@@ -17,18 +17,19 @@ try {
       "resnet $m $sz rc=$LASTEXITCODE" | Tee-Object -Append "$g\summary.txt"
     }
   }
-  # direct-kernel repro of the earlier 'no engine' errors (largest shapes), with launch tracing
-  $env:CFI_BENCH_BATCH = '8'; $env:CFI_CUDNN_TRACE = '1'
-  & $py "$d\bench_conv.py" direct "$g\direct_big.jsonl" "r18_3x3_64_56|fp32|nchw" > "$g\direct_big.out" 2> "$g\direct_big.err"
-  "direct repro rc=$LASTEXITCODE" | Tee-Object -Append "$g\summary.txt"
-  Remove-Item Env:CFI_CUDNN_TRACE -EA 0
-  # default (GEMM) path on the same largest shapes
-  & $py "$d\bench_conv.py" cudnn "$g\cudnn_big.jsonl" "r18_conv1_7x7s2" > "$g\cudnn_big.out" 2> "$g\cudnn_big.err"
-  "cudnn conv1 rc=$LASTEXITCODE" | Tee-Object -Append "$g\summary.txt"
+  # large shapes with NO workspace advertised: callers pass none, the shim must use its internal scratch (formerly 'no engine')
+  $env:CFI_BENCH_BATCH = '8'; $env:CFI_CUDNN_NO_WS = '1'
+  & $py "$d\bench_conv.py" cudnn "$g\nows_big.jsonl" "fp32|nchw" > "$g\nows_big.out" 2> "$g\nows_big.err"
+  "no-workspace sweep (fp32 nchw) rc=$LASTEXITCODE" | Tee-Object -Append "$g\summary.txt"
+  Remove-Item Env:CFI_CUDNN_NO_WS -EA 0
+  # default path, same shapes
+  & $py "$d\bench_conv.py" cudnn "$g\cudnn_big.jsonl" "fp32|nchw" > "$g\cudnn_big.out" 2> "$g\cudnn_big.err"
+  "default sweep (fp32 nchw) rc=$LASTEXITCODE" | Tee-Object -Append "$g\summary.txt"
   if (-not $SkipSuite) {
     Set-Location "$d\src"
     $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = "$d\target"
     $env:CUDA_FOR_INTEL_HYBRID_DIR = "$run\hybrid"
+    $env:CFI_HW_WATCHDOG_S = '600'
     cargo test --release -j4 --test gpu -- --ignored --test-threads=1 --skip hw_nvrtc > "$g\gpu_suite.out" 2> "$g\gpu_suite.err"
     "gpu suite rc=$LASTEXITCODE" | Tee-Object -Append "$g\summary.txt"
   }

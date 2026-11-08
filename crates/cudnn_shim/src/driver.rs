@@ -18,6 +18,8 @@ struct Driver {
     cuCtxGetCurrent: unsafe extern "system" fn(*mut CUcontext) -> CuResult,
     cuModuleLoadData: unsafe extern "system" fn(*mut CUmodule, *const c_void) -> CuResult,
     cuModuleGetFunction: unsafe extern "system" fn(*mut CUfunction, CUmodule, *const c_char) -> CuResult,
+    cuMemAlloc: unsafe extern "system" fn(*mut u64, usize) -> CuResult,
+    cuStreamSynchronize: unsafe extern "system" fn(CUstream) -> CuResult,
     cuLaunchKernel: unsafe extern "system" fn(
         CUfunction, u32, u32, u32, u32, u32, u32, u32, CUstream, *mut *mut c_void, *mut *mut c_void,
     ) -> CuResult,
@@ -50,6 +52,8 @@ fn driver() -> Option<&'static Driver> {
             cuCtxGetCurrent: sym!("cuCtxGetCurrent"),
             cuModuleLoadData: sym!("cuModuleLoadData"),
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
+            cuMemAlloc: sym!("cuMemAlloc_v2"),
+            cuStreamSynchronize: sym!("cuStreamSynchronize"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
             _lib: lib,
         })
@@ -164,4 +168,25 @@ pub fn launch(kid: Kid, grid: u32, block: u32, stream: CUstream, args: &[Arg]) -
         (drv.cuLaunchKernel)(k.0, grid, 1, 1, block, 1, 1, 0, stream, params.as_mut_ptr(), std::ptr::null_mut())
     };
     if err != 0 { Err(LaunchError::Launch(err)) } else { Ok(()) }
+}
+
+/// Internal scratch for calls that arrive without a (large enough) workspace. One buffer that grows;
+/// the caller must [`sync_stream`] before the next use (the buffer is shared by every stream).
+pub fn scratch(bytes: usize) -> Option<u64> {
+    static S: Mutex<(u64, usize)> = Mutex::new((0, 0));
+    let drv = driver()?;
+    let mut s = S.lock().unwrap_or_else(|e| e.into_inner());
+    if s.1 < bytes {
+        let mut p = 0u64;
+        if unsafe { (drv.cuMemAlloc)(&mut p, bytes) } != 0 || p == 0 {
+            return None;
+        }
+        // the previous (smaller) buffer is leaked on purpose: it may still be referenced by queued work
+        *s = (p, bytes);
+    }
+    Some(s.0)
+}
+
+pub fn sync_stream(stream: CUstream) -> bool {
+    driver().is_some_and(|d| unsafe { (d.cuStreamSynchronize)(stream) } == 0)
 }

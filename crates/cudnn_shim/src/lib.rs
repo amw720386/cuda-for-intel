@@ -823,6 +823,11 @@ thread_local! {
 
 /// Workspace the chosen algorithm needs for `plan` (0: the direct kernel runs and needs none).
 pub(crate) fn conv_workspace(plan: &ConvPlan) -> usize {
+    // test hook: advertise no workspace so callers pass none (exercises the internal scratch path)
+    static NO_WS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *NO_WS.get_or_init(|| std::env::var_os("CFI_CUDNN_NO_WS").is_some_and(|v| !v.is_empty() && v != "0")) {
+        return 0;
+    }
     if blas::global().is_none() {
         return 0;
     }
@@ -840,14 +845,36 @@ fn run_conv(stream: CUstream, plan: &ConvPlan, a: u64, b: u64, out: u64, alpha: 
     if total == 0 {
         return abi::SUCCESS;
     }
-    if ws != 0 && ws_bytes != 0 {
-        if let Some(blas) = blas::global() {
-            let mut guard = blas.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.set_stream(stream) == 0 {
-                CUR_GEOM.with(|c| c.set(plan.geom));
-                let mut ex = GpuExec { stream, elem: plan.elem, ops: [a, b, out], ws, blas: &mut guard };
-                match gemmconv::run(&mut ex, &plan.geom, rk, plan.elem, alpha, beta, ws_bytes) {
-                    Ok(true) => return abi::SUCCESS,
+    if let Some(blas) = blas::global() {
+        let mut guard = blas.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.set_stream(stream) == 0 {
+            CUR_GEOM.with(|c| c.set(plan.geom));
+            // 1) the caller's workspace, 2) internal scratch (synchronised afterwards) when there is none or it is too small
+            let mut tries = vec![(ws, ws_bytes, false)];
+            let need = gemmconv::workspace_bytes(&plan.geom, rk, plan.elem);
+            if need > 0 {
+                tries.push((0, need, true));
+            }
+            for (w, wb, internal) in tries {
+                let (w, wb) = if internal {
+                    match driver::scratch(wb) {
+                        Some(p) => (p, wb),
+                        None => continue,
+                    }
+                } else {
+                    (w, wb)
+                };
+                if w == 0 || wb == 0 {
+                    continue;
+                }
+                let mut ex = GpuExec { stream, elem: plan.elem, ops: [a, b, out], ws: w, blas: &mut guard };
+                match gemmconv::run(&mut ex, &plan.geom, rk, plan.elem, alpha, beta, wb) {
+                    Ok(true) => {
+                        if internal && !driver::sync_stream(stream) {
+                            return abi::EXECUTION_FAILED;
+                        }
+                        return abi::SUCCESS;
+                    }
                     Ok(false) => {}
                     Err(st) => return st,
                 }
