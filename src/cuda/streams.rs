@@ -19,6 +19,7 @@ mod batch;
 #[cfg(all(test, windows))]
 mod batch_tests;
 mod batch_wake;
+mod cross_device;
 pub(super) mod events;
 pub(super) mod timing;
 #[cfg(test)]

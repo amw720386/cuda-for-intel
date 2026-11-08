@@ -345,7 +345,12 @@ fn pointer_facts(pointer: u64) -> Result<PointerFacts, CuResult> {
             context: 0,
             ordinal: 0,
         };
-        for (&key, context) in &state.contexts {
+        // A clash of address ranges between devices resolves to the caller's own context.
+        let own = current().and_then(|key| state.contexts.get(&key).map(|c| (key, c)));
+        for (key, context) in own
+            .into_iter()
+            .chain(state.contexts.iter().map(|(&k, c)| (k, c)))
+        {
             for (kind, map) in [
                 (Kind::Device, &context.allocations),
                 (Kind::Host, &context.host_allocations),
@@ -921,79 +926,6 @@ pub unsafe extern "system" fn cuMemcpy3DAsync_v2(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Peers
-// ---------------------------------------------------------------------------
-
-/// Copies between contexts complete before returning, which satisfies the
-/// stream ordering of the Async form.
-fn peer_copy(
-    dst: u64,
-    dst_context: Opaque,
-    src: u64,
-    src_context: Opaque,
-    size: usize,
-) -> CuResult {
-    status(state(|state| {
-        let (dst_key, src_key) = (dst_context.addr(), src_context.addr());
-        for key in [dst_key, src_key] {
-            state
-                .contexts
-                .get(&key)
-                .ok_or(InvalidContext)?
-                .check_live()?;
-        }
-        if size == 0 {
-            return Ok(());
-        }
-        let api = &state.runtime.api;
-        let source = state.contexts.get_mut(&src_key).ok_or(InvalidContext)?;
-        if !contains_range(&source.allocations, src as usize, size) {
-            return Err(InvalidValue);
-        }
-        source.streams.wait_all(api)?;
-        let target = state.contexts.get_mut(&dst_key).ok_or(InvalidContext)?;
-        if !contains_range(&target.allocations, dst as usize, size) {
-            return Err(InvalidValue);
-        }
-        if dst_key != src_key {
-            target.streams.wait_all(api)?;
-        }
-        let dst_ptr = std::ptr::with_exposed_provenance_mut(dst as usize);
-        let src_ptr = std::ptr::with_exposed_provenance(src as usize);
-        unsafe { target.backend.copy(api, dst_ptr, src_ptr, size) }
-            .inspect_err(|error| target.backend.health.observe(error))
-            .map_err(backend_error)
-    }))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cuMemcpyPeer(
-    dst: u64,
-    dst_context: Opaque,
-    src: u64,
-    src_context: Opaque,
-    size: usize,
-) -> CuResult {
-    trace::call("cuMemcpyPeer", || {
-        peer_copy(dst, dst_context, src, src_context, size)
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cuMemcpyPeerAsync(
-    dst: u64,
-    dst_context: Opaque,
-    src: u64,
-    src_context: Opaque,
-    size: usize,
-    _stream: Opaque,
-) -> CuResult {
-    trace::call("cuMemcpyPeerAsync", || {
-        peer_copy(dst, dst_context, src, src_context, size)
-    })
-}
-
 fn valid_device(ordinal: c_int) -> Result<(), CuResult> {
     runtime(|runtime| {
         usize::try_from(ordinal)
@@ -1001,84 +933,6 @@ fn valid_device(ordinal: c_int) -> Result<(), CuResult> {
             .filter(|&ordinal| ordinal < runtime.devices.len())
             .map(|_| ())
             .ok_or(InvalidDevice)
-    })
-}
-
-/// Level Zero devices are not linked for direct access by this shim.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cuDeviceCanAccessPeer(
-    out: *mut c_int,
-    device: c_int,
-    peer: c_int,
-) -> CuResult {
-    trace::call("cuDeviceCanAccessPeer", || {
-        if out.is_null() {
-            return InvalidValue;
-        }
-        status(
-            valid_device(device)
-                .and_then(|()| valid_device(peer))
-                .map(|()| unsafe { out.write(0) }),
-        )
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn cuDeviceGetP2PAttribute(
-    out: *mut c_int,
-    attr: c_int,
-    src: c_int,
-    dst: c_int,
-) -> CuResult {
-    trace::call("cuDeviceGetP2PAttribute", || {
-        // 1 PERFORMANCE_RANK, 2 ACCESS_SUPPORTED, 3 NATIVE_ATOMIC_SUPPORTED,
-        // 4 CUDA_ARRAY_ACCESS_SUPPORTED, 5 ONLY_PARTIAL_NATIVE_ATOMIC_SUPPORTED.
-        if out.is_null() || !(1..=5).contains(&attr) {
-            return InvalidValue;
-        }
-        status(
-            valid_device(src)
-                .and_then(|()| valid_device(dst))
-                .and_then(|()| {
-                    if src == dst {
-                        return Err(InvalidDevice);
-                    }
-                    unsafe { out.write(0) };
-                    Ok(())
-                }),
-        )
-    })
-}
-
-fn peer_context(peer: Opaque) -> Result<(), CuResult> {
-    state(|state| {
-        let current = state
-            .contexts
-            .get(&current().ok_or(InvalidContext)?)
-            .ok_or(ContextIsDestroyed)?;
-        let peer = state.contexts.get(&peer.addr()).ok_or(InvalidContext)?;
-        peer.check_live()?;
-        if peer.device == current.device {
-            return Err(InvalidDevice);
-        }
-        Ok(())
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn cuCtxEnablePeerAccess(peer: Opaque, flags: c_uint) -> CuResult {
-    trace::call("cuCtxEnablePeerAccess", || {
-        if flags != 0 {
-            return InvalidValue;
-        }
-        status(peer_context(peer).and_then(|()| Err(PeerAccessUnsupported)))
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn cuCtxDisablePeerAccess(peer: Opaque) -> CuResult {
-    trace::call("cuCtxDisablePeerAccess", || {
-        status(peer_context(peer).and_then(|()| Err(PeerAccessNotEnabled)))
     })
 }
 
@@ -1438,6 +1292,7 @@ pub extern "system" fn cuMemAdvise_v2(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cuda::devices::peer::*;
     use std::ptr::null_mut;
 
     #[test]

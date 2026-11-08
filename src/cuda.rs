@@ -9,6 +9,7 @@ use std::sync::Mutex;
 mod current_stack;
 mod xcache;
 mod discovery;
+pub(crate) mod devices;
 #[cfg(windows)]
 mod dxgi_luid;
 mod export_table;
@@ -108,6 +109,8 @@ struct CudaContext {
     module_globals: BTreeSet<usize>,
     functions: HashMap<usize, (usize, CString)>,
     local_storage: HashMap<usize, export_table::ContextStorage>,
+    /// Peer contexts this context enabled access to (see `devices::peer`).
+    peer_access: BTreeSet<usize>,
 }
 
 /// A PTX module whose kernels are translated one at a time on first lookup.
@@ -316,7 +319,11 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
         if guard.is_some() {
             return Success;
         }
-        match Runtime::load() {
+        let loaded = Runtime::load().map(|mut rt| {
+            devices::arrange(&mut rt.devices, &devices::Selection::from_process());
+            rt
+        });
+        match loaded {
             Ok(rt) if rt.devices.is_empty() => NoDevice,
             Ok(rt) => {
                 if trace::enabled() {
@@ -459,6 +466,7 @@ impl State {
                 module_globals: BTreeSet::new(),
                 functions: HashMap::new(),
                 local_storage: HashMap::new(),
+                peer_access: BTreeSet::new(),
             },
         );
         if trace::enabled() {
@@ -737,6 +745,9 @@ pub extern "system" fn cuMemFree_v2(address: u64) -> CuResult {
         if address != 0 {
             streams::drain_unlocked(None);
         }
+        if let Some(result) = devices::peer::free_foreign(address) {
+            return result;
+        }
         status(with_context(|runtime, context| {
             if address == 0 {
                 return Ok(());
@@ -958,6 +969,9 @@ pub unsafe extern "system" fn cuMemcpyDtoD_v2(dst: u64, src: u64, size: usize) -
         if size != 0 {
             streams::drain_unlocked(Some(0));
         }
+        if let Some(result) = devices::peer::foreign_dtod(dst, src, size) {
+            return result;
+        }
         status(with_context(|runtime, context| {
             if size == 0 {
                 return Ok(());
@@ -987,6 +1001,9 @@ pub unsafe extern "system" fn cuMemcpyDtoDAsync_v2(
     stream: Opaque,
 ) -> CuResult {
     trace::call("cuMemcpyDtoDAsync_v2", || {
+        if let Some(result) = devices::peer::foreign_dtod(dst, src, size) {
+            return result;
+        }
         status(with_context(|runtime, context| {
             let key = context.streams.launch_key(stream)?;
             if size == 0 {
@@ -1055,56 +1072,58 @@ fn memset_bytes(dst: u64, value: u8, size: usize, stream: Opaque) -> CuResult {
     }))
 }
 
-/// Decides once whether `dp4a` may use the SPIR-V integer dot product: the driver must build a
-/// probe module that uses it. `CUDA_FOR_INTEL_DP4A=0` forces the scalar lowering.
+/// Probes the device of `context` once (dynamic shared window, `dp4a` integer dot product)
+/// and configures the translator for it. Each device answers for itself: the driver must
+/// build a probe module that uses the dot product on that device, and
+/// `CUDA_FOR_INTEL_DP4A=0` (anything but `1`) forces the scalar lowering.
 fn probe_dot_product(runtime: &Runtime, context: &mut CudaContext) {
-    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
+    let device = &runtime.devices[context.device as usize];
     // Dynamic shared memory window: GGML's larger MMQ tiles launch with up to the opt-in limit
     // the device reports (more than 48 KiB), so reserve what the device offers, up to
     // CUDA_FOR_INTEL_DYN_SHARED (default 64 KiB). Kernels reserve the whole window per workgroup.
-    #[cfg(test)]
-    let fake = runtime.api.is_fake();
-    #[cfg(not(test))]
-    let fake = false;
-    if !fake {
-        let device_max = runtime.devices[context.device as usize].info.max_shared_local_memory;
-        let wanted = std::env::var("CUDA_FOR_INTEL_DYN_SHARED").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(65536);
-        let window = wanted.min(device_max).max(49152.min(device_max));
-        ptx::set_dynamic_shared_bytes(window);
-        export_log_always(format_args!("dynamic shared window {window} (device max {device_max})"));
-    }
     // The native integer-dot-product lowering is opt-in (CUDA_FOR_INTEL_DP4A=1) until the
     // Q6_K ncols_dst=4 mismatch is root-caused.
-    if std::env::var_os("CUDA_FOR_INTEL_DP4A").as_deref() != Some(std::ffi::OsStr::new("1")) {
-        return;
-    }
+    let probe = devices::probe::ensure(device, || {
+        let env = devices::probe::ProbeEnv::from_process();
+        let probe = devices::probe::compute(&device.info, env, || {
+            #[cfg(test)]
+            if runtime.api.is_fake() {
+                return false;
+            }
+            // The translator must emit the dot product for the probe module itself.
+            ptx::set_dot_product(true);
+            let started = std::time::Instant::now();
+            let ok = match ptx::translate(ptx::DOT_PROBE_PTX) {
+                Ok(translated) => match context.backend.load_module(&runtime.api, &translated.words) {
+                    Ok(mut module) => {
+                        let _ = module.destroy(&runtime.api);
+                        true
+                    }
+                    Err(error) => {
+                        export_log(format_args!("dot product probe rejected by the driver: {error}"));
+                        false
+                    }
+                },
+                Err(error) => {
+                    export_log(format_args!("dot product probe did not translate: {error}"));
+                    false
+                }
+            };
+            export_log(format_args!("dp4a lowering: integer dot product={ok} probe_ms={}", started.elapsed().as_millis()));
+            ok
+        });
+        export_log_always(format_args!(
+            "device {} dynamic shared window {} (device max {}) dot product {}",
+            context.device, probe.dynamic_shared, device.info.max_shared_local_memory, probe.dot_product
+        ));
+        probe
+    });
+    // Unit tests on the fake backend leave the process-wide translator switches alone.
     #[cfg(test)]
     if runtime.api.is_fake() {
         return;
     }
-    ptx::set_dot_product(true);
-    let started = std::time::Instant::now();
-    let ok = match ptx::translate(ptx::DOT_PROBE_PTX) {
-        Ok(translated) => match context.backend.load_module(&runtime.api, &translated.words) {
-            Ok(mut module) => {
-                let _ = module.destroy(&runtime.api);
-                true
-            }
-            Err(error) => {
-                export_log(format_args!("dot product probe rejected by the driver: {error}"));
-                false
-            }
-        },
-        Err(error) => {
-            export_log(format_args!("dot product probe did not translate: {error}"));
-            false
-        }
-    };
-    ptx::set_dot_product(ok);
-    export_log(format_args!("dp4a lowering: integer dot product={ok} probe_ms={}", started.elapsed().as_millis()));
+    probe.apply();
 }
 
 fn load_ptx(
@@ -2254,6 +2273,12 @@ pub unsafe extern "system" fn cuDeviceGetAttribute(
             trace::record(format_args!(
                 "device attribute ordinal={ordinal} attribute={attr}"
             ));
+        }
+        if let Ok(Some(value)) = runtime(|rt| Ok(devices::list_attribute(rt, ordinal, attr)))
+            && !out.is_null()
+        {
+            unsafe { out.write(value) };
+            return Success;
         }
         device(ordinal, |info| {
             if out.is_null() {

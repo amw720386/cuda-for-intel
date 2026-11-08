@@ -9,8 +9,52 @@ use std::time::{Duration, Instant};
 
 const UNKNOWN: Status = 0x7fff_fffe;
 const NOT_READY: Status = 1;
-// Distinct drivers, device handles and compute queue ordinals.
-const DEVICES: [(Id, Id, u32); 2] = [(1, 2, 7), (3, 4, 11)];
+/// Description of one fake device. `start()` uses two distinct-driver defaults;
+/// `start_with()` builds topologies of any size for multi-device tests.
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceSpec {
+    pub name: String,
+    /// Devices with equal `driver` values share one fake Level Zero driver.
+    pub driver: usize,
+    pub integrated: bool,
+    pub total_memory: u64,
+    pub max_allocation: u64,
+    pub uuid: [u8; 16],
+    pub pci: Option<[u32; 4]>,
+    pub fp64: bool,
+    pub subgroup_sizes: Vec<u32>,
+    pub max_workgroup_size: u32,
+    pub shared_local_memory: u32,
+    pub device_id: u32,
+    /// Devices of one driver that share a group report `zeDeviceCanAccessPeer`.
+    pub p2p_group: Option<u32>,
+}
+
+impl DeviceSpec {
+    pub(crate) fn new(index: usize, driver: usize) -> Self {
+        Self {
+            name: "Lifecycle fixture".into(),
+            driver,
+            integrated: false,
+            total_memory: 1 << 20,
+            max_allocation: if index == 0 { 4096 } else { 128 },
+            uuid: [0; 16],
+            pci: Some([0, 2, 3, 1]),
+            fp64: false,
+            subgroup_sizes: vec![16],
+            max_workgroup_size: 256,
+            shared_local_memory: 32768,
+            device_id: index as u32,
+            p2p_group: None,
+        }
+    }
+}
+
+/// Distinct drivers, device handles and compute queue ordinals for device `index`
+/// in driver group `driver`: drivers get odd ids, devices even ones.
+fn ids(index: usize, driver: usize) -> (Id, Id, u32) {
+    (1 + 2 * driver, 2 + 2 * index, 7 + 4 * index as u32)
+}
 /// Device timer frequency advertised by the fake devices.
 pub(crate) const FAKE_TIMER_HZ: u64 = 10_000_000;
 const WAIT_LIMIT: Duration = Duration::from_secs(3);
@@ -106,12 +150,20 @@ struct Driver {
     /// Module variables handed out by `zeModuleGetGlobalPointer`.
     globals: BTreeMap<(Id, String), Id>,
     global_size: Option<usize>,
+    /// (driver, device handle, compute queue ordinal) per fake device.
+    devices: Vec<(Id, Id, u32)>,
+    /// Device-handle pairs that `zeDeviceCanAccessPeer` answers true for.
+    peers: Vec<(Id, Id)>,
+    /// Every memory copy appended: (device handle, destination, source, bytes).
+    copies: Vec<(Id, usize, usize, usize)>,
+    /// Device each command list was created for.
+    list_device: BTreeMap<Id, Id>,
 }
 
 impl Driver {
     fn device_ordinal(&self, context: Raw, device: Raw) -> DriverResult<u32> {
         let parent = self.get(context.addr(), Kind::Context)?.parent;
-        DEVICES
+        self.devices
             .iter()
             .find_map(|&(driver, handle, ordinal)| {
                 (driver == parent && handle == device.addr()).then_some(ordinal)
@@ -308,27 +360,54 @@ pub(super) fn unexpected(call: &'static str) -> Status {
 }
 
 pub(crate) fn start() -> Runtime {
-    assert!(lock().replace(Driver::default()).is_none());
-    let devices = DEVICES
-        .into_iter()
+    start_with(&[DeviceSpec::new(0, 0), DeviceSpec::new(1, 1)])
+}
+
+pub(crate) fn start_with(specs: &[DeviceSpec]) -> Runtime {
+    let table: Vec<(Id, Id, u32)> = specs
+        .iter()
         .enumerate()
-        .map(|(index, (driver, handle, ordinal))| Device {
+        .map(|(index, spec)| ids(index, spec.driver))
+        .collect();
+    let mut peers = Vec::new();
+    for (a, x) in specs.iter().enumerate() {
+        for (b, y) in specs.iter().enumerate() {
+            if a != b && x.driver == y.driver && x.p2p_group.is_some() && x.p2p_group == y.p2p_group
+            {
+                peers.push((table[a].1, table[b].1));
+            }
+        }
+    }
+    assert!(
+        lock()
+            .replace(Driver {
+                devices: table.clone(),
+                peers,
+                ..Driver::default()
+            })
+            .is_none()
+    );
+    let devices = specs
+        .iter()
+        .zip(table)
+        .enumerate()
+        .map(|(index, (spec, (driver, handle, ordinal)))| Device {
             info: DeviceInfo {
-                name: "Lifecycle fixture".into(),
+                name: spec.name.clone(),
                 vendor_id: 0x8086,
-                device_id: index as u32,
-                device_flags: 0,
-                pci_address: Some([0, 2, 3, 1]),
+                device_id: spec.device_id,
+                device_flags: u32::from(spec.integrated),
+                pci_address: spec.pci,
                 driver_version: 0,
                 api_version: 0x10000,
-                uuid: [0; 16],
-                total_memory: 1 << 20,
-                max_allocation: if index == 0 { 4096 } else { 128 },
-                max_workgroup_size: 256,
-                max_workgroup_dimensions: [256, 16, 16],
+                uuid: spec.uuid,
+                total_memory: spec.total_memory,
+                max_allocation: spec.max_allocation,
+                max_workgroup_size: spec.max_workgroup_size,
+                max_workgroup_dimensions: [spec.max_workgroup_size, 16, 16],
                 max_grid_dimensions: [65535; 3],
-                max_shared_local_memory: 32768,
-                subgroup_sizes: vec![16],
+                max_shared_local_memory: spec.shared_local_memory,
+                subgroup_sizes: spec.subgroup_sizes.clone(),
                 spirv_version: 0x10000,
                 fp32_denorms: true,
                 fp32_round_to_nearest: true,
@@ -336,7 +415,7 @@ pub(crate) fn start() -> Runtime {
                 fp32_fma: true,
                 device_memory_atomics: true,
                 module_flags: 0,
-                floating_point_flags: [0, 0x27, 0],
+                floating_point_flags: [0, 0x27, if spec.fp64 { 0x3f } else { 0 }],
                 float_atomic_flags: None,
                 memory_access_flags: [1, 3, 0, 0, 0],
                 memory_heaps: vec![],
@@ -361,12 +440,33 @@ pub(crate) fn start() -> Runtime {
             },
             driver: Handle(without_provenance_mut(driver)),
             handle: Handle(without_provenance_mut(handle)),
+            driver_index: spec.driver as u32,
+            device_index: specs[..index]
+                .iter()
+                .filter(|other| other.driver == spec.driver)
+                .count() as u32,
+            probe: Default::default(),
         })
         .collect();
     Runtime {
         api: abi::api(),
         devices,
     }
+}
+
+/// True when `zeDeviceCanAccessPeer(device, peer)` is true in the fake topology.
+fn peer_access(driver: &Driver, device: Id, peer: Id) -> bool {
+    driver.peers.contains(&(device, peer))
+}
+
+/// Fake device handle of the device described by `specs[index]` in `start_with`.
+pub(crate) fn device_handle(index: usize) -> usize {
+    ids(index, 0).1
+}
+
+/// Memory copies appended so far: (device handle, destination, source, bytes).
+pub(crate) fn copy_log() -> Vec<(usize, usize, usize, usize)> {
+    lock().as_ref().map(|d| d.copies.clone()).unwrap_or_default()
 }
 
 pub(crate) fn finish() {

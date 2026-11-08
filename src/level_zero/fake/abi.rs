@@ -17,7 +17,7 @@ unsafe extern "system" fn context_create(
 ) -> Status {
     call_driver(|driver| {
         let parent = parent.addr();
-        if !DEVICES.iter().any(|device| device.0 == parent) {
+        if !driver.devices.iter().any(|device| device.0 == parent) {
             return Err("invalid native driver");
         }
         unsafe { out.write(without_provenance_mut(driver.create(parent, Kind::Context))) };
@@ -50,6 +50,7 @@ fn list_create(ctx: Raw, device: Raw, ordinal: u32, mode: u32, out: *mut Raw) ->
             return Err("selected wrong list queue ordinal");
         }
         let id = driver.create(ctx.addr(), Kind::List);
+        driver.list_device.insert(id, device.addr());
         driver.lists.insert(
             id,
             List {
@@ -363,12 +364,14 @@ unsafe extern "system" fn append_copy(
     list: Raw,
     dst: Raw,
     src: *const c_void,
-    _: usize,
+    size: usize,
     signal: Raw,
     count: u32,
     waits: *mut Raw,
 ) -> Status {
     call_driver(|driver| {
+        let device = driver.list_device.get(&list.addr()).copied().unwrap_or(0);
+        driver.copies.push((device, dst.addr(), src.addr(), size));
         let mut command = marker(signal, count, waits);
         command.resources.extend(
             [dst.addr(), src.addr()]
@@ -502,8 +505,16 @@ unsafe extern "system" fn fence_query(id: Raw) -> Status {
     wait(id, Kind::Fence, 0)
 }
 
+unsafe extern "system" fn can_access_peer(device: Raw, peer: Raw, out: *mut u8) -> Status {
+    call_driver(|driver| {
+        unsafe { out.write(u8::from(peer_access(driver, device.addr(), peer.addr()))) };
+        Ok(0)
+    })
+}
+
 pub(super) fn api() -> Api {
     Api {
+        can_access_peer: Some(can_access_peer),
         zeContextCreate: context_create,
         zeContextDestroy: context_destroy,
         zeCommandListCreateImmediate: list_immediate,

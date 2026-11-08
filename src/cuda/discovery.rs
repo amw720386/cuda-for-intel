@@ -1,3 +1,5 @@
+use super::devices::peer::*;
+use super::devices::*;
 use super::export_table::cuGetExportTable;
 use super::gaps::*;
 use super::graph_api::*;
@@ -190,6 +192,13 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuDeviceGetAttribute" => entry!(cuDeviceGetAttribute, 2000),
         b"cuDeviceGetPCIBusId" => entry!(cuDeviceGetPCIBusId, 4010),
         b"cuDeviceGetUuid" => entry!(cuDeviceGetUuid, 9020),
+        b"cuDeviceGetUuid_v2" => entry!(cuDeviceGetUuid_v2, 11040),
+        b"cuDeviceGetByPCIBusId" => entry!(cuDeviceGetByPCIBusId, 4010),
+        b"cuIpcGetMemHandle" => entry!(cuIpcGetMemHandle, 4010),
+        b"cuIpcOpenMemHandle" => entry!(cuIpcOpenMemHandle_v2, 11000),
+        b"cuIpcCloseMemHandle" => entry!(cuIpcCloseMemHandle, 4010),
+        b"cuIpcGetEventHandle" => entry!(cuIpcGetEventHandle, 4010),
+        b"cuIpcOpenEventHandle" => entry!(cuIpcOpenEventHandle, 4010),
         b"cuDeviceGetLuid" => entry!(cuDeviceGetLuid, 10000),
         b"cuDeviceTotalMem" => entry!(cuDeviceTotalMem_v2, 3020),
         b"cuMemGetInfo" => entry!(cuMemGetInfo_v2, 3020),

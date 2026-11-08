@@ -279,27 +279,39 @@ pub extern "system" fn cuEventRecordWithFlags(event: Opaque, stream: Opaque, fla
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamWaitEvent(stream: Opaque, event: Opaque, flags: u32) -> CuResult {
     trace::call("cuStreamWaitEvent", || {
-        status(with_context(|runtime, context| {
-            if flags != 0 {
-                return Err(InvalidValue);
+        use super::cross_device::Route;
+        match super::cross_device::route(stream, event, flags) {
+            Route::Done(result) => result,
+            Route::Ordinary => ordinary_wait(stream, event, flags),
+            Route::OrdinaryIn(owner) => {
+                super::cross_device::with_current(owner, || ordinary_wait(stream, event, flags))
             }
-            let streams = &mut context.streams;
-            let key = streams.launch_key(stream)?;
-            streams.event(event)?;
-            if let Some(result) = streams.capture_wait(key, event.addr()) {
-                return result;
-            }
-            if let Some(recording) = streams.event(event)? {
-                let producer = recording.producer;
-                let fence = Arc::clone(&recording.fence);
-                if key != producer {
-                    streams.flush_producer(&runtime.api, producer, &fence)?;
-                }
-                streams.event_marker(&runtime.api, &context.backend, key, Some(fence))?;
-            }
-            Ok(())
-        }))
+        }
     })
+}
+
+/// Stream-ordered wait on an event of the stream's own context.
+fn ordinary_wait(stream: Opaque, event: Opaque, flags: u32) -> CuResult {
+    status(with_context(|runtime, context| {
+        if flags != 0 {
+            return Err(InvalidValue);
+        }
+        let streams = &mut context.streams;
+        let key = streams.launch_key(stream)?;
+        streams.event(event)?;
+        if let Some(result) = streams.capture_wait(key, event.addr()) {
+            return result;
+        }
+        if let Some(recording) = streams.event(event)? {
+            let producer = recording.producer;
+            let fence = Arc::clone(&recording.fence);
+            if key != producer {
+                streams.flush_producer(&runtime.api, producer, &fence)?;
+            }
+            streams.event_marker(&runtime.api, &context.backend, key, Some(fence))?;
+        }
+        Ok(())
+    }))
 }
 
 #[cfg(all(test, windows))]
