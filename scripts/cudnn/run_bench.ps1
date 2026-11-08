@@ -8,7 +8,8 @@ $env:CFI_BENCH_ROOT = $run; $env:CFI_BENCH_BATCH = "$Batch"
 try {
   foreach ($m in $Modes) {
     $o = "$d\res_${Tag}_$m.jsonl"; Remove-Item $o -EA 0
-    $p = Start-Process $py -ArgumentList $(if ($Filter) { "`"$d\bench_conv.py`" $m `"$o`" $Filter" } else { "`"$d\bench_conv.py`" $m `"$o`"" }) -RedirectStandardOutput "$d\log_${Tag}_$m.out" -RedirectStandardError "$d\log_${Tag}_$m.err" -PassThru -NoNewWindow
+    if ($m.StartsWith('rn_')) { $script = "test_resnet18.py"; $mm = $m.Substring(3); $o = "$d\res_${Tag}_$m.json" } else { $script = "bench_conv.py"; $mm = $m }
+    $p = Start-Process $py -ArgumentList $(if ($Filter -and $script -eq 'bench_conv.py') { "`"$d\$script`" $mm `"$o`" $Filter" } else { "`"$d\$script`" $mm `"$o`"" }) -RedirectStandardOutput "$d\log_${Tag}_$m.out" -RedirectStandardError "$d\log_${Tag}_$m.err" -PassThru -NoNewWindow
     if (-not $p.WaitForExit($TimeoutMin * 60000)) { "TIMEOUT $m (pid $($p.Id) left running)" | Out-File -Append "$d\log_${Tag}_$m.out" }
   }
 } finally { & "$w\gpu-queue.ps1" -Action release -Id "cudnn3-$Tag" }
