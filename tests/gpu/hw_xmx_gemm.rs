@@ -154,6 +154,10 @@ impl Ctx {
         let f: libloading::Symbol<Count> = unsafe { self.shim().get(b"cfiXmxLaunchCount\0") }.expect("cfiXmxLaunchCount export");
         unsafe { f() }
     }
+    fn blk_launches(&self) -> u64 {
+        let f: libloading::Symbol<Count> = unsafe { self.shim().get(b"cfiXmxBlkLaunchCount\0") }.expect("cfiXmxBlkLaunchCount export");
+        unsafe { f() }
+    }
     fn probe_status(&self) -> u32 {
         let f: libloading::Symbol<Status> = unsafe { self.shim().get(b"cfiXmxProbeStatus\0") }.expect("cfiXmxProbeStatus export");
         unsafe { f() }
@@ -199,6 +203,8 @@ fn setup() -> Ctx {
         lib,
     }
 }
+
+static OPERAND_OFFSET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn set_mode(mode: &str) {
     unsafe { std::env::set_var("CFI_XMX", mode) };
@@ -280,7 +286,15 @@ fn reference(c: &Case, d: &Data) -> Vec<u8> {
 
 /// Run one case through the shim in the current `CFI_XMX` mode; returns C bytes.
 fn run(ctx: &Ctx, c: &Case, d: &Data) -> Vec<u8> {
-    let (da, db, dc) = (ctx.up(&d.a), ctx.up(&d.b), ctx.up(&d.c0));
+    // A and B start `OPERAND_OFFSET` bytes into their allocations (ggml tensor views).
+    let off = OPERAND_OFFSET.load(std::sync::atomic::Ordering::Relaxed);
+    let up_off = |v: &[u8]| {
+        let mut w = vec![0u8; off];
+        w.extend_from_slice(v);
+        ctx.up(&w)
+    };
+    let (da0, db0) = (up_off(&d.a), up_off(&d.b));
+    let (da, db, dc) = (da0 + off as u64, db0 + off as u64, ctx.up(&d.c0));
     let (ta, tb) = (c.ta as i32, c.tb as i32);
     let (m, n, k) = (c.m as i32, c.n as i32, c.k as i32);
     let (alpha, beta) = (c.alpha, c.beta);
@@ -335,7 +349,7 @@ fn run(ctx: &Ctx, c: &Case, d: &Data) -> Vec<u8> {
     let sync = unsafe { (ctx.sync)() };
     assert_eq!((status, sync), (0, 0), "{c:?}: gemm status / sync");
     let out = ctx.down(dc, d.c0.len());
-    for ptr in [da, db, dc] {
+    for ptr in [da0, db0, dc] {
         unsafe { (ctx.free)(ptr) };
     }
     out
@@ -608,7 +622,12 @@ fn hw_xmx_gemm_table() {
 }
 
 fn gflops(ctx: &Ctx, m: usize, n: usize, k: usize, ta: bool, tb: bool, reps: usize) -> f64 {
-    let c = Case { m, n, k, ta, tb, inp: Dt::F16, out: Dt::F32, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0, c16: false };
+    gflops_out(ctx, m, n, k, ta, tb, reps, Dt::F32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gflops_out(ctx: &Ctx, m: usize, n: usize, k: usize, ta: bool, tb: bool, reps: usize, out: Dt) -> f64 {
+    let c = Case { m, n, k, ta, tb, inp: Dt::F16, out, kind: Kind::Plain, pad: 0, alpha: 1.0, beta: 0.0, c16: false };
     let mut rng = Rng(99);
     let d = make_data(&c, &mut rng);
     let (da, db, dc) = (ctx.up(&d.a), ctx.up(&d.b), ctx.up(&d.c0));
@@ -616,7 +635,7 @@ fn gflops(ctx: &Ctx, m: usize, n: usize, k: usize, ta: bool, tb: bool, reps: usi
     let (alpha, beta) = (1.0f32, 0.0f32);
     let call = || unsafe {
         f(ctx.handle, ta as i32, tb as i32, m as i32, n as i32, k as i32, p(&alpha), da as *const c_void, R_16F,
-          d.lda as i32, db as *const c_void, R_16F, d.ldb as i32, p(&beta), dc as *mut c_void, R_32F, d.ldc as i32,
+          d.lda as i32, db as *const c_void, R_16F, d.ldb as i32, p(&beta), dc as *mut c_void, out.code(), d.ldc as i32,
           COMPUTE_32F, -1)
     };
     unsafe { std::env::set_var("CFI_CUBLAS_ASYNC", "1") };
@@ -658,4 +677,95 @@ fn hw_xmx_perf() {
     }
     set_mode("0");
     assert!(ctx.xmx_launches() > 0, "XMX never launched");
+}
+
+/// GEMM shapes seen in stock Ollama prefill (A = weight [rows x k] read transposed, B = activations
+/// [k x tokens]; ggml calls cublasGemmEx(T, N, rows, tokens, k)), plus a square reference.
+/// Prints GFLOP/s with XMX off and with the default (auto) selection; set `CFI_XMX_BENCH_MODES`
+/// (comma list of CFI_XMX values, default `0,1`) to compare other settings.
+#[test]
+#[ignore = "requires nvcuda.dll, cublas64_12.dll and an Intel GPU with SPV_INTEL_subgroup_matrix_multiply_accumulate"]
+fn hw_xmx_shapes() {
+    let ctx = setup();
+    let modes = std::env::var("CFI_XMX_BENCH_MODES").unwrap_or_else(|_| "0,1".into());
+    let modes: Vec<&str> = modes.split(',').collect();
+    let shapes: &[(usize, usize, usize)] = &[
+        (896, 631, 896),
+        (4864, 631, 896),
+        (896, 631, 4864),
+        (4096, 631, 4096),
+        (11008, 631, 4096),
+        (896, 512, 896),
+        (4864, 512, 896),
+        (4096, 512, 4096),
+        (2048, 2048, 2048),
+        (128, 631, 64),
+    ];
+    for &(m, n, k) in shapes {
+        let flop = 2.0 * (m * n * k) as f64;
+        let reps = ((2e11 / flop) as usize).clamp(5, 400);
+        for out in [Dt::F32, Dt::F16] {
+            let mut line = format!("SHAPE m={m} n={n} k={k} out={out:?}:");
+            let mut base = 0.0;
+            for (i, mode) in modes.iter().enumerate() {
+                set_mode(mode);
+                let g = gflops_out(&ctx, m, n, k, true, false, reps, out);
+                if i == 0 {
+                    base = g;
+                }
+                line.push_str(&format!(" CFI_XMX={mode} {g:8.1} GFLOP/s ({:.3} ms, {:.2}x)", flop / g / 1e6, g / base));
+            }
+            println!("{line}");
+        }
+    }
+    set_mode("0");
+}
+
+/// 2D block-load variant: bit-identical to the gather variant (same DPAS order) and exact against the
+/// host reference, for both A layouts, ragged m/n/k, batches, output types and operands that start
+/// 0, 4 and 32 bytes into their allocations. Skips the offsets the probe says the driver cannot take.
+#[test]
+#[ignore = "requires nvcuda.dll, cublas64_12.dll and an Intel GPU with SPV_INTEL_subgroup_matrix_multiply_accumulate"]
+fn hw_xmx_blk() {
+    let ctx = setup();
+    let mut rng = Rng(4242);
+    let mut ran = 0;
+    let mut mismatches = Vec::new();
+    for &(m, n, k) in &[(32usize, 8usize, 32usize), (34, 9, 50), (96, 41, 96), (70, 24, 38), (896, 100, 896), (64, 1, 104), (50, 17, 34)] {
+        for ta in [true, false] {
+            for (inp, out) in [(Dt::F16, Dt::F32), (Dt::F16, Dt::F16), (Dt::Bf16, Dt::Bf16)] {
+                for kind in [Kind::Plain, Kind::Strided(3)] {
+                    for off in [0usize, 4, 32] {
+                        let p0 = (8 - k % 8) % 8;
+                        let c = Case { m, n, k, ta, tb: false, inp, out, kind, pad: p0, alpha: 1.0, beta: 0.5, c16: false };
+                        let d = make_data(&c, &mut rng);
+                        OPERAND_OFFSET.store(off, std::sync::atomic::Ordering::Relaxed);
+                        set_mode("2");
+                        unsafe { std::env::set_var("CFI_XMX_BLK", "0") };
+                        let gather = run(&ctx, &c, &d);
+                        unsafe { std::env::remove_var("CFI_XMX_BLK") };
+                        let b0 = ctx.blk_launches();
+                        let blk = run(&ctx, &c, &d);
+                        let used = ctx.blk_launches() > b0;
+                        if used {
+                            ran += 1;
+                            if blk != gather {
+                                mismatches.push(format!("m={m} n={n} k={k} ta={ta} {inp:?}->{out:?} {kind:?} off={off}"));
+                            }
+                            let want = reference(&c, &d);
+                            compare(&c, &d, &blk, &want, "blk");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    OPERAND_OFFSET.store(0, std::sync::atomic::Ordering::Relaxed);
+    set_mode("0");
+    println!("BLK cases run {ran}; mismatches {}", mismatches.len());
+    for m in mismatches.iter().take(20) {
+        println!("FAIL {m}");
+    }
+    assert!(ran > 0, "the 2D block variant never launched (probe failed?)");
+    assert!(mismatches.is_empty());
 }
