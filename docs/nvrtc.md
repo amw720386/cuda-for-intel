@@ -133,8 +133,12 @@ single precision. Do not use this path for numerics that need correctly rounded 
 
 ```
 set NVRTC_SHIM_CLANG=C:\Program Files\LLVM\bin\clang.exe
-cargo test --test gpu hw_nvrtc -- --ignored --nocapture
+cargo build && cargo test --test gpu hw_nvrtc -- --ignored --nocapture
 ```
+
+  Last run on the Arc B390 box with the official LLVM 20.1.8 Windows release (no admin install): all 8
+  kernels PASS (vector_add, shared_reduce, warp_shuffle_vote, atomics, templates_name_expressions,
+  half_math, cooperative_groups_tile_reduce, math_functions). `cargo build` must run first so `nvcuda.dll` exists.
 
 ## Environment variables
 
