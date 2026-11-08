@@ -623,6 +623,10 @@ mod tests {
         tile: (u32, u32),
         pad: usize,
         flags: Flags,
+        /// CUBLAS_COMPUTE_16F: f16 scalars, `opts.acc16` set (f16 in/out only).
+        acc16: bool,
+        /// Pointer-table operands start 2 bytes past a 256-byte boundary (ggml views).
+        misalign: bool,
     }
 
     fn dt_of(t: Ty) -> DType {
@@ -668,7 +672,7 @@ mod tests {
             a: in_dt,
             b: in_dt,
             c: out_dt,
-            scalar: ScalarKind::F32,
+            scalar: if c.acc16 { ScalarKind::F16 } else { ScalarKind::F32 },
         };
         let (ea, eb, ec) = (lda * cols_a, ldb * cols_b, ldc * c.n);
         // Distinct matrices per batch entry; the pointer variant broadcasts A across the batch.
@@ -738,7 +742,7 @@ mod tests {
                 Some(Ty::Bf16) => crate::ptxgen::Elem::Bf16,
                 _ => crate::ptxgen::Elem::F32,
             },
-            acc16: false,
+            acc16: c.acc16,
         };
         Prep { c, d, opts, abytes, bbytes, cbytes, bias_bytes, want, ea, eb, ec, ldc }
     }
@@ -772,10 +776,17 @@ mod tests {
         let p = prepare(c, seed);
         let (d, in_dt, out_dt) = (p.d, p.d.a, p.d.c);
         let mut mem = Mem::new();
-        let (da, db, dc) = (mem.alloc(&p.abytes), mem.alloc(&p.bbytes), mem.alloc(&p.cbytes));
+        let shift = if c.misalign && c.ptrs { 2usize } else { 0 };
+        let shifted = |mem: &mut Mem, b: &[u8]| -> u64 {
+            let mut v = vec![0u8; shift];
+            v.extend_from_slice(b);
+            mem.alloc(&v) + shift as u64
+        };
+        let (da, db) = (shifted(&mut mem, &p.abytes), shifted(&mut mem, &p.bbytes));
+        let dc = mem.alloc(&p.cbytes);
         let dbias = if c.bias.is_some() { mem.alloc(&p.bias_bytes) } else { 0 };
         let (sa, sb, sc) = (p.ea as i64, p.eb as i64, p.ec as i64);
-        let call = Call { d, pointer_arrays: c.ptrs, beta: c.beta, opts: p.opts, a: da, b: db, sa, sb };
+        let call = Call { d, pointer_arrays: c.ptrs, beta: c.beta, opts: p.opts, a: da, b: db, sa, sb, batch: c.batch as u32 };
         let cfg = xmx_host::qualify(&call, Mode::Force, c.tile, c.flags).expect("shape qualifies");
         let words = xmx::build(&cfg).unwrap();
         let (gx, gy) = xmx_host::grid(&d, &cfg);
@@ -842,7 +853,7 @@ mod tests {
                         for bias in [None, Some(Ty::F32), Some(Ty::F16), Some(Ty::Bf16)] {
                             for (ta, tb, m, n, k, beta) in [(true, false, 37usize, 19usize, 45usize, 0.0f32), (false, true, 64, 64, 64, 0.5), (true, true, 17, 33, 20, 0.0)] {
                                 seed += 1;
-                                let c = Case { m, n, k, ta, tb, input, out, batch: 2, ptrs: false, alpha: 1.0, beta, bias, act, tile: (2, 4), pad: 1, flags: Flags::Packed };
+                                let c = Case { m, n, k, ta, tb, input, out, batch: 2, ptrs: false, alpha: 1.0, beta, bias, act, tile: (2, 4), pad: 1, flags: Flags::Packed, acc16: false, misalign: false };
                                 let pr = prepare(c, seed);
                                 let (da, db, dc) = (up(&pr.abytes), up(&pr.bbytes), up(&pr.cbytes));
                                 let dbias = if bias.is_some() { up(&pr.bias_bytes) } else { 0 };
@@ -868,7 +879,7 @@ mod tests {
     fn base() -> Case {
         Case {
             m: 16, n: 8, k: 16, ta: false, tb: false, input: Input::F16, out: Ty::F32, batch: 1, ptrs: false,
-            alpha: 1.0, beta: 0.0, bias: None, act: Act::None, tile: (1, 1), pad: 0, flags: Flags::Packed,
+            alpha: 1.0, beta: 0.0, bias: None, act: Act::None, tile: (1, 1), pad: 0, flags: Flags::Packed, acc16: false, misalign: false,
         }
     }
 
@@ -938,6 +949,111 @@ mod tests {
                 check(Case { m: 20, n: 11, k: 23, batch: 3, ptrs, out, tile: (1, 2), pad: 1, ..base() }, seed);
             }
         }
+    }
+
+    #[test]
+    fn compute_16f_rounds_once_from_f32_accumulators() {
+        // ggml KQV shape family: f16 A/B/C, f16 alpha/beta, pointer tables and strided batches.
+        let mut seed = 2000;
+        for ptrs in [true, false] {
+            for (m, n, k, ta, tb) in [(64usize, 40usize, 50usize, false, false), (33, 17, 70, true, false), (16, 16, 16, true, true)] {
+                seed += 1;
+                check(Case { m, n, k, ta, tb, input: Input::F16, out: Ty::F16, batch: 4, ptrs, acc16: true, alpha: 0.5, beta: 0.25, tile: (2, 4), pad: 1, ..base() }, seed);
+            }
+        }
+        // A long K accumulation that an f16 accumulator would round away: sum of 2048 values near 1/8.
+        let c = Case { m: 16, n: 8, k: 2048, input: Input::F16, out: Ty::F16, acc16: true, ..base() };
+        check(c, 9);
+    }
+
+    /// Regression for the ragged-n KQV report (m=64 n=33 k=512, f16 16F, pointer table, ratio 7
+    /// broadcast of A): the second n tile has a single valid column. Hardware showed the diff on
+    /// a call that was below the Auto threshold (PTX per-op f16 rounding), not on XMX; this pins
+    /// the XMX kernel itself on that shape family, including ragged k.
+    #[test]
+    fn ragged_n_pointer_table_16f_matches_single_rounded_reference() {
+        let mut seed = 4000;
+        for k in [512usize, 500, 497] {
+            for n in [33usize, 1, 9, 65] {
+                seed += 1;
+                check(Case { m: 64, n, k, input: Input::F16, out: Ty::F16, batch: 14, ptrs: true, acc16: true, tile: (2, 4), ..base() }, seed);
+            }
+        }
+    }
+
+    #[test]
+    fn two_byte_aligned_pointer_table_operands() {
+        // ggml views can hand out 2-byte aligned addresses; the pointer-table variant must use
+        // 16-bit loads only (the interpreter asserts every Aligned operand).
+        let mut seed = 3000;
+        for (ta, tb) in [(true, false), (false, false), (true, true), (false, true)] {
+            seed += 1;
+            let cfg = check(Case { m: 48, n: 24, k: 48, ta, tb, ptrs: true, batch: 3, misalign: true, tile: (2, 4), ..base() }, seed);
+            assert!(cfg.ptrs && !cfg.pair_a && !cfg.vec_b);
+        }
+    }
+
+    /// Evidence for leaving f32 GEMMs (llama.cpp QK) on the PTX kernels: error of split-precision
+    /// XMX schemes against an f64 reference, relative to sum|a||b|, versus the fp32 PTX kernel
+    /// (sequential f32 fma). bf16 2-term splits are ~20x worse than fp32; a 3-way bf16 split
+    /// (6 DPAS products) gets within ~3x of fp32 error, which divides the 5-8 TFLOP/s measured for
+    /// f16 XMX by 6 and adds the split ALU cost, i.e. break-even with the ~1 TFLOP/s PTX kernel.
+    #[test]
+    fn f32_split_precision_study() {
+        let mut rng = Rng(0xfeed);
+        let (k, trials) = (64usize, 400usize);
+        let gauss = |rng: &mut Rng| -> f32 {
+            let u = |r: &mut Rng| (r.next() % 1_000_003) as f64 / 1_000_003.0 + 1e-9;
+            ((-2.0 * u(rng).ln()).sqrt() * (6.283185307179586 * u(rng)).cos()) as f32
+        };
+        let bf = |x: f32| bf16_bits_to_f32(f32_to_bf16_bits(x));
+        let hf = |x: f32| f16_bits_to_f32(f32_to_f16_bits(x));
+        let split_bf = |x: f32| {
+            let h = bf(x);
+            let m = bf(x - h);
+            let l = bf(x - h - m);
+            [h, m, l]
+        };
+        let split_h = |x: f32| {
+            let h = hf(x);
+            [h, hf(x - h)]
+        };
+        let (mut e32, mut e_bf3, mut e_bf2, mut e_h2) = (0f64, 0f64, 0f64, 0f64);
+        for _ in 0..trials {
+            let a: Vec<f32> = (0..k).map(|_| gauss(&mut rng)).collect();
+            let b: Vec<f32> = (0..k).map(|_| gauss(&mut rng)).collect();
+            let exact: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let scale: f64 = a.iter().zip(&b).map(|(x, y)| (*x as f64 * *y as f64).abs()).sum();
+            let mut f = 0f32;
+            for i in 0..k {
+                f = a[i].mul_add(b[i], f);
+            }
+            let (mut s6, mut s3b, mut s3h) = (0f32, 0f32, 0f32);
+            for i in 0..k {
+                let (sa, sb) = (split_bf(a[i]), split_bf(b[i]));
+                for (x, y) in [(0, 0), (0, 1), (1, 0), (0, 2), (1, 1), (2, 0)] {
+                    s6 += sa[x] * sb[y];
+                }
+                let (ta, tb) = ([sa[0], sa[1]], [sb[0], sb[1]]);
+                for (x, y) in [(0, 0), (0, 1), (1, 0)] {
+                    s3b += ta[x] * tb[y];
+                }
+                let (ha, hb) = (split_h(a[i]), split_h(b[i]));
+                for (x, y) in [(0, 0), (0, 1), (1, 0)] {
+                    s3h += ha[x] * hb[y];
+                }
+            }
+            let rel = |v: f32| (v as f64 - exact).abs() / scale;
+            e32 = e32.max(rel(f));
+            e_bf3 = e_bf3.max(rel(s6));
+            e_bf2 = e_bf2.max(rel(s3b));
+            e_h2 = e_h2.max(rel(s3h));
+        }
+        println!("f32 split study (max err/sum|ab|, k={k}): fp32 fma {e32:.2e}, bf16x3 6-product {e_bf3:.2e}, bf16x2 3-product {e_bf2:.2e}, f16x2 3-product {e_h2:.2e}");
+        // Measured: bf16x2 ~20x, bf16x3 ~3x, f16x2 ~2x the fp32 kernel's error.
+        assert!(e_bf2 > 10.0 * e32, "bf16x2 is not fp32-class");
+        assert!(e_bf3 > 2.0 * e32, "bf16x3 (6 products) is not within 2x either");
+        assert!(e_h2 < 3.0 * e32, "f16x2 is the only 3-product scheme near fp32 on gaussian data");
     }
 
     #[test]
