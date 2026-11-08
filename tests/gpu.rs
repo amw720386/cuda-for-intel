@@ -101,6 +101,8 @@ mod hw_launch_stress;
 mod hw_xmx_gemm;
 #[path = "gpu/hw_nvrtc.rs"]
 mod hw_nvrtc;
+#[path = "gpu/hw_translator_edge.rs"]
+mod hw_translator_edge;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

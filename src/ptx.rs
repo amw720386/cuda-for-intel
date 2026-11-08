@@ -1003,6 +1003,21 @@ pub(crate) fn set_lenient_undefined(on: bool) {
     LENIENT_UNDEFINED.with(|c| c.set(on));
 }
 
+static UNDEFINED_REGISTERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of registers read before any write that were zero-initialised since process start
+/// (PTX leaves them undefined; the Intel compiler would otherwise fold them arbitrarily).
+pub(crate) fn undefined_register_count() -> u64 {
+    UNDEFINED_REGISTERS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(super) fn note_undefined_register(entry: &str, register: &str) {
+    UNDEFINED_REGISTERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if std::env::var_os("CFI_WARN_UNDEFINED").is_some() {
+        eprintln!("cuda-for-intel: warning: register {register} is read before any write in {entry}; zero-initialised");
+    }
+}
+
 pub(crate) fn lenient_undefined() -> bool {
     LENIENT_UNDEFINED.with(|c| c.get())
 }

@@ -304,6 +304,7 @@ impl<'a> Emitter<'a> {
             vec![Operand::IdRef(slot), Operand::IdRef(zero)],
         ));
         self.undef_slots_info.push((slot, zero, self.current_block));
+        super::note_undefined_register(&self.current_entry, operand);
         if kind != Kind::Predicate {
             self.undefined_seen.push((self.current_entry.clone(), operand.to_string(), kind == Kind::B64));
         }
@@ -552,6 +553,9 @@ impl<'a> Emitter<'a> {
         let _membermask = self.integer(membermask, Kind::B32)?;
         let value = self.read(value)?.require(Kind::B32, value)?;
         let xor_mask = self.integer(xor_mask, Kind::B32)?;
+        // PTX reads only b[4:0] as the lane operand.
+        let c31 = self.u32_const(31);
+        let xor_mask = self.builder.bitwise_and(self.u32_type, None, xor_mask, c31)?;
         // Native subgroup shuffle: no workgroup barrier, so warps that early-exit
         // after bar.sync (GGML mmvq) cannot hang the remaining warp's reduction.
         // SubgroupSize=32 (set on the entry) makes Intel subgroups match CUDA warps.
@@ -1872,7 +1876,9 @@ impl<'a> Emitter<'a> {
         let segment = self.builder.bitwise_and(ty, None, shifted, c31)?;
         let keep = self.builder.bitwise_xor(ty, None, segment, c31)?;
         let value = self.read(src[0])?.require(Kind::B32, src[0])?;
+        // PTX reads only b[4:0] as the lane / offset operand.
         let delta = self.integer(src[1], Kind::B32)?;
+        let delta = self.builder.bitwise_and(ty, None, delta, c31)?;
         let lane = self.lane_id()?;
         let min_lane = self.builder.bitwise_and(ty, None, lane, segment)?;
         let (source, valid) = match mode {
