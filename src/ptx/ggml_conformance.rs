@@ -758,3 +758,330 @@ mmq_tests! {
     mmq_iq4_nl: Q::IQ4NL,
     mmq_iq4_xs: Q::IQ4XS,
 }
+
+// ---- flash attention (Qwen2.5-0.5B shapes: head dim 64, 14 heads, 2 kv heads) ----
+
+const FA_D: usize = 64;
+const FA_HEADS: usize = 14;
+const FA_KV_HEADS: usize = 2;
+
+struct FaCase {
+    q: Vec<f32>,      // [token][head][d]
+    k: Vec<f32>,      // [kvhead][pos][d] (f16-rounded)
+    v: Vec<f32>,
+    mask: Option<Vec<f32>>, // [row][pos] (f16-rounded, may hold -inf)
+    kvpad: usize,
+    n_tokens: usize,
+    kvlen: usize,
+}
+
+fn fa_case(n_tokens: usize, kvlen: usize, kvpad: usize, causal: bool, use_mask: bool, seed: u64) -> FaCase {
+    let mut rng = Rng(seed);
+    let q = rand_floats(&mut rng, n_tokens * FA_HEADS * FA_D, 2.0);
+    let r16 = |x: f32| f16_val(f16_bits(x));
+    let k: Vec<f32> = rand_floats(&mut rng, FA_KV_HEADS * kvpad * FA_D, 2.0).into_iter().map(r16).collect();
+    let v: Vec<f32> = rand_floats(&mut rng, FA_KV_HEADS * kvpad * FA_D, 2.0).into_iter().map(r16).collect();
+    let mask = use_mask.then(|| {
+        let rows = n_tokens.next_multiple_of(64);
+        let mut m = vec![0f32; rows * kvpad];
+        for i in 0..rows {
+            for j in 0..kvpad {
+                // token i attends to kv positions <= kvlen - n_tokens + i when causal
+                let visible = i < n_tokens && j < kvlen && (!causal || j + n_tokens <= kvlen + i);
+                m[i * kvpad + j] = if visible { 0.0 } else { f32::NEG_INFINITY };
+            }
+        }
+        m
+    });
+    FaCase { q, k, v, mask, kvpad, n_tokens, kvlen }
+}
+
+/// softmax(QK^T*scale + mask)V in f64: [token][head][d].
+fn fa_ref(c: &FaCase, scale: f32) -> Vec<f64> {
+    let mut out = vec![0f64; c.n_tokens * FA_HEADS * FA_D];
+    for t in 0..c.n_tokens {
+        for h in 0..FA_HEADS {
+            let kvh = h / (FA_HEADS / FA_KV_HEADS);
+            let qv = &c.q[(t * FA_HEADS + h) * FA_D..][..FA_D];
+            let lim = if c.mask.is_some() { c.kvpad } else { c.kvlen };
+            let mut s = vec![f64::NEG_INFINITY; lim];
+            for (j, sj) in s.iter_mut().enumerate() {
+                let kk = &c.k[(kvh * c.kvpad + j) * FA_D..][..FA_D];
+                let dot: f64 = qv.iter().zip(kk).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
+                let m = c.mask.as_ref().map_or(0.0, |m| f64::from(m[t * c.kvpad + j]));
+                *sj = dot * f64::from(scale) + m;
+            }
+            let mx = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let e: Vec<f64> = s.iter().map(|x| (x - mx).exp()).collect();
+            let sum: f64 = e.iter().sum();
+            for d in 0..FA_D {
+                let acc: f64 = e.iter().enumerate().map(|(j, p)| p * f64::from(c.v[(kvh * c.kvpad + j) * FA_D + d])).sum();
+                out[(t * FA_HEADS + h) * FA_D + d] = acc / sum;
+            }
+        }
+    }
+    out
+}
+
+fn fa_compare(what: &str, got: &[f32], want: &[f64], tol: f64) {
+    let mut worst = 0f64;
+    let mut bad = 0usize;
+    let mut first = None;
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        let e = if g.is_finite() { (f64::from(*g) - w).abs() } else { f64::INFINITY };
+        if e > tol || e.is_nan() {
+            bad += 1;
+            first.get_or_insert((i, *g, *w));
+        }
+        if e > worst || e.is_nan() {
+            worst = e;
+        }
+    }
+    assert!(bad == 0, "{what}: {bad}/{} values off, worst err {worst}, first (idx, got, want) {first:?}", want.len());
+}
+
+/// Runs the prefill kernel (flash_attn_ext_f16 + stream_k_fixup) at `grid` blocks.
+fn run_fa_prefill(c: &FaCase, scale: f32, grid: u32, with_fixup: bool) -> Vec<f32> {
+    let entry = "_Z18flash_attn_ext_f16ILi64ELi64ELi32ELi1ELi4ELi2ELb0ELb0EEvPKcS1_S1_S1_S1_PKiPfP6float2ffffjfiiiiiiiiiiiiixiixiiiiix";
+    let kern = load_kernel(&find_entry(entry, &[], ""), false);
+    let mut gpu = Gpu::default();
+    let qp = gpu.upload(&f32_bytes(&c.q));
+    let kp = gpu.upload(&to_half_bytes(&interleave_kv(&c.k, c.kvpad)));
+    let vp = gpu.upload(&to_half_bytes(&interleave_kv(&c.v, c.kvpad)));
+    let mp = c.mask.as_ref().map_or(0, |m| gpu.upload(&to_half_bytes_inf(m)));
+    let dst = gpu.alloc(4 * c.n_tokens * FA_HEADS * FA_D);
+    let meta = gpu.alloc(8 * grid as usize * 32 * (2 + FA_D / 2));
+    let (nt, kvpad) = (c.n_tokens as i32, c.kvpad as i32);
+    let mrows = c.n_tokens.next_multiple_of(64) as i32;
+    let ia = |v: i32| Arg::U(v as u32);
+    let args = vec![
+        Arg::P(qp), Arg::P(kp), Arg::P(vp), Arg::P(mp), Arg::P(0), Arg::P(0), Arg::P(dst), Arg::P(meta),
+        Arg::F(scale), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0), Arg::U(8), Arg::F(0.0),
+        ia(FA_D as i32), ia(nt), ia(FA_HEADS as i32), ia(1),
+        ia((FA_D * FA_HEADS * 4) as i32), ia((FA_D * 4) as i32), ia((FA_D * FA_HEADS * 4 * c.n_tokens) as i32),
+        ia(FA_D as i32), ia(kvpad), ia(FA_KV_HEADS as i32), ia(1),
+        ia((FA_D * 2 * FA_KV_HEADS) as i32), ia((FA_D * 2) as i32), Arg::P((FA_D * 2 * c.kvpad * FA_KV_HEADS) as u64),
+        ia((FA_D * 2 * FA_KV_HEADS) as i32), ia((FA_D * 2) as i32), Arg::P((FA_D * 2 * c.kvpad * FA_KV_HEADS) as u64),
+        ia(kvpad), ia(1), ia(1),
+        ia(kvpad * 2), ia(kvpad * 2 * mrows), Arg::P((kvpad * 2 * mrows) as u64),
+    ];
+    kern.run(&mut gpu, [grid, 1, 1], [32, 4, 1], &args).unwrap();
+    if with_fixup {
+        let fx = load_kernel(&find_entry("_Z25flash_attn_stream_k_fixupILi64ELi32ELi1E", &[], ""), false);
+        let fargs = vec![Arg::P(dst), Arg::P(meta), ia(nt), ia(FA_HEADS as i32), ia(1), ia(kvpad)];
+        let _ = fx.meta.params.len();
+        fx.run(&mut gpu, [grid, 32, 1], [64, 1, 1], &fargs[..fx.meta.params.len().min(fargs.len())]).unwrap();
+    }
+    gpu.download_f32(dst, c.n_tokens * FA_HEADS * FA_D)
+}
+
+/// Ollama's cache layout: [d][kv head][pos] (nb11 = 256, nb12 = 128 bytes).
+fn interleave_kv(x: &[f32], kvpad: usize) -> Vec<f32> {
+    let mut o = vec![0f32; x.len()];
+    for h in 0..FA_KV_HEADS {
+        for j in 0..kvpad {
+            o[(j * FA_KV_HEADS + h) * FA_D..][..FA_D].copy_from_slice(&x[(h * kvpad + j) * FA_D..][..FA_D]);
+        }
+    }
+    o
+}
+
+fn to_half_bytes_inf(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| if *x == f32::NEG_INFINITY { 0xfc00u16 } else { f16_bits(*x) }.to_le_bytes()).collect()
+}
+
+fn fa_prefill_check(n_tokens: usize, kvlen: usize, kvpad: usize, grid: u32, use_mask: bool) {
+    if ptx_dir().is_none() {
+        return;
+    }
+    let c = fa_case(n_tokens, kvlen, kvpad, true, use_mask, 7 + n_tokens as u64);
+    let want = fa_ref(&c, 0.125);
+    let got = run_fa_prefill(&c, 0.125, grid, true);
+    fa_compare(&format!("fa prefill n={n_tokens} kv={kvlen}/{kvpad} grid={grid} mask={use_mask}"), &got, &want, 4e-3);
+}
+
+#[test]
+fn fa_prefill_small() {
+    fa_prefill_check(3, 3, 256, 14, true);
+}
+
+/// Decode path: flash_attn_ext_vec<64,1,f16,f16> (+ flash_attn_combine_results when `pb > 1`).
+fn run_fa_decode(c: &FaCase, scale: f32, pb: u32) -> Vec<f32> {
+    assert_eq!(c.n_tokens, 1);
+    let vec_name = find_entry("_Z18flash_attn_ext_vecILi64ELi1EL9ggml_type1ELS0_1ELb0E", &[], "");
+    let kern = load_kernel(&vec_name, false);
+    let mut gpu = Gpu::default();
+    let qp = gpu.upload(&f32_bytes(&c.q));
+    let kp = gpu.upload(&to_half_bytes(&c.k));
+    let vp = gpu.upload(&to_half_bytes(&c.v));
+    let mp = c.mask.as_ref().map_or(0, |m| gpu.upload(&to_half_bytes(m)));
+    let dst = gpu.alloc(4 * FA_HEADS * FA_D);
+    let parts = gpu.alloc(4 * FA_HEADS * FA_D * pb as usize);
+    let meta = gpu.alloc(8 * FA_HEADS * pb as usize);
+    let kvpad = c.kvpad as i32;
+    let mrows = 64i32;
+    let ia = |v: i32| Arg::U(v as u32);
+    let out = if pb == 1 { dst } else { parts };
+    let args = vec![
+        Arg::P(qp), Arg::P(kp), Arg::P(vp), Arg::P(mp), Arg::P(0), Arg::P(0), Arg::P(out), Arg::P(meta),
+        Arg::F(scale), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0), Arg::U(8), Arg::F(0.0),
+        ia(FA_D as i32), ia(1), ia(FA_HEADS as i32), ia(1),
+        ia((FA_D * FA_HEADS * 4) as i32), ia((FA_D * 4) as i32), ia((FA_D * FA_HEADS * 4) as i32),
+        ia(FA_D as i32), ia(kvpad), ia(FA_KV_HEADS as i32), ia(1),
+        ia((FA_D * 2) as i32), ia((FA_D * 2) as i32 * kvpad), Arg::P((FA_D * 2 * c.kvpad * FA_KV_HEADS) as u64),
+        ia((FA_D * 2) as i32), ia((FA_D * 2) as i32 * kvpad), Arg::P((FA_D * 2 * c.kvpad * FA_KV_HEADS) as u64),
+        ia(kvpad), ia(1), ia(1),
+        ia(kvpad * 2), ia(kvpad * 2 * mrows), Arg::P((kvpad * 2 * mrows) as u64),
+    ];
+    kern.run(&mut gpu, [1, pb, FA_HEADS as u32], [32, 4, 1], &args).unwrap();
+    if pb > 1 {
+        let comb = load_kernel(&find_entry("_Z26flash_attn_combine_resultsILi64E", &[], ""), false);
+        let cargs = vec![Arg::P(parts), Arg::P(meta), Arg::P(dst), Arg::U(pb)];
+        comb.run(&mut gpu, [1, FA_HEADS as u32, 1], [64, 1, 1], &cargs).unwrap();
+    }
+    gpu.download_f32(dst, FA_HEADS * FA_D)
+}
+
+fn fa_decode_check(kvlen: usize, kvpad: usize, pb: u32, use_mask: bool) {
+    if ptx_dir().is_none() {
+        return;
+    }
+    let c = fa_case(1, kvlen, kvpad, true, use_mask, 100 + kvlen as u64);
+    let want = fa_ref(&c, 0.125);
+    let got = run_fa_decode(&c, 0.125, pb);
+    fa_compare(&format!("fa decode kv={kvlen}/{kvpad} pb={pb} mask={use_mask}"), &got, &want, 4e-3);
+}
+
+#[test]
+fn fa_decode_single_block() {
+    fa_decode_check(3, 256, 1, true);
+    fa_decode_check(40, 256, 1, true);
+}
+
+#[test]
+fn fa_decode_parallel_blocks() {
+    fa_decode_check(3, 256, 4, true);
+    fa_decode_check(40, 256, 4, true);
+}
+
+#[test]
+fn fa_prefill_more() {
+    fa_prefill_check(40, 40, 256, 28, true);
+    fa_prefill_check(5, 60, 512, 5, true);
+}
+
+#[test]
+#[ignore = "bring-up sweep"]
+fn fa_decode_sweep() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    for use_mask in [true, false] {
+        for kv in [1usize, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 40, 64] {
+            let c = fa_case(1, kv, 256, true, use_mask, 100 + kv as u64);
+            let want = fa_ref(&c, 0.125);
+            let got = run_fa_decode(&c, 0.125, 1);
+            let bad = got.iter().zip(&want).filter(|(g, w)| !((f64::from(**g) - **w).abs() <= 4e-3)).count();
+            eprintln!("SWEEP mask={use_mask} kv={kv} bad={bad}/{} got0={} want0={}", want.len(), got[0], want[0]);
+        }
+    }
+}
+
+#[test]
+#[ignore = "bring-up probes"]
+fn fa_decode_probe_weights() {
+    if ptx_dir().is_none() {
+        return;
+    }
+    let kv = 12usize;
+    let mut c = fa_case(1, kv, 256, true, true, 5);
+    // V one-hot: output dim d (< kv) reads the softmax weight of position d.
+    for h in 0..FA_KV_HEADS {
+        for j in 0..c.kvpad {
+            for d in 0..FA_D {
+                c.v[(h * c.kvpad + j) * FA_D + d] = if d == j + 20 { 1.0 } else { 0.0 };
+            }
+        }
+    }
+    let want = fa_ref(&c, 0.125);
+    let got = run_fa_decode(&c, 0.125, 1);
+    for d in 20..kv + 22 {
+        eprintln!("PROBE d={d} got={:.5} want={:.5}", got[d], want[d]);
+    }
+}
+
+/// Replays one launch captured with `CFI_DEBUG_COPYBACK_DUMP` (`L<idx>.txt` + `_pre.bin` /
+/// `_post.bin` snapshots) through the translator and the SPIR-V simulator and compares every
+/// pointer argument's post snapshot, read as f32, with the simulator's result.
+/// `CFI_REPLAY_DIR=<dump dir> CFI_REPLAY_LAUNCH=<idx> CFI_GGML_PTX_DIR=<ptx dir>`.
+#[test]
+#[ignore = "replays a captured hardware launch"]
+fn replay_dumped_launch() {
+    let (Some(dir), Ok(idx), Some(_)) = (
+        std::env::var_os("CFI_REPLAY_DIR").map(std::path::PathBuf::from),
+        std::env::var("CFI_REPLAY_LAUNCH"),
+        ptx_dir(),
+    ) else {
+        return;
+    };
+    let text = std::fs::read_to_string(dir.join(format!("L{idx}.txt"))).unwrap();
+    let mut lines = text.lines();
+    let name = lines.next().unwrap().to_owned();
+    let geometry = lines.next().unwrap();
+    let nums = |s: &str| -> Vec<u32> {
+        let inner = s.split('[').nth(1).unwrap().split(']').next().unwrap();
+        inner.split(',').map(|x| x.trim().parse().unwrap()).collect()
+    };
+    let grid = nums(geometry.split("block=").next().unwrap());
+    let block = nums(geometry.split("block=").nth(1).unwrap());
+    let values: Vec<u64> = lines
+        .map(|l| u64::from_str_radix(l.rsplit("value=0x").next().unwrap(), 16).unwrap())
+        .collect();
+    let kern = load_kernel(&name, false);
+    let mut gpu = Gpu::default();
+    let mut args = Vec::new();
+    let mut ptrs = Vec::new();
+    for (i, (value, param)) in values.iter().zip(&kern.meta.params).enumerate() {
+        match param {
+            Param::GlobalPtr => {
+                let pre = std::fs::read(dir.join(format!("L{idx}_a{i}_pre.bin"))).ok();
+                let post = std::fs::read(dir.join(format!("L{idx}_a{i}_post.bin"))).ok();
+                let size = pre.as_ref().or(post.as_ref()).map_or(0, Vec::len);
+                if *value == 0 || size == 0 {
+                    args.push(Arg::P(0));
+                } else {
+                    let addr = match &pre {
+                        Some(p) => gpu.upload(p),
+                        None => gpu.alloc(size),
+                    };
+                    args.push(Arg::P(addr));
+                    ptrs.push((i, addr, post, pre));
+                }
+            }
+            Param::U64 => args.push(Arg::P(*value)),
+            Param::F32 => args.push(Arg::F(f32::from_bits(*value as u32))),
+            Param::U32 => args.push(Arg::U(*value as u32)),
+            other => panic!("replay does not support {other:?}"),
+        }
+    }
+    kern.run(&mut gpu, [grid[0], grid[1], grid[2]], [block[0], block[1], block[2]], &args).unwrap();
+    let mut total_bad = 0;
+    for (i, addr, post, pre) in ptrs {
+        let (Some(post), Some(pre)) = (post, pre) else { continue };
+        if post == pre {
+            continue; // not written by the launch
+        }
+        let got = gpu.download(addr, post.len());
+        let f = |b: &[u8]| -> Vec<f32> { b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect() };
+        let (g, w) = (f(&got), f(&post));
+        let bad: Vec<usize> = (0..g.len())
+            .filter(|&k| !(g[k] == w[k] || (g[k].is_finite() && w[k].is_finite() && (g[k] - w[k]).abs() <= 2e-3 * (1.0 + w[k].abs()))))
+            .collect();
+        eprintln!("REPLAY a{i}: {} f32 differ of {}", bad.len(), g.len());
+        for &k in bad.iter().take(8) {
+            eprintln!("  [{k}] sim={} hw={}", g[k], w[k]);
+        }
+        total_bad += bad.len();
+    }
+    eprintln!("REPLAY total differing words: {total_bad}");
+}
