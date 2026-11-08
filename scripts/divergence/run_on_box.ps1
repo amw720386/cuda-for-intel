@@ -11,16 +11,18 @@
 .PARAMETER Prompts  optional text file with one prompt per line (default: built-in list)
 .PARAMETER ResultsName subdirectory of Work that receives results (default results)
 .PARAMETER ShimDir optional dir holding the nvcuda.dll and cublas64_13.dll to test (copied into private copies of the Ollama tree and of run\); default: the DLLs already staged
+.PARAMETER VariantList comma separated subset of variants to run (default all)
+.PARAMETER SkipTool only run the Ollama scan
 .PARAMETER Fixed    index (0-based) of the prompt to analyse even if the modes agree on it (default: first diverging)
 #>
 param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$OllamaRun, [Parameter(Mandatory)][string]$Model,
-      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1, [string]$ResultsName = 'results', [string]$ShimDir = '')
+      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1, [string]$ResultsName = 'results', [string]$ShimDir = '', [switch]$SkipTool, [string]$VariantList = '')
 $ErrorActionPreference = 'Continue'
 $queue = Join-Path (Split-Path $Work -Parent) 'gpu-queue.ps1'
 $lock  = Join-Path (Split-Path $Work -Parent) 'gpu.lock'
 $res = Join-Path $Work $ResultsName; New-Item -ItemType Directory -Force $res | Out-Null
 $utf8 = New-Object System.Text.UTF8Encoding($false)
-if ($Prompts) { $plist = [IO.File]::ReadAllLines($Prompts, $utf8) | ? { $_ } } else {
+if ($Prompts) { $plist = @([IO.File]::ReadAllLines($Prompts, $utf8) | ? { $_ }) } else {
   $plist = @('Write a short story about a robot learning to paint.','The quick brown fox jumps over the lazy dog. The quick brown fox',
    'Explain why the sky is blue in one sentence:','def fibonacci(n):','The three primary colors are red, yellow, and',
    'Once upon a time in a small village there lived a young girl who loved to','Q: What is 17 plus 25? A:','Translate to French: Good morning, how are you?',
@@ -70,7 +72,7 @@ try {
     "FROM $Model" | Set-Content "$wd\Mf"
     & $exe create "divc-$mode" -f "$wd\Mf" 2>&1 | Out-Null
     for ($i = 0; $i -lt $plist.Count; $i++) {
-      $body = @{model = "divc-$mode"; prompt = $plist[$i]; stream = $false; raw = $true; options = @{num_predict = $NPredict; temperature = 0; seed = 0; num_gpu = 99; num_ctx = 1024; num_batch = 512}} | ConvertTo-Json -Depth 4
+      $body = @{model = "divc-$mode"; prompt = $plist[$i]; stream = $false; raw = $true; options = @{num_predict = $NPredict; temperature = 0; seed = 0; top_k = 1; top_p = 1.0; repeat_penalty = 1.0; num_gpu = 99; num_ctx = 1024; num_batch = 512}} | ConvertTo-Json -Depth 4
       try { $r = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/api/generate" -Method Post -Body $utf8.GetBytes($body) -ContentType 'application/json; charset=utf-8' -TimeoutSec 5400
             $ms = New-Object IO.MemoryStream; $r.RawContentStream.CopyTo($ms); [IO.File]::WriteAllBytes("$wd\p$i.json", $ms.ToArray()) } catch { "FAIL $mode $i $($_.Exception.Message)" | Add-Content "$res\scan_errors.txt" }
     }
@@ -78,7 +80,7 @@ try {
     if (Test-Path "$wd\cuda-for-intel-export.log") { Copy-Item "$wd\cuda-for-intel-export.log" "$res\ollama_${mode}_export.log" }
   }
   # compare
-  $rows = @(); $pick = -1
+  $rows = @(); $pick = -1; $bestD = 0
   for ($i = 0; $i -lt $plist.Count; $i++) {
     $a = $null; $n = $null
     try { $a = ($utf8.GetString([IO.File]::ReadAllBytes("$res\ollama_auto\p$i.json")) | ConvertFrom-Json).response; $n = ($utf8.GetString([IO.File]::ReadAllBytes("$res\ollama_none\p$i.json")) | ConvertFrom-Json).response } catch {}
@@ -86,25 +88,28 @@ try {
     $d = -1; $m = [Math]::Min($a.Length, $n.Length); for ($k = 0; $k -lt $m; $k++) { if ($a[$k] -ne $n[$k]) { $d = $k; break } }
     if ($d -lt 0 -and $a.Length -ne $n.Length) { $d = $m }
     $rows += "$i diverge_char=$d len_auto=$($a.Length) len_none=$($n.Length) :: $($plist[$i])"
-    if ($d -ge 0 -and $pick -lt 0 -and $d -ge 60) { $pick = $i }
+    if ($d -ge 20 -and ($pick -lt 0 -or [Math]::Abs($d - 160) -lt [Math]::Abs($bestD - 160))) { $pick = $i; $bestD = $d }
   }
   if ($pick -lt 0) { for ($i = 0; $i -lt $plist.Count; $i++) { if ($rows[$i] -match 'diverge_char=(\d+)' -and [int]$Matches[1] -ge 0 -and $rows[$i] -notmatch 'diverge_char=-1') { $pick = $i; break } } }
   if ($Fixed -ge 0) { $pick = $Fixed }
   $rows | Set-Content "$res\scan_summary.txt"; "picked=$pick" | Add-Content "$res\scan_summary.txt"
   # ---------- B: logits through llama.cpp (same shim, same mode switch) ----------
-  if ($pick -ge 0) {
+  if ($pick -ge 0 -and -not $SkipTool) {
     [IO.File]::WriteAllText("$res\prompt.txt", $plist[$pick], $utf8)
     $tool = "$runDir\cfi_logits.exe"
     # variant name -> CUDA_FOR_INTEL_SUBST value ('' = unset = default auto)
-    $variants = [ordered]@{ auto = ''; none = 'none'; auto_nommq = 'auto,-mmq'; auto_nommvq = 'auto,-mmvq'; auto_noquant = 'auto,-quantize_q8_1' }
+    $variants = [ordered]@{ auto = ''; none = 'none'; cpu = 'none'; auto_nommq = 'auto,-mmq'; only_mmq = 'mmq'; only_mmvq = 'mmvq'; only_quant = 'quantize_q8_1'; mmvq_nw1 = 'mmvq'; mmvq_nw2 = 'mmvq'; mmvq_nw8 = 'mmvq' }
+    $nwarps = @{ mmvq_nw1 = '1'; mmvq_nw2 = '2'; mmvq_nw8 = '8' }   # CUDA_FOR_INTEL_SUBST_NWARPS: changes only the cross-warp add order of mmvq
+    if ($VariantList) { $keep = $VariantList.Split(',') + @('auto','none'); foreach ($k in @($variants.Keys)) { if ($keep -notcontains $k) { $variants.Remove($k) } } }
     function Run-Tool($var, $kind, $idsFile, $tag) {
       $kc = "$Work\kc_llama_$var"; New-Item -ItemType Directory -Force $kc | Out-Null
       Set-ModeEnv 'auto' $kc
       if ($variants[$var]) { $env:CUDA_FOR_INTEL_SUBST = $variants[$var] }
+      if ($nwarps[$var]) { $env:CUDA_FOR_INTEL_SUBST_NWARPS = $nwarps[$var] }
       $env:PATH = "$runDir;$env:PATH"
       Push-Location $runDir
       Remove-Item cuda-for-intel-export.log -EA 0
-      $p = Start-Process -PassThru -Wait -NoNewWindow -FilePath $tool -ArgumentList $Model, '99', $kind, "$NPredict", "$res\prompt.txt", $idsFile, "$res\$tag" -RedirectStandardError "$res\$tag.err" -RedirectStandardOutput "$res\$tag.out"
+      $p = Start-Process -PassThru -Wait -NoNewWindow -FilePath $tool -ArgumentList $Model, $(if ($var -eq 'cpu') { '0' } else { '99' }), $kind, "$NPredict", "$res\prompt.txt", $idsFile, "$res\$tag" -RedirectStandardError "$res\$tag.err" -RedirectStandardOutput "$res\$tag.out"
       "$tag exit=$($p.ExitCode) SUBST=[$($variants[$var])]" | Add-Content "$res\tool_runs.txt"
       if (Test-Path cuda-for-intel-export.log) { Select-String -Path cuda-for-intel-export.log -Pattern '^subst' | % { $_.Line } | Set-Content "$res\$tag.subst.log" }
       Pop-Location

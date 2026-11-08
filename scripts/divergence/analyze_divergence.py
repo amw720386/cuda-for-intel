@@ -88,7 +88,8 @@ def step_table(ref, a, n, gen):
                          auto_top1=int(np.argmax(x)), none_top1=int(np.argmax(y)),
                          d_auto_ref=float(np.max(np.abs(x - r))), d_none_ref=float(np.max(np.abs(y - r))),
                          d_auto_ref_top20=float(np.max(np.abs(x[top] - r[top]))), d_none_ref_top20=float(np.max(np.abs(y[top] - r[top]))),
-                         d_auto_none=float(np.max(np.abs(x - y))), d_auto_none_top20=float(np.max(np.abs(x[top] - y[top]))),
+                         d_auto_none=float(np.max(np.abs(x - y))),
+                         rms_auto_ref=float(np.sqrt(np.mean((x - r) ** 2))), rms_none_ref=float(np.sqrt(np.mean((y - r) ** 2))), rms_auto_none=float(np.sqrt(np.mean((x - y) ** 2))), d_auto_none_top20=float(np.max(np.abs(x[top] - y[top]))),
                          auto_margin=float(np.sort(x)[-1] - np.sort(x)[-2]), none_margin=float(np.sort(y)[-1] - np.sort(y)[-2])))
     return rows
 
@@ -102,10 +103,11 @@ def summarize(rows, label):
              f"none top-1 != reference top-1: {sum(r['none_top1'] != r['ref_top1'] for r in rows)}\n")
     f = lambda k: float(np.max([r[k] for r in rows]))
     m = lambda k: float(np.mean([r[k] for r in rows]))
-    L.append("| quantity (all steps) | max | mean |\n|---|---|---|")
-    for k, nm in [("d_auto_ref", "max abs dlogit auto vs fp32 ref (full vocab)"), ("d_none_ref", "max abs dlogit none vs fp32 ref (full vocab)"),
+    L.append("| quantity (per step, then over the steps) | max over steps | mean over steps |\n|---|---|---|")
+    for k, nm in [("d_auto_ref", "auto vs fp32 ref, max over vocab"), ("d_none_ref", "none vs fp32 ref, max over vocab"),
                   ("d_auto_ref_top20", "auto vs ref, ref top-20 tokens"), ("d_none_ref_top20", "none vs ref, ref top-20 tokens"),
-                  ("d_auto_none", "auto vs none (full vocab)"), ("d_auto_none_top20", "auto vs none, ref top-20 tokens")]:
+                  ("rms_auto_ref", "auto vs ref, RMS over vocab"), ("rms_none_ref", "none vs ref, RMS over vocab"), ("rms_auto_none", "auto vs none, RMS over vocab"),
+                  ("d_auto_none", "auto vs none, max over vocab"), ("d_auto_none_top20", "auto vs none, ref top-20 tokens")]:
         L.append(f"| {nm} | {f(k):.5f} | {m(k):.5f} |")
     L.append("")
     if flips:
@@ -127,7 +129,7 @@ def summarize(rows, label):
     return "\n".join(L), flips, noise
 
 
-VARIANTS = ["auto", "none", "auto_nommq", "auto_nommvq", "auto_noquant"]
+VARIANTS = ["auto", "none", "cpu", "auto_nommq", "only_mmq", "only_mmvq", "only_quant", "mmvq_nw1", "mmvq_nw2", "mmvq_nw8"]
 
 
 def variant_file(R, var, seq):
@@ -146,15 +148,21 @@ def variant_table(R, nv, gen, ref, seq):
     r = ref
     n = data["none"]
     top = [np.argsort(-r[i])[:20] for i in range(len(gen))]
-    out.append("| variant (CUDA_FOR_INTEL_SUBST) | steps | top-1 flips vs none | top-1 != ref top-1 | max abs dlogit vs fp32 ref (vocab) | same, ref top-20 | max abs dlogit vs none (vocab) | first step differing from none |\n|---|---|---|---|---|---|---|---|")
+    out.append("| variant (CUDA_FOR_INTEL_SUBST) | steps | top-1 flips vs none | top-1 != ref top-1 | max abs dlogit vs fp32 ref (vocab) | same, ref top-20 | max abs dlogit vs none (vocab) | first step differing from none | max / mean(step max) abs dlogit vs CPU q8 pipeline | RMS vs ref | RMS vs none |\n|---|---|---|---|---|---|---|---|---|---|---|")
     for v, x in data.items():
         d_ref = np.abs(x - r).max(axis=1)
         d_ref20 = max(np.abs(x[i][top[i]] - r[i][top[i]]).max() for i in range(len(gen)))
         d_none = np.abs(x - n).max(axis=1)
+        rms_none = float(np.sqrt(((x - n) ** 2).mean(axis=1)).mean()); rms_ref = float(np.sqrt(((x - r) ** 2).mean(axis=1)).mean())
         flips = int((x.argmax(1) != n.argmax(1)).sum())
         refflips = int((x.argmax(1) != r.argmax(1)).sum())
         nz = np.nonzero(d_none > 0)[0]
-        out.append(f"| {v} | {len(x)} | {flips} | {refflips} | {d_ref.max():.5f} | {d_ref20:.5f} | {d_none.max():.5f} | {int(nz[0]) if len(nz) else 'none (bit-identical)'} |")
+        if "cpu" in data:
+            dc = np.abs(x - data["cpu"])
+            cpu_txt = f"{dc.max():.5f} / {dc.max(axis=1).mean():.5f}"
+        else:
+            cpu_txt = "n/a"
+        out.append(f"| {v} | {len(x)} | {flips} | {refflips} | {d_ref.max():.5f} | {d_ref20:.5f} | {d_none.max():.5f} | {int(nz[0]) if len(nz) else 'none (bit-identical)'} | {cpu_txt} | {rms_ref:.5f} | {rms_none:.5f} |")
     return "\n".join(out) + "\n"
 
 
