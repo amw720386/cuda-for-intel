@@ -129,7 +129,7 @@ def summarize(rows, label):
     return "\n".join(L), flips, noise
 
 
-VARIANTS = ["auto", "none", "cpu", "auto_nommq", "only_mmq", "only_mmvq", "only_quant", "mmvq_nw1", "mmvq_nw2", "mmvq_nw8"]
+VARIANTS = ["auto", "none", "cpu", "auto_noquant", "auto_nommq", "only_mmq", "only_mmvq", "only_quant", "mmvq_nw1", "mmvq_nw2", "mmvq_nw8"]
 
 
 def variant_file(R, var, seq):

@@ -701,3 +701,129 @@ fn hw_subst_mmq_types() {
     assert!(rejected.is_empty(), "the driver rejected native kernels (they ran as translated PTX)");
     assert!(failures.is_empty(), "native results differ from reference: {failures:?}");
 }
+
+/// Fuzz of `quantize_q8_1`: native vs translated stock kernel vs host reference on a few million
+/// realistic activations (wide per-row magnitudes, outliers, zero blocks). Reports how many
+/// `d`, `sum` and quant bytes differ and prints examples. One GPU slot:
+///   cargo test --test gpu hw_subst_quantize_fuzz -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore = "requires CFI_STOCK_GGML_DLL, a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn hw_subst_quantize_fuzz() {
+    let path = std::env::var("CFI_STOCK_GGML_DLL").expect("CFI_STOCK_GGML_DLL");
+    let blobs = extract_all(&path);
+    let quant_blob = blobs.iter().find(|b| b.contains(".entry _Z13quantize_q8_1PKfPvxxxxxj5uint3(")).expect("quantize blob");
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxSynchronize(),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLibraryLoadData(*mut Handle, *const c_void, *mut c_void, *mut c_void, u32, *mut c_void, *mut c_void, u32),
+        cuLibraryGetKernel(*mut Handle, Handle, *const c_char),
+        cuKernelGetFunction(*mut Handle, Handle),
+    );
+    let launch_fn = unsafe {
+        dll.get::<unsafe extern "system" fn(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut *mut c_void, *mut Handle) -> i32>(b"cuLaunchKernel\0")
+    }
+    .expect("cuLaunchKernel");
+    let api = Api { launch: *launch_fn, sync: *cuCtxSynchronize, alloc: *cuMemAlloc_v2, htod: *cuMemcpyHtoD_v2, dtoh: *cuMemcpyDtoH_v2 };
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
+    let load = |blob: &str| -> Handle {
+        let src = std::ffi::CString::new(blob).unwrap();
+        let mut library = null_mut();
+        assert_eq!(unsafe { cuLibraryLoadData(&mut library, src.as_ptr().cast(), null_mut(), null_mut(), 0, null_mut(), null_mut(), 0) }, 0);
+        library
+    };
+    let function = |library: Handle, switch: &str| -> Handle {
+        unsafe { std::env::set_var("CUDA_FOR_INTEL_SUBST", switch) };
+        let c = std::ffi::CString::new("_Z13quantize_q8_1PKfPvxxxxxj5uint3").unwrap();
+        let mut kernel = null_mut();
+        assert_eq!(unsafe { cuLibraryGetKernel(&mut kernel, library, c.as_ptr()) }, 0);
+        let mut f = null_mut();
+        assert_eq!(unsafe { cuKernelGetFunction(&mut f, kernel) }, 0);
+        unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
+        f
+    };
+    let (plain, native) = (load(quant_blob), load(quant_blob));
+    let (f_plain, f_native) = (function(plain, "none"), function(native, "quantize_q8_1"));
+    let mut rng = Rng(0xFEED);
+    let (ne0, ne1) = (4096usize, 512usize);
+    let mut total = (0usize, 0usize, 0usize, 0usize, 0usize); // blocks, d diffs, sum diffs, q diffs, q diffs vs host ref (translated)
+    let mut shown = 0;
+    for round in 0..6 {
+        let mut x = vec![0f32; ne0 * ne1];
+        for r in 0..ne1 {
+            let scale = 10f32.powf(rng.unit() * 2.5 - 0.5);
+            for c in 0..ne0 {
+                let g = rng.unit() + rng.unit() + rng.unit();
+                let mut v = g * scale;
+                if rng.u32() % 512 == 0 {
+                    v *= 40.0;
+                }
+                if (c / 32) % 17 == (round + r) % 17 && round % 2 == 1 {
+                    v = 0.0;
+                }
+                x[r * ne0 + c] = v;
+            }
+        }
+        let xb: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let xa = upload(&api, &xb);
+        let nbytes = ne0 * ne1 / 32 * refs::Q8_1_BYTES;
+        let mut outs = Vec::new();
+        for f in [f_plain, f_native] {
+            let ya = upload(&api, &vec![0u8; nbytes]);
+            let q = |v: usize| (v as u64).to_le_bytes().to_vec();
+            let params = vec![
+                xa.to_le_bytes().to_vec(),
+                ya.to_le_bytes().to_vec(),
+                q(ne0),
+                q(ne0),
+                q(ne0 * ne1),
+                q(ne0 * ne1),
+                q(ne0),
+                (ne1 as u32).to_le_bytes().to_vec(),
+                bytes_u32(&refs::fastdiv_values(1)),
+            ];
+            assert_eq!(launch(&api, f, [ne0.div_ceil(256) as u32, ne1 as u32, 1], [256, 1, 1], &params), 0);
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            outs.push(download(&api, ya, nbytes));
+        }
+        let (t, n) = (&outs[0], &outs[1]);
+        for b in 0..nbytes / refs::Q8_1_BYTES {
+            let (tb, nb) = (&t[b * 36..b * 36 + 36], &n[b * 36..b * 36 + 36]);
+            total.0 += 1;
+            let dd = tb[0..2] != nb[0..2];
+            let sd = tb[2..4] != nb[2..4];
+            let qd = (0..32).filter(|i| tb[4 + i] != nb[4 + i]).count();
+            total.1 += usize::from(dd);
+            total.2 += usize::from(sd);
+            total.3 += qd;
+            if (dd || sd || qd > 0) && shown < 12 {
+                shown += 1;
+                let xs = &x[b * 32..b * 32 + 32];
+                let amax = xs.iter().fold(0f32, |a, v| a.max(v.abs()));
+                let first = (0..32).find(|i| tb[4 + i] != nb[4 + i]);
+                println!(
+                    "diff block {b}: d translated {:04x}{:04x} native {:04x}{:04x}; sum t {:02x}{:02x} n {:02x}{:02x}; q diffs {qd}; amax {amax:e}; first q diff {:?}",
+                    tb[1], tb[0], nb[1], nb[0], tb[3], tb[2], nb[3], nb[2],
+                    first.map(|i| (xs[i], tb[4 + i] as i8, nb[4 + i] as i8, xs[i] / (amax / 127.0)))
+                );
+            }
+        }
+        let want = {
+            let mut w = Vec::new();
+            for r in 0..ne1 {
+                w.extend(refs::quantize_q8_1(&x[r * ne0..(r + 1) * ne0]));
+            }
+            w
+        };
+        total.4 += t.iter().zip(&want).filter(|(a, b)| a != b).count();
+    }
+    println!("quantize fuzz: {} blocks; native-vs-translated: d differs in {}, sum in {}, quant bytes {}; translated-vs-host-ref differing bytes {}", total.0, total.1, total.2, total.3, total.4);
+    assert_eq!(total.1 + total.3, 0, "native quantize_q8_1 d/quants differ from the translated kernel");
+}
