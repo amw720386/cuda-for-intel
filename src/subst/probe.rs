@@ -211,14 +211,20 @@ impl QuantizeCase {
 }
 
 pub(crate) struct MmqCase {
+    pub ty: u32,
     pub p: refs::Mmq,
     pub x: Vec<u8>,
     pub y: Vec<u8>,
 }
 
 pub(crate) fn mmq_case(ncols_x: usize, nrows: usize, ncols: usize, nch: usize, ratio: usize, nsamples: usize, seed: u64) -> MmqCase {
+    mmq_case_ty(refs::Q8_0, ncols_x, nrows, ncols, nch, ratio, nsamples, seed)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mmq_case_ty(ty: u32, ncols_x: usize, nrows: usize, ncols: usize, nch: usize, ratio: usize, nsamples: usize, seed: u64) -> MmqCase {
     let mut rng = Rng(seed);
-    let nb = ncols_x / 32;
+    let nb = ncols_x / 32 / refs::mmq_groups(ty);
     let nch_x = nch / ratio;
     let ychan = ncols_x / 128 * ncols * 36; // ints per (channel, sample) of y
     let p = refs::Mmq {
@@ -239,13 +245,13 @@ pub(crate) fn mmq_case(ncols_x: usize, nrows: usize, ncols: usize, nch: usize, r
         stride_sample_y: ychan * nch,
         stride_sample_dst: nrows * ncols * nch,
     };
-    let x = refs::random_blocks(refs::Q8_0, nrows * nb * nch_x * nsamples, &mut rng);
+    let x = refs::random_blocks(ty, nrows * nb * nch_x * nsamples, &mut rng);
     let mut y = Vec::new();
     for _ in 0..nch * nsamples {
         let acts: Vec<f32> = (0..ncols_x * ncols).map(|_| rng.unit() * 2.0).collect();
-        y.extend(refs::quantize_mmq_d4(&acts, ncols_x, ncols));
+        y.extend(refs::quantize_mmq(ty, &acts, ncols_x, ncols));
     }
-    MmqCase { p, x, y }
+    MmqCase { ty, p, x, y }
 }
 
 impl MmqCase {
@@ -255,7 +261,7 @@ impl MmqCase {
 
     pub fn reference(&self) -> Vec<f32> {
         let mut want = vec![0f32; self.dst_len()];
-        refs::mmq_q8_0(&self.p, &self.x, &self.y, &mut want);
+        refs::mmq_ref(self.ty, &self.p, &self.x, &self.y, &mut want);
         want
     }
 
@@ -332,8 +338,8 @@ pub(crate) fn validate(plan: &Plan, dev: &mut impl Device) -> Result<(), String>
             }
             Ok(())
         }
-        Kernel::MmqQ80 => {
-            let case = mmq_case(256, 70, 40, 2, 1, 1, 0x3171);
+        Kernel::Mmq { ty } => {
+            let case = mmq_case_ty(ty, 256, 70, 40, 2, 1, 1, 0x3171);
             let want = case.reference();
             let got = case.run(dev, plan)?;
             let nmse = refs::nmse(&got, &want);
@@ -342,7 +348,7 @@ pub(crate) fn validate(plan: &Plan, dev: &mut impl Device) -> Result<(), String>
             }
             Ok(())
         }
-        Kernel::MmqFixupQ80 => Ok(()),
+        Kernel::MmqFixup { .. } => Ok(()),
         Kernel::QuantizeQ81 => {
             let case = quantize_case(96, 128, 3, 2, 1, 0x71);
             let want = case.reference();

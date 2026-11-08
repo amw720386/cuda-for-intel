@@ -8,8 +8,10 @@ pub const Q8_1_BYTES: usize = 36;
 
 /// ggml_type ids the substitution layer knows.
 pub const Q4_0: u32 = 2;
+pub const Q5_0: u32 = 6;
 pub const Q8_0: u32 = 8;
 pub const Q4_K: u32 = 12;
+pub const Q5_K: u32 = 13;
 pub const Q6_K: u32 = 14;
 
 #[derive(Clone, Copy, Debug)]
@@ -399,17 +401,17 @@ impl Rng {
 
 /// Random but valid quantized blocks: bytes random, half scales finite and moderate.
 pub fn random_blocks(ty: u32, nblocks: usize, rng: &mut Rng) -> Vec<u8> {
-    let t = traits(ty).unwrap();
-    let mut out = vec![0u8; nblocks * t.block_bytes];
+    let bytes = mmq_block_bytes(ty);
+    let mut out = vec![0u8; nblocks * bytes];
     for b in 0..nblocks {
-        let blk = &mut out[b * t.block_bytes..(b + 1) * t.block_bytes];
+        let blk = &mut out[b * bytes..(b + 1) * bytes];
         for byte in blk.iter_mut() {
             *byte = rng.u32() as u8;
         }
         let half = |rng: &mut Rng| f32_to_f16(rng.unit() * 0.05).to_le_bytes();
         match ty {
-            Q4_0 | Q8_0 => blk[0..2].copy_from_slice(&half(rng)),
-            Q4_K => {
+            Q4_0 | Q5_0 | Q8_0 => blk[0..2].copy_from_slice(&half(rng)),
+            Q4_K | Q5_K => {
                 blk[0..2].copy_from_slice(&half(rng));
                 blk[2..4].copy_from_slice(&half(rng));
             }
@@ -505,4 +507,218 @@ pub fn mmq_q8_0(p: &Mmq, x: &[u8], y: &[u8], dst: &mut [f32]) {
             }
         }
     }
+}
+
+// ---- mul_mat_q for every type the native kernel covers ----
+
+pub fn mmq_block_bytes(ty: u32) -> usize {
+    match ty {
+        Q4_0 => 18,
+        Q5_0 => 22,
+        Q8_0 => 34,
+        Q4_K => 144,
+        Q5_K => 176,
+        Q6_K => 210,
+        _ => panic!("unsupported ggml type {ty}"),
+    }
+}
+
+/// 32-value groups per block (1 for the legacy types, 8 for the K-quants).
+pub fn mmq_groups(ty: u32) -> usize {
+    if matches!(ty, Q4_K | Q5_K | Q6_K) { 8 } else { 1 }
+}
+
+/// y layout ggml picks for the type: `half2 ds[4]` (true) or `float d[4]`.
+pub fn mmq_ds4(ty: u32) -> bool {
+    matches!(ty, Q4_0 | Q4_K | Q5_K)
+}
+
+fn h(b: &[u8], o: usize) -> f32 {
+    f16_to_f32(u16::from_le_bytes([b[o], b[o + 1]]))
+}
+
+fn round_half(x: f32) -> f32 {
+    f16_to_f32(f32_to_f16(x))
+}
+
+/// One 32-value group of an x block as the stock tile loader presents it.
+#[derive(Clone, Debug)]
+pub struct XGroup {
+    pub q: [i8; 32],
+    /// scale-per-32 types: d; K-quants: half-rounded `d*sc`; Q6_K: block d
+    pub d: f32,
+    /// K-quants: half-rounded `-dmin*m`
+    pub m: f32,
+    /// Q6_K: the two int8 scales of the group
+    pub sc: [i32; 2],
+}
+
+/// ggml `get_scale_min_k4`.
+fn scale_min_k4(j: usize, s: &[u8]) -> (i32, i32) {
+    if j < 4 {
+        (i32::from(s[j] & 63), i32::from(s[j + 4] & 63))
+    } else {
+        (
+            i32::from((s[j + 4] & 0xF) | ((s[j - 4] >> 6) << 4)),
+            i32::from((s[j + 4] >> 4) | ((s[j] >> 6) << 4)),
+        )
+    }
+}
+
+pub fn decode_group(ty: u32, blk: &[u8], g: usize) -> XGroup {
+    let mut q = [0i8; 32];
+    let (mut d, mut m, mut sc) = (0f32, 0f32, [0i32; 2]);
+    match ty {
+        Q8_0 => {
+            d = h(blk, 0);
+            for i in 0..32 {
+                q[i] = blk[2 + i] as i8;
+            }
+        }
+        Q4_0 => {
+            d = h(blk, 0);
+            for i in 0..32 {
+                let v = blk[2 + i % 16];
+                q[i] = (if i < 16 { v & 15 } else { v >> 4 }) as i8 - 8;
+            }
+        }
+        Q5_0 => {
+            d = h(blk, 0);
+            let qh = u32::from_le_bytes([blk[2], blk[3], blk[4], blk[5]]);
+            for i in 0..32 {
+                let j = i % 16;
+                let nib = if i < 16 { blk[6 + j] & 15 } else { blk[6 + j] >> 4 };
+                q[i] = (nib | ((((qh >> i) & 1) as u8) << 4)) as i8 - 16;
+            }
+        }
+        Q4_K | Q5_K => {
+            let (sc_, m_) = scale_min_k4(g, &blk[4..16]);
+            d = round_half(h(blk, 0) * sc_ as f32);
+            m = round_half(-h(blk, 2) * m_ as f32);
+            for i in 0..32 {
+                let (nib, hi) = if ty == Q4_K {
+                    let v = blk[16 + 32 * (g / 2) + i];
+                    (if g % 2 == 0 { v & 15 } else { v >> 4 }, 0)
+                } else {
+                    let v = blk[48 + 32 * (g / 2) + i];
+                    (if g % 2 == 0 { v & 15 } else { v >> 4 }, (blk[16 + i] >> g) & 1)
+                };
+                q[i] = (nib | (hi << 4)) as i8;
+            }
+        }
+        Q6_K => {
+            d = h(blk, 208);
+            sc = [i32::from(blk[192 + 2 * g] as i8), i32::from(blk[192 + 2 * g + 1] as i8)];
+            for i in 0..32 {
+                let v = 32 * g + i;
+                let (half, r) = (v / 128, v % 128);
+                let (quad, l) = (r / 32, r % 32);
+                let lo = blk[64 * half + 32 * (quad & 1) + l];
+                let lo = if quad >> 1 == 0 { lo & 15 } else { lo >> 4 };
+                let hi = (blk[128 + 32 * half + l] >> (2 * quad)) & 3;
+                q[i] = (lo | (hi << 4)) as i8 - 32;
+            }
+        }
+        _ => panic!("unsupported ggml type {ty}"),
+    }
+    XGroup { q, d, m, sc }
+}
+
+/// `block_q8_1_mmq` stream for `ncols` columns: 144-byte blocks, `half2 ds[4]` or `float d[4]`
+/// (see `mmq_ds4`) then 128 int8 values. `ds = (d, sum of the float values)`.
+pub fn quantize_mmq(ty: u32, x: &[f32], ne0: usize, ncols: usize) -> Vec<u8> {
+    assert!(ne0 % 128 == 0 && x.len() == ne0 * ncols);
+    let mut out = vec![0u8; ne0 / 128 * ncols * MMQ_BLOCK_BYTES];
+    for col in 0..ncols {
+        for g in 0..ne0 / 32 {
+            let v = &x[col * ne0 + g * 32..col * ne0 + g * 32 + 32];
+            let amax = v.iter().fold(0f32, |a, b| fmax(a, b.abs()));
+            let d_inv = 127.0 / amax;
+            let blk = (g / 4) * ncols + col;
+            let o = blk * MMQ_BLOCK_BYTES;
+            let d = if amax == 0.0 { 0.0 } else { 1.0 / d_inv };
+            if mmq_ds4(ty) {
+                let sum: f32 = v.iter().sum();
+                out[o + 4 * (g % 4)..o + 4 * (g % 4) + 2].copy_from_slice(&f32_to_f16(d).to_le_bytes());
+                out[o + 4 * (g % 4) + 2..o + 4 * (g % 4) + 4].copy_from_slice(&f32_to_f16(sum).to_le_bytes());
+            } else {
+                out[o + 4 * (g % 4)..o + 4 * (g % 4) + 4].copy_from_slice(&d.to_le_bytes());
+            }
+            for (l, xv) in v.iter().enumerate() {
+                let q = if amax == 0.0 { 0 } else { (xv * d_inv).round() as i32 as i8 };
+                out[o + 16 + (g % 4) * 32 + l] = q as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Reference of the native `mul_mat_q` for tiles stream-k does not split: the float structure of
+/// the stock MMA path per type (see the module doc of `subst/mmq.rs`).
+pub fn mmq_ref(ty: u32, p: &Mmq, x: &[u8], y: &[u8], dst: &mut [f32]) {
+    let nb = p.ncols_x / 32;
+    let (bytes, groups) = (mmq_block_bytes(ty), mmq_groups(ty));
+    let ds4 = mmq_ds4(ty);
+    for w in 0..p.nsamples_y {
+        for z in 0..p.nchannels_y {
+            let xo = (w / p.sample_ratio) * p.stride_sample_x + (z / p.channel_ratio) * p.stride_channel_x;
+            let yo = w * p.stride_sample_y + z * p.stride_channel_y;
+            for col in 0..p.ncols_dst {
+                for row in 0..p.nrows_x {
+                    let mut sum = 0f32;
+                    let mut tmp = 0f32;
+                    let mut last_d = 0f32;
+                    for kb in 0..nb {
+                        let bi = xo + row * p.stride_row_x + kb / groups;
+                        let xg = decode_group(ty, &x[bi * bytes..(bi + 1) * bytes], kb % groups);
+                        let yb_int = yo + (kb / 4) * p.ncols_y * 36 + col * 36;
+                        let yb = &y[yb_int * 4..];
+                        let hb = 4 * (kb % 4);
+                        let (d_b, s_b) = if ds4 {
+                            (h(yb, hb), h(yb, hb + 2))
+                        } else {
+                            (f32::from_le_bytes([yb[hb], yb[hb + 1], yb[hb + 2], yb[hb + 3]]), 0.0)
+                        };
+                        let yq = &yb[16 + (kb % 4) * 32..];
+                        let dot = |r: std::ops::Range<usize>| -> i32 {
+                            let mut s = 0i32;
+                            for t in r {
+                                s = dp4a(b2i8(&xg.q, t), b2(yq, t), s);
+                            }
+                            s
+                        };
+                        match ty {
+                            Q8_0 | Q4_0 | Q5_0 => {
+                                sum = fmaf(xg.d * dot(0..8) as f32, d_b, sum);
+                            }
+                            Q4_K | Q5_K => {
+                                let t = xg.d * d_b;
+                                sum = fmaf(t, dot(0..8) as f32, sum);
+                                sum = fmaf(xg.m, s_b, sum);
+                            }
+                            _ => {
+                                let v = dot(0..4).wrapping_mul(xg.sc[0]).wrapping_add(dot(4..8).wrapping_mul(xg.sc[1]));
+                                tmp = fmaf(v as f32, d_b, tmp);
+                                last_d = xg.d;
+                                if kb % 4 == 3 || kb == nb - 1 {
+                                    // the stage's first group holds the block d
+                                    let bi0 = xo + row * p.stride_row_x + (kb - kb % 4) / groups;
+                                    let d0 = decode_group(ty, &x[bi0 * bytes..(bi0 + 1) * bytes], (kb - kb % 4) % groups).d;
+                                    let _ = last_d;
+                                    sum = fmaf(tmp, d0, sum);
+                                    tmp = 0.0;
+                                }
+                            }
+                        }
+                    }
+                    dst[w * p.stride_sample_dst + z * p.stride_channel_dst + col * p.stride_col_dst + row] = sum;
+                }
+            }
+        }
+    }
+}
+
+fn b2i8(q: &[i8; 32], word: usize) -> u32 {
+    let o = word * 4;
+    u32::from(q[o] as u8) | u32::from(q[o + 1] as u8) << 8 | u32::from(q[o + 2] as u8) << 16 | u32::from(q[o + 3] as u8) << 24
 }

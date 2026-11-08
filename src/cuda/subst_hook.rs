@@ -70,12 +70,12 @@ pub(super) fn launch(
     args: &[KernelArg],
 ) -> Result<(), CuResult> {
     if let Some(plan) = plan {
-        let needs_values = matches!(plan.kernel, subst::Kernel::MmqQ80 | subst::Kernel::MmqFixupQ80);
+        let needs_values = matches!(plan.kernel, subst::Kernel::Mmq { .. } | subst::Kernel::MmqFixup { .. });
         let vals: Vec<u64> = if needs_values { arg_values(args) } else { Vec::new() };
-        if plan.kernel == subst::Kernel::MmqQ80 {
+        if matches!(plan.kernel, subst::Kernel::Mmq { .. }) {
             context.subst.pending_fixup = None;
         }
-        if plan.kernel == subst::Kernel::MmqFixupQ80 {
+        if matches!(plan.kernel, subst::Kernel::MmqFixup { .. }) {
             // [ids, bounds, dst, tmp, ...]: only fixups of a native mul_mat_q are no-ops
             let skip = vals.len() == 13 && context.subst.pending_fixup == Some((vals[2], vals[3]));
             let n = context.subst.fixup_events;
@@ -97,7 +97,7 @@ pub(super) fn launch(
         {
             match context.streams.launch(api, &context.backend, kernel, stream, mapped, args) {
                 Ok(()) => {
-                    if plan.kernel == subst::Kernel::MmqQ80 {
+                    if matches!(plan.kernel, subst::Kernel::Mmq { .. }) {
                         context.subst.pending_fixup = Some((vals[4], vals[5]));
                     }
                     shadow_check(api, context, plan, translated, stream, geometry, args);
@@ -277,7 +277,7 @@ fn shadow_check(
     }
     let vals = arg_values(args);
     let (dst_index, floats, tiled_geometry) = match plan.kernel {
-        subst::Kernel::MmqQ80 if vals.len() == 23 && plan.aux != 0 => {
+        subst::Kernel::Mmq { .. } if vals.len() == 23 && plan.aux != 0 => {
             let tiles = vals[8].div_ceil(u64::from(plan.aux)) * vals[7].div_ceil(128) * vals[13] * vals[18];
             (4usize, vals[18] * vals[21], ([tiles as u32, 1, 1], [32u32, 8, 1]))
         }

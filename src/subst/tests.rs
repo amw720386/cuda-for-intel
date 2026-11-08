@@ -305,9 +305,9 @@ fn registry_accepts_every_stock_mmvq_instantiation() {
 
 #[test]
 fn mmq_q8_0_matches_reference() {
-    let words = super::mmq::build(true);
+    let words = super::mmq::build(refs::Q8_0, true);
     validate(&words);
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
     // ragged rows/cols, channels with a ratio, two samples, k not a multiple of the 4-block stage
     for (ncols_x, nrows, ncols, nch, ratio, nsamples) in [(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] {
         let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 5 + ncols as u64);
@@ -325,7 +325,7 @@ fn translated_stock_mmq_q8_0_matches_native_on_the_interpreter() {
     let entry = "_Z9mul_mat_qIL9ggml_type8ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     crate::ptx::set_dynamic_shared_bytes(65536);
     let Some((stock, params)) = translated("blob98.ptx", entry) else { return };
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
     assert!(matches!(
         super::decide(entry, &params, &super::Switch::parse("mmq")),
         super::Decision::Substitute(_)
@@ -351,7 +351,7 @@ fn translated_stock_mmq_q8_0_matches_native_on_the_interpreter() {
     interp::run(&mut dev, &stock, &args, [1, 1, 1], [32, 8, 1]);
     let translated_out: Vec<f32> =
         dev.download(da, n * 4).chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    let words = super::mmq::build(true);
+    let words = super::mmq::build(refs::Q8_0, true);
     let mut sim = Sim { dev: Dev::default(), words: &words };
     let native = case.run(&mut sim, &plan).unwrap();
     let nmse = refs::nmse(&native, &translated_out);
@@ -391,8 +391,8 @@ fn auto_policy_follows_the_measurements() {
 #[ignore = "slow: multi-tile stock mmq on the interpreter; mismatch under investigation"]
 fn translated_stock_mmq_q8_0_multi_tile_shapes() {
     crate::ptx::set_dynamic_shared_bytes(65536);
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
-    let words = super::mmq::build(true);
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let words = super::mmq::build(refs::Q8_0, true);
     let mut failed = false;
     // (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples)
     for (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples) in [(256usize, 130usize, 9usize, 8usize, 1usize, 1usize, 1usize), (256, 130, 9, 8, 2, 2, 2)] {
@@ -441,4 +441,75 @@ fn translated_stock_mmq_q8_0_multi_tile_shapes() {
         failed |= refs::nmse(&native, &translated_out) >= 1e-9;
     }
     assert!(!failed);
+}
+
+const MMQ_TYPES: [(u32, &str); 6] = [
+    (refs::Q4_0, "blob91.ptx"),
+    (refs::Q5_0, "blob94.ptx"),
+    (refs::Q8_0, "blob98.ptx"),
+    (refs::Q4_K, "blob93.ptx"),
+    (refs::Q5_K, "blob96.ptx"),
+    (refs::Q6_K, "blob97.ptx"),
+];
+
+/// Native mmq against the host reference, every supported type: ragged rows/cols, channels with a
+/// ratio, two samples, k not a multiple of the stage (legacy types only).
+#[test]
+fn mmq_all_types_match_reference_bitwise() {
+    for (ty, _) in MMQ_TYPES {
+        let words = super::mmq::build(ty, true);
+        validate(&words);
+        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+        let shapes: &[(usize, usize, usize, usize, usize, usize)] =
+            if refs::mmq_groups(ty) == 1 { &[(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] } else { &[(512, 70, 40, 2, 1, 1), (256, 65, 9, 4, 2, 2), (768, 3, 1, 1, 1, 1)] };
+        for &(ncols_x, nrows, ncols, nch, ratio, nsamples) in shapes {
+            let case = probe::mmq_case_ty(ty, ncols_x, nrows, ncols, nch, ratio, nsamples, 5 + ncols as u64 + u64::from(ty));
+            let want = case.reference();
+            let mut sim = Sim { dev: Dev::default(), words: &words };
+            let got = case.run(&mut sim, &plan).unwrap();
+            let bad = got.iter().zip(&want).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert!(bad == 0, "type {ty} mmq {ncols_x}x{nrows}x{ncols}: {bad} of {} differ, nmse {}", got.len(), refs::nmse(&got, &want));
+        }
+    }
+}
+
+/// The translated stock `mul_mat_q<ty>` (MMA path) against the native kernel, one CTA per tile
+/// (needs `CFI_STOCK_PTX_DIR`).
+#[test]
+fn translated_stock_mmq_all_types_match_native_on_the_interpreter() {
+    crate::ptx::set_dynamic_shared_bytes(65536);
+    for (ty, blob) in MMQ_TYPES {
+        let entry = format!("_Z9mul_mat_qIL9ggml_type{ty}ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+        let Some((stock, params)) = translated(blob, &entry) else { return };
+        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+        assert!(matches!(super::decide(&entry, &params, &super::Switch::parse("mmq")), super::Decision::Substitute(_)), "type {ty}");
+        let case = probe::mmq_case_ty(ty, 512, 70, 8, 1, 1, 1, 21 + u64::from(ty));
+        let mut dev = Dev::default();
+        let xa = dev.put(&case.x);
+        let ya = dev.put(&case.y);
+        let n = case.dst_len();
+        let da = dev.alloc(n * 4);
+        let tmp = dev.alloc(1 << 16);
+        let mut args: Vec<ArgVal> = case
+            .args(xa, ya, da)
+            .iter()
+            .map(|a| match *a {
+                PArg::Ptr(p) => ArgVal::Ptr(p),
+                PArg::U32(v) => ArgVal::U32(v),
+                PArg::U64(v) => ArgVal::U64(v),
+            })
+            .collect();
+        args[5] = ArgVal::Ptr(tmp);
+        interp::run(&mut dev, &stock, &args, [1, 1, 1], [32, 8, 1]);
+        let translated_out: Vec<f32> =
+            dev.download(da, n * 4).chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let words = super::mmq::build(ty, true);
+        let mut sim = Sim { dev: Dev::default(), words: &words };
+        let native = case.run(&mut sim, &plan).unwrap();
+        let nmse = refs::nmse(&native, &translated_out);
+        let bad = native.iter().zip(&translated_out).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        println!("mmq type {ty} native vs translated stock: nmse {nmse:.3e}, {bad} of {} bitwise differences", n);
+        assert!(nmse < 1e-9, "type {ty}");
+        assert_eq!(bad, 0, "type {ty}: not bit-identical");
+    }
 }

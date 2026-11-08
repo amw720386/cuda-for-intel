@@ -494,3 +494,210 @@ fn hw_subst_native_vs_translated() {
     assert!(rejected.is_empty(), "the driver rejected native kernels (they ran as translated PTX)");
     assert!(failures.is_empty(), "native results differ from reference: {failures:?}");
 }
+
+/// `mul_mat_q` for every native type (Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K): native vs translated
+/// stock vs host reference on Llama-3.2-1B / Qwen2.5-1.5B / Qwen2.5-0.5B prefill shapes, then
+/// translated and native throughput at 4096 x 4096 x 512. One GPU slot:
+///   set CFI_STOCK_GGML_DLL=<path>\ggml-cuda.dll
+///   cargo test --test gpu hw_subst_mmq -- --ignored --nocapture --test-threads=1
+/// Optional: CFI_SUBST_REPS (default 20), CFI_SUBST_TYPES=q4_0,q5_0,q8_0,q4_k,q5_k,q6_k.
+#[test]
+#[ignore = "requires CFI_STOCK_GGML_DLL, a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn hw_subst_mmq_types() {
+    let path = std::env::var("CFI_STOCK_GGML_DLL").expect("CFI_STOCK_GGML_DLL");
+    let reps: usize = std::env::var("CFI_SUBST_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let want_types: Vec<String> = std::env::var("CFI_SUBST_TYPES")
+        .unwrap_or_else(|_| "q8_0,q4_0,q5_0,q4_k,q5_k,q6_k".into())
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    let blobs = extract_all(&path);
+    let _ = std::fs::remove_file("cuda-for-intel-export.log");
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxSynchronize(),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLibraryLoadData(*mut Handle, *const c_void, *mut c_void, *mut c_void, u32, *mut c_void, *mut c_void, u32),
+        cuLibraryGetKernel(*mut Handle, Handle, *const c_char),
+        cuKernelGetFunction(*mut Handle, Handle),
+    );
+    let launch_fn = unsafe {
+        dll.get::<unsafe extern "system" fn(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut *mut c_void, *mut Handle) -> i32>(b"cuLaunchKernel\0")
+    }
+    .expect("cuLaunchKernel");
+    let api = Api {
+        launch: *launch_fn,
+        sync: *cuCtxSynchronize,
+        alloc: *cuMemAlloc_v2,
+        htod: *cuMemcpyHtoD_v2,
+        dtoh: *cuMemcpyDtoH_v2,
+    };
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
+    let load = |blob: &str| -> Handle {
+        let src = std::ffi::CString::new(blob).unwrap();
+        let mut library = null_mut();
+        let status = unsafe {
+            cuLibraryLoadData(&mut library, src.as_ptr().cast(), null_mut(), null_mut(), 0, null_mut(), null_mut(), 0)
+        };
+        assert_eq!(status, 0, "cuLibraryLoadData");
+        library
+    };
+    let function = |library: Handle, name: &str, switch: &str| -> Handle {
+        // SAFETY: single-threaded test; the driver reads the variable when it resolves the kernel.
+        unsafe { std::env::set_var("CUDA_FOR_INTEL_SUBST", if switch.is_empty() { "none" } else { switch }) };
+        let c = std::ffi::CString::new(name).unwrap();
+        let mut kernel = null_mut();
+        assert_eq!(unsafe { cuLibraryGetKernel(&mut kernel, library, c.as_ptr()) }, 0, "cuLibraryGetKernel({name})");
+        let mut f = null_mut();
+        assert_eq!(unsafe { cuKernelGetFunction(&mut f, kernel) }, 0, "cuKernelGetFunction({name})");
+        unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
+        f
+    };
+    let mut failures = Vec::new();
+    let mut summary = Vec::new();
+    let types: [(u32, &str); 6] = [
+        (refs::Q8_0, "q8_0"),
+        (refs::Q4_0, "q4_0"),
+        (refs::Q5_0, "q5_0"),
+        (refs::Q4_K, "q4_k"),
+        (refs::Q5_K, "q5_k"),
+        (refs::Q6_K, "q6_k"),
+    ];
+    for (ty, label) in types {
+        if !want_types.iter().any(|t| t == label) {
+            continue;
+        }
+        let Some(blob) = blobs.iter().find(|b| b.contains(&format!(".entry _Z9mul_mat_qIL9ggml_type{ty}ELi64ELb0E"))) else {
+            println!("{label}: no mul_mat_q blob");
+            continue;
+        };
+        let (plain, native) = (load(blob), load(blob));
+        let bytes = refs::mmq_block_bytes(ty);
+        let per_block = 32 * refs::mmq_groups(ty);
+        let mk = |nrows: usize, ncols_x: usize, ncols: usize, seed: u64| -> (refs::Mmq, Vec<u8>, Vec<u8>) {
+            let mut rng = Rng(seed);
+            let nb = ncols_x / per_block;
+            let kpad = ncols_x.next_multiple_of(512);
+            let ychan = kpad / 128 * ncols * 36;
+            let p = refs::Mmq {
+                ncols_x,
+                nrows_x: nrows,
+                ncols_dst: ncols,
+                nchannels_y: 1,
+                nsamples_y: 1,
+                channel_ratio: 1,
+                sample_ratio: 1,
+                stride_row_x: nb,
+                ncols_y: ncols,
+                stride_col_dst: nrows,
+                stride_channel_x: nrows * nb,
+                stride_channel_y: ychan,
+                stride_channel_dst: nrows * ncols,
+                stride_sample_x: nrows * nb,
+                stride_sample_y: ychan,
+                stride_sample_dst: nrows * ncols,
+            };
+            let mut x = refs::random_blocks(ty, nrows * nb, &mut rng);
+            x.extend(vec![0u8; bytes * 16]);
+            let mut acts = vec![0f32; kpad * ncols];
+            for c in 0..ncols {
+                for k in 0..ncols_x {
+                    acts[c * kpad + k] = rng.unit() * 2.0;
+                }
+            }
+            (p, x, refs::quantize_mmq(ty, &acts, kpad, ncols))
+        };
+        println!("== mul_mat_q {label}: native vs translated vs host reference");
+        // Llama-3.2-1B (2048/8192/512), Qwen2.5-1.5B (1536/8960/256), Qwen2.5-0.5B (896/4864) shapes
+        let mut cases: Vec<(usize, usize, usize)> = Vec::new();
+        for (m, k) in [(2048usize, 2048usize), (8192, 2048), (2048, 8192), (512, 2048), (1536, 1536), (8960, 1536), (1536, 8960), (256, 1536), (300, 1024)] {
+            for n in [7usize, 33, 64] {
+                cases.push((m, k, n));
+            }
+        }
+        if per_block == 32 {
+            cases.push((896, 896, 16));
+            cases.push((4864, 896, 33));
+        }
+        let mut worst = (0f64, 0f64, 0usize);
+        for (nrows, ncols_x, ncols) in cases {
+            let mmq_x = ncols.next_multiple_of(8).clamp(8, 64);
+            let need_check = u32::from(nrows % 128 != 0);
+            let entry = format!("_Z9mul_mat_qIL9ggml_type{ty}ELi{mmq_x}ELb{need_check}EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+            let (p, x, y) = mk(nrows, ncols_x, ncols, 7 + nrows as u64 + u64::from(ty));
+            let n = p.stride_sample_dst;
+            let mut want = vec![0f32; n];
+            refs::mmq_ref(ty, &p, &x, &y, &mut want);
+            let (xa, ya) = (upload(&api, &x), upload(&api, &y));
+            let tmp = upload(&api, &vec![0u8; 1 << 22]);
+            let mut outs = Vec::new();
+            for (module, switch) in [(plain, ""), (native, "mmq")] {
+                let f = function(module, &entry, switch);
+                let da = upload(&api, &vec![0u8; n * 4]);
+                let params = mmq_params(&p, xa, ya, da, tmp);
+                let tiles = (ncols.div_ceil(mmq_x) * nrows.div_ceil(128)) as u32;
+                assert_eq!(launch(&api, f, [tiles, 1, 1], [32, 8, 1], &params), 0);
+                assert_eq!(unsafe { (api.sync)() }, 0);
+                outs.push(floats(&download(&api, da, n * 4)));
+            }
+            let (t, nat) = (&outs[0], &outs[1]);
+            let (a, b, d) = (refs::nmse(nat, &want), refs::nmse(nat, t), refs::nmse(t, &want));
+            let bitwise = nat.iter().zip(t).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            println!("{label} rows {nrows} k {ncols_x} cols {ncols} mmq_x {mmq_x}: native-vs-ref {a:.2e}, native-vs-translated {b:.2e} ({bitwise} bitwise), translated-vs-ref {d:.2e}");
+            worst = (worst.0.max(a), worst.1.max(b), worst.2 + bitwise);
+            if !(a < 1e-9 && b < 1e-9) {
+                failures.push(format!("{label} {entry} {nrows}x{ncols_x}x{ncols}"));
+            }
+        }
+        // throughput: 4096 x 4096 weights, 512 prompt columns
+        let (nrows, ncols_x, ncols, mmq_x) = (4096usize, 4096usize, 512usize, 64usize);
+        let entry = format!("_Z9mul_mat_qIL9ggml_type{ty}ELi{mmq_x}ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+        let (p, x, y) = mk(nrows, ncols_x, ncols, 3);
+        let (xa, ya) = (upload(&api, &x), upload(&api, &y));
+        let tmp = upload(&api, &vec![0u8; 1 << 22]);
+        let da = upload(&api, &vec![0u8; nrows * ncols * 4]);
+        let params = mmq_params(&p, xa, ya, da, tmp);
+        let tiles = (ncols.div_ceil(mmq_x) * nrows.div_ceil(128)) as u32;
+        let flops = 2.0 * nrows as f64 * ncols as f64 * ncols_x as f64;
+        let mut rates = Vec::new();
+        for (module, switch) in [(plain, ""), (native, "mmq")] {
+            let f = function(module, &entry, switch);
+            for _ in 0..2 {
+                assert_eq!(launch(&api, f, [tiles, 1, 1], [32, 8, 1], &params), 0);
+            }
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            let start = Instant::now();
+            for _ in 0..reps {
+                assert_eq!(launch(&api, f, [tiles, 1, 1], [32, 8, 1], &params), 0);
+            }
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            rates.push(flops * reps as f64 / start.elapsed().as_secs_f64() / 1e12);
+        }
+        println!("{label}: translated {:.3} TOPS, native {:.3} TOPS, speedup {:.2}x", rates[0], rates[1], rates[1] / rates[0]);
+        summary.push(format!(
+            "{label:6} speedup {:6.2}x  worst native-vs-ref {:.2e}  native-vs-translated {:.2e}  bitwise-diff floats {}",
+            rates[1] / rates[0],
+            worst.0,
+            worst.1,
+            worst.2
+        ));
+    }
+    println!("== summary (mmq native vs translated stock, 4096x4096x512, one CTA per tile)");
+    for l in &summary {
+        println!("{l}");
+    }
+    let log = std::fs::read_to_string("cuda-for-intel-export.log").unwrap_or_default();
+    let rejected: Vec<&str> = log.lines().filter(|l| l.contains("subst:") && (l.contains("rejected") || l.contains("failed") || l.contains("keeping translated"))).collect();
+    for line in &rejected {
+        println!("  {line}");
+    }
+    assert!(rejected.is_empty(), "the driver rejected native kernels (they ran as translated PTX)");
+    assert!(failures.is_empty(), "native results differ from reference: {failures:?}");
+}

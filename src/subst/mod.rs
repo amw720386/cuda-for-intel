@@ -145,10 +145,10 @@ fn source_name(s: &str) -> Option<(String, &str)> {
 pub(crate) enum Kernel {
     Mmvq { ty: u32, ncols: u32 },
     QuantizeQ81,
-    /// `mul_mat_q<Q8_0>` (any mmq_x / need_check), non-MoE only.
-    MmqQ80,
-    /// `mul_mat_q_stream_k_fixup<Q8_0>`: skipped after a native `MmqQ80` launch.
-    MmqFixupQ80,
+    /// `mul_mat_q<ty>` (any mmq_x / need_check), non-MoE only.
+    Mmq { ty: u32 },
+    /// `mul_mat_q_stream_k_fixup<ty>`: skipped after a native `Mmq` launch.
+    MmqFixup { ty: u32 },
 }
 
 fn ptr() -> Param {
@@ -158,13 +158,18 @@ fn u3() -> Param {
     Param::Words { words: 3, align: 4, trim: 0 }
 }
 
+/// mmq types enabled in `auto` (the rest need an explicit `mmq:<type>` / `mmq` / `all`); raised
+/// only where hw_subst shows exact shadow checks and a speedup of at least 2x.
+const AUTO_MMQ: [u32; 1] = [refs::Q8_0];
+
 /// The measured default: with weights loaded once per row the native mmvq beat or tied the
 /// translated PTX on the Arc at every type and ncols 1..8 (Q8_0 1.02-1.88x, Q4_0 1.02-1.44x,
 /// Q4_K 1.65-2.23x, Q6_K 1.65-2.54x; one dense run, hw_subst). quantize_q8_1 is byte-exact and
 /// cheap. mmq (Q8_0) and its stream-k fixup are native in `auto` too: 330 of 330 shadow checks exact on the Arc, prefill about 4x faster; switch off with `auto,-mmq`.
 pub(crate) fn auto_ok(kernel: Kernel) -> bool {
     match kernel {
-        Kernel::Mmvq { .. } | Kernel::QuantizeQ81 | Kernel::MmqQ80 | Kernel::MmqFixupQ80 => true,
+        Kernel::Mmvq { .. } | Kernel::QuantizeQ81 => true,
+        Kernel::Mmq { ty } | Kernel::MmqFixup { ty } => AUTO_MMQ.contains(&ty),
     }
 }
 
@@ -209,9 +214,9 @@ fn layout_matches(kernel: Kernel, params: &[Param], expected: &[Param]) -> bool 
     if params == expected {
         return true;
     }
-    if matches!(kernel, Kernel::MmqQ80 | Kernel::MmqFixupQ80) {
+    if matches!(kernel, Kernel::Mmq { .. } | Kernel::MmqFixup { .. }) {
         // unused pointer slots (ids, expert bounds, ...) may be typed u64
-        let lead = if kernel == Kernel::MmqQ80 { 6 } else { 4 };
+        let lead = if matches!(kernel, Kernel::Mmq { .. }) { 6 } else { 4 };
         return params.len() == expected.len()
             && params.iter().zip(expected).enumerate().all(|(i, (a, b))| {
                 a == b || (i < lead && matches!(a, Param::U64 | Param::GlobalPtr))
@@ -223,11 +228,17 @@ fn layout_matches(kernel: Kernel, params: &[Param], expected: &[Param]) -> bool 
         && params.iter().zip(expected).enumerate().all(|(i, (a, b))| i == 2 || a == b)
 }
 
+fn mmvq_supported(ty: u32) -> bool {
+    matches!(ty, refs::Q4_0 | refs::Q8_0 | refs::Q4_K | refs::Q6_K)
+}
+
 pub(crate) fn type_name(ty: u32) -> Option<&'static str> {
     Some(match ty {
         refs::Q4_0 => "q4_0",
+        refs::Q5_0 => "q5_0",
         refs::Q8_0 => "q8_0",
         refs::Q4_K => "q4_k",
+        refs::Q5_K => "q5_k",
         refs::Q6_K => "q6_k",
         _ => return None,
     })
@@ -260,16 +271,20 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
     let Some(m) = demangle(name) else { return Decision::NotApplicable };
     let (kernel, expected, family, ty) = match (m.base.as_str(), m.targs.as_slice()) {
         ("mul_mat_vec_q", [TArg::Enum(e, ty), TArg::Int(ncols)]) if e == "ggml_type" => {
-            let (Some(tn), true) = (type_name(*ty as u32), (1..=8).contains(ncols)) else {
+            let (Some(tn), true) =
+                (type_name(*ty as u32).filter(|_| mmvq_supported(*ty as u32)), (1..=8).contains(ncols))
+            else {
                 return Decision::NotApplicable;
             };
             (Kernel::Mmvq { ty: *ty as u32, ncols: *ncols as u32 }, mmvq_layout(), "mmvq", Some(tn))
         }
-        ("mul_mat_q", [TArg::Enum(e, 8), TArg::Int(_), TArg::Int(_)]) if e == "ggml_type" => {
-            (Kernel::MmqQ80, mmq_layout(), "mmq", Some("q8_0"))
+        ("mul_mat_q", [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_)]) if e == "ggml_type" && mmq::supported(*ty as u32) => {
+            (Kernel::Mmq { ty: *ty as u32 }, mmq_layout(), "mmq", type_name(*ty as u32))
         }
-        ("mul_mat_q_stream_k_fixup", [TArg::Enum(e, 8), TArg::Int(_), TArg::Int(_)]) if e == "ggml_type" => {
-            (Kernel::MmqFixupQ80, mmq_fixup_layout(), "mmq", Some("q8_0"))
+        ("mul_mat_q_stream_k_fixup", [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_)])
+            if e == "ggml_type" && mmq::supported(*ty as u32) =>
+        {
+            (Kernel::MmqFixup { ty: *ty as u32 }, mmq_fixup_layout(), "mmq", type_name(*ty as u32))
         }
         ("quantize_q8_1", []) => (Kernel::QuantizeQ81, quantize_layout(), "quantize_q8_1", None),
         _ => return Decision::NotApplicable,
@@ -295,11 +310,11 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
     let key = match kernel {
         Kernel::Mmvq { ty, ncols } => format!("mmvq:t{ty}:c{ncols}:w{}", nwarps.unwrap_or(0)),
         Kernel::QuantizeQ81 => "quantize_q8_1".to_string(),
-        Kernel::MmqQ80 => "mmq:q8_0".to_string(),
-        Kernel::MmqFixupQ80 => "mmq_fixup:q8_0".to_string(),
+        Kernel::Mmq { ty } => format!("mmq:t{ty}"),
+        Kernel::MmqFixup { ty } => format!("mmq_fixup:t{ty}"),
     };
     let aux = match m.targs.as_slice() {
-        [_, TArg::Int(x), _] if matches!(kernel, Kernel::MmqQ80 | Kernel::MmqFixupQ80) => *x as u32,
+        [_, TArg::Int(x), _] if matches!(kernel, Kernel::Mmq { .. } | Kernel::MmqFixup { .. }) => *x as u32,
         _ => 0,
     };
     Decision::Substitute(Plan { kernel, key, nwarps, layout_hash: layout_hash(params), aux })
@@ -317,8 +332,8 @@ impl Plan {
                 format!("cfi_mmvq_t{}_c{}_w{}", ty, ncols, self.nwarps_for(refs::Mmvq::ggml_nwarps(ncols as usize) as u32))
             }
             Kernel::QuantizeQ81 => "cfi_quantize_q8_1".to_string(),
-            Kernel::MmqQ80 => "cfi_mmq_q8_0".to_string(),
-            Kernel::MmqFixupQ80 => String::new(),
+            Kernel::Mmq { ty } => mmq::entry_name(ty),
+            Kernel::MmqFixup { .. } => String::new(),
         }
     }
 
@@ -332,8 +347,8 @@ impl Plan {
                 mmvq::build(mmvq::Cfg { ty, ncols, nwarps }, dot)
             }
             Kernel::QuantizeQ81 => quantize::build(dot),
-            Kernel::MmqQ80 => mmq::build(dot),
-            Kernel::MmqFixupQ80 => Vec::new(),
+            Kernel::Mmq { ty } => mmq::build(ty, dot),
+            Kernel::MmqFixup { .. } => Vec::new(),
         })
         .map_err(|_| format!("native generator for {} panicked", self.key))
     }
@@ -350,7 +365,7 @@ impl Plan {
                 Some((grid, [32, self.nwarps_for(stock), 1]))
             }
             Kernel::QuantizeQ81 => (block == [256, 1, 1]).then_some((grid, block)),
-            Kernel::MmqQ80 | Kernel::MmqFixupQ80 => None, // needs the argument values: `map_launch`
+            Kernel::Mmq { .. } | Kernel::MmqFixup { .. } => None, // needs the argument values: `map_launch`
         }
     }
 
@@ -358,7 +373,7 @@ impl Plan {
     /// each launch word, pointers as addresses).
     pub(crate) fn map_launch(&self, grid: [u32; 3], block: [u32; 3], vals: &[u64]) -> Option<([u32; 3], [u32; 3])> {
         match self.kernel {
-            Kernel::MmqQ80 => {
+            Kernel::Mmq { .. } => {
                 // stock: 32 x 8 threads; MoE (ids_dst / expert_bounds) stays on the translated kernel
                 if block != [32, 8, 1] || vals.len() != 23 || vals[2] != 0 || vals[3] != 0 {
                     return None;
