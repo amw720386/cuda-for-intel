@@ -54,13 +54,13 @@ fn native_state() -> (usize, usize) {
 }
 
 #[test]
-fn substitution_is_off_by_default_and_on_when_selected() {
+fn substitution_is_off_when_none_and_on_when_selected_or_default() {
     let _fixture = Fixture::new();
     let ctx = context(None);
     let (a, _) = allocations();
     let (b, _) = allocations();
     // SAFETY: tests that touch the fake runtime are serialised by the fixture.
-    unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
+    unsafe { std::env::set_var("CUDA_FOR_INTEL_SUBST", "none") };
     let plain = load(QUANTIZE);
     assert_eq!(launch_quantize(plain, 256, a, b, true), Success);
     let (modules_plain, natives_plain) = native_state();
@@ -86,6 +86,20 @@ fn substitution_is_off_by_default_and_on_when_selected() {
     assert_eq!(native_state().1, before.1);
     unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
     // context teardown destroys the native modules too
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+}
+
+#[test]
+fn unset_variable_means_auto() {
+    let _fixture = Fixture::new();
+    let ctx = context(None);
+    let (a, _) = allocations();
+    let (b, _) = allocations();
+    unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
+    let by_default = load(QUANTIZE);
+    assert_eq!(launch_quantize(by_default, 256, a, b, true), Success);
+    assert_eq!(native_state().1, 1, "quantize_q8_1 is native under the default auto policy");
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
     assert_baseline();
 }
