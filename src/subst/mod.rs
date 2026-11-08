@@ -5,7 +5,7 @@
 //! (`cuda/subst_hook.rs`) builds the native module lazily, validates it once against a host
 //! reference on the real device, and falls back to the translated kernel on any failure.
 //!
-//! Selection: `CUDA_FOR_INTEL_SUBST=none|auto|all|<comma list>` (default `none`; `auto` = measured per-kernel policy). List items are a
+//! Selection: `CUDA_FOR_INTEL_SUBST=none|auto|all|<comma list>` (default `auto` = measured per-kernel policy; `none` disables). `mmq` is EXPERIMENTAL and opt-in only (`auto,mmq`): its module load can spin for minutes on the Arc and its prefill output diverged from the translated kernel at token 1. List items are a
 //! family (`mmvq`, `quantize_q8_1`) optionally narrowed to a type (`mmvq:q8_0`, `mmvq:q4_k`).
 use crate::ptx::Param;
 
@@ -52,7 +52,11 @@ impl Switch {
     /// Reads the variable on every call (cheap, and lets tests and the hardware comparison load
     /// the same kernel with and without substitution in one process).
     pub(crate) fn from_env() -> Self {
-        Self::parse(&std::env::var("CUDA_FOR_INTEL_SUBST").unwrap_or_default())
+        // Unset means `auto` (measured policy); `CUDA_FOR_INTEL_SUBST=none` disables substitution.
+        match std::env::var("CUDA_FOR_INTEL_SUBST") {
+            Ok(text) => Self::parse(&text),
+            Err(_) => Self::parse("auto"),
+        }
     }
 
     pub(crate) fn allows(&self, family: &str, ty: Option<&str>) -> bool {
@@ -141,7 +145,7 @@ fn ptr() -> Param {
     Param::GlobalPtr
 }
 fn u3() -> Param {
-    Param::Words { words: 3, align: 4 }
+    Param::Words { words: 3, align: 4, trim: 0 }
 }
 
 /// The measured default: with weights loaded once per row the native mmvq beat or tied the
