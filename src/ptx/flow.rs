@@ -335,6 +335,22 @@ fn cyclic_blocks(blocks: &[Block<'_>]) -> Vec<bool> {
     in_cycle
 }
 
+thread_local! {
+    static STRICT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test hook: forces `CFI_STRICT_BARRIERS` semantics on the current thread.
+#[cfg(test)]
+pub(super) fn set_strict_barriers(on: bool) {
+    STRICT_OVERRIDE.with(|s| s.set(on));
+}
+
+/// With `CFI_STRICT_BARRIERS` set, loops are not trusted to have a uniform trip count: every
+/// barrier-bearing loop test must be proven block-uniform.
+fn strict_barriers() -> bool {
+    STRICT_OVERRIDE.with(|s| s.get()) || std::env::var_os("CFI_STRICT_BARRIERS").is_some()
+}
+
 fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<usize>]) -> Result<(), Error> {
     // A branch's strict postdominators are guaranteed reconvergence points.
     let postdom = Graphs::build(blocks, predecessors);
@@ -499,7 +515,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
             // bound up to a multiple of the block size. Uniformity of the trip count is a
             // value fact we cannot prove, so trust the program as CUDA does.
             let in_loop = in_cycle[index];
-            if in_loop && std::env::var_os("CFI_STRICT_BARRIERS").is_none() {
+            if in_loop && !strict_barriers() {
                 continue;
             }
             checked_branches[index] = true;

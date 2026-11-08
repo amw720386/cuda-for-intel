@@ -1039,6 +1039,10 @@ mod tier2_tests;
 mod tier3_tests;
 #[cfg(test)]
 mod tier3_mma_tests;
+#[cfg(test)]
+mod sim;
+#[cfg(test)]
+mod flow_tests;
 
 #[cfg(test)]
 mod tests {
