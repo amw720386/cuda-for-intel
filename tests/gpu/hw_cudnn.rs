@@ -20,6 +20,8 @@ use refmath::{ConvGeom, Kind, out_dim};
 
 type Dll = libloading::Library;
 
+static GEMM_PATH_CASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn cudnn_dll() -> Dll {
     let exe = std::env::current_exe().unwrap();
     let dll = exe.parent().unwrap().parent().unwrap().join("cudnn64_9.dll");
@@ -207,6 +209,48 @@ fn run_conv_case(cu: &Cu, api: &Api, c: &Case) {
     let mut want = before.clone();
     refmath::conv_fwd(&g, &x, &wv, &mut want, 2.0, 0.5);
     check("fwd alpha/beta", &got, &c.dt.dec(&c.dt.enc(&want)), tol);
+
+    // Same three directions with a caller-supplied workspace (explicit-GEMM path where eligible) and with a
+    // workspace that is too small (must fall back to the direct kernels, never fail or corrupt).
+    let ws_fwd = dnn!(api.cudnn, "cudnnGetConvolutionForwardWorkspaceSize", fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void, i32, *mut usize));
+    let ws_bd = dnn!(api.cudnn, "cudnnGetConvolutionBackwardDataWorkspaceSize", fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void, i32, *mut usize));
+    let ws_bf = dnn!(api.cudnn, "cudnnGetConvolutionBackwardFilterWorkspaceSize", fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void, i32, *mut usize));
+    let (mut sf, mut sd, mut sw) = (0usize, 0usize, 0usize);
+    assert_eq!(unsafe { ws_fwd(api.h, xd, wd, cd, dyd, 0, &mut sf) }, 0);
+    assert_eq!(unsafe { ws_bd(api.h, wd, dyd, cd, xd, 0, &mut sd) }, 0);
+    assert_eq!(unsafe { ws_bf(api.h, xd, dyd, cd, wd, 0, &mut sw) }, 0);
+    println!("  workspace sizes fwd/bwd-data/bwd-filter: {sf}/{sd}/{sw}");
+    if sf + sd + sw > 0 {
+        GEMM_PATH_CASES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    for tiny in [false, true] {
+        let wsp = |sz: usize| if tiny { (cu.up(&[0u8; 16]), 16usize) } else { (cu.up(&vec![0u8; sz.max(4)]), sz) };
+        let tag = if tiny { "tiny workspace" } else { "workspace" };
+        let zero_y = cu.up(&vec![0u8; g.y_len() * c.dt.bytes()]);
+        let (wp, wb) = wsp(sf);
+        assert_eq!(unsafe { fwd(api.h, &alpha, xd, x_ptr, wd, w_ptr, cd, 0, wp as *mut c_void, wb, &beta, dyd, zero_y) }, 0);
+        let got = c.dt.dec(&cu.down(zero_y, g.y_len() * c.dt.bytes()));
+        let mut want = vec![0f32; g.y_len()];
+        refmath::conv_fwd(&g, &x, &wv, &mut want, 1.0, 0.0);
+        check(&format!("fwd {tag}"), &got, &c.dt.dec(&c.dt.enc(&want)), tol);
+        let zero_x = cu.up(&vec![0u8; g.x_len() * c.dt.bytes()]);
+        let (wp, wb) = wsp(sd);
+        assert_eq!(unsafe { bwd_d(api.h, &alpha, wd, w_ptr, dyd, dy_ptr, cd, 0, wp as *mut c_void, wb, &beta, xd, zero_x) }, 0);
+        let got = c.dt.dec(&cu.down(zero_x, g.x_len() * c.dt.bytes()));
+        let mut want = vec![0f32; g.x_len()];
+        refmath::conv_bwd_data(&g, &wv, &dy, &mut want, 1.0, 0.0);
+        check(&format!("bwd data {tag}"), &got, &c.dt.dec(&c.dt.enc(&want)), tol);
+        // accumulate into a non-zero dw (beta = 1) to cover the chunk accumulation
+        let dw0 = rt(sample(g.w_len(), 9));
+        let dwp = cu.up(&c.dt.enc(&dw0));
+        let (wp, wb) = wsp(sw);
+        let one = 1f32;
+        assert_eq!(unsafe { bwd_f(api.h, &alpha, xd, x_ptr, dyd, dy_ptr, cd, 0, wp as *mut c_void, wb, &one, wd, dwp) }, 0);
+        let got = c.dt.dec(&cu.down(dwp, g.w_len() * c.dt.bytes()));
+        let mut want = dw0.clone();
+        refmath::conv_bwd_filter(&g, &x, &dy, &mut want, 1.0, 1.0);
+        check(&format!("bwd filter {tag}"), &got, &c.dt.dec(&c.dt.enc(&want)), tol * 4.0);
+    }
     let _ = Kind::Fwd;
 }
 
@@ -239,6 +283,18 @@ fn dense() {
         dtoh: *unsafe { drv.get::<unsafe extern "system" fn(*mut c_void, u64, usize) -> i32>(b"cuMemcpyDtoH_v2\0") }.unwrap(),
         sync: *unsafe { drv.get::<unsafe extern "system" fn() -> i32>(b"cuCtxSynchronize\0") }.unwrap(),
     };
+    // The explicit-GEMM path finds the cuBLAS shim by module name: preload it like an application would.
+    let cublas = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("cublas64_12.dll");
+    let cublas_loaded = match unsafe { Dll::new(&cublas) } {
+        Ok(l) => {
+            std::mem::forget(l);
+            true
+        }
+        Err(e) => {
+            println!("cublas64_12.dll not preloaded ({e}); GEMM path not exercised");
+            false
+        }
+    };
     let cudnn = cudnn_dll();
 
     // --- library basics -------------------------------------------------
@@ -263,6 +319,9 @@ fn dense() {
     for c in &cases {
         run_conv_case(&cu, &api, c);
     }
+    let gemm_cases = GEMM_PATH_CASES.load(std::sync::atomic::Ordering::SeqCst);
+    println!("cases that used the explicit-GEMM workspace: {gemm_cases}");
+    assert!(gemm_cases > 0 || !cublas_loaded, "cuBLAS shim preloaded but no case reported a workspace");
 
     // --- AddTensor + ConvolutionBiasActivationForward ----------------------
     {

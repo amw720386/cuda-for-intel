@@ -66,6 +66,9 @@ for cl in (False, True):
         worst = max(nmse(gg[k], gc_[k]) for k in gc_)
         key = f'{"nhwc" if cl else "nchw"}_{"fp16" if half else "fp32"}'
         res[key] = dict(nmse_logits=nmse(yg, yc), nmse_grad_worst=worst, step_s=dt)
+        lim = (1e-3, 0.2) if half else (1e-6, 1e-2)
+        res[key]['pass'] = bool(res[key]['nmse_logits'] < lim[0] and res[key]['nmse_grad_worst'] < lim[1])
         print(key, res[key], flush=True)
 res['mode'] = mode; res['N'] = N; res['size'] = S
 if out: json.dump(res, open(out, 'w'))
+sys.exit(0 if all(v['pass'] for v in res.values() if isinstance(v, dict)) else 1)
