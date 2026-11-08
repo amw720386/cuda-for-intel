@@ -1308,6 +1308,9 @@ pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_v
         return InvalidValue;
     }
     let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx(image.cast()) }) else {
+        if let Some(message) = unsafe { cfi_fatbin::report_no_ptx("load_module_from_fatbin", image.cast()) } {
+            export_log(format_args!("{message}"));
+        }
         if trace::enabled() {
             trace::record(format_args!("fatbin module has no PTX: {}", unsafe {
                 cfi_fatbin::describe(image.cast())
@@ -1504,6 +1507,12 @@ pub unsafe extern "system" fn cuModuleLoadData(out: *mut Opaque, image: *const c
             }
             // Recognize ELF and CUDA fatbin headers before treating the input as C text.
             if matches!(unsafe { image.cast::<u8>().read() }, 0x7f | 0x50 | 0xb1) {
+                if unsafe { image.cast::<u8>().read() } == 0x7f {
+                    let head = unsafe { std::slice::from_raw_parts(image.cast::<u8>(), 64) };
+                    if let Some(message) = cfi_fatbin::report_cubin("cuModuleLoadData", head) {
+                        export_log(format_args!("{message}"));
+                    }
+                }
                 return Err(InvalidImage);
             }
             let image = unsafe { CStr::from_ptr(image.cast()) }.to_bytes();

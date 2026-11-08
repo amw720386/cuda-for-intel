@@ -117,6 +117,9 @@ pub unsafe extern "system" fn cuLibraryLoadData(
                 // SASS-only image: nothing here can run on this device, which is
                 // what a real driver reports for a cubin built for another arch.
                 None => {
+                    if let Some(message) = unsafe { cfi_fatbin::report_no_ptx("cuLibraryLoadData", code) } {
+                        super::export_log(format_args!("{message}"));
+                    }
                     if trace::enabled() {
                         trace::record(format_args!(
                             "library image has no PTX (fatbin): {}",
@@ -127,6 +130,11 @@ pub unsafe extern "system" fn cuLibraryLoadData(
                 }
             },
             0x7f => {
+                // Standalone cubin: 64 bytes cover the ELF header.
+                let head = unsafe { std::slice::from_raw_parts(code, 64) };
+                if let Some(message) = cfi_fatbin::report_cubin("cuLibraryLoadData", head) {
+                    super::export_log(format_args!("{message}"));
+                }
                 if trace::enabled() {
                     trace::record(format_args!("library image is a raw ELF cubin"));
                 }

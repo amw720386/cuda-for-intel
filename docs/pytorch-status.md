@@ -1,0 +1,26 @@
+# PyTorch on the shim: compatibility matrix
+
+Host: Intel Arc B390, Windows. Sources: `docs/torch-bringup.md`, `docs/hw-logs/torch-round1.md`.
+Columns: works = equals CPU within tolerance on hardware. "not re-run" means the item was not run
+on this branch (the GPU gate was reserved for the release check); treat as unverified here.
+
+| Workload | torch 2.2.2+cu118 (compute_37 PTX) | conda torch 2.13 cuda128 (compute_120) | Why / notes |
+| --- | --- | --- | --- |
+| tensor create / copy / pinned / events / streams | works | works | |
+| matmul f32/f16, bmm, Linear fwd+bwd | works | works | cuBLAS replaced by `cublas_shim`; XMX on by default for large fp16 |
+| elementwise, relu/gelu, sum | works | works | |
+| softmax, layer_norm, batch_norm | works | works | |
+| embedding, index_select, cat, dropout/randn (Philox) | works | works | |
+| conv2d fwd/bwd, max_pool | works | works | native ATen kernels with `cudnn.enabled=False` |
+| optimizers (SGD, Adam, AdamW, foreach) | works | works | |
+| TransformerEncoderLayer fwd + grads | works | works | |
+| SDPA default (mem-efficient / flash) | fails 209 | works at cc 8.0/12.0 | cu118 PTX is an arch-guard stub for `fmha_cutlassF`; use math SDPA or `CFI_REPORT_CC=3.7` |
+| ResNet-18 forward | not re-run | works | |
+| Hugging Face greedy generation vs CPU (GPT-2 / Qwen2.5-0.5B) | not re-run | not re-run | next step; expected to need math SDPA |
+| cuDNN-backed conv | n/a | n/a | optional; `cudnn-fast` branch stand-in not merged here |
+| cuFFT, cuSOLVER, cuSPARSE, NCCL | fails | fails | no stand-ins |
+| cu126/cu128/cu121+ Windows wheels, Linux cu126/cu128 wheels | fails | n/a | SASS only; now reported by a one-time error naming the SASS architectures and pointing at `docs/sass-support.md` (CUDA_ERROR_NO_BINARY_FOR_GPU) |
+| PyTorch built with `TORCH_CUDA_ARCH_LIST=8.0+PTX` | untested | n/a | recipe in `docs/pytorch-build-ptx.md`; no build box yet |
+
+Translator gaps listed in `docs/torch-bringup.md` still apply (2 complex<double> foreach kernels,
+some very large cuda128 modules).

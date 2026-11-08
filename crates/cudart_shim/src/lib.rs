@@ -1155,6 +1155,7 @@ fn resolve_function(drv: &Driver, host_fun: usize) -> Result<(), c_int> {
         return Err(INVALID_VALUE);
     };
     let Some(raw) = extract_ptx(image as *mut c_void) else {
+        unsafe { cfi_fatbin::report_no_ptx("__cudaRegisterFunction", image as *const u8) };
         eprintln!(
             "CUDA for Intel resolve: extract_ptx failed fat={fat_key:#x} image={image:#x}"
         );
@@ -1338,9 +1339,12 @@ pub unsafe extern "system" fn __cudaRegisterFatBinaryEnd(fatbin: *mut c_void) {
                 "CUDA for Intel fatbin end: id=1 extract ok ({} PTX bytes); defer ModuleLoad",
                 ptx.len()
             ),
-            None => eprintln!(
-                "CUDA for Intel fatbin end: id=1 extract_ptx failed image={image:#x}"
-            ),
+            None => {
+                unsafe { cfi_fatbin::report_no_ptx("__cudaRegisterFatBinaryEnd", image as *const u8) };
+                eprintln!(
+                    "CUDA for Intel fatbin end: id=1 extract_ptx failed image={image:#x}"
+                )
+            }
         }
     }
 }

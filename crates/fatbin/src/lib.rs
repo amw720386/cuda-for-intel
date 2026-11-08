@@ -84,6 +84,148 @@ pub unsafe fn describe(image: *const u8) -> String {
     out
 }
 
+
+/// Architectures found in a fatbin: `ptx` entries (translatable) and `sass` entries (cubin ELF).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub ptx: Vec<u32>,
+    pub sass: Vec<u32>,
+}
+
+/// Documentation page the diagnostics point to.
+pub const SASS_DOC: &str = "docs/sass-support.md";
+
+/// Header-only walk of the record kinds and architectures (no decompression).
+///
+/// # Safety
+/// Same contract as [`extract_ptx`].
+pub unsafe fn summarize(image: *const u8) -> Option<Summary> {
+    if image.is_null() {
+        return None;
+    }
+    let frame = match unsafe { image.cast::<u32>().read_unaligned() } {
+        WRAPPER_MAGIC => unsafe { image.add(8).cast::<*const u8>().read_unaligned() },
+        FRAME_MAGIC => image,
+        _ => return None,
+    };
+    if frame.is_null() {
+        return None;
+    }
+    let header = unsafe { std::slice::from_raw_parts(frame, 16) };
+    let header_size = usize::from(u16::from_le_bytes(field(header, 6)?));
+    let file_size = usize::try_from(u64::from_le_bytes(field(header, 8)?)).ok()?.min(MAX_SIZE);
+    let records = unsafe { std::slice::from_raw_parts(frame.add(header_size), file_size) };
+    Some(summarize_records(records))
+}
+
+fn summarize_records(mut records: &[u8]) -> Summary {
+    let mut out = Summary::default();
+    while records.len() >= 64 {
+        let (Some(kind), Some(hdr), Some(pay), Some(arch)) = (
+            field(records, 0).map(u16::from_le_bytes),
+            field(records, 4).map(u32::from_le_bytes),
+            field(records, 8).map(u32::from_le_bytes),
+            field(records, 28).map(u32::from_le_bytes),
+        ) else {
+            break;
+        };
+        match kind {
+            1 if !out.ptx.contains(&arch) => out.ptx.push(arch),
+            2 if !out.sass.contains(&arch) => out.sass.push(arch),
+            _ => {}
+        }
+        let (hdr, pay) = (hdr as usize, pay as usize);
+        match hdr.checked_add(pay).and_then(|e| records.get(e..)) {
+            Some(rest) if hdr >= 64 => records = rest,
+            _ => break,
+        }
+    }
+    out.ptx.sort_unstable();
+    out.sass.sort_unstable();
+    out
+}
+
+/// `e_machine` value of a CUDA cubin (EM_CUDA).
+pub const EM_CUDA: u16 = 190;
+
+/// Architecture (`sm_XX` number) of a standalone cubin ELF image, `None` when the bytes are not a
+/// 64-bit little-endian ELF with `e_machine == 190`. The sm number is the low byte of `e_flags`
+/// (0 when unrecorded).
+pub fn cubin_arch(image: &[u8]) -> Option<u32> {
+    if image.get(..4)? != b"\x7fELF" || *image.get(4)? != 2 {
+        return None;
+    }
+    let machine = u16::from_le_bytes(field(image, 18)?);
+    if machine != EM_CUDA {
+        return None;
+    }
+    Some(u32::from_le_bytes(field(image, 48)?) & 0xff)
+}
+
+fn arch_list(archs: &[u32]) -> String {
+    if archs.is_empty() {
+        return "none".into();
+    }
+    archs.iter().map(|a| format!("sm_{a}")).collect::<Vec<_>>().join(", ")
+}
+
+/// The actionable message for a module that has SASS but no PTX.
+pub fn no_ptx_message(origin: &str, summary: &Summary) -> String {
+    if summary.sass.is_empty() {
+        return format!(
+            "CUDA for Intel: {origin}: the fatbin contains neither PTX nor SASS entries we can read \
+             (PTX: {}); see {SASS_DOC}.",
+            arch_list(&summary.ptx)
+        );
+    }
+    format!(
+        "CUDA for Intel: {origin}: this module has SASS (cubin) for {} but no PTX. This runtime \
+         translates PTX and cannot execute SASS, so the kernels cannot run on this GPU \
+         (CUDA_ERROR_NO_BINARY_FOR_GPU). Use a build that embeds PTX (PyTorch Windows cu118 wheel, \
+         conda-forge builds, or rebuild with TORCH_CUDA_ARCH_LIST=\"8.0+PTX\" / \
+         -gencode arch=compute_80,code=compute_80). See {SASS_DOC}; scripts/ptxscan.py checks a binary.",
+        arch_list(&summary.sass)
+    )
+}
+
+/// Message for a standalone cubin ELF image.
+pub fn cubin_message(origin: &str, arch: u32) -> String {
+    format!(
+        "CUDA for Intel: {origin}: image is a standalone cubin ELF (e_machine 190, sm_{arch}) \
+         with no PTX. This runtime translates PTX and cannot execute SASS \
+         (CUDA_ERROR_NO_BINARY_FOR_GPU). Rebuild with PTX embedded (-gencode \
+         arch=compute_80,code=compute_80) or load a PTX/fatbin-with-PTX image. See {SASS_DOC}."
+    )
+}
+
+static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Print `message` to stderr the first time only (per process). Returns whether it printed.
+pub fn report_once(message: &str) -> bool {
+    if REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    eprintln!("{message}");
+    true
+}
+
+/// Log a one-time actionable error for a fatbin without extractable PTX. Always on (not only
+/// under tracing). Returns the message when it was printed.
+///
+/// # Safety
+/// Same contract as [`extract_ptx`].
+pub unsafe fn report_no_ptx(origin: &str, image: *const u8) -> Option<String> {
+    let summary = unsafe { summarize(image) }.unwrap_or_default();
+    let message = no_ptx_message(origin, &summary);
+    report_once(&message).then_some(message)
+}
+
+/// Same for a raw image whose first byte is ELF.
+pub fn report_cubin(origin: &str, image: &[u8]) -> Option<String> {
+    let message = cubin_message(origin, cubin_arch(image)?);
+    report_once(&message).then_some(message)
+}
+
 fn field<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
     bytes.get(offset..offset + N)?.try_into().ok()
 }
@@ -149,6 +291,50 @@ fn decode_ptx(header: &[u8], payload: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    fn record(kind: u16, arch: u32) -> Vec<u8> {
+        let mut r = vec![0u8; 64 + 8];
+        r[..2].copy_from_slice(&kind.to_le_bytes());
+        r[2..4].copy_from_slice(&0x101u16.to_le_bytes());
+        r[4..8].copy_from_slice(&64u32.to_le_bytes());
+        r[8..12].copy_from_slice(&8u32.to_le_bytes());
+        r[28..32].copy_from_slice(&arch.to_le_bytes());
+        r
+    }
+
+    #[test]
+    fn sass_only_frame_is_summarized_and_message_names_arches() {
+        let mut records = record(2, 80);
+        records.extend(record(2, 75));
+        records.extend(record(2, 80));
+        assert!(extract_records(&records).is_none());
+        let s = summarize_records(&records);
+        assert_eq!(s, Summary { ptx: vec![], sass: vec![75, 80] });
+        let m = no_ptx_message("unit", &s);
+        assert!(m.contains("sm_75, sm_80") && m.contains("docs/sass-support.md") && m.contains("+PTX"));
+    }
+
+    #[test]
+    fn mixed_frame_lists_both_kinds() {
+        let mut records = record(1, 37);
+        records.extend(record(2, 50));
+        let s = summarize_records(&records);
+        assert_eq!((s.ptx, s.sass), (vec![37], vec![50]));
+    }
+
+    #[test]
+    fn cubin_elf_machine_190_detected() {
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[18..20].copy_from_slice(&190u16.to_le_bytes());
+        elf[48..52].copy_from_slice(&0x0050_0250u32.to_le_bytes());
+        assert_eq!(cubin_arch(&elf), Some(0x50));
+        elf[18] = 62;
+        assert_eq!(cubin_arch(&elf), None);
+        assert_eq!(cubin_arch(b"hello"), None);
+    }
 
     #[test]
     fn extracts_lz4_and_zstd_records_with_padding() {
