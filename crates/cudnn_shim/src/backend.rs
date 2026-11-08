@@ -300,9 +300,7 @@ pub unsafe fn finalize(d: &mut BDesc) -> Status {
                 }
             }
             BD_EXECUTION_PLAN => {
-                if !d.attrs.contains_key(&A_PLAN_HANDLE) && !d.attrs.contains_key(&A_PLAN_DEVICEPROP) {
-                    return Err(BAD_PARAM);
-                }
+                // Newer frontends may set neither HANDLE nor DEVICEPROP before finalize.
                 let cfg = unsafe { target(d, A_PLAN_CFG, BD_ENGINECFG)? };
                 d.exec = Some(cfg.exec.ok_or(NOT_SUPPORTED_GRAPH_PATTERN)?);
             }
