@@ -134,7 +134,13 @@ fn with_watchdog<F: FnOnce() + Send + 'static>(secs: u64, f: F) {
     });
     match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
         Ok(()) => h.join().unwrap(),
-        Err(_) => {
+        // The worker dropped the sender without finishing: it panicked (a failed assertion
+        // is not a hang). Re-raise it so the real message is reported.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match h.join() {
+            Err(p) => std::panic::resume_unwind(p),
+            Ok(()) => panic!("watchdog worker ended without a result"),
+        },
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             eprintln!("WATCHDOG: GEMM hung for {secs}s");
             std::process::exit(99);
         }
