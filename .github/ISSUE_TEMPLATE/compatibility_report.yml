@@ -1,0 +1,25 @@
+name: Compatibility report
+description: Report that a GPU, driver, application or model works or does not
+labels: [compatibility]
+body:
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Run `pwsh -File scripts\cfi-doctor.ps1` and paste the output.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: [Works, Works with problems, Does not work]
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Application, version, model or workload, and what you compared against
+    validations:
+      required: true
