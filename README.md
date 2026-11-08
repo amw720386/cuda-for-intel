@@ -1,3 +1,29 @@
+<div align="center">
+
+# 🟦 CUDA for Intel
+
+**Run CUDA programs on an Intel Arc GPU. A Rust shim implements the CUDA Driver API, translates PTX to SPIR-V and launches it through Level Zero.** 🦀⚡
+
+<img src="docs/demo/pipeline.svg" alt="Animation: a PTX packet travels from the CUDA app through the shim and translator, becomes SPIR-V, and reaches the Arc GPU" width="100%">
+
+<sub>🔥 Stock Ollama v0.12.6 generates tokens on an Intel Arc B390 through this shim. Experimental.</sub>
+
+</div>
+
+## ⚡ Prefill speed with kernel substitution
+
+<p align="center"><img src="docs/demo/prefill-chart.svg" alt="Bar chart of prefill tokens per second, substitution off versus on: Qwen2.5-0.5B 1818 to 6767, Llama-3.2-1B 817 to 4877, Qwen2.5-1.5B 627 to 3727" width="100%"></p>
+
+Prefill tokens/s on Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off (flash attention is being fixed), release candidate `7fc40fb`. Qwen2.5-0.5B Q8_0 **3.7x**, Llama-3.2-1B Q4_K_M **6.0x**, Qwen2.5-1.5B Q4_K_M **5.9x**. Details: [docs/kernel-subst.md](docs/kernel-subst.md).
+
+## 🧩 Architecture
+
+<p align="center"><img src="docs/demo/architecture.svg" alt="Stack: CUDA app, CUDA runtime, Rust nvcuda shim, PTX parser, PTX to SPIR-V translator, kernel substitution layer, Level Zero, Arc GPU" width="80%"></p>
+
+Tweet thread draft and alt text: [docs/demo/tweet-thread.md](docs/demo/tweet-thread.md).
+
+---
+
 # CUDA for Intel
 
 Run unmodified CUDA programs on Intel GPUs under Windows. This project is an independent Rust implementation of the CUDA Driver API
