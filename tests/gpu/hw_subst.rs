@@ -258,7 +258,8 @@ fn hw_subst_native_vs_translated() {
         // SAFETY: single-threaded test; the driver reads the variables when it resolves the kernel.
         unsafe {
             if switch.is_empty() {
-                std::env::remove_var("CUDA_FOR_INTEL_SUBST");
+                // unset now means `auto`; the translated reference needs an explicit `none`
+                std::env::set_var("CUDA_FOR_INTEL_SUBST", "none");
             } else {
                 std::env::set_var("CUDA_FOR_INTEL_SUBST", switch);
             }
