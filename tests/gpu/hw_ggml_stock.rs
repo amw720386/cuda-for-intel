@@ -39,7 +39,10 @@ fn family(name: &str) -> String {
 #[ignore = "requires CFI_STOCK_GGML_DLL, a built nvcuda.dll and an Intel Level Zero GPU"]
 #[allow(non_snake_case)]
 fn hw_stock_ggml_kernels_compile() {
-    let path = std::env::var("CFI_STOCK_GGML_DLL").expect("CFI_STOCK_GGML_DLL");
+    let Ok(path) = std::env::var("CFI_STOCK_GGML_DLL") else {
+        println!("SKIP: set CFI_STOCK_GGML_DLL to the stock ggml-cuda.dll");
+        return;
+    };
     let per_family: usize = std::env::var("CFI_STOCK_PER_FAMILY").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let blobs = extract_all(&path);
     println!("fatbin PTX blobs: {}", blobs.len());
