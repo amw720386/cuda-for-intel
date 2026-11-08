@@ -338,7 +338,7 @@ fn cyclic_blocks(blocks: &[Block<'_>]) -> Vec<bool> {
 fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<usize>]) -> Result<(), Error> {
     // A branch's strict postdominators are guaranteed reconvergence points.
     let postdom = Graphs::build(blocks, predecessors);
-    let uniformity = super::uniform::analyze(blocks, predecessors, &postdom);
+    let uniformity = super::uniform::analyze(blocks, order, predecessors, &postdom);
     let in_cycle = cyclic_blocks(blocks);
     // Blocks from which a convergent instruction is reachable (backward closure, linear).
     let mut reaches_conv = vec![false; blocks.len()];

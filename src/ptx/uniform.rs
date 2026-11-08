@@ -55,6 +55,7 @@ impl Cls {
         match (self, other) {
             (Var, _) | (_, Var) => Var,
             (Mul, Ntid) | (Ntid, Mul) => Mul,
+            (Rem(a, x), Rem(b, y)) if a == b => Rem(a, x || y),
             (a, b) if a.uniform() && b.uniform() => Uni,
             (Top, b) | (b, Top) if b.uniform() => Top,
             _ => Var,
@@ -82,6 +83,11 @@ struct Ctx<'a, 'b> {
     graphs: &'b Graphs,
     /// Strong updates within the current block: the class of the latest definition so far.
     local: &'b HashMap<u32, Cls>,
+    /// Definitions of registers that are tracked flow-sensitively (reaching definitions).
+    md_defs: &'b [Vec<u32>],
+    md_cls: &'b [Cls],
+    /// Reaching-definition bits at entry of the current block; empty = flow-insensitive.
+    reach: &'b [u64],
 }
 
 impl<'a> Ctx<'a, '_> {
@@ -103,7 +109,21 @@ impl<'a> Ctx<'a, '_> {
             return if s == "0" { Cls::Mul } else { Cls::Uni };
         }
         let base = s.split('+').next().unwrap_or(s);
-        self.ids.get(base).map_or(Cls::Top, |&id| self.local.get(&id).copied().unwrap_or(self.cls[id as usize]))
+        let Some(&id) = self.ids.get(base) else { return Cls::Top };
+        if let Some(&c) = self.local.get(&id) {
+            return c;
+        }
+        let defs = &self.md_defs[id as usize];
+        if defs.is_empty() {
+            return self.cls[id as usize];
+        }
+        let mut c = Cls::Bot;
+        for &d in defs {
+            if self.reach.is_empty() || self.reach[d as usize / 64] >> (d % 64) & 1 == 1 {
+                c = c.join(self.md_cls[d as usize]);
+            }
+        }
+        c
     }
 
     fn id(&self, s: &str) -> Option<u32> {
@@ -248,7 +268,12 @@ fn transfer<'a>(ctx: &Ctx<'a, '_>, inst: &Instruction<'a>, block: usize, defs: &
     }
 }
 
-pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], graphs: &Graphs) -> Uniformity {
+pub(super) fn analyze<'a>(
+    blocks: &[Block<'a>],
+    order: &[usize],
+    predecessors: &[Vec<usize>],
+    graphs: &Graphs,
+) -> Uniformity {
     let mut ids: HashMap<&'a str, u32> = HashMap::new();
     let mut defcount: Vec<u32> = Vec::new();
     let mut scratch = Vec::new();
@@ -270,6 +295,88 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
         }
     }
     let single: Vec<bool> = defcount.iter().map(|&c| c == 1).collect();
+
+    // Registers with a few definitions (loop counters reused for unrelated loops) are classified
+    // per reaching definition; lowering scratch registers and heavily redefined ones fall back
+    // to the join over all definitions.
+    const MAX_TRACKED_DEFS: u32 = 64;
+    const MAX_REACH_BYTES: usize = 256 << 20;
+    let mut names: Vec<&str> = vec![""; ids.len()];
+    for (&n, &id) in &ids {
+        names[id as usize] = n;
+    }
+    let mut md_defs: Vec<Vec<u32>> = vec![Vec::new(); ids.len()];
+    let mut md_reg: Vec<u32> = Vec::new();
+    let mut block_md: Vec<Vec<u32>> = vec![Vec::new(); blocks.len()];
+    for (bi, block) in blocks.iter().enumerate() {
+        for inst in &block.instructions {
+            if inst.collect_definitions(&mut scratch).is_some() {
+                for &d in &scratch {
+                    let id = ids[d];
+                    let tracked = defcount[id as usize] > 1
+                        && defcount[id as usize] <= MAX_TRACKED_DEFS
+                        && !d.starts_with("%__");
+                    if tracked {
+                        let index = md_reg.len() as u32;
+                        md_reg.push(id);
+                        md_defs[id as usize].push(index);
+                        block_md[bi].push(index);
+                    } else {
+                        block_md[bi].push(u32::MAX);
+                    }
+                }
+            }
+        }
+    }
+    // Last tracked definition of each register per block.
+    let block_last: Vec<Vec<(u32, u32)>> = block_md
+        .iter()
+        .map(|list| {
+            let mut last: Vec<(u32, u32)> = Vec::new();
+            for &d in list.iter().filter(|&&d| d != u32::MAX) {
+                let reg = md_reg[d as usize];
+                match last.iter_mut().find(|(r, _)| *r == reg) {
+                    Some(entry) => entry.1 = d,
+                    None => last.push((reg, d)),
+                }
+            }
+            last
+        })
+        .collect();
+    let words = md_reg.len().div_ceil(64);
+    let mut reach_in: Vec<u64> = Vec::new();
+    if words > 0 && blocks.len().saturating_mul(words).saturating_mul(8) <= MAX_REACH_BYTES {
+        reach_in = vec![0u64; blocks.len() * words];
+        let mut row = vec![0u64; words];
+        let mut tmp = vec![0u64; words];
+        loop {
+            let mut changed = false;
+            for &b in order {
+                row.fill(0);
+                for &p in &predecessors[b] {
+                    tmp.copy_from_slice(&reach_in[p * words..(p + 1) * words]);
+                    for &(reg, last) in &block_last[p] {
+                        for &d in &md_defs[reg as usize] {
+                            tmp[d as usize / 64] &= !(1u64 << (d % 64));
+                        }
+                        tmp[last as usize / 64] |= 1u64 << (last % 64);
+                    }
+                    for (r, t) in row.iter_mut().zip(&tmp) {
+                        *r |= t;
+                    }
+                }
+                let slot = &mut reach_in[b * words..(b + 1) * words];
+                if slot != row.as_slice() {
+                    slot.copy_from_slice(&row);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    let mut md_cls = vec![Cls::Bot; md_reg.len()];
 
     // Edges that prove the upper 32 bits of a register are zero:
     // `and.b64 t, s, 0xFFFFFFFF00000000; setp.{ne,eq}.s64 p, t, 0; @p bra ...`.
@@ -325,10 +432,12 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
             let mut changed = false;
             for (bi, block) in blocks.iter().enumerate() {
                 local.clear();
+                let reach: &[u64] = if reach_in.is_empty() { &[] } else { &reach_in[bi * words..(bi + 1) * words] };
+                let mut cursor = 0usize;
                 for inst in &block.instructions {
                     let Some(inputs) = inst.collect_definitions(&mut defs) else { continue };
                     let inputs: Vec<&str> = inputs.to_vec();
-                    let ctx = Ctx { ids: &ids, cls: &cls, single: &single, hi_zero: &hi_zero, graphs, local: &local };
+                    let ctx = Ctx { ids: &ids, cls: &cls, single: &single, hi_zero: &hi_zero, graphs, local: &local, md_defs: &md_defs, md_cls: &md_cls, reach };
                     let mut value = transfer(&ctx, inst, bi, &defs, &inputs);
                     if tainted[bi] && value != Cls::Bot {
                         value = Cls::Var;
@@ -336,6 +445,15 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
                     for &d in &defs {
                         let id = ids[d];
                         local.insert(id, value);
+                        let md = block_md[bi][cursor];
+                        cursor += 1;
+                        if md != u32::MAX {
+                            let joined = md_cls[md as usize].join(value);
+                            if joined != md_cls[md as usize] {
+                                md_cls[md as usize] = joined;
+                                changed = true;
+                            }
+                        }
                         let joined = cls[id as usize].join(value);
                         if joined != cls[id as usize] {
                             cls[id as usize] = joined;
@@ -344,7 +462,7 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
                     }
                 }
                 if let Terminator::Branch { predicate, .. } = block.end {
-                    let ctx = Ctx { ids: &ids, cls: &cls, single: &single, hi_zero: &hi_zero, graphs, local: &local };
+                    let ctx = Ctx { ids: &ids, cls: &cls, single: &single, hi_zero: &hi_zero, graphs, local: &local, md_defs: &md_defs, md_cls: &md_cls, reach };
                     let c = ctx.operand(predicate);
                     if c != branch_cls[bi] {
                         branch_cls[bi] = c;
