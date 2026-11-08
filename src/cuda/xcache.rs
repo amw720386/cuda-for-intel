@@ -14,7 +14,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Bump when the translator's output for the same PTX can change.
-const TRANSLATOR_VERSION: u32 = 3;
+const TRANSLATOR_VERSION: u32 = 4;
 const MAGIC: u32 = 0x5850_4331; // "XPC1"
 
 fn enabled() -> bool {

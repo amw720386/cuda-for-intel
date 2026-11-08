@@ -498,7 +498,7 @@ impl<'a> Math<'a> {
         let dec = self.sub(s, one)?;
         let min_pos = one;
         let min_neg = self.c(SIGN | 1);
-        Ok(match mode {
+        let result = match mode {
             Mode::Zero => {
                 let need = self.b.select(self.boolean, None, s_neg, e_pos, e_neg)?;
                 let need_nz = self.both_not(need, s_zero)?;
@@ -514,7 +514,26 @@ impl<'a> Math<'a> {
                 let next = self.select(s_neg, neg_next, inc)?;
                 self.select(e_pos, next, s)?
             }
-        })
+        };
+        // Overflow of finite operands: the exact result lies below the infinity that
+        // round-to-nearest produced, so toward-zero and the matching directed mode give +-MAX.
+        let (inf, max_pos, max_neg) = (self.c(INFINITY), self.c(0x7f7f_ffff), self.c(SIGN | 0x7f7f_ffff));
+        let s_inf = self.eq(s_mag, inf)?;
+        let ma = self.magnitude(a)?;
+        let mb = self.magnitude(b)?;
+        let mc = self.magnitude(c)?;
+        let fa_ok = self.lt(ma, inf)?;
+        let fb_ok = self.lt(mb, inf)?;
+        let fc_ok = self.lt(mc, inf)?;
+        let ab = self.both(fa_ok, fb_ok)?;
+        let finite_in = self.both(ab, fc_ok)?;
+        let overflow = self.both(s_inf, finite_in)?;
+        let clamp_to = match mode {
+            Mode::Zero => self.select(s_neg, max_neg, max_pos)?,
+            Mode::Down => self.select(s_neg, s, max_pos)?,
+            Mode::Up => self.select(s_neg, max_neg, s)?,
+        };
+        Ok(self.select(overflow, clamp_to, result)?)
     }
 }
 

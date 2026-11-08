@@ -1127,6 +1127,10 @@ mod ggml_ref;
 mod ggml_conformance;
 #[cfg(test)]
 mod nvrtc_tests;
+#[cfg(test)]
+mod corpus_scan;
+#[cfg(test)]
+mod fuzz_tests;
 
 #[cfg(test)]
 mod tests {

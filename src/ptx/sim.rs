@@ -181,6 +181,21 @@ pub fn f16_to_f32(h: u32) -> f32 {
     if sign == 1 { -magnitude } else { magnitude }
 }
 
+/// Directed rounding given the nearest result `r` and the sign `d` of (exact - r).
+fn directed_f32(r: f32, d: i32, mode: rspirv::spirv::FPRoundingMode) -> f32 {
+    use rspirv::spirv::FPRoundingMode as M;
+    if r.is_nan() || d == 0 {
+        return r;
+    }
+    match mode {
+        M::RTZ if d < 0 && r > 0.0 => r.next_down(),
+        M::RTZ if d > 0 && r < 0.0 => r.next_up(),
+        M::RTN if d < 0 => r.next_down(),
+        M::RTP if d > 0 => r.next_up(),
+        _ => r,
+    }
+}
+
 fn fv(w: u32, bits: u64) -> f64 {
     match w {
         16 => f64::from(f16_to_f32(bits as u32)),
@@ -878,6 +893,12 @@ impl Sim {
                         u64::from(h)
                     }
                     (_, None) | (_, Some(rspirv::spirv::FPRoundingMode::RTE)) => fb(to, x),
+                    (32, Some(m)) if from == 64 && x.is_finite() => {
+                        let r = x as f32;
+                        let d = if r.is_infinite() { -(r as f64).signum() as i32 } else { (x - f64::from(r)).partial_cmp(&0.0).map_or(0, |o| o as i32) };
+                        u64::from(directed_f32(r, d, m).to_bits())
+                    }
+                    (32, Some(_)) => fb(to, x),
                     (_, Some(m)) => return Err(format!("unmodelled FConvert rounding {m:?}")),
                 })
             }
@@ -918,7 +939,12 @@ impl Sim {
                 let ow = sw(0);
                 let raw = g!(0);
                 let signed = ins.op == Op::ConvertSToF;
-                Some(if w == 32 && ow == 64 {
+                let exact: i128 = if signed { i128::from(sext(ow, raw)) } else { i128::from(raw) };
+                Some(if w == 32 && !matches!(ins.decorated_rounding, None | Some(rspirv::spirv::FPRoundingMode::RTE)) {
+                    let r = exact as f32;
+                    let d = (exact - r as i128).signum();
+                    u64::from(directed_f32(r, d as i32, ins.decorated_rounding.unwrap()).to_bits())
+                } else if w == 32 && ow == 64 {
                     u64::from(if signed { sext(ow, raw) as f32 } else { raw as f32 }.to_bits())
                 } else if w == 16 {
                     let v = if signed { sext(ow, raw) as f32 } else { raw as f32 };

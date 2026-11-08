@@ -312,6 +312,33 @@ impl<'a> Emitter<'a> {
         Ok(value)
     }
 
+    /// Integer division/remainder with the divisor-zero and INT_MIN / -1 cases defined (PTX leaves
+    /// them undefined; SPIR-V makes them undefined behaviour). Defined results follow NVIDIA
+    /// hardware: x / 0 = all ones, x % 0 = x, INT_MIN / -1 = INT_MIN, INT_MIN % -1 = 0.
+    fn guarded_div(&mut self, ty: Word, bits: u32, signed: bool, rem: bool, a: Word, b: Word) -> Result<Word, rspirv::dr::Error> {
+        let c = |s: &mut Self, v: u64| if bits == 32 { s.builder.constant_bit32(ty, v as u32) } else { s.builder.constant_bit64(ty, v) };
+        let zero = c(self, 0);
+        let one = c(self, 1);
+        let ones = c(self, u64::MAX);
+        let b_is_zero = self.builder.i_equal(self.bool_type, None, b, zero)?;
+        let mut bad = b_is_zero;
+        if signed {
+            let min = c(self, 1u64 << (bits - 1));
+            let a_min = self.builder.i_equal(self.bool_type, None, a, min)?;
+            let b_m1 = self.builder.i_equal(self.bool_type, None, b, ones)?;
+            let ovf = self.builder.logical_and(self.bool_type, None, a_min, b_m1)?;
+            bad = self.builder.logical_or(self.bool_type, None, bad, ovf)?;
+        }
+        let safe = self.builder.select(ty, None, bad, one, b)?;
+        let q = match (signed, rem) {
+            (true, false) => self.builder.s_div(ty, None, a, safe)?,
+            (false, false) => self.builder.u_div(ty, None, a, safe)?,
+            (true, true) => self.builder.s_rem(ty, None, a, safe)?,
+            (false, true) => self.builder.u_mod(ty, None, a, safe)?,
+        };
+        self.builder.select(ty, None, b_is_zero, if rem { a } else { ones }, q)
+    }
+
     fn write(&mut self, dst: &'a str, value: Value) -> Result<(), Error> {
         if self.declarations.get(dst) != Some(&value.kind.width()) {
             return Err(Error::new(format!(
@@ -2393,10 +2420,10 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
                     IntegerOp::And => self.builder.bitwise_and(ty, None, a, b),
                     IntegerOp::Or => self.builder.bitwise_or(ty, None, a, b),
-                    IntegerOp::Div => self.builder.s_div(ty, None, a, b),
-                    IntegerOp::DivUnsigned => self.builder.u_div(ty, None, a, b),
-                    IntegerOp::Rem => self.builder.s_rem(ty, None, a, b),
-                    IntegerOp::RemUnsigned => self.builder.u_mod(ty, None, a, b),
+                    IntegerOp::Div => self.guarded_div(ty, 32, true, false, a, b),
+                    IntegerOp::DivUnsigned => self.guarded_div(ty, 32, false, false, a, b),
+                    IntegerOp::Rem => self.guarded_div(ty, 32, true, true, a, b),
+                    IntegerOp::RemUnsigned => self.guarded_div(ty, 32, false, true, a, b),
                     IntegerOp::SignExtend8 => {
                         // PTX cvt.s32.s8 sign-extends the low 8 bits of the source.
                         let shift = self.builder.constant_bit32(ty, 24);
@@ -2709,11 +2736,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let a = self.integer(a, Kind::B64)?;
                 let b = self.integer(b, Kind::B64)?;
-                let id = if signed {
-                    self.builder.s_div(self.u64_type, None, a, b)?
-                } else {
-                    self.builder.u_div(self.u64_type, None, a, b)?
-                };
+                let id = self.guarded_div(self.u64_type, 64, signed, false, a, b)?;
                 (dst, id, Kind::B64)
             }
             Instruction::Rem64 {
@@ -2723,11 +2746,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let a = self.integer(a, Kind::B64)?;
                 let b = self.integer(b, Kind::B64)?;
-                let id = if signed {
-                    self.builder.s_rem(self.u64_type, None, a, b)?
-                } else {
-                    self.builder.u_mod(self.u64_type, None, a, b)?
-                };
+                let id = self.guarded_div(self.u64_type, 64, signed, true, a, b)?;
                 (dst, id, Kind::B64)
             }
             Instruction::Load64(space, dst, address) => {
