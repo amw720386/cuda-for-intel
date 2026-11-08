@@ -144,13 +144,13 @@ fn u3() -> Param {
     Param::Words { words: 3, align: 4 }
 }
 
-/// The measured default: native only where it beat the translated PTX on the Arc
-/// (mmvq ncols 1 for all types, Q4_K at every ncols, Q6_K up to 2 columns; quantize_q8_1
-/// is byte-exact and cheap). `mmq` is unmeasured and stays off in `auto`.
+/// The measured default: with weights loaded once per row the native mmvq beat or tied the
+/// translated PTX on the Arc at every type and ncols 1..8 (Q8_0 1.02-1.88x, Q4_0 1.02-1.44x,
+/// Q4_K 1.65-2.23x, Q6_K 1.65-2.54x; one dense run, hw_subst). quantize_q8_1 is byte-exact and
+/// cheap. `mmq` is unmeasured (its module load does not finish on the Arc) and stays off in `auto`.
 pub(crate) fn auto_ok(kernel: Kernel) -> bool {
     match kernel {
-        Kernel::Mmvq { ty, ncols } => ncols == 1 || ty == refs::Q4_K || (ty == refs::Q6_K && ncols <= 2),
-        Kernel::QuantizeQ81 => true,
+        Kernel::Mmvq { .. } | Kernel::QuantizeQ81 => true,
         Kernel::MmqQ80 | Kernel::MmqFixupQ80 => false,
     }
 }

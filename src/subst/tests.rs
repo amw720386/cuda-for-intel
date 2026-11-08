@@ -370,8 +370,7 @@ fn auto_policy_follows_the_measurements() {
     for ty in [2, 8, 12, 14] {
         assert!(yes(ty, 1), "ncols 1 native for type {ty}");
     }
-    assert!(!yes(8, 2) && !yes(2, 4) && !yes(8, 8));
-    assert!(yes(12, 8) && yes(14, 2) && !yes(14, 4));
+    assert!(yes(8, 2) && yes(2, 4) && yes(8, 8) && yes(12, 8) && yes(14, 2) && yes(14, 4));
     assert!(matches!(decide("_Z13quantize_q8_1PKfPvxxxxxj5uint3", &quantize_layout(), &auto), Decision::Substitute(_)));
     let mmq = "_Z9mul_mat_qIL9ggml_type8ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     assert_eq!(decide(mmq, &mmq_layout(), &auto), Decision::NotApplicable);
