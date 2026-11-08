@@ -10,7 +10,7 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 Experimental first public release: a CUDA Driver API compatibility runtime for Intel Arc GPUs via Level Zero, developed and hardware-tested on Windows with an Intel Arc B390.
 
 ### Added
-- CUDA Driver API runtime (`nvcuda`) over Level Zero: contexts, streams, events, memory, modules, graphs capture, multi-device enumeration, peer copies and cross-device events.
+- CUDA Driver API runtime (`nvcuda`) over Level Zero: contexts, streams, events, memory, modules, graphs capture, multi-device enumeration (untested with two GPUs; peer access is not implemented).
 - PTX to SPIR-V translator with per-entry lazy translation, flow and block-uniformity analysis, inlining of library callees, and a translation cache.
 - `cfi-fatbin` fatbin PTX extraction (zstd, lz4, zlib).
 - cuBLAS / cuBLASLt shim with XMX matrix kernels.

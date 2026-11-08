@@ -2,7 +2,7 @@
 
 # 🟦 CUDA for Intel
 
-**Run CUDA programs on an Intel Arc GPU. A Rust shim implements the CUDA Driver API, translates PTX to SPIR-V and launches it through Level Zero.** 🦀⚡
+**Experimental: run CUDA programs that embed PTX on an Intel Arc GPU (Windows). A Rust shim implements the CUDA Driver API, translates PTX to SPIR-V and launches it through Level Zero.** 🦀⚡
 
 <a href="docs/demo/explainer.mp4"><img src="docs/demo/explainer-teaser.gif" alt="Teaser of the explainer video: measured prefill tokens per second with kernel substitution off and on" width="80%"></a>
 
@@ -12,7 +12,7 @@
 
 <sub>MP4: <a href="docs/demo/pipeline.mp4">pipeline</a> · <a href="docs/demo/architecture.mp4">architecture</a> · <a href="docs/demo/prefill-chart.mp4">prefill chart</a> · <a href="docs/demo/hero.mp4">all three chained</a></sub>
 
-<sub>🔥 Stock Ollama v0.12.6 generates tokens on an Intel Arc B390 through this shim. Experimental.</sub>
+<sub>🔥 Stock Ollama v0.12.6 generates tokens on an Intel Arc B390 through this shim (small models; slower than Ollama's CPU backend today). Experimental.</sub>
 
 </div>
 
@@ -20,7 +20,7 @@
 
 <p align="center"><a href="docs/demo/prefill-chart.mp4"><img src="docs/demo/prefill-chart.gif" alt="Bar chart of prefill tokens per second, substitution off versus on: Qwen2.5-0.5B 1818 to 6767, Llama-3.2-1B 817 to 4877, Qwen2.5-1.5B 627 to 3727" width="100%"></a></p>
 
-Prefill tokens/s on Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off (flash attention is being fixed), release candidate `7fc40fb`. Qwen2.5-0.5B Q8_0 **3.7x**, Llama-3.2-1B Q4_K_M **6.0x**, Qwen2.5-1.5B Q4_K_M **5.9x**. Details: [docs/kernel-subst.md](docs/kernel-subst.md).
+Prefill tokens/s on Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off (flash attention is being fixed), release candidate `7fc40fb`. Single runs on a shared machine; the raw log for these three pairs is not yet committed under `docs/hw-logs/` ([claims audit](docs/claims-audit.md)), the nearest logged runs are in [docs/kernel-subst.md](docs/kernel-subst.md). Qwen2.5-0.5B Q8_0 **3.7x**, Llama-3.2-1B Q4_K_M **6.0x**, Qwen2.5-1.5B Q4_K_M **5.9x**. Details: [docs/kernel-subst.md](docs/kernel-subst.md).
 
 ## 🧩 Architecture
 
@@ -32,7 +32,7 @@ Regenerate the videos: `python3 docs/demo/render_videos.py` and `python3 docs/de
 
 # CUDA for Intel
 
-Run unmodified CUDA programs on Intel GPUs under Windows. This project is an independent Rust implementation of the CUDA Driver API
+Runs CUDA programs that embed PTX, without recompiling them, on Intel GPUs under Windows; programs that carry only SASS cannot run, and many CUDA libraries are missing. This project is an independent Rust implementation of the CUDA Driver API
 (`nvcuda.dll`) plus cuBLAS / cuBLASLt stand-ins. It translates the PTX that CUDA programs carry into SPIR-V and runs it through Level Zero.
 It is experimental: read the compatibility matrix and the limitations before relying on it.
 
@@ -62,15 +62,15 @@ Everything in this table was run, and the evidence is linked. "Untested" means n
 | Windows x64, Intel Arc B390 (Xe3, PCI `8086:b080`, driver 32.0.101.9033) | Primary target. Everything below was verified here. | [docs/hw-logs/](docs/hw-logs/README.md) |
 | Windows x64, Intel Iris Xe (Alder Lake, PCI `8086:46a8`, driver 32.0.101.7085) | Driver API tests, vector add, reduction, RMSNorm, ggml residual add, genuine CUDA Runtime 13.0.88 kernel; stock Ollama enumerates it as CUDA0. Nothing newer (PyTorch, stock model generation, XMX) has been run on it. | [docs/milestone-12.md](docs/milestone-12.md), [docs/milestone-13.md](docs/milestone-13.md), [docs/agent-handoff.md](docs/agent-handoff.md) |
 | Other Intel GPUs (Arc A-series, other Arc B-series, Lunar Lake, Data Center) | Untested. | |
-| XMX (DPAS) GEMM path | Needs Xe2/Xe3 with `SPV_INTEL_subgroup_matrix_multiply_accumulate`; verified on Arc B390 only. Other GPUs fall back to the tiled PTX GEMM. | commit `57b9fa5`, `tests/gpu/hw_xmx_gemm.rs` |
+| XMX (DPAS) GEMM path | Needs Xe2/Xe3 with `SPV_INTEL_subgroup_matrix_multiply_accumulate`; exercised on Arc B390 only by `tests/gpu/hw_xmx_gemm.rs`; no XMX speedup over the tiled path has been demonstrated end to end. Other GPUs fall back to the tiled PTX GEMM. | commit `57b9fa5`, `tests/gpu/hw_xmx_gemm.rs` (no committed log) |
 | Linux | The Level Zero loader path is included for portability. Untested on hardware. | |
-| macOS | Build and library unit tests only (no GPU). | `cargo test --lib`: 229 passed on the Windows box; the count on macOS is UNVERIFIED |
+| macOS | Build and library unit tests only (no GPU). | `cargo test --lib`: 215 passed on the Windows box ([test-unit.log](docs/hw-logs/test-unit.log)); the count on macOS is UNVERIFIED |
 
 ### Software
 
 | Software | Status on Arc B390 | Recipe | Evidence |
 | --- | --- | --- | --- |
-| Stock Ollama v0.12.6 (unchanged `ollama.exe` and `cuda_v13/ggml-cuda.dll`) | Qwen2.5-0.5B-Instruct Q8_0 fully on the GPU, 8 greedy tokens equal to the CPU backend; 10 of 12 prompts identical over 24 tokens. Eleven more models and quants run coherently (table in [model-matrix.md](docs/hw-logs/model-matrix.md)); K-quant models diverge earlier from the CPU output, which is expected. | [docs/ollama.md](docs/ollama.md) | [ollama-stock-v0.12.6.md](docs/hw-logs/ollama-stock-v0.12.6.md), [stock-scan.md](docs/hw-logs/stock-scan.md), [model-matrix.md](docs/hw-logs/model-matrix.md) |
+| Stock Ollama v0.12.6 (unchanged `ollama.exe` and `cuda_v13/ggml-cuda.dll`) | Qwen2.5-0.5B-Instruct Q8_0 fully on the GPU, 8 greedy tokens equal to the CPU backend; 10 of 12 prompts identical over 24 tokens. Eleven more model/quant combinations were run; per-row result (coherent, repetitive or diverging from the CPU backend) in [model-matrix.md](docs/hw-logs/model-matrix.md). K-quant models diverge earlier from the CPU output; the log gives the reason, not a correctness verdict. | [docs/ollama.md](docs/ollama.md) | [ollama-stock-v0.12.6.md](docs/hw-logs/ollama-stock-v0.12.6.md), [stock-scan.md](docs/hw-logs/stock-scan.md), [model-matrix.md](docs/hw-logs/model-matrix.md) |
 | llama.cpp (ggml CUDA backend built for `75-virtual`) | `llama-completion` GPU equals CPU on 8 tokens; Qwen-shaped `MUL_MAT` passes (157 of 161 cases); perplexity within 0.11 % of CPU. Flash attention off. | [docs/llama-cpp.md](docs/llama-cpp.md) | [ggml-test-backend-ops.md](docs/hw-logs/ggml-test-backend-ops.md) |
 | PyTorch `2.2.2+cu118` Windows wheel (PTX compute_37) | Works: tensor ops, Linear/conv/transformer layer forward and backward, optimizers, autocast fp16, streams and events, equal to CPU. | [docs/pytorch.md](docs/pytorch.md) | [torch-round1.md](docs/hw-logs/torch-round1.md), [torch-bringup.md](docs/torch-bringup.md) |
 | PyTorch 2.13.0 conda-forge `cuda128` build (PTX compute_120) | Works: matmul, Linear, softmax, layer_norm, gelu, conv2d forward and backward, SDPA math, autocast fp16, SGD loop. About 6 % of probed kernels still fail to translate. | [docs/pytorch.md](docs/pytorch.md) | [torch-bringup.md](docs/torch-bringup.md), [torch-arch-guard-stubs.md](docs/torch-arch-guard-stubs.md) |
@@ -189,7 +189,7 @@ unless the description says otherwise. Defaults are taken from the source at thi
 | `CUDA_FOR_INTEL_DP4A` | off | `1`: lower `dp4a` to the SPIR-V integer dot product (Xe DP4A) after the driver accepts a probe module. Opt-in until a Q6_K mismatch is root-caused. |
 | `CFI_DP4A_MODE` | `packed` | Dot-product encoding for bring-up: `packed`, `signed` or `vec`. |
 | `CFI_DP4A_CONST` | off | `1`: also use the dot product when an operand is a compile-time constant (the Intel compiler miscompiled that case). |
-| `CFI_OPT_LD16` | off | `1`: merge pairs of 16-bit loads into 32-bit loads (log: +35 % decode on Qwen2.5-0.5B Q8_0; opt-in because of an unexplained batched-GEMM launch failure seen earlier). |
+| `CFI_OPT_LD16` | off | `1`: merge pairs of 16-bit loads into 32-bit loads. Opt-in: no committed log measures its effect yet (see `docs/hw-logs/perf-depth.md`). |
 | `CFI_OPT_SHFL` | on | `0`: use the general computed-lane lowering for constant butterfly shuffles. |
 | `CFI_FLOW_DEBUG` | off | Set: print why a register was classed thread-dependent (barrier analysis). |
 
@@ -249,7 +249,7 @@ Set `CUDA_FOR_INTEL_TRACE=1` and `CUDA_FOR_INTEL_LOG=1` first; most failures nam
 - Warm the caches: the first run of any new model or program pays kernel compilation. Keep `CUDA_FOR_INTEL_CACHE_DIR` and `CFI_CACHE_DIR` on a persistent disk.
 - XMX GEMM is on by default but engages only for large fp16/bf16 GEMMs (`min(m,n) >= 128`, `m*n*k >= 2^24`); small or skinny shapes were slower with XMX.
   Tune with `CFI_XMX_MIN_DIM`, `CFI_XMX_MIN_WORK`, `CFI_XMX_TILE`, or switch off with `CFI_XMX=0` to compare.
-- `CFI_OPT_LD16=1` merged 16-bit load pairs and measured +35 % decode on Qwen2.5-0.5B Q8_0, but is opt-in; test your workload before enabling it.
+- `CFI_OPT_LD16=1` merges 16-bit load pairs; its effect is not measured in any committed log, so it stays opt-in. Test your workload before enabling it.
 - Leave `CUDA_FOR_INTEL_LOG`, `_TRACE`, `_PROFILE` and `_SYNC_LAUNCH` off for measurements; they add syscalls per call or serialise launches.
 - `CFI_CUBLAS_ASYNC=1` removes the stream synchronisation after each GEMM; verify your results before relying on it.
 - Quantised ggml models: Q8_0 is the format verified end to end; Q4_0 and Q4_K matrix multiplications pass `test-backend-ops` (the Q4_K_M perplexity run was not recorded).

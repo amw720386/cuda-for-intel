@@ -4,11 +4,11 @@ Completed November 6, 2026. The CUDA subset passed the existing correctness matr
 
 ## Access and setup
 
-The local OpenSSH destination identity did not apply to the jump process. Separate `<gateway-host>` and `<arc-host>` host entries made the gateway accept the existing ED25519 key. The public file fingerprint matched the fingerprint derived from the private key. The gateway’s ED25519 fingerprint matched the existing known-host entry and the fingerprint supplied with the reservation. Intel’s public documentation did not publish an independent fingerprint. The Windows endpoint was pinned on first use over the authenticated gateway. Strict verification was used for the subsequent session.
+The local OpenSSH destination identity did not apply to the jump process. Separate gateway and target host entries in the local SSH configuration made the gateway accept the existing ED25519 key. The public file fingerprint matched the fingerprint derived from the private key. The gateway’s ED25519 fingerprint matched the existing known-host entry and the fingerprint supplied with the reservation. Intel’s public documentation did not publish an independent fingerprint. The Windows endpoint was pinned on first use over the authenticated gateway. Strict verification was used for the subsequent session.
 
 Windows rejected the same public key and accepted password authentication. The interactive handoff timed out and one retry lost its temporary WSL directory. The successful connection used a local SSH prompt helper and a private WSL multiplex socket. Source and binary archives went through that connection and their SHA-256 checksums matched on both sides. [Intel Cloud SSH access guide](https://cloud.intel.com/docs/how_to_access.html)
 
-The instance already had Visual Studio Community 18 with MSVC and Vulkan SDK 1.4.363.0. Rust 1.99.0 x86-64 MSVC with Clippy and rustfmt, and portable PowerShell 7.5.13, were installed under the validation directory in the remote user profile. Builds used that directory for Cargo and Rustup state. The selected graphics driver and Level Zero loader were the ones installed on each host.
+The instance already had Visual Studio Community 18 with MSVC and Vulkan SDK 1.4.363.0. Rust 1.99.0 x86-64 MSVC with Clippy and rustfmt, and portable PowerShell 7.5.13, were installed under the validation directory in the remote user profile. Builds used that directory for Cargo and Rustup state. The selected graphics driver and Level Zero loader were the ones installed on each host. <!-- leak-ok: SDK version string -->
 
 ## Measured hardware and capabilities
 

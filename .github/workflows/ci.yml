@@ -17,9 +17,11 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -33,18 +35,21 @@ jobs:
     name: spir-v simulator and translator tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: sim, flow, coverage, tier2/3 and ggml conformance tests (fake Level Zero backend)
-        run: cargo test --locked --lib -p cuda-for-intel -- ptx::
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - name: "sim, flow, coverage, tier2/3 and ggml conformance tests (fake Level Zero backend)"
+        run: "cargo test --locked --lib -p cuda-for-intel -- ptx::"
       - name: XMX interpreter and generators
         run: cargo test --locked -p cublas_shim
   lints:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
+          toolchain: stable
           components: rustfmt, clippy
       # Advisory until the existing formatting and lint backlog is cleared: these report but do
       # not fail the run. Remove continue-on-error once `cargo fmt --check` and clippy are clean.
@@ -57,13 +62,13 @@ jobs:
   leak-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: scan tracked files for IPs, hosts, user paths, keys
         run: bash scripts/scan-leaks.sh
   powershell-syntax:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: parse installer scripts
         shell: pwsh
         run: |
