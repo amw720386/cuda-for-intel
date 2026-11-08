@@ -11,3 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libloading = "0.8"
+
+[features]
+# Build the v8 ABI flavour (status codes 1..14, version 8.9.7). Install the DLL as cudnn64_8.dll.
+v8 = []
