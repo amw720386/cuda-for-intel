@@ -15,6 +15,28 @@ use std::path::PathBuf;
 
 /// Bump when the translator's output for the same PTX can change.
 const TRANSLATOR_VERSION: u32 = 3;
+
+/// NUL-terminated build description read by `scripts/cfi-doctor.ps1`. The translator number is
+/// spelled out literally; `build_info_matches_translator_version` keeps it in sync.
+static BUILD_INFO: &[u8] = concat!("cfi-version=", env!("CARGO_PKG_VERSION"), ";translator=3\0").as_bytes();
+
+/// Returns a static NUL-terminated string such as `cfi-version=0.1.0;translator=3`.
+/// No allocation, no device access: safe to call right after `LoadLibrary`.
+#[unsafe(no_mangle)]
+pub extern "C" fn cfi_build_info() -> *const std::ffi::c_char {
+    BUILD_INFO.as_ptr().cast()
+}
+
+#[cfg(test)]
+mod build_info_tests {
+    #[test]
+    fn build_info_matches_translator_version() {
+        let text = std::str::from_utf8(super::BUILD_INFO).unwrap();
+        assert!(text.ends_with('\0'));
+        assert!(text.contains(&format!("translator={};", super::TRANSLATOR_VERSION).replace(';', "\0")));
+        assert!(text.contains(env!("CARGO_PKG_VERSION")));
+    }
+}
 const MAGIC: u32 = 0x5850_4331; // "XPC1"
 
 fn enabled() -> bool {
