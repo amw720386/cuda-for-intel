@@ -225,7 +225,9 @@ fn status(result: Result<(), CuResult>) -> CuResult {
 }
 
 fn current() -> Option<usize> {
-    CURRENT.with(|stack| current_stack::top(&stack.borrow()))
+    // During process teardown the thread-local may already be destroyed (cudart unloads
+    // modules from its atexit handler): treat that as "no current context" instead of panicking.
+    CURRENT.try_with(|stack| current_stack::top(&stack.borrow())).ok().flatten()
 }
 
 fn with_context<T>(

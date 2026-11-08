@@ -282,7 +282,7 @@ handwritten/memory/ld_global_nc_u32.ptx	pass	strict-pass
 handwritten/memory/ld_global_nc_v4_u32.ptx	pass	strict-pass	
 handwritten/memory/ld_global_v2_u64.ptx	pass	strict-pass	
 handwritten/memory/ld_global_v4_f32.ptx	pass	strict-pass	
-handwritten/memory/ld_param_v2.ptx	error	strict-fail	mismatched PTX parameter load for out
+handwritten/memory/ld_param_v2.ptx	error	strict-fail	unknown PTX parameter word out+4
 handwritten/memory/ld_shared_cluster.ptx	error	strict-fail	invalid PTX identifier ld.global.shared
 handwritten/memory/ld_shared_v4.ptx	pass	strict-pass	
 handwritten/memory/ld_volatile_global.ptx	pass	strict-pass	
@@ -379,6 +379,7 @@ handwritten/tex/tex_level_2d.ptx	unsupported	strict-fail	unsupported PTX instruc
 handwritten/tex/tld4_r_2d.ptx	unsupported	strict-fail	unsupported PTX instruction: tld4.r.2d.v4.f32.f32 { %f1 , %f2 , %f3 , %f4 } , [ %rd3 , { %f5 , %f6 } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
 handwritten/tex/txq_width.ptx	unsupported	strict-fail	unsupported PTX instruction: txq.width.b32 %r1 , [ %rd3 ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
 handwritten/torch/bar_red_uniform_branch.ptx	pass	strict-pass	
+handwritten/torch/movmatrix_trans.ptx	pass	strict-pass	
 handwritten/torch/param_space_array.ptx	pass	strict-pass	
 handwritten/vote/activemask.ptx	pass	strict-pass	
 handwritten/vote/match_all_sync_b32.ptx	pass	strict-fail	

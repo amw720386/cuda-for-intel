@@ -85,6 +85,36 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             return Some(out);
         }
     }
+    // movmatrix.sync.aligned.m8n8.trans.b16 d, s: transpose of an 8x8 b16 matrix whose rows are
+    // spread two elements per lane (lane l holds row l/4, columns 2*(l%4), 2*(l%4)+1).
+    // Lane l receives T[l/4][2(l%4)+{0,1}] = M[2(l%4)+{0,1}][l/4], which sits in lane
+    // 8*(l%4) + (l>>3) (+4 for the odd row), half (l>>2)&1.
+    if op == "movmatrix.sync.aligned.m8n8.trans.b16" && inst.operands.len() == 2 {
+        ctx.tc = ctx.tc.max(8);
+        let (d, src) = (inst.operand(0).trim().to_owned(), inst.operand(1).trim().to_owned());
+        let g = |op: &str, o: &[&str]| render(&inst.guard, op, &o.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let mut out = vec![
+            g("mov.u32", &["%__tc_0", "%laneid"]),
+            g("and.b32", &["%__tc_1", "%__tc_0", "3"]),
+            g("shl.b32", &["%__tc_1", "%__tc_1", "3"]),
+            g("shr.u32", &["%__tc_2", "%__tc_0", "3"]),
+            g("add.u32", &["%__tc_1", "%__tc_1", "%__tc_2"]),
+            g("add.u32", &["%__tc_2", "%__tc_1", "4"]),
+            g("shr.u32", &["%__tc_3", "%__tc_0", "2"]),
+            g("and.b32", &["%__tc_3", "%__tc_3", "1"]),
+            g("shl.b32", &["%__tc_3", "%__tc_3", "4"]),
+        ];
+        out.extend(again(ctx, &inst.guard, "shfl.sync.idx.b32", vec!["%__tc_4".into(), src.clone(), "%__tc_1".into(), "31".into(), "0xffffffff".into()]));
+        out.extend(again(ctx, &inst.guard, "shfl.sync.idx.b32", vec!["%__tc_5".into(), src, "%__tc_2".into(), "31".into(), "0xffffffff".into()]));
+        out.extend([
+            g("shr.u32", &["%__tc_4", "%__tc_4", "%__tc_3"]),
+            g("and.b32", &["%__tc_4", "%__tc_4", "65535"]),
+            g("shr.u32", &["%__tc_5", "%__tc_5", "%__tc_3"]),
+            g("shl.b32", &["%__tc_5", "%__tc_5", "16"]),
+            g("or.b32", &[&d, "%__tc_4", "%__tc_5"]),
+        ]);
+        return Some(out);
+    }
     // cvt to an 8-bit type keeps the low byte.
     if parts.len() == 3 && parts[0] == "cvt" && matches!(parts[1], "s8" | "u8") && matches!(parts[2], "s32" | "u32") && inst.operands.len() == 2 {
         ctx.tc = ctx.tc.max(1);
