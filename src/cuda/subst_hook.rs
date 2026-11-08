@@ -16,6 +16,8 @@ pub(super) struct Natives {
     map: HashMap<String, Native>,
     /// (dst, tmp_fixup) of the last native `mul_mat_q`: its stream-k fixup kernel is skipped.
     pending_fixup: Option<(u64, u64)>,
+    /// Shadow-check launches done per plan (`CUDA_FOR_INTEL_SUBST_CHECK`).
+    checks: HashMap<String, usize>,
 }
 
 impl Natives {
@@ -86,6 +88,7 @@ pub(super) fn launch(
                     if plan.kernel == subst::Kernel::MmqQ80 {
                         context.subst.pending_fixup = Some((vals[4], vals[5]));
                     }
+                    shadow_check(api, context, plan, translated, stream, geometry, args);
                     return Ok(());
                 }
                 Err(error) => {
@@ -237,5 +240,108 @@ impl probe::Device for Probe<'_> {
             .streams
             .wait_stream(self.api, self.stream, u64::MAX)
             .map_err(|e| format!("wait: {e:?}"))
+    }
+}
+
+/// `CUDA_FOR_INTEL_SUBST_CHECK=<n>`: after each of the first `n` native launches of a mmvq / mmq
+/// plan, rerun the translated kernel into a scratch copy of the destination and compare. On a
+/// mismatch the translated result is written back (so the run stays correct), the plan falls back
+/// to PTX for good and the shapes are logged. Debug aid; it synchronises the stream.
+fn shadow_check(
+    api: &Api,
+    context: &mut CudaContext,
+    plan: &Plan,
+    translated: Handle,
+    stream: usize,
+    geometry: ([u32; 3], [u32; 3]),
+    args: &[KernelArg],
+) {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let budget = *BUDGET.get_or_init(|| {
+        std::env::var("CUDA_FOR_INTEL_SUBST_CHECK").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    });
+    if budget == 0 {
+        return;
+    }
+    let vals = arg_values(args);
+    let (dst_index, floats, tiled_geometry) = match plan.kernel {
+        subst::Kernel::MmqQ80 if vals.len() == 23 && plan.aux != 0 => {
+            let tiles = vals[8].div_ceil(u64::from(plan.aux)) * vals[7].div_ceil(128) * vals[13] * vals[18];
+            (4usize, vals[18] * vals[21], ([tiles as u32, 1, 1], [32u32, 8, 1]))
+        }
+        subst::Kernel::Mmvq { .. } if vals.len() == 23 => (3usize, u64::from(geometry.0[2]) * vals[22], geometry),
+        _ => return,
+    };
+    let count = context.subst.checks.entry(plan.key.clone()).or_insert(0);
+    if *count >= budget || floats == 0 || floats > (1 << 26) {
+        return;
+    }
+    *count += 1;
+    let bytes = floats as usize * 4;
+    let dst = vals[dst_index] as usize;
+    let result = (|| -> Result<(Vec<u8>, Vec<u8>), String> {
+        context.streams.wait_stream(api, stream, u64::MAX).map_err(|e| format!("wait: {e:?}"))?;
+        let mut native = vec![0u8; bytes];
+        let scratch = context.backend.alloc(api, bytes.max(16)).map_err(|e| e.to_string())?;
+        let run = (|| -> Result<Vec<u8>, String> {
+            unsafe {
+                context.backend.copy(api, native.as_mut_ptr().cast(), std::ptr::with_exposed_provenance(dst), bytes)
+            }
+            .map_err(|e| e.to_string())?;
+            unsafe {
+                context.backend.copy(api, std::ptr::with_exposed_provenance_mut(scratch), native.as_ptr().cast(), bytes)
+            }
+            .map_err(|e| e.to_string())?;
+            let storage: Vec<([u8; 8], usize)> = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let mut b = [0u8; 8];
+                    if i == dst_index {
+                        b = (scratch as u64).to_le_bytes();
+                    } else {
+                        unsafe { std::ptr::copy_nonoverlapping(a.value.cast::<u8>(), b.as_mut_ptr(), a.size.min(8)) };
+                    }
+                    (b, a.size)
+                })
+                .collect();
+            let kargs: Vec<KernelArg> =
+                storage.iter().map(|(b, n)| KernelArg { value: b.as_ptr().cast_mut().cast(), size: *n }).collect();
+            context
+                .streams
+                .launch(api, &context.backend, translated, stream, tiled_geometry, &kargs)
+                .map_err(|e| format!("launch: {e:?}"))?;
+            context.streams.wait_stream(api, stream, u64::MAX).map_err(|e| format!("wait: {e:?}"))?;
+            let mut out = vec![0u8; bytes];
+            unsafe {
+                context.backend.copy(api, out.as_mut_ptr().cast(), std::ptr::with_exposed_provenance(scratch), bytes)
+            }
+            .map_err(|e| e.to_string())?;
+            Ok(out)
+        })();
+        let _ = context.backend.free(api, scratch);
+        run.map(|translated_bytes| (native, translated_bytes))
+    })();
+    match result {
+        Ok((native, reference)) => {
+            let f = |b: &[u8]| -> Vec<f32> { b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect() };
+            let (n, t) = (f(&native), f(&reference));
+            let nmse = crate::subst::refs::nmse(&n, &t);
+            let bad = n.iter().zip(&t).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            export_log_always(format_args!(
+                "subst-check: {} nmse {nmse:.3e}, {bad}/{} floats differ; vals {:?}",
+                plan.key,
+                n.len(),
+                &vals[..vals.len().min(23)]
+            ));
+            if !(nmse < 1e-9) {
+                export_log_always(format_args!("subst-check: {} MISMATCH, restoring the translated result and disabling", plan.key));
+                let _ = unsafe {
+                    context.backend.copy(api, std::ptr::with_exposed_provenance_mut(dst), reference.as_ptr().cast(), bytes)
+                };
+                context.subst.map.insert(plan.key.clone(), Native::Failed);
+            }
+        }
+        Err(why) => export_log_always(format_args!("subst-check: {} could not run: {why}", plan.key)),
     }
 }

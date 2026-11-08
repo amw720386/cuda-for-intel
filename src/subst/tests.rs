@@ -145,7 +145,7 @@ fn quantize_q8_1_matches_reference() {
 #[test]
 fn device_probe_accepts_native_kernels_and_rejects_corrupt_ones() {
     use super::{Kernel, Plan, Switch, decide};
-    let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0 };
+    let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0, aux: 0 };
     for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
         let p = plan(Kernel::Mmvq { ty, ncols: 3 }, "m");
         let words = p.build(true).unwrap();
@@ -211,7 +211,7 @@ fn switch_parsing_and_decisions() {
 #[test]
 fn geometry_mapping_rejects_unexpected_launches() {
     use super::{Kernel, Plan};
-    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0 };
+    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0, aux: 0 };
     assert_eq!(p.map_geometry([10, 1, 1], [32, 4, 1]), Some(([10, 1, 1], [32, 4, 1])));
     assert_eq!(p.map_geometry([10, 1, 1], [32, 2, 1]), None);
     let wide = Plan { nwarps: Some(8), ..p };
@@ -307,7 +307,7 @@ fn registry_accepts_every_stock_mmvq_instantiation() {
 fn mmq_q8_0_matches_reference() {
     let words = super::mmq::build(true);
     validate(&words);
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0 };
+    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
     // ragged rows/cols, channels with a ratio, two samples, k not a multiple of the 4-block stage
     for (ncols_x, nrows, ncols, nch, ratio, nsamples) in [(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] {
         let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 5 + ncols as u64);
@@ -325,7 +325,7 @@ fn translated_stock_mmq_q8_0_matches_native_on_the_interpreter() {
     let entry = "_Z9mul_mat_qIL9ggml_type8ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     crate::ptx::set_dynamic_shared_bytes(65536);
     let Some((stock, params)) = translated("blob98.ptx", entry) else { return };
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0 };
+    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
     assert!(matches!(
         super::decide(entry, &params, &super::Switch::parse("mmq")),
         super::Decision::Substitute(_)
@@ -388,7 +388,7 @@ fn auto_policy_follows_the_measurements() {
 #[ignore = "slow: multi-tile stock mmq on the interpreter; mismatch under investigation"]
 fn translated_stock_mmq_q8_0_multi_tile_shapes() {
     crate::ptx::set_dynamic_shared_bytes(65536);
-    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0 };
+    let plan = super::Plan { kernel: super::Kernel::MmqQ80, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
     let words = super::mmq::build(true);
     let mut failed = false;
     // (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples)

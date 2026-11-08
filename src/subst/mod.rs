@@ -228,6 +228,8 @@ pub(crate) struct Plan {
     /// `CUDA_FOR_INTEL_SUBST_NWARPS` override for mmvq (experiments; changes only cross-warp add order).
     pub nwarps: Option<u32>,
     pub layout_hash: u64,
+    /// Template tile width (`mmq_x`) of mul_mat_q variants; 0 otherwise.
+    pub aux: u32,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -280,7 +282,11 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
         Kernel::MmqQ80 => "mmq:q8_0".to_string(),
         Kernel::MmqFixupQ80 => "mmq_fixup:q8_0".to_string(),
     };
-    Decision::Substitute(Plan { kernel, key, nwarps, layout_hash: layout_hash(params) })
+    let aux = match m.targs.as_slice() {
+        [_, TArg::Int(x), _] if matches!(kernel, Kernel::MmqQ80 | Kernel::MmqFixupQ80) => *x as u32,
+        _ => 0,
+    };
+    Decision::Substitute(Plan { kernel, key, nwarps, layout_hash: layout_hash(params), aux })
 }
 
 impl Plan {
