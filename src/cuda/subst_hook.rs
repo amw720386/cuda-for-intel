@@ -18,6 +18,7 @@ pub(super) struct Natives {
     pending_fixup: Option<(u64, u64)>,
     /// Shadow-check launches done per plan (`CUDA_FOR_INTEL_SUBST_CHECK`).
     checks: HashMap<String, usize>,
+    fixup_events: usize,
 }
 
 impl Natives {
@@ -76,7 +77,18 @@ pub(super) fn launch(
         }
         if plan.kernel == subst::Kernel::MmqFixupQ80 {
             // [ids, bounds, dst, tmp, ...]: only fixups of a native mul_mat_q are no-ops
-            if vals.len() == 13 && context.subst.pending_fixup == Some((vals[2], vals[3])) {
+            let skip = vals.len() == 13 && context.subst.pending_fixup == Some((vals[2], vals[3]));
+            let n = context.subst.fixup_events;
+            context.subst.fixup_events += 1;
+            if n < 40 {
+                export_log_always(format_args!(
+                    "subst: mmq fixup {} (pending {:?}, dst/tmp {:?})",
+                    if skip { "skipped" } else { "RUNS" },
+                    context.subst.pending_fixup,
+                    vals.get(2..4)
+                ));
+            }
+            if skip {
                 context.subst.pending_fixup = None;
                 return Ok(());
             }
