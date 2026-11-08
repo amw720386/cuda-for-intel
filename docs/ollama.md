@@ -70,7 +70,8 @@ Invoke-RestMethod http://127.0.0.1:11435/api/generate -Method Post -ContentType 
 ```
 
 The first request JIT-compiles kernels and can take minutes (the compiled kernels are cached in
-`C:\cfi\kernel-cache`). To stop the server press Ctrl+C in its window. The server and its runner processes
+`C:\cfi\kernel-cache`). Check `ollama-cfi.exe ps`: the PROCESSOR column must say `100% GPU`. If the server is not running, the
+Ollama client may start an installed Ollama app instead, so start `run-ollama.ps1` first. To stop the server press Ctrl+C in its window. The server and its runner processes
 are named `ollama-cfi.exe`, so stop them by that name (`Stop-Process -Name ollama-cfi`); that never touches an
 installed Ollama.
 
