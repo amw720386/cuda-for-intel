@@ -1044,6 +1044,8 @@ mod sim;
 mod ggml_ref;
 #[cfg(test)]
 mod ggml_conformance;
+#[cfg(test)]
+mod nvrtc_tests;
 
 #[cfg(test)]
 mod tests {
