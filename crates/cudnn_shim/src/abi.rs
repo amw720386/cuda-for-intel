@@ -29,8 +29,8 @@ mod st {
     pub const EXECUTION_FAILED: i32 = 5000;
     pub const VERSION: usize = 91002; // torch cu128 (cuDNN 9.10.2) refuses older runtimes
     pub const MAJOR: i32 = 9;
-    pub const MINOR: i32 = 7;
-    pub const PATCH: i32 = 1;
+    pub const MINOR: i32 = 10;
+    pub const PATCH: i32 = 2;
 }
 
 #[cfg(feature = "v8")]
