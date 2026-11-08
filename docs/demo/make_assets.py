@@ -25,7 +25,7 @@ rows=[("CUDA app","Stock Ollama, llama.cpp, PyTorch, your own PTX-carrying progr
 ("nvcuda.dll shim (Rust)","Driver API, contexts, streams, graphs; cuBLAS / cuBLASLt stand-ins","#f2c14e",False),
 ("PTX parser + normaliser","reads the PTX the CUDA program carries","#3fb950",False),
 ("PTX to SPIR-V translator","OpenCL-environment SPIR-V","#3fb950",False),
-("Kernel substitution layer (opt-in switch)","recognised ggml kernels (mmvq, quantize_q8_1, Q8_0 mmq) swapped for hand-written Intel SPIR-V;  falls back to the translated kernel on any mismatch","#bc8cff",False),
+("Kernel substitution layer (on by default)","recognised ggml kernels (mmvq, quantize_q8_1, Q8_0 mmq) swapped for hand-written Intel SPIR-V;  falls back to the translated kernel on any mismatch","#bc8cff",False),
 ("Level Zero","loads the module, launches the kernel","#58a6ff",False),
 ("Intel Arc GPU (Arc B390)","runs it","#1f6feb",False)]
 y=56;bh=66

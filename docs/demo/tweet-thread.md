@@ -6,7 +6,7 @@ Attach: 1 = docs/demo/pipeline.svg screen-recorded or architecture.png, 3 = arch
 
 2/ 🔧 How it works: the app and NVIDIA's own CUDA runtime stay unchanged. Our nvcuda.dll replacement catches the Driver API calls, reads the PTX, translates it to SPIR-V and launches it on the GPU through Level Zero.
 
-3/ 🧩 Architecture: app -> CUDA runtime -> Rust nvcuda shim -> PTX parser -> PTX-to-SPIR-V translator -> Level Zero -> Arc. Plus an opt-in kernel substitution layer: a few hot ggml kernels get swapped for hand-written Intel-native SPIR-V, with a fallback to the translated kernel if anything mismatches.
+3/ 🧩 Architecture: app -> CUDA runtime -> Rust nvcuda shim -> PTX parser -> PTX-to-SPIR-V translator -> Level Zero -> Arc. Plus a kernel substitution layer, on by default: a few hot ggml kernels get swapped for hand-written Intel-native SPIR-V, with a fallback to the translated kernel if anything mismatches.
 
 4/ ⚡ What substitution does to prompt processing (prefill tok/s, Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off), off -> on:
 Qwen2.5-0.5B Q8_0: 1818 -> 6767 (3.7x)
