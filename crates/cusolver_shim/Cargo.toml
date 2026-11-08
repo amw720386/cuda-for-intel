@@ -1,0 +1,10 @@
+[package]
+name = "cusolver_shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "cuSOLVER surface for cuda-for-intel: every entry point returns the library's NOT_SUPPORTED status instead of failing to load"
+
+[lib]
+name = "cusolver64_11"
+crate-type = ["cdylib", "rlib"]
