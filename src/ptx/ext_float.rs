@@ -557,7 +557,7 @@ impl<'a> Emitter<'a> {
                 let hi = self.u32_const(hi as u32);
                 let v = self.opencl_int(t, OpenclStd100Op::s_max, &[value, lo])?;
                 let v = self.opencl_int(t, OpenclStd100Op::s_min, &[v, hi])?;
-                let mask = self.u32_const((1u32 << dbits) - 1);
+                let mask = self.u32_const((1u32 << Self::reg_bits(d, dbits)) - 1);
                 self.builder.bitwise_and(t, None, v, mask)?
             } else {
                 value
@@ -600,12 +600,18 @@ impl<'a> Emitter<'a> {
         }
         let narrowed = self.builder.u_convert(self.u32_type, None, v)?;
         let id = if dbits < 32 {
-            let mask = self.u32_const((1u32 << dbits) - 1);
+            let mask = self.u32_const((1u32 << Self::reg_bits(d, dbits)) - 1);
             self.builder.bitwise_and(self.u32_type, None, narrowed, mask)?
         } else {
             narrowed
         };
         self.write(dst, Value { id, kind: Kind::B32 })
+    }
+
+    /// Bits of the destination register that carry the value: PTX sign- or zero-extends a
+    /// narrow result to the 16-bit register width, so a signed 8-bit result occupies 16 bits.
+    fn reg_bits(d: NumTy, dbits: u32) -> u32 {
+        if dbits == 8 && d.is_signed() { 16 } else { dbits }
     }
 
     /// Inclusive value range of a narrow (<= 32-bit) integer type as i64.

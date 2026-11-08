@@ -304,12 +304,40 @@ impl<'a> Emitter<'a> {
             vec![Operand::IdRef(slot), Operand::IdRef(zero)],
         ));
         self.undef_slots_info.push((slot, zero, self.current_block));
+        super::note_undefined_register(&self.current_entry, operand);
         if kind != Kind::Predicate {
             self.undefined_seen.push((self.current_entry.clone(), operand.to_string(), kind == Kind::B64));
         }
         let value = Value { id: slot, kind };
         self.undef_slots.insert(operand.to_string(), value);
         Ok(value)
+    }
+
+    /// Integer division/remainder with the divisor-zero and INT_MIN / -1 cases defined (PTX leaves
+    /// them undefined; SPIR-V makes them undefined behaviour). Defined results follow NVIDIA
+    /// hardware: x / 0 = all ones, x % 0 = x, INT_MIN / -1 = INT_MIN, INT_MIN % -1 = 0.
+    fn guarded_div(&mut self, ty: Word, bits: u32, signed: bool, rem: bool, a: Word, b: Word) -> Result<Word, rspirv::dr::Error> {
+        let c = |s: &mut Self, v: u64| if bits == 32 { s.builder.constant_bit32(ty, v as u32) } else { s.builder.constant_bit64(ty, v) };
+        let zero = c(self, 0);
+        let one = c(self, 1);
+        let ones = c(self, u64::MAX);
+        let b_is_zero = self.builder.i_equal(self.bool_type, None, b, zero)?;
+        let mut bad = b_is_zero;
+        if signed {
+            let min = c(self, 1u64 << (bits - 1));
+            let a_min = self.builder.i_equal(self.bool_type, None, a, min)?;
+            let b_m1 = self.builder.i_equal(self.bool_type, None, b, ones)?;
+            let ovf = self.builder.logical_and(self.bool_type, None, a_min, b_m1)?;
+            bad = self.builder.logical_or(self.bool_type, None, bad, ovf)?;
+        }
+        let safe = self.builder.select(ty, None, bad, one, b)?;
+        let q = match (signed, rem) {
+            (true, false) => self.builder.s_div(ty, None, a, safe)?,
+            (false, false) => self.builder.u_div(ty, None, a, safe)?,
+            (true, true) => self.builder.s_rem(ty, None, a, safe)?,
+            (false, true) => self.builder.u_mod(ty, None, a, safe)?,
+        };
+        self.builder.select(ty, None, b_is_zero, if rem { a } else { ones }, q)
     }
 
     fn write(&mut self, dst: &'a str, value: Value) -> Result<(), Error> {
@@ -525,6 +553,9 @@ impl<'a> Emitter<'a> {
         let _membermask = self.integer(membermask, Kind::B32)?;
         let value = self.read(value)?.require(Kind::B32, value)?;
         let xor_mask = self.integer(xor_mask, Kind::B32)?;
+        // PTX reads only b[4:0] as the lane operand.
+        let c31 = self.u32_const(31);
+        let xor_mask = self.builder.bitwise_and(self.u32_type, None, xor_mask, c31)?;
         // Native subgroup shuffle: no workgroup barrier, so warps that early-exit
         // after bar.sync (GGML mmvq) cannot hang the remaining warp's reduction.
         // SubgroupSize=32 (set on the entry) makes Intel subgroups match CUDA warps.
@@ -1845,7 +1876,9 @@ impl<'a> Emitter<'a> {
         let segment = self.builder.bitwise_and(ty, None, shifted, c31)?;
         let keep = self.builder.bitwise_xor(ty, None, segment, c31)?;
         let value = self.read(src[0])?.require(Kind::B32, src[0])?;
+        // PTX reads only b[4:0] as the lane / offset operand.
         let delta = self.integer(src[1], Kind::B32)?;
+        let delta = self.builder.bitwise_and(ty, None, delta, c31)?;
         let lane = self.lane_id()?;
         let min_lane = self.builder.bitwise_and(ty, None, lane, segment)?;
         let (source, valid) = match mode {
@@ -2393,10 +2426,10 @@ impl<'a> Emitter<'a> {
                     IntegerOp::Mul => self.builder.i_mul(ty, None, a, b),
                     IntegerOp::And => self.builder.bitwise_and(ty, None, a, b),
                     IntegerOp::Or => self.builder.bitwise_or(ty, None, a, b),
-                    IntegerOp::Div => self.builder.s_div(ty, None, a, b),
-                    IntegerOp::DivUnsigned => self.builder.u_div(ty, None, a, b),
-                    IntegerOp::Rem => self.builder.s_rem(ty, None, a, b),
-                    IntegerOp::RemUnsigned => self.builder.u_mod(ty, None, a, b),
+                    IntegerOp::Div => self.guarded_div(ty, 32, true, false, a, b),
+                    IntegerOp::DivUnsigned => self.guarded_div(ty, 32, false, false, a, b),
+                    IntegerOp::Rem => self.guarded_div(ty, 32, true, true, a, b),
+                    IntegerOp::RemUnsigned => self.guarded_div(ty, 32, false, true, a, b),
                     IntegerOp::SignExtend8 => {
                         // PTX cvt.s32.s8 sign-extends the low 8 bits of the source.
                         let shift = self.builder.constant_bit32(ty, 24);
@@ -2709,11 +2742,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let a = self.integer(a, Kind::B64)?;
                 let b = self.integer(b, Kind::B64)?;
-                let id = if signed {
-                    self.builder.s_div(self.u64_type, None, a, b)?
-                } else {
-                    self.builder.u_div(self.u64_type, None, a, b)?
-                };
+                let id = self.guarded_div(self.u64_type, 64, signed, false, a, b)?;
                 (dst, id, Kind::B64)
             }
             Instruction::Rem64 {
@@ -2723,11 +2752,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let a = self.integer(a, Kind::B64)?;
                 let b = self.integer(b, Kind::B64)?;
-                let id = if signed {
-                    self.builder.s_rem(self.u64_type, None, a, b)?
-                } else {
-                    self.builder.u_mod(self.u64_type, None, a, b)?
-                };
+                let id = self.guarded_div(self.u64_type, 64, signed, true, a, b)?;
                 (dst, id, Kind::B64)
             }
             Instruction::Load64(space, dst, address) => {
