@@ -124,7 +124,7 @@ unless the description says otherwise. Defaults are taken from the source at thi
 | `CUDA_FOR_INTEL_BUILD_FLAGS` | empty | Extra options for the Intel compiler, for every module. |
 | `CUDA_FOR_INTEL_BIG_FLAGS`, `CUDA_FOR_INTEL_BIG_WORDS` | empty, 400000 | Extra compiler options for modules larger than `BIG_WORDS` SPIR-V words. |
 | `CUDA_FOR_INTEL_BATCH_CAP`, `_BATCH_US`, `_BATCH_TIMER` | off, 250, condvar | Only with `--features experimental-batching`: regular command lists of 1 to 1024 commands, flush deadline in microseconds, `high-resolution` for a Windows waitable timer. |
-| `CUDA_FOR_INTEL_SUBST` | `none` | Native kernel substitution (`none`, `all` or a list). Exists on the unmerged `kernel-subst` branch only; no effect in this tree. |
+| `CUDA_FOR_INTEL_SUBST` | `auto` | Native Intel replacements for ggml's quantized mat-vec (mmvq), `quantize_q8_1` and Q8_0 mat-mat (mmq + stream-k fixup) kernels. `auto` (default) is the measured policy, `none` disables, `all` forces every native kernel, or a list; `-mmq`, `-mmvq`, `-quantize_q8_1` switch a family off (`auto,-mmq`). Validated once per kernel on the device, falls back to the translated PTX on any mismatch. See `docs/kernel-subst.md`. |
 
 ### Translator optimisations
 

@@ -373,7 +373,11 @@ fn auto_policy_follows_the_measurements() {
     assert!(yes(8, 2) && yes(2, 4) && yes(8, 8) && yes(12, 8) && yes(14, 2) && yes(14, 4));
     assert!(matches!(decide("_Z13quantize_q8_1PKfPvxxxxxj5uint3", &quantize_layout(), &auto), Decision::Substitute(_)));
     let mmq = "_Z9mul_mat_qIL9ggml_type8ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
-    assert_eq!(decide(mmq, &mmq_layout(), &auto), Decision::NotApplicable);
-    // explicit list items still force a kernel in addition to auto
-    assert!(matches!(decide(mmq, &mmq_layout(), &Switch::parse("auto,mmq")), Decision::Substitute(_)));
+    assert!(matches!(decide(mmq, &mmq_layout(), &auto), Decision::Substitute(_)), "mmq is in auto");
+    // `-family` switches one family off
+    let no_mmq = Switch::parse("auto,-mmq");
+    assert_eq!(decide(mmq, &mmq_layout(), &no_mmq), Decision::NotApplicable);
+    assert!(matches!(decide(&name(8, 1), &mmvq_layout(), &no_mmq), Decision::Substitute(_)));
+    assert_eq!(decide(&name(8, 1), &mmvq_layout(), &Switch::parse("all,-mmvq:q8_0")), Decision::NotApplicable);
+    assert!(Switch::parse("auto,-mmq,none").is_none());
 }

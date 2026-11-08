@@ -70,7 +70,7 @@ Library kernels (`cuLibraryGetKernel`) are translated lazily, one entry per modu
 
 A separate branch (`kernel-subst`, not part of this tree) adds hand-written native SPIR-V replacements for selected ggml kernels (mmvq, quantize_q8_1,
 Q8_0 mul_mat_q), recognised by mangled name and parameter layout, verified against a host reference on first use, with fallback to the translated PTX.
-Its switch is `CUDA_FOR_INTEL_SUBST=none|all|<list>` (default `none`). Until that branch is merged this switch does nothing here.
+Its switch is `CUDA_FOR_INTEL_SUBST=none|auto|all|<list>` (default `auto`; `-mmq`-style items switch a family off). See `docs/kernel-subst.md`.
 
 ## XMX GEMM
 

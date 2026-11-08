@@ -2,7 +2,7 @@
 
 Opt-in layer that replaces recognised ggml-cuda kernels with hand-written Intel-native SPIR-V.
 
-* Switch: `CUDA_FOR_INTEL_SUBST=none|auto|all|<list>` (default `none`; `auto` = per-kernel policy from the first Arc measurements: mmvq ncols 1 for all types, Q4_K at every ncols, Q6_K ncols<=2, quantize_q8_1; mmq stays off). List items: `mmvq`, `mmvq:q8_0|q4_0|q4_k|q6_k`, `quantize_q8_1`.
+* Switch: `CUDA_FOR_INTEL_SUBST=none|auto|all|<list>` (default `auto`: mmvq at every ncols and type, quantize_q8_1, mmq Q8_0 with its stream-k fixup; `none` disables; `-mmq`, `-mmvq`, `-quantize_q8_1` or `-family:type` remove a family from auto/all, e.g. `auto,-mmq`). Measured on the Arc: mmvq 1.0-3.7x, mmq 5.3x at 4096x4096x512; 330 of 330 shadow checks of mmq/mmvq launches in Qwen2.5-0.5B prefill were bit-identical to the translated kernel; native mmq differs from stock stream-k only in float add order, so greedy output can differ in near-ties (perplexity within +-0.13% over 5 chunks).
   `CUDA_FOR_INTEL_SUBST_NWARPS=<pow2>` (mmvq experiment, changes only the cross-warp add order), `CUDA_FOR_INTEL_SUBST_PROBE=0` skips the first-use check.
 * Recognition (`src/subst/mod.rs`): Itanium name (template args included) plus exact parameter layout. Any mismatch keeps the PTX and logs why.
   Launch shape must also match (mmvq block `32 x stock nwarps`, quantize block 256).
