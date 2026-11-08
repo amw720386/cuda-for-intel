@@ -9,14 +9,16 @@
 .PARAMETER Hybrid   dir with nvcudart_hybrid64.dll
 .PARAMETER Id       gpu-queue id
 .PARAMETER Prompts  optional text file with one prompt per line (default: built-in list)
+.PARAMETER ResultsName subdirectory of Work that receives results (default results)
+.PARAMETER ShimDir optional dir holding the nvcuda.dll and cublas64_13.dll to test (copied into private copies of the Ollama tree and of run\); default: the DLLs already staged
 .PARAMETER Fixed    index (0-based) of the prompt to analyse even if the modes agree on it (default: first diverging)
 #>
 param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$OllamaRun, [Parameter(Mandatory)][string]$Model,
-      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1)
+      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1, [string]$ResultsName = 'results', [string]$ShimDir = '')
 $ErrorActionPreference = 'Continue'
 $queue = Join-Path (Split-Path $Work -Parent) 'gpu-queue.ps1'
 $lock  = Join-Path (Split-Path $Work -Parent) 'gpu.lock'
-$res = Join-Path $Work 'results'; New-Item -ItemType Directory -Force $res | Out-Null
+$res = Join-Path $Work $ResultsName; New-Item -ItemType Directory -Force $res | Out-Null
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 if ($Prompts) { $plist = [IO.File]::ReadAllLines($Prompts, $utf8) | ? { $_ } } else {
   $plist = @('Write a short story about a robot learning to paint.','The quick brown fox jumps over the lazy dog. The quick brown fox',
@@ -27,8 +29,21 @@ if ($Prompts) { $plist = [IO.File]::ReadAllLines($Prompts, $utf8) | ? { $_ } } e
    'What are the benefits of exercise?','Tell me a joke about programmers.','Write a haiku about autumn, then explain it.',
    'Once there was a little boat that wanted to see the world','Dear Sir or Madam, I am writing to complain about') }
 
+if ($ShimDir) {
+  $priv = Join-Path $Work 'ollama_priv'
+  if (-not (Test-Path $priv)) { robocopy $OllamaRun $priv /E /XF *.orig /NFL /NDL /NJH /NJS /NP | Out-Null }
+  $OllamaRun = $priv
+  Copy-Item "$ShimDir\nvcuda.dll" "$OllamaRun\lib\ollama\cuda_v13\nvcuda.dll" -Force
+  Copy-Item "$ShimDir\cublas64_13.dll" "$OllamaRun\lib\ollama\cuda_v13\cublas64_13.dll" -Force
+  $runDir = Join-Path $Work 'run_priv'
+  if (-not (Test-Path $runDir)) { New-Item -ItemType Directory $runDir | Out-Null; Copy-Item "$Work\run\*" $runDir -Recurse -Exclude *.log }
+  Copy-Item "$ShimDir\nvcuda.dll" $runDir -Force; Copy-Item "$ShimDir\cublas64_13.dll" $runDir -Force; Copy-Item "$ShimDir\cublas64_13.dll" "$runDir\cublasLt64_13.dll" -Force
+} else { $runDir = Join-Path $Work 'run' }
+Get-FileHash "$OllamaRun\lib\ollama\cuda_v13\nvcuda.dll" -Algorithm SHA256 | % { "nvcuda.dll sha256=$($_.Hash)" } | Set-Content "$res\provenance.txt"
+Get-FileHash "$OllamaRun\lib\ollama\cuda_v13\ggml-cuda.dll" -Algorithm SHA256 | % { "ollama ggml-cuda.dll sha256=$($_.Hash)" } | Add-Content "$res\provenance.txt"
+Get-FileHash $Model -Algorithm SHA256 | % { "model sha256=$($_.Hash)" } | Add-Content "$res\provenance.txt"
 & powershell -NoProfile -File $queue -Action acquire -Id $Id -MaxWaitSec 14400 | Out-Null
-$hb = Start-Job -ArgumentList $lock -ScriptBlock { param($l) while ($true) { try { (Get-Item $l).LastWriteTime = Get-Date } catch {}; Start-Sleep 60 } }
+$hb = Start-Job -ArgumentList $lock,$Id -ScriptBlock { param($l,$me) while ($true) { try { if ((Get-Content "$l\owner" -EA 0) -eq $me) { (Get-Item $l).LastWriteTime = Get-Date } } catch {}; Start-Sleep 60 } }
 try {
   function Set-ModeEnv($mode, $cacheDir) {
     Get-ChildItem Env: | ? { $_.Name -match 'CFI|CUDA_FOR_INTEL|NEO_' } | % { Remove-Item "Env:$($_.Name)" }
@@ -38,7 +53,7 @@ try {
   # ---------- A: stock Ollama scan ----------
   $g = "$OllamaRun\lib\ollama\cuda_v13"; $exe = "$OllamaRun\ollama-divc.exe"
   if (-not (Test-Path $exe)) { Copy-Item "$OllamaRun\ollama.exe" $exe }
-  $port = 11557
+  $port = Get-Random -Minimum 21000 -Maximum 29000
   foreach ($mode in 'auto','none') {
     $wd = "$res\ollama_$mode"; New-Item -ItemType Directory -Force "$wd", "$Work\kc_ollama_$mode" | Out-Null
     Set-ModeEnv $mode "$Work\kc_ollama_$mode"
@@ -48,6 +63,10 @@ try {
     Get-Process ollama-divc -EA 0 | Stop-Process -Force; Start-Sleep 2
     $srv = Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $wd -FilePath $exe -ArgumentList 'serve' -RedirectStandardOutput "$wd\o.txt" -RedirectStandardError "$wd\e.txt"
     Start-Sleep 8
+    # guard: our own server log must say it listens on our port (a foreign server on the port would make ours fail with "bind")
+    $okSrv = $false
+    for ($w = 0; $w -lt 30 -and -not $okSrv; $w++) { $log = Get-Content "$wd\e.txt" -Raw -EA 0; if ($log -match "Listening on 127.0.0.1:$port ") { $okSrv = $true } elseif ($log -match 'bind:') { break } else { Start-Sleep 2 } }
+    if (-not $okSrv -or $srv.HasExited) { "ABORT $mode : our ollama-divc did not start listening on $port" | Add-Content "$res\scan_errors.txt"; Get-Process ollama-divc -EA 0 | Stop-Process -Force; continue }
     "FROM $Model" | Set-Content "$wd\Mf"
     & $exe create "divc-$mode" -f "$wd\Mf" 2>&1 | Out-Null
     for ($i = 0; $i -lt $plist.Count; $i++) {
@@ -75,29 +94,28 @@ try {
   # ---------- B: logits through llama.cpp (same shim, same mode switch) ----------
   if ($pick -ge 0) {
     [IO.File]::WriteAllText("$res\prompt.txt", $plist[$pick], $utf8)
-    $tool = "$Work\run\cfi_logits.exe"
-    function Run-Tool($mode, $kind, $idsFile, $tag) {
-      Set-ModeEnv $mode "$Work\kc_llama_$mode"; New-Item -ItemType Directory -Force "$Work\kc_llama_$mode" | Out-Null
-      $env:PATH = "$Work\run;$env:PATH"
-      $wd = "$Work\run"; Push-Location $wd
+    $tool = "$runDir\cfi_logits.exe"
+    # variant name -> CUDA_FOR_INTEL_SUBST value ('' = unset = default auto)
+    $variants = [ordered]@{ auto = ''; none = 'none'; auto_nommq = 'auto,-mmq'; auto_nommvq = 'auto,-mmvq'; auto_noquant = 'auto,-quantize_q8_1' }
+    function Run-Tool($var, $kind, $idsFile, $tag) {
+      $kc = "$Work\kc_llama_$var"; New-Item -ItemType Directory -Force $kc | Out-Null
+      Set-ModeEnv 'auto' $kc
+      if ($variants[$var]) { $env:CUDA_FOR_INTEL_SUBST = $variants[$var] }
+      $env:PATH = "$runDir;$env:PATH"
+      Push-Location $runDir
       Remove-Item cuda-for-intel-export.log -EA 0
       $p = Start-Process -PassThru -Wait -NoNewWindow -FilePath $tool -ArgumentList $Model, '99', $kind, "$NPredict", "$res\prompt.txt", $idsFile, "$res\$tag" -RedirectStandardError "$res\$tag.err" -RedirectStandardOutput "$res\$tag.out"
-      "$tag exit=$($p.ExitCode)" | Add-Content "$res\tool_runs.txt"
-      if (Test-Path cuda-for-intel-export.log) { Copy-Item cuda-for-intel-export.log "$res\$tag.export.log" -Force }
+      "$tag exit=$($p.ExitCode) SUBST=[$($variants[$var])]" | Add-Content "$res\tool_runs.txt"
+      if (Test-Path cuda-for-intel-export.log) { Select-String -Path cuda-for-intel-export.log -Pattern '^subst' | % { $_.Line } | Set-Content "$res\$tag.subst.log" }
       Pop-Location
     }
     Run-Tool 'auto' 'gen' '-' 'llama_auto_gen'
     Run-Tool 'none' 'gen' '-' 'llama_none_gen'
-    # ids files for forcing: generated ids line of the other run
-    foreach ($pair in @(@('auto','none'), @('none','auto'))) {
-      $mode = $pair[0]; $other = $pair[1]
-      $ids = (Get-Content "$res\llama_${other}_gen.ids.txt")[2]
-      Set-Content "$res\forced_from_$other.txt" $ids
-      Run-Tool $mode 'force' "$res\forced_from_$other.txt" "llama_${mode}_force_$other"
-      # also force the mode's own sequence (repeatability / mode-independent step alignment)
-    }
-    foreach ($mode in 'auto','none') { $ids = (Get-Content "$res\llama_${mode}_gen.ids.txt")[2]; Set-Content "$res\forced_from_$mode.txt" $ids }
-    Run-Tool 'auto' 'force' "$res\forced_from_auto.txt" 'llama_auto_force_auto'
+    foreach ($seq in 'auto','none') { (Get-Content "$res\llama_${seq}_gen.ids.txt")[2] | Set-Content "$res\forced_from_$seq.txt" }
+    foreach ($seq in 'none','auto') { foreach ($var in $variants.Keys) {
+      if ($var -eq $seq) { continue }   # the free run already is "variant $var on its own sequence"
+      Run-Tool $var 'force' "$res\forced_from_$seq.txt" "llama_${var}_force_$seq"
+    } }
   }
 } finally {
   Stop-Job $hb -EA 0; Remove-Job $hb -Force -EA 0
