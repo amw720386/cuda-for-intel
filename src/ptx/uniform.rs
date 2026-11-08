@@ -62,15 +62,15 @@ impl Cls {
     }
 }
 
-pub(super) struct Uniformity<'a> {
-    ids: HashMap<&'a str, u32>,
-    cls: Vec<Cls>,
+pub(super) struct Uniformity {
+    /// Class of each block's branch predicate at the terminator.
+    branch_cls: Vec<Cls>,
 }
 
-impl<'a> Uniformity<'a> {
-    /// True when the predicate is provably the same for every thread of the block.
-    pub(super) fn predicate_uniform(&self, name: &str) -> bool {
-        self.ids.get(name).is_some_and(|&id| self.cls[id as usize].uniform())
+impl Uniformity {
+    /// True when the branch ending `block` is provably taken identically by every thread.
+    pub(super) fn branch_uniform(&self, block: usize) -> bool {
+        self.branch_cls[block].uniform()
     }
 }
 
@@ -80,6 +80,8 @@ struct Ctx<'a, 'b> {
     single: &'b [bool],
     hi_zero: &'b [(usize, u32)],
     graphs: &'b Graphs,
+    /// Strong updates within the current block: the class of the latest definition so far.
+    local: &'b HashMap<u32, Cls>,
 }
 
 impl<'a> Ctx<'a, '_> {
@@ -101,7 +103,7 @@ impl<'a> Ctx<'a, '_> {
             return if s == "0" { Cls::Mul } else { Cls::Uni };
         }
         let base = s.split('+').next().unwrap_or(s);
-        self.ids.get(base).map_or(Cls::Top, |&id| self.cls[id as usize])
+        self.ids.get(base).map_or(Cls::Top, |&id| self.local.get(&id).copied().unwrap_or(self.cls[id as usize]))
     }
 
     fn id(&self, s: &str) -> Option<u32> {
@@ -182,6 +184,7 @@ fn transfer<'a>(ctx: &Ctx<'a, '_>, inst: &Instruction<'a>, block: usize, defs: &
     let _ = defs;
     match inst {
         Builtin(_, src) => ctx.operand(src),
+        LaneId(_) | Special(..) => Cls::Var,
         Param(..) | ParamS8(..) | ParamS32(..) | ParamVec { .. } => Cls::Uni,
         Move32(_, s) | Move64(_, s) => ctx.operand(s),
         Integer32(op, _, [a, b]) => arith(ctx, op, None, a, b),
@@ -245,7 +248,7 @@ fn transfer<'a>(ctx: &Ctx<'a, '_>, inst: &Instruction<'a>, block: usize, defs: &
     }
 }
 
-pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], graphs: &Graphs) -> Uniformity<'a> {
+pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], graphs: &Graphs) -> Uniformity {
     let mut ids: HashMap<&'a str, u32> = HashMap::new();
     let mut defcount: Vec<u32> = Vec::new();
     let mut scratch = Vec::new();
@@ -310,6 +313,8 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
     }
 
     let mut cls = vec![Cls::Bot; ids.len()];
+    let mut branch_cls = vec![Cls::Bot; blocks.len()];
+    let mut local: HashMap<u32, Cls> = HashMap::new();
     let mut tainted = vec![false; blocks.len()];
     let mut stamp = vec![0u32; blocks.len()];
     let mut generation = 0u32;
@@ -319,21 +324,31 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
         loop {
             let mut changed = false;
             for (bi, block) in blocks.iter().enumerate() {
+                local.clear();
                 for inst in &block.instructions {
                     let Some(inputs) = inst.collect_definitions(&mut defs) else { continue };
                     let inputs: Vec<&str> = inputs.to_vec();
-                    let ctx = Ctx { ids: &ids, cls: &cls, single: &single, hi_zero: &hi_zero, graphs };
+                    let ctx = Ctx { ids: &ids, cls: &cls, single: &single, hi_zero: &hi_zero, graphs, local: &local };
                     let mut value = transfer(&ctx, inst, bi, &defs, &inputs);
                     if tainted[bi] && value != Cls::Bot {
                         value = Cls::Var;
                     }
                     for &d in &defs {
-                        let id = ids[d] as usize;
-                        let joined = cls[id].join(value);
-                        if joined != cls[id] {
-                            cls[id] = joined;
+                        let id = ids[d];
+                        local.insert(id, value);
+                        let joined = cls[id as usize].join(value);
+                        if joined != cls[id as usize] {
+                            cls[id as usize] = joined;
                             changed = true;
                         }
+                    }
+                }
+                if let Terminator::Branch { predicate, .. } = block.end {
+                    let ctx = Ctx { ids: &ids, cls: &cls, single: &single, hi_zero: &hi_zero, graphs, local: &local };
+                    let c = ctx.operand(predicate);
+                    if c != branch_cls[bi] {
+                        branch_cls[bi] = c;
+                        changed = true;
                     }
                 }
             }
@@ -348,12 +363,47 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
             if taken == other {
                 continue;
             }
-            let c = ids.get(predicate).map_or(Cls::Top, |&id| cls[id as usize]);
+            let c = branch_cls[bi];
             if !matches!(c, Cls::Var | Cls::Tid) {
                 continue;
             }
-            generation += 1;
+            // Threads that leave through a side which never meets the other side again (an early
+            // `return`) cannot observe the values the surviving side computes, so the survivors
+            // stay in lock step. Only sides that reconverge on a block with real work taint.
+            let meets = |from_a: usize, from_b: usize, mark: &mut Vec<u32>, generation: &mut u32, budget: &mut u64| {
+                *generation += 2;
+                let (ga, gb) = (*generation - 1, *generation);
+                let mut stack = vec![from_a];
+                while let Some(n) = stack.pop() {
+                    if std::mem::replace(&mut mark[n], ga) == ga {
+                        continue;
+                    }
+                    *budget = budget.saturating_sub(1);
+                    stack.extend(blocks[n].end.successors());
+                }
+                stack.push(from_b);
+                while let Some(n) = stack.pop() {
+                    if mark[n] == gb {
+                        continue;
+                    }
+                    let seen_by_a = mark[n] == ga;
+                    mark[n] = gb;
+                    if seen_by_a && !(blocks[n].instructions.is_empty() && matches!(blocks[n].end, Terminator::Return)) {
+                        return true;
+                    }
+                    *budget = budget.saturating_sub(1);
+                    stack.extend(blocks[n].end.successors());
+                }
+                false
+            };
+            if !meets(taken, other, &mut stamp, &mut generation, &mut budget) {
+                continue;
+            }
+            if std::env::var_os("CFI_UNIFORM_DEBUG").is_some() {
+                eprintln!("TAINT branch {predicate} in block {bi} class {c:?}");
+            }
             let mut stack = vec![taken, other];
+            generation += 1;
             while let Some(next) = stack.pop() {
                 if graphs.postdominates(bi, next) && next != bi && !false {
                     continue;
@@ -363,19 +413,31 @@ pub(super) fn analyze<'a>(blocks: &[Block<'a>], predecessors: &[Vec<usize>], gra
                 }
                 if budget == 0 {
                     // Give up precision rather than time: nothing downstream stays provable.
-                    cls.iter_mut().for_each(|c| *c = Cls::Var);
-                    return Uniformity { ids, cls };
+                    branch_cls.iter_mut().for_each(|c| *c = Cls::Var);
+                    return Uniformity { branch_cls };
                 }
                 budget -= 1;
                 if !tainted[next] {
                     tainted[next] = true;
                     grew = true;
+                    if let Some(watch) = std::env::var_os("CFI_UNIFORM_WATCH") {
+                        let w = watch.to_string_lossy();
+                        let mut d = Vec::new();
+                        if blocks[next].instructions.iter().any(|i| i.collect_definitions(&mut d).is_some() && d.iter().any(|x| *x == w)) {
+                            eprintln!("WATCH {w} block {next} tainted by branch {predicate} in block {bi}");
+                        }
+                    }
                 }
                 stack.extend(blocks[next].end.successors());
             }
         }
         if !grew {
-            return Uniformity { ids, cls };
+            if std::env::var_os("CFI_UNIFORM_DEBUG").is_some() {
+                for (name, &id) in &ids {
+                    eprintln!("UNI {name} {:?} single={}", cls[id as usize], single[id as usize]);
+                }
+            }
+            return Uniformity { branch_cls };
         }
     }
 }

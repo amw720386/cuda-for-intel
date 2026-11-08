@@ -483,7 +483,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
             if exit_only(taken) || exit_only(other) {
                 continue;
             }
-            if uniform_compare.contains(predicate) || uniformity.predicate_uniform(predicate) {
+            if uniform_compare.contains(predicate) || uniformity.branch_uniform(index) {
                 continue;
             }
             // Generalised early exit: if no barrier is reachable from one side, the threads
