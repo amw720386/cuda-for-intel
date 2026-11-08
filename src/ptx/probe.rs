@@ -87,6 +87,10 @@ pub(super) fn probe_module_hashed(prepared: &str, threads: usize) -> Result<Vec<
 /// Like [`probe_module_hashed`], but through the lazy per-entry path the runtime uses
 /// (`translate_entry` on a prepared library), so parse-once costs are visible.
 pub(super) fn probe_lazy_hashed(prepared: &str, threads: usize) -> Result<Vec<TimedEntry>, Error> {
+    probe_lazy_hashed_with(prepared, threads, false)
+}
+
+pub(super) fn probe_lazy_hashed_with(prepared: &str, threads: usize, whole_module_api: bool) -> Result<Vec<TimedEntry>, Error> {
     let names: Vec<String> = super::entry_names(prepared)?.into_iter().map(str::to_string).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let slots: Vec<std::sync::Mutex<Option<TimedEntry>>> = (0..names.len()).map(|_| std::sync::Mutex::new(None)).collect();
@@ -101,7 +105,9 @@ pub(super) fn probe_lazy_hashed(prepared: &str, threads: usize) -> Result<Vec<Ti
                         break;
                     }
                     let start = std::time::Instant::now();
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::translate_entry(prepared, &names[i])))
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if whole_module_api { super::translate_prepared_entry(prepared, &names[i]) } else { super::translate_entry(prepared, &names[i]) }
+                    }))
                         .map_err(|_| "panic".to_string())
                         .and_then(|r| r.map(|t| hash_words(&t.words)).map_err(|e| e.to_string()));
                     *slots[i].lock().unwrap() = Some((names[i].clone(), result, start.elapsed()));

@@ -108,7 +108,7 @@ fn time_file(path: &str, threads: usize, mode: &str) {
         return;
     }
     let t = Instant::now();
-    let r = match if mode == "lazy" { ptx::probe_lazy_hashed(&prepared, threads) } else { ptx::probe_module_hashed(&prepared, threads) } { Ok(r) => r, Err(e) => { println!("PARSE_FAIL\t{e}"); return } };
+    let r = match if mode == "lazy" { ptx::probe_lazy_hashed(&prepared, threads) } else if mode == "prepared" { ptx::probe_prepared_hashed(&prepared, threads) } else { ptx::probe_module_hashed(&prepared, threads) } { Ok(r) => r, Err(e) => { println!("PARSE_FAIL\t{e}"); return } };
     eprintln!("parse+translate all entries ({threads} threads) {:.2?}", t.elapsed());
     let mut worst: Vec<_> = r.iter().map(|(n, _, d)| (*d, n.clone())).collect();
     worst.sort(); worst.reverse();

@@ -1839,8 +1839,10 @@ fn rewrite_half_extract_scopes(source: &str) -> String {
             i += caps.consumed;
             continue;
         }
-        out.push(source[i..].chars().next().unwrap());
-        i += source[i..].chars().next().unwrap().len_utf8();
+        // Copy the run up to the next `{` in one go.
+        let run = bytes[i + 1..].iter().position(|&b| b == b'{').map_or(bytes.len(), |n| i + 1 + n);
+        out.push_str(&source[i..run]);
+        i = run;
     }
     out
 }
@@ -2012,9 +2014,10 @@ fn rewrite_register_scopes(source: &str) -> String {
             i = close + 1;
             continue;
         }
-        let ch = source[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
+        // Copy the run up to the next comment start or `{` in one go.
+        let run = bytes[i + 1..].iter().position(|&b| b == b'{' || b == b'/').map_or(bytes.len(), |n| i + 1 + n);
+        out.push_str(&source[i..run]);
+        i = run;
     }
     out
 }
@@ -2253,7 +2256,70 @@ fn canonical_setp(op: &str) -> Option<&'static str> {
     })
 }
 
+/// Byte range of `.entry NAME ( ... ) { ... }` in normalised PTX (one statement per line,
+/// no comments), found without tokenising the module.
+fn entry_span(source: &str, name: &str) -> Option<(usize, usize)> {
+    let pattern = format!(".entry {name} (");
+    let mut from = 0;
+    let start = loop {
+        let at = from + source[from..].find(&pattern)?;
+        if at == 0 || source.as_bytes()[at - 1].is_ascii_whitespace() {
+            break at;
+        }
+        from = at + 1;
+    };
+    let bytes = source.as_bytes();
+    let mut i = start + pattern.len();
+    while i < bytes.len() && bytes[i] != b'{' {
+        i += 1;
+    }
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some((start, i + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A module made of the module-scope statements that precede `name` plus that entry alone.
+/// `None` when the text is not in normalised form (callers then use the whole module).
+pub(super) fn narrow_to_entry(source: &str, name: &str) -> Option<String> {
+    let (start, end) = entry_span(source, name)?;
+    // Block-opening lines (other entries and functions) are skipped whole; every balanced
+    // line outside a block is a module-scope declaration.
+    let mut out = String::new();
+    let mut depth = 0i32;
+    let mut at = 0;
+    for line in source[..start].split_inclusive('\n') {
+        let delta = line.bytes().filter(|&b| b == b'{').count() as i32 - line.bytes().filter(|&b| b == b'}').count() as i32;
+        if depth == 0 && delta == 0 {
+            out.push_str(line);
+        }
+        depth += delta;
+        if depth < 0 {
+            return None;
+        }
+        at += line.len();
+    }
+    if depth != 0 || at != start {
+        return None;
+    }
+    out.push_str(&source[start..end]);
+    out.push('\n');
+    Some(out)
+}
+
 pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, Error> {
+    let source = entry_span(source, name).map_or(source, |(start, end)| &source[start..end]);
     let mut tokens = tokens(source)?;
     let start = tokens
         .windows(3)

@@ -866,15 +866,30 @@ pub(crate) struct Translation {
 
 /// Scope flattening, source canonicalisation and `.func` inlining.
 fn prepare(source: &str) -> Result<String, Error> {
+    let timing = std::env::var_os("CFI_PREP_TIMING").is_some();
+    let mut t = std::time::Instant::now();
+    let mut lap = |what: &str| {
+        if timing {
+            eprintln!("  prepare/{what}: {:.2?}", t.elapsed());
+            t = std::time::Instant::now();
+        }
+    };
     let rewritten = parse::rewrite_half_scopes(source);
+    lap("half_scopes");
     // Constant-bank variables live in ordinary device memory, so reads are global loads.
     let rewritten = if rewritten.contains("ld.const.") {
         rewritten.replace("ld.const.", "ld.global.")
     } else {
         rewritten
     };
+    lap("ld.const");
     let normalized = normalize::run(&rewritten)?;
-    normalize::finish(&parse::rewrite_half_scopes(&normalized))
+    lap("normalize::run");
+    let again = parse::rewrite_half_scopes(&normalized);
+    lap("half_scopes2");
+    let out = normalize::finish(&again);
+    lap("finish");
+    out
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
@@ -920,7 +935,11 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
 /// Translate one `.entry` of an already prepared module (lazy cudart 11.x modules).
 /// Kernels that fail elsewhere in the module do not matter.
 pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Translation, Error> {
-    let (entries, vars) = parse::parse_module(prepared)?;
+    // Parse only the requested entry plus the module-scope declarations before it, instead of
+    // every entry of a multi-megabyte module (the result is the same: other entries cannot
+    // influence this one).
+    let narrowed = parse::narrow_to_entry(prepared, name);
+    let (entries, vars) = parse::parse_module(narrowed.as_deref().unwrap_or(prepared))?;
     let entry = entries
         .into_iter()
         .find(|entry| entry.name == name)
@@ -956,6 +975,12 @@ pub(crate) fn skipped_entries() -> Vec<(String, String)> {
 }
 
 /// Translate every parsed entry of a prepared module on its own and report per kernel.
+/// Per-entry SPIR-V hash and time through `translate_prepared_entry`, for the perf harness.
+#[allow(dead_code)]
+pub(crate) fn probe_prepared_hashed(prepared: &str, threads: usize) -> Result<Vec<(String, Result<u64, String>, std::time::Duration)>, Error> {
+    probe::probe_lazy_hashed_with(prepared, threads, true)
+}
+
 /// Per-entry SPIR-V hash and time, for the perf harness.
 #[allow(dead_code)]
 pub(crate) fn probe_module_hashed(prepared: &str, threads: usize) -> Result<Vec<(String, Result<u64, String>, std::time::Duration)>, Error> {

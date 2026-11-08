@@ -1149,33 +1149,104 @@ fn rewrite_cp_async(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
 /// Removes plain `{ ... }` scopes left inside entry bodies (their `.reg`
 /// declarations were already hoisted by the scope flattener).
 pub(super) fn finish(text: &str) -> Result<String, Error> {
-    let tokens: Vec<String> = parse::tokens(text)?.into_iter().map(str::to_owned).collect();
-    let statements = split(tokens);
+    let tokens = parse::tokens(text)?;
     let mut out = String::with_capacity(text.len());
     let mut depth = 0i32;
     let mut dead = false;
-    for stmt in statements {
+    split_each(&tokens, |stmt| {
         let lone = |t: &str| stmt.len() == 1 && stmt[0] == t;
         let label = stmt.len() == 2 && stmt[1] == ":";
         if dead && !label && !lone("}") {
-            continue;
+            return;
         }
         dead = stmt.len() == 2 && stmt[0] == "ret" && stmt[1] == ";";
-        if is_entry_header(&stmt) {
+        if stmt.last().is_some_and(|t| *t == "{") && stmt.len() > 1 && stmt.contains(&".entry") {
             depth = 1;
         } else if lone("{") && depth >= 1 {
             depth += 1;
-            continue;
+            return;
         } else if lone("}") && depth >= 1 {
             depth -= 1;
             if depth >= 1 {
+                return;
+            }
+        }
+        for (i, token) in stmt.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push_str(token);
+        }
+        out.push('\n');
+    });
+    Ok(out)
+}
+
+/// Borrowed-token twin of [`split`]: calls `f` with each statement without allocating one.
+fn split_each<'a>(tokens: &[&'a str], mut f: impl FnMut(&[&'a str])) {
+    let mut cur: Vec<&'a str> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        i += 1;
+        if cur.is_empty() {
+            match token {
+                "{" | "}" => {
+                    f(&[token]);
+                    continue;
+                }
+                ".version" | ".address_size" => {
+                    if let Some(&value) = tokens.get(i) {
+                        i += 1;
+                        f(&[token, value]);
+                    } else {
+                        f(&[token]);
+                    }
+                    continue;
+                }
+                ".target" => {
+                    let start = i;
+                    while i < tokens.len() && !tokens[i].starts_with('.') {
+                        i += 1;
+                    }
+                    let mut stmt = vec![token];
+                    stmt.extend_from_slice(&tokens[start..i]);
+                    f(&stmt);
+                    continue;
+                }
+                _ => {}
+            }
+            if tokens.get(i) == Some(&":") && !token.starts_with('.') && !token.starts_with('@') {
+                i += 1;
+                f(&[token, ":"]);
                 continue;
             }
         }
-        out.push_str(&stmt.join(" "));
-        out.push('\n');
+        let terminates_on_brace = {
+            let has = |name: &str| cur.iter().any(|t| *t == name);
+            !cur.is_empty()
+                && token == "{"
+                && (has(".entry") || has(".func"))
+                && !has(".global")
+                && !has(".const")
+                && !has(".shared")
+                && !has(".local")
+        };
+        if terminates_on_brace {
+            cur.push(token);
+            f(&cur);
+            cur.clear();
+            continue;
+        }
+        cur.push(token);
+        if token == ";" {
+            f(&cur);
+            cur.clear();
+        }
     }
-    Ok(out)
+    if !cur.is_empty() {
+        f(&cur);
+    }
 }
 
 // ---- wmma ---------------------------------------------------------------
