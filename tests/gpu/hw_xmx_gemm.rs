@@ -487,16 +487,30 @@ fn hw_xmx_ggml_attention() {
         let before = ctx.xmx_launches();
         let got = run(&ctx, &c, &d);
         let launched = ctx.xmx_launches() > before;
-        let (worst, inexact) = compare(&c, &d, &got, &want, "xmx");
+        // A 16F call below the Auto threshold runs on the PTX kernel, which rounds its accumulator
+        // to f16 after every operation (~0.5-3% off the single-rounded reference): loose check.
+        let (worst, inexact) = if c.c16 && !launched {
+            let sz = 2;
+            let mut worst = 0f64;
+            for i in 0..got.len() / sz {
+                let (g, w) = (dec(Dt::F16, &got, i) as f64, dec(Dt::F16, &want, i) as f64);
+                worst = worst.max((g - w).abs());
+                assert!((g - w).abs() <= 0.03 * w.abs() + 0.05, "{c:?}: PTX 16F entry {i}: got {g} want {w}");
+            }
+            (worst, usize::MAX)
+        } else {
+            compare(&c, &d, &got, &want, "xmx")
+        };
         println!("GGML {c:?}: xmx launched={launched} max abs err {worst:.3e} inexact {inexact}");
         assert_eq!(launched, expect_auto_xmx(&c), "{c:?}: XMX engagement differs from the threshold rule");
         if launched { engaged += 1 } else { skipped += 1 }
-        if c.c16 {
+        if c.c16 && launched {
             // f32 accumulators, one rounding: bit-exact against the reference (exact-valued data).
             assert_eq!(inexact, 0, "{c:?}: 16F result is not the single-rounded f32 sum");
             // Opting out restores the PTX 16F path (which rounds the accumulator per operation).
             unsafe { std::env::set_var("CFI_XMX_ACC16", "0") };
             let b2 = ctx.xmx_launches();
+            // The PTX per-op-f16 result is not compared against the single-rounded reference.
             let _ = run(&ctx, &c, &d);
             assert_eq!(ctx.xmx_launches(), b2, "CFI_XMX_ACC16=0 must decline");
             unsafe { std::env::remove_var("CFI_XMX_ACC16") };

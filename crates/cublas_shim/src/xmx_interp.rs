@@ -966,6 +966,21 @@ mod tests {
         check(c, 9);
     }
 
+    /// Regression for the ragged-n KQV report (m=64 n=33 k=512, f16 16F, pointer table, ratio 7
+    /// broadcast of A): the second n tile has a single valid column. Hardware showed the diff on
+    /// a call that was below the Auto threshold (PTX per-op f16 rounding), not on XMX; this pins
+    /// the XMX kernel itself on that shape family, including ragged k.
+    #[test]
+    fn ragged_n_pointer_table_16f_matches_single_rounded_reference() {
+        let mut seed = 4000;
+        for k in [512usize, 500, 497] {
+            for n in [33usize, 1, 9, 65] {
+                seed += 1;
+                check(Case { m: 64, n, k, input: Input::F16, out: Ty::F16, batch: 14, ptrs: true, acc16: true, tile: (2, 4), ..base() }, seed);
+            }
+        }
+    }
+
     #[test]
     fn two_byte_aligned_pointer_table_operands() {
         // ggml views can hand out 2-byte aligned addresses; the pointer-table variant must use
