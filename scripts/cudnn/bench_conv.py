@@ -14,8 +14,11 @@ os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
 ctypes.WinDLL(R + r'\nvcuda.dll')
 if mode == 'cudnn':
     ctypes.WinDLL(R + r'\cudnn64_8.dll')
+if mode == 'cudnn' and os.path.exists(R + r'\direct.flag'):
+    os.environ['CFI_CUDNN_DIRECT'] = '1'   # old direct-kernel path (pre-GEMM engine), for baselines
+    mode = 'cudnn_direct'
 import torch, torch.nn.functional as F
-torch.backends.cudnn.enabled = (mode == 'cudnn')
+torch.backends.cudnn.enabled = (mode != 'aten')
 torch.backends.cudnn.benchmark = False
 B = int(os.environ.get('CFI_BENCH_BATCH', '8'))
 # tag, C, K, H, kernel, stride, pad, groups, transposed

@@ -1,5 +1,6 @@
 # Run bench_conv.py for the given modes under the GPU queue. Usage: run_bench.ps1 -Tag base -Modes aten,cudnn [-Filter x] [-Batch 8] [-TimeoutMin 25]
 param([string]$Tag='run', [string[]]$Modes=@('aten','cudnn'), [string]$Filter='', [int]$Batch=8, [int]$TimeoutMin=25)
+$Modes = @($Modes | ForEach-Object { $_ -split ',' })
 $w = Join-Path $env:USERPROFILE 'cfi-work'; $d = "$w\cd3"; $run = "$d\run"
 $py = "$w\torch\torch222\Scripts\python.exe"
 $env:CFI_BENCH_ROOT = $run; $env:CFI_BENCH_BATCH = "$Batch"
