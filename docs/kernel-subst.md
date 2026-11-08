@@ -21,3 +21,16 @@ Opt-in layer that replaces recognised ggml-cuda kernels with hand-written Intel-
   Q4_1/Q5_1 are not covered. Not done: DPAS (int8 XMX) variant.
 * Hardware: `tests/gpu/hw_subst.rs` (see its header for the command).
 * Debug: `CUDA_FOR_INTEL_SUBST_CHECK=<n>` reruns the translated kernel after the first n native mmvq/mmq launches of each variant into a scratch copy, logs `subst-check:` lines (nmse, shapes) to cuda-for-intel-export.log, and on mismatch restores the translated result and falls back to PTX for that variant.
+
+## K-quant mmq end to end (stock Ollama v0.12.6, Arc, flash attention off, 631-token prompt, greedy, 48 tokens)
+
+| model | SUBST | prefill tok/s | decode tok/s |
+|---|---|---|---|
+| Llama-3.2-1B Q4_K_M | none | 805 | 26.3 |
+| Llama-3.2-1B Q4_K_M | auto | 4843 (6.0x) | 32.2 (+22%) |
+| Qwen2.5-1.5B Q4_K_M | none | 643 | 21.2 |
+| Qwen2.5-1.5B Q4_K_M | auto | 3736 (5.8x) | 24.9 (+18%) |
+
+Shadow check (`CUDA_FOR_INTEL_SUBST_CHECK=30`, Llama-3.2-1B, mmq Q4_K and Q6_K plus mmvq): 120 of 120 launches bit-identical to the translated kernels.
+Both modes produce coherent output; greedy text diverges from `none` after about 20 tokens at near-ties (e.g. "fashion, cuisine," versus "fashion,"), the stream-k
+add-order effect described above. Reproduce with `scripts/bench-subst-ollama.ps1`; kernel-level log in `docs/hw-logs/hw-subst-mmq-types.log`.
