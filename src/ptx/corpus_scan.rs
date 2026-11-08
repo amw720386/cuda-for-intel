@@ -181,15 +181,9 @@ fn corpus_scan() {
                 Ok(t) => {
                     nok += 1;
                     if validate_every > 0 && { nok += 0; validated += 1; validated % validate_every == 0 } {
-                        let tmp = std::env::temp_dir().join("cfi_corpus_val.spv");
-                        let bytes: Vec<u8> = t.words.iter().flat_map(|w| w.to_le_bytes()).collect();
-                        std::fs::write(&tmp, bytes).unwrap();
-                        let out = std::process::Command::new("spirv-val").arg("--target-env").arg("opencl2.2").arg(&tmp).output();
-                        if let Ok(o) = out
-                            && !o.status.success()
-                        {
+                        if let Some(msg) = super::fuzz_tests::validate(&t.words) {
                             nval_bad += 1;
-                            let c = error_class(&format!("spirv-val: {}", String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("")));
+                            let c = error_class(&format!("spirv-val: {msg}"));
                             errs.entry(c).or_insert((0, ctx.clone())).0 += 1;
                         }
                     }

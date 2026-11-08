@@ -188,7 +188,7 @@ pub(super) fn run_case(c: &Case, rng: &mut Rng, n: usize) -> Outcome {
     Outcome::Pass(checked)
 }
 
-fn validate(words: &[u32]) -> Option<String> {
+pub(super) fn validate(words: &[u32]) -> Option<String> {
     let bin = std::env::var_os("SPIRV_VAL").map(std::path::PathBuf::from).or_else(|| {
         std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("spirv-val")).find(|f| f.exists()))
     })?;
