@@ -1,0 +1,129 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#8b949e;--blue:#58a6ff;--green:#3fb950;--gold:#f2c14e;--pur:#bc8cff;--red:#f85149}
+*{box-sizing:border-box}
+body{margin:0;width:1280px;height:720px;background:var(--bg);color:var(--fg);overflow:hidden;position:relative;
+ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.sc{position:absolute;inset:0;opacity:0}
+h1{position:absolute;left:60px;top:34px;margin:0;font-size:34px}
+.sub{position:absolute;left:60px;top:84px;font-size:18px;color:var(--mut)}
+.box{position:absolute;background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:14px 16px}
+.box b{display:block;font-size:20px}.box span{font-size:14px;color:var(--mut)}
+#cap{position:absolute;left:0;right:0;bottom:0;height:96px;background:rgba(1,4,9,.92);border-top:1px solid var(--line);
+ display:flex;align-items:center;justify-content:center;text-align:center;font-size:26px;padding:0 70px;line-height:1.3}
+.code{position:absolute;background:#010409;border:1.5px solid var(--line);border-radius:14px;padding:18px 22px;font-size:19px;line-height:1.55;white-space:pre}
+.lbl{position:absolute;font-size:15px;color:var(--mut)}
+.pill{position:absolute;border-radius:999px;padding:6px 16px;font-size:18px;font-weight:600}
+</style></head><body>
+<div id="s1" class="sc"></div><div id="s2" class="sc"></div><div id="s3" class="sc"></div>
+<div id="s4" class="sc"></div><div id="s5" class="sc"></div><div id="s6" class="sc"></div>
+<div id="cap"></div>
+<script>
+const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x));
+const prog=(t,a,b)=>clamp((t-a)/(b-a));
+const ease=x=>x<.5?2*x*x:1-Math.pow(-2*x+2,2)/2;
+const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const type=(s,t,a,cps=38)=>s.slice(0,Math.max(0,Math.floor((t-a)*cps)));
+// scene windows [start,end]
+const SC=[[0,9],[9,22],[22,48],[48,60],[60,70],[70,80]];
+const el=id=>document.getElementById(id);
+// ---- static builders
+el('s1').innerHTML=`<h1>🧩 What actually happens when a CUDA app meets an Intel GPU</h1>
+<div class="sub">The implementation, step by step</div>
+<div class="box" id="a1" style="left:90px;top:230px;width:330px;height:200px"><b>CUDA program</b><span>built for NVIDIA</span>
+ <div class="pill m" style="left:16px;top:112px;background:#1f3a5f;color:var(--blue)">PTX</div></div>
+<div class="box" id="a2" style="left:860px;top:230px;width:330px;height:200px;border-color:#1f6feb"><b>Intel Arc GPU</b><span>runs SPIR-V through Level Zero, not PTX</span></div>
+<div id="a3" class="m" style="position:absolute;left:440px;top:300px;width:400px;text-align:center;font-size:56px;color:var(--red)">✕</div>
+<div id="a4" class="lbl" style="left:440px;top:370px;width:400px;text-align:center;font-size:18px">no PTX loader here</div>`;
+const steps=[["CUDA app","Ollama, llama.cpp, PyTorch…","#58a6ff"],["CUDA Runtime","genuine NVIDIA cudart, unchanged","#8b949e"],
+["nvcuda shim","Rust, Driver API","#f2c14e"],["PTX parser","reads the PTX the program carries","#3fb950"],
+["PTX to SPIR-V","OpenCL-environment SPIR-V","#3fb950"],["Level Zero","loads module, launches kernel","#58a6ff"],["Arc GPU","runs it","#1f6feb"]];
+let h='<h1>➡️ The path of one kernel launch</h1><div class="sub">The shim, parser and translator are the code in this repo; cudart comes from NVIDIA, Level Zero from Intel</div>';
+steps.forEach((s,i)=>{h+=`<div class="box" id="p${i}" style="left:${28+i*176}px;top:250px;width:160px;height:150px;border-top:5px solid ${s[2]}"><b style="font-size:17px">${s[0]}</b><span style="font-size:13px">${s[1]}</span></div>`;
+ if(i<6)h+=`<div class="lbl" style="left:${28+i*176+158}px;top:312px;width:20px;font-size:20px">›</div>`;});
+h+='<div id="pk" style="position:absolute;top:218px;width:22px;height:22px;border-radius:50%;background:var(--blue)"></div>';
+el('s2').innerHTML=h;
+const PTX=[
+["mov.u32  %r2, %ctaid.x;",["%46 = OpLoad %v3ulong %gl_WorkGroupID","%47 = OpCompositeExtract %ulong %46 0","%48 = OpUConvert %uint %47","      OpStore %49 %48"],"block index x: read from the WorkgroupId built-in"],
+["mad.lo.s32  %r5, %r2, %r3, %r4;",["%58 = OpLoad %uint %49","%59 = OpLoad %uint %53","%60 = OpLoad %uint %57","%61 = OpIMul %uint %58 %59","%62 = OpIAdd %uint %61 %60","      OpStore %63 %62"],"multiply-add becomes OpIMul + OpIAdd"],
+["setp.ge.u32  %p1, %r5, %r1;\n@%p1 bra  $L__BB0_2;",["%64 = OpLoad %uint %63","%65 = OpLoad %uint %45","%66 = OpUGreaterThanEqual %bool %64 %65","      OpStore %68 %66","%69 = OpLoad %bool %68","      OpBranchConditional %69 %34 %33"],"compare + predicated branch becomes OpBranchConditional"],
+["add.f32  %r8, %r6, %r7;",["%143 = OpLoad %uint %115","%144 = OpBitcast %float %143","%145 = OpLoad %uint %142","%146 = OpBitcast %float %145","%147 = OpFAdd %float %144 %146","%148 = OpBitcast %uint %147","       OpStore %149 %148"],"PTX registers are untyped bits, so floats are bitcast around OpFAdd"]];
+el('s3').innerHTML=`<h1>🔬 A real kernel through the real translator</h1>
+<div class="sub m" style="font-size:16px">examples/vector_add.ptx  →  SPIR-V as emitted by the translator (shown with spirv-dis)</div>
+<div class="lbl" style="left:60px;top:132px">PTX in</div><div class="lbl" style="left:470px;top:132px">SPIR-V out (excerpt)</div>
+<div class="code m" id="c1" style="left:60px;top:160px;width:390px;height:330px;color:var(--blue)"></div>
+<div class="code m" id="c2" style="left:470px;top:160px;width:750px;height:330px;font-size:18px;color:#9be9a8"></div>
+<div id="c3" style="position:absolute;left:60px;top:505px;width:1160px;font-size:19px;color:var(--gold)"></div>`;
+el('s4').innerHTML=`<h1>🔁 Kernel substitution</h1><div class="sub">On by default. A recognised kernel can be swapped; anything else keeps the translated path.</div>
+<div class="box" id="k0" style="left:60px;top:260px;width:250px;height:130px"><b>Kernel arrives</b><span>PTX from the app</span></div>
+<div class="box" id="k1" style="left:370px;top:260px;width:250px;height:130px;border-color:var(--pur)"><b>Recognised ggml kernel?</b><span class="m" style="font-size:13px">mmvq, quantize_q8_1, Q8_0 mmq</span></div>
+<div class="box" id="k2" style="left:690px;top:160px;width:530px;height:120px;border-left:6px solid var(--pur)"><b>Yes: hand-written Intel SPIR-V</b><span>swapped in for the translated kernel</span></div>
+<div class="box" id="k3" style="left:690px;top:370px;width:530px;height:120px;border-left:6px solid var(--green)"><b>No, or any mismatch: translated kernel</b><span>the PTX-to-SPIR-V path from the last scene</span></div>
+<div class="lbl" id="k4" style="left:628px;top:300px;font-size:26px">›</div>`;
+el('s5').innerHTML=`<h1>⚡ Measured: prefill tokens/s, substitution off → on</h1>
+<div class="sub">Intel Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off (being fixed)</div><div id="bars"></div>`;
+el('s6').innerHTML=`<h1>✅ Where this stands</h1><div class="sub">Experimental</div>
+<div class="box" style="left:60px;top:140px;width:560px;height:430px;border-top:5px solid var(--green)"><b style="font-size:26px;color:var(--green)">Works</b>
+ <div id="w" style="margin-top:20px;font-size:22px;line-height:1.6"></div></div>
+<div class="box" style="left:660px;top:140px;width:560px;height:430px;border-top:5px solid var(--gold)"><b style="font-size:26px;color:var(--gold)">Not yet</b>
+ <div id="n" style="margin-top:20px;font-size:22px;line-height:1.6"></div></div>
+<div id="end" class="m" style="position:absolute;left:0;right:0;top:590px;text-align:center;font-size:20px;color:var(--mut)">github.com/amw720386/cuda-for-intel</div>`;
+const WORKS=["PTX-carrying CUDA programs","Stock Ollama v0.12.6 generating tokens on an Arc B390","Prefill speedups shown above, with substitution on"];
+const NOT=["Programs that ship only SASS/cubin","No XMX speedup is claimed","cuDNN: not covered","Flash attention: being fixed","Windows is the tested platform"];
+const DATA=[["Qwen2.5-0.5B Q8_0",1818,6767,"3.7x"],["Llama-3.2-1B Q4_K_M",817,4877,"6.0x"],["Qwen2.5-1.5B Q4_K_M",627,3727,"5.9x"]];
+const CAPS=[[0,"CUDA programs carry PTX, NVIDIA's portable GPU assembly. An Intel Arc GPU cannot run it."],
+[9,"The path: the app, the real cudart, then a Rust shim that implements the CUDA Driver API."],
+[14.5,"The shim parses the PTX, translates it to SPIR-V, and Level Zero launches it on the Arc GPU."],
+[22,"Here is a real kernel: vector add, from examples/vector_add.ptx."],
+[48,"Recognised ggml kernels can be swapped for hand-written Intel SPIR-V."],
+[53,"Anything not recognised, or any mismatch, falls back to the translated kernel."],
+[60,"Measured prefill tokens per second, substitution off versus on."],
+[70,"What works today, and what does not yet."]];
+function sceneOpacity(i,t){const[a,b]=SC[i];return clamp(Math.min((t-a)/.4,(b-t)/.4));}
+function render(t){
+ SC.forEach((_,i)=>{el('s'+(i+1)).style.opacity=sceneOpacity(i,t);});
+ let c=CAPS[0][1];for(const[a,s]of CAPS)if(t>=a)c=s;
+ const capT=SC[5][0]<=t?c:c;
+ el('cap').textContent=c;
+ // s1
+ if(t<9){const u=ease(prog(t,.5,2));el('a1').style.opacity=u;el('a2').style.opacity=prog(t,2,3);
+  el('a3').style.opacity=prog(t,4,5);el('a4').style.opacity=prog(t,4.5,5.5);}
+ // s2
+ if(t>=9&&t<22){const u=t-9.5;const idx=clamp(u/1.7,0,6.999);
+  steps.forEach((s,i)=>{const on=Math.floor(idx)===i;const b=el('p'+i);b.style.opacity=prog(t,9.2+i*.1,9.8+i*.1);
+   b.style.background=on?'#1c2a40':'#161b22';b.style.borderColor=on?s[2]:'#30363d';});
+  const x=28+idx*176+68;el('pk').style.left=x+'px';
+  el('pk').style.background=idx>=4?'var(--green)':'var(--blue)';
+  el('pk').innerHTML='';}
+ // s3
+ if(t>=22&&t<48){const T=t-22.5;const seg=4.7;const k=clamp(Math.floor(T/seg),0,3);const lt=T-k*seg;
+  const [p,o,n]=PTX[k];
+  el('c1').textContent=type(p,lt,0,30);
+  const lines=o.map(l=>l);let full=lines.join('\n');
+  el('c2').textContent=type(full,lt,1.0,48);
+  el('c3').textContent=lt>3.0?('→ '+n):'';
+  if(t>=44.5){el('c3').textContent='Excerpts in order; lines between them are omitted. One stack slot per PTX register: every op loads, computes, stores.';}
+ }
+ // s4
+ if(t>=48&&t<60){const T=t-48;
+  [['k0',.3],['k1',1.2],['k2',5],['k3',8]].forEach(([id,a])=>{el(id).style.opacity=prog(t,48+a,48.6+a);});
+  el('k4').style.opacity=prog(t,49.2,49.8);
+  el('k2').style.background=(T>5&&T<8)?'#2a1f45':'#161b22';el('k3').style.background=(T>8)?'#12301c':'#161b22';}
+ // s5
+ if(t>=60&&t<70){const T=t-60;let h='';const x0=120,base=520,top=190,mx=7000;
+  [0,2000,4000,6000].forEach(g=>{const y=base-(base-top)*g/mx;h+=`<div style="position:absolute;left:${x0}px;top:${y}px;width:1060px;border-top:1px solid #30363d"></div><div class="lbl" style="left:60px;top:${y-9}px;width:50px;text-align:right">${g}</div>`;});
+  DATA.forEach((d,i)=>{const cx=x0+50+i*340;[[d[1],'#8b949e','off'],[d[2],'#58a6ff','on']].forEach(([v,col,lb],j)=>{
+   const g=ease(prog(T,.4+i*.5+j*.2,1.8+i*.5+j*.2));const hh=(base-top)*v/mx*g;const x=cx+j*120;
+   h+=`<div style="position:absolute;left:${x}px;top:${base-hh}px;width:110px;height:${hh}px;background:${col};border-radius:5px"></div>`;
+   h+=`<div style="position:absolute;left:${x}px;top:${base-hh-30}px;width:110px;text-align:center;font-weight:700;font-size:22px;opacity:${g>.98?1:0}">${v}</div>`;
+   h+=`<div class="lbl" style="left:${x}px;top:${base+6}px;width:110px;text-align:center">substitution ${lb}</div>`;});
+   h+=`<div style="position:absolute;left:${cx-20}px;top:${base+34}px;width:280px;text-align:center;font-weight:700;font-size:20px">${d[0]}</div>`;
+   h+=`<div style="position:absolute;left:${cx+110}px;top:${base-(base-top)*d[2]/mx-76}px;width:120px;text-align:center;font-weight:800;font-size:30px;color:var(--green);opacity:${prog(T,2.8+i*.5,3.4+i*.5)}">${d[3]}</div>`;});
+  el('bars').innerHTML=h;}
+ // s6
+ if(t>=70){const T=t-70.3;
+  el('w').innerHTML=WORKS.map((s,i)=>`<div style="opacity:${prog(T,i*.8,i*.8+.5)}">✅ ${s}</div>`).join('');
+  el('n').innerHTML=NOT.map((s,i)=>`<div style="opacity:${prog(T,1+i*.7,1+i*.7+.5)}">🚧 ${s}</div>`).join('');
+  el('end').style.opacity=prog(T,5.5,6.5);}
+}
+</script></body></html>
