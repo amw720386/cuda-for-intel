@@ -32,6 +32,8 @@ mod globals_tests;
 mod graph_tests;
 #[cfg(test)]
 mod timing_tests;
+#[cfg(test)]
+mod subst_tests;
 #[cfg(all(test, windows))]
 mod profiling;
 #[cfg(all(test, windows))]

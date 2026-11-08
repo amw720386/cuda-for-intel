@@ -736,7 +736,9 @@ impl Kernel {
     }
 
     fn replay(&self, api: &Api, context: &mut CudaContext, stream: usize) -> Result<(), CuResult> {
-        let (_, kernel) = self.entry(context)?.function.ok_or(InvalidHandle)?;
+        let entry = self.entry(context)?;
+        let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
+        let subst_plan = entry.subst.clone();
         let args: Vec<_> = self
             .args
             .iter()
@@ -745,9 +747,7 @@ impl Kernel {
                 size: arg.len(),
             })
             .collect();
-        context
-            .streams
-            .launch(api, &context.backend, kernel, stream, self.geometry, &args)
+        super::subst_hook::launch(api, context, subst_plan.as_ref(), kernel, stream, self.geometry, &args)
     }
 }
 
