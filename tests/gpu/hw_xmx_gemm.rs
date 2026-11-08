@@ -490,12 +490,28 @@ fn hw_xmx_ggml_attention() {
         // A 16F call below the Auto threshold runs on the PTX kernel, which rounds its accumulator
         // to f16 after every operation (~0.5-3% off the single-rounded reference): loose check.
         let (worst, inexact) = if c.c16 && !launched {
-            let sz = 2;
+            // Per-op f16 rounding error scales with sum |a*b| (cancellation makes the result small),
+            // not with the result: bound it by 2^-9 * sum|a*b| (k roundings of up to 2^-11 each
+            // would be worst case; random walk is far smaller) plus the output rounding.
+            let ratio = match c.kind { Kind::Ptrs { ratio, .. } => ratio, Kind::Bcast(b) => b, _ => 1 };
             let mut worst = 0f64;
-            for i in 0..got.len() / sz {
-                let (g, w) = (dec(Dt::F16, &got, i) as f64, dec(Dt::F16, &want, i) as f64);
-                worst = worst.max((g - w).abs());
-                assert!((g - w).abs() <= 0.03 * w.abs() + 0.05, "{c:?}: PTX 16F entry {i}: got {g} want {w}");
+            for z in 0..d.batch {
+                for j in 0..c.n {
+                    for i in 0..c.m {
+                        let mut mag = 0f64;
+                        for l in 0..c.k {
+                            let ai = if c.ta { l + i * d.lda } else { i + l * d.lda };
+                            let bi = if c.tb { j + l * d.ldb } else { l + j * d.ldb };
+                            mag += (dec(c.inp, &d.a, (z / ratio) * d.ea + ai) as f64
+                                * dec(c.inp, &d.b, z * d.eb + bi) as f64).abs();
+                        }
+                        let ci = z * d.ec + i + j * d.ldc;
+                        let (g, w) = (dec(Dt::F16, &got, ci) as f64, dec(Dt::F16, &want, ci) as f64);
+                        worst = worst.max((g - w).abs());
+                        assert!((g - w).abs() <= mag / 512.0 + 2e-3 * w.abs() + 2e-3,
+                            "{c:?}: PTX 16F z={z} i={i} j={j}: got {g} want {w} (sum|ab| {mag})");
+                    }
+                }
             }
             (worst, usize::MAX)
         } else {
