@@ -1,0 +1,748 @@
+acquired kq-subst
+241 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| if n == usize::MAX { Some(n) } else { 
+n.checked_sub(1) })
+help: replace the use of the deprecated method
+241 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| if n == usize::MAX { Some(n) } else { 
+n.checked_sub(1) })
+241 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| if n == usize::MAX { Some(n) } else { 
+n.checked_sub(1) })
+System.Management.Automation.RemoteException
+188 |             if let Page::Host(address) = page {
+System.Management.Automation.RemoteException
+1708 |             let mut staged_pointers: Vec<Box<u64>> = Vec::new();
+System.Management.Automation.RemoteException
+1727 |                     staged_pointers = keep;
+System.Management.Automation.RemoteException
+641 |             ["cvt.u32.u16" | "cvt.u16.u16", dst, ",", src] => {
+...
+943 |             ["cvt.u32.u16", dst, ",", src] => {
+System.Management.Automation.RemoteException
+2733 |                     let mut word = |s: &mut Self, a: Word| -> Result<Word, Error> {
+System.Management.Automation.RemoteException
+570 |     let (mut d, mut m, mut sc) = (0f32, 0f32, [0i32; 2]);
+...
+573 |             d = h(blk, 0);
+System.Management.Automation.RemoteException
+670 |                     let mut last_d = 0f32;
+...
+702 |                                 last_d = xg.d;
+System.Management.Automation.RemoteException
+1404 | pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr) -> Result<usize, CuResult> {
+note: but type `cuda::State` is only usable at visibility `pub(self)`
+ 149 | struct State {
+System.Management.Automation.RemoteException
+177 | / pub(crate) fn copy_between(
+178 | |     state: &mut State,
+179 | |     dst_key: usize,
+180 | |     dst: u64,
+...   |
+183 | |     size: usize,
+184 | | ) -> Result<(), CuResult> {
+note: but type `cuda::State` is only usable at visibility `pub(self)`
+149 | struct State {
+System.Management.Automation.RemoteException
+286 | / pub(crate) fn owner_of(
+287 | |     state: &State,
+288 | |     first: Option<usize>,
+289 | |     address: usize,
+290 | |     size: usize,
+291 | | ) -> Option<usize> {
+note: but type `cuda::State` is only usable at visibility `pub(self)`
+149 | struct State {
+System.Management.Automation.RemoteException
+1183 | fn load_ptx_entry(
+System.Management.Automation.RemoteException
+1356 | fn diagnose_reject(ptx: &str, error: &ptx::Error) {
+System.Management.Automation.RemoteException
+31 | pub(crate) struct LibShared {
+32 |     pub(crate) text: String,
+33 |     pub(crate) hash: u64,
+34 |     prepared: OnceLock<Option<Arc<String>>>,
+System.Management.Automation.RemoteException
+37 | impl LibShared {
+38 |     pub(crate) fn new(text: String) -> Self {
+...
+44 |     pub(crate) fn prepared(&self) -> Option<Arc<String>> {
+System.Management.Automation.RemoteException
+62 | enum Slot {
+System.Management.Automation.RemoteException
+67 | struct Job {
+System.Management.Automation.RemoteException
+76 | struct Pool {
+System.Management.Automation.RemoteException
+83 | fn enabled() -> bool {
+System.Management.Automation.RemoteException
+90 | fn warmup() -> bool {
+System.Management.Automation.RemoteException
+95 | fn env_usize(name: &str) -> Option<usize> {
+System.Management.Automation.RemoteException
+99 | static POOL: OnceLock<&'static Pool> = OnceLock::new();
+System.Management.Automation.RemoteException
+101 | fn pool() -> &'static Pool {
+System.Management.Automation.RemoteException
+121 | fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+System.Management.Automation.RemoteException
+127 | fn rank(name: &str, requested: &str) -> u8 {
+System.Management.Automation.RemoteException
+143 | pub(crate) fn start_library(shared: &Arc<LibShared>, names: &[CString], requested: &str, compiler: 
+Option<NativeCompiler>) {
+System.Management.Automation.RemoteException
+173 | pub(crate) fn claim_or_wait(key: u64) {
+System.Management.Automation.RemoteException
+193 | fn worker(pool: &'static Pool) {
+System.Management.Automation.RemoteException
+220 | fn run(job: &Job) {
+System.Management.Automation.RemoteException
+60 | pub(crate) fn format_uuid(uuid: &[u8; 16]) -> String {
+System.Management.Automation.RemoteException
+174 | pub(crate) fn format_pci_bus_id(address: [u32; 4]) -> String {
+System.Management.Automation.RemoteException
+227 | pub(crate) const PTX_AND_BINARY_VERSION: i32 = 75;
+System.Management.Automation.RemoteException
+18 | pub(super) fn size(params: &[Param]) -> usize {
+System.Management.Automation.RemoteException
+17 | pub(in crate::cuda) struct Library {
+...
+20 |     shared: Option<std::sync::Arc<super::prefetch::LibShared>>,
+21 |     /// Whether the other kernels of this library were queued for background translation.
+22 |     prefetched: bool,
+System.Management.Automation.RemoteException
+277 | fn lazy_enabled() -> bool {
+System.Management.Automation.RemoteException
+285 | fn lazy_kernel_function(state: &mut State, library: usize, name: &CStr) -> Result<Option<usize>, CuResult> {
+System.Management.Automation.RemoteException
+742 | impl Context {
+...
+916 |     pub(crate) fn native_compiler(&self, api: &Api) -> Option<NativeCompiler> {
+System.Management.Automation.RemoteException
+1297 | pub(crate) struct NativeCompiler {
+System.Management.Automation.RemoteException
+1311 | impl NativeCompiler {
+1312 |     /// Returns true when a binary for `words` is in the cache afterwards.
+1313 |     pub(crate) fn precompile(&self, words: &[u32]) -> bool {
+System.Management.Automation.RemoteException
+126 | pub(crate) fn contains(dir: &Path, key: &str) -> bool {
+System.Management.Automation.RemoteException
+1094 | pub(crate) fn prepare_source(source: &str) -> Result<String, Error> {
+System.Management.Automation.RemoteException
+6 | pub(crate) struct FxHasher {
+System.Management.Automation.RemoteException
+10 | const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+System.Management.Automation.RemoteException
+12 | impl FxHasher {
+13 |     #[inline]
+14 |     fn add(&mut self, word: u64) {
+System.Management.Automation.RemoteException
+60 | pub(crate) type FxBuild = BuildHasherDefault<FxHasher>;
+System.Management.Automation.RemoteException
+61 | pub(crate) type FxHashSet<T> = std::collections::HashSet<T, FxBuild>;
+System.Management.Automation.RemoteException
+62 | pub(crate) type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuild>;
+System.Management.Automation.RemoteException
+70 | impl<'a> Gen<'a> {
+...
+82 |     fn rp(&mut self) -> String {
+System.Management.Automation.RemoteException
+425 | fn constant(g: &mut Gen, v: u32) -> String {
+System.Management.Automation.RemoteException
+72 | impl ParamOp<'_> {
+...
+78 |     pub(super) fn is_staged(&self) -> bool {
+System.Management.Automation.RemoteException
+2169 | pub(super) fn parse(source: &str) -> Result<Vec<Entry<'_>>, Error> {
+System.Management.Automation.RemoteException
+220 | pub(crate) fn mmq_case(ncols_x: usize, nrows: usize, ncols: usize, nch: usize, ratio: usize, nsamples: usize, 
+seed: u64) -> MmqCase {
+System.Management.Automation.RemoteException
+28 | pub(crate) enum Arg {
+...
+32 |     F32,
+System.Management.Automation.RemoteException
+ 59 | impl Kb {
+...
+195 |     pub(crate) fn umod(&mut self, a: V, b: V) -> V {
+...
+271 |     pub(crate) fn sconv(&mut self, to: Ty, a: V) -> V {
+...
+294 |     pub(crate) fn addr_u64off(&mut self, base: V, bytes: V) -> V {
+...
+327 |     pub(crate) fn cf_zero(&mut self) -> V {
+...
+346 |     pub(crate) fn fogt(&mut self, a: V, b: V) -> V {
+...
+534 |     pub(crate) fn num_groups(&mut self, c: u32) -> V {
+System.Management.Automation.RemoteException
+202 |         fn CloseHandle(handle: isize) -> i32;
+   ::: src\cuda\streams\batch_wake.rs:94:9
+ 94 |         fn CloseHandle(handle: Raw) -> i32;
+               found `unsafe extern "system" fn(isize) -> i32`
+System.Management.Automation.RemoteException
+7 | use std::ptr::{from_mut, null, null_mut};
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+help: `cuEventCreate` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+help: `cuEventDestroy_v2` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+help: `cuEventRecord` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+help: `cuStreamWaitEvent` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\graph_capture.rs:14:5
+ 14 | /     symbols!(dll;
+ 15 | |         cuInit(u32),
+ 16 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 17 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 42 | |         cuGraphExecDestroy(Handle),
+ 43 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\isolation.rs:60:5
+ 60 | /     symbols!(dll;
+ 61 | |         cuInit(u32),
+ 62 | |         cuDeviceGet(*mut i32, i32),
+ 63 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+...   |
+ 86 | |         cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+ 87 | |     );
+help: `cuMemcpyHtoDAsync_v2` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\isolation.rs:60:5
+ 60 | /     symbols!(dll;
+ 61 | |         cuInit(u32),
+ 62 | |         cuDeviceGet(*mut i32, i32),
+ 63 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+...   |
+ 86 | |         cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+ 87 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\store_u8.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\store_u8.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\quantize_warp_ops.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\quantize_warp_ops.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\ctaid.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\ctaid.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\shr_s64.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\shr_s64.rs:10:5
+ 10 | /     symbols!(dll;
+ 11 | |         cuInit(u32),
+ 12 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 13 | |         cuCtxDestroy_v2(Handle),
+...   |
+ 21 | |         cuCtxSynchronize(),
+ 22 | |     );
+System.Management.Automation.RemoteException
+570 |     let (mut d, mut m, mut sc) = (0f32, 0f32, [0i32; 2]);
+...
+573 |             d = h(blk, 0);
+System.Management.Automation.RemoteException
+670 |                     let mut last_d = 0f32;
+...
+702 |                                 last_d = xg.d;
+System.Management.Automation.RemoteException
+461 |             let mut time = |f: Handle, block: [u32; 3]| -> f64 {
+System.Management.Automation.RemoteException
+77 |         let mut table = |base: u64, per: usize, div: usize| -> u64 {
+System.Management.Automation.RemoteException
+106 |               let $name = unsafe {
+   ::: tests\gpu\hw_cublas_batched.rs:47:5
+ 47 | /     symbols!(dll;
+ 48 | |         cuInit(u32),
+ 49 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 50 | |         cuMemAlloc_v2(*mut u64, usize),
+...   |
+ 54 | |         cuCtxSynchronize(),
+ 55 | |     );
+help: `cuMemFree_v2` is captured in macro and introduced a unused variable
+106 |               let $name = unsafe {
+   ::: tests\gpu\hw_cublas_batched.rs:47:5
+ 47 | /     symbols!(dll;
+ 48 | |         cuInit(u32),
+ 49 | |         cuCtxCreate_v2(*mut Handle, u32, i32),
+ 50 | |         cuMemAlloc_v2(*mut u64, usize),
+...   |
+ 54 | |         cuCtxSynchronize(),
+ 55 | |     );
+System.Management.Automation.RemoteException
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running tests\gpu.rs (target\release\deps\gpu-fb1c49a21362f2ce.exe)
+running 1 test
+test hw_subst::hw_subst_mmq_types ... == mul_mat_q q8_0: native vs translated vs host reference
+q8_0 rows 2048 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 2048 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 2048 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 8192 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 8192 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 8192 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 2048 k 8192 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 2048 k 8192 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 2048 k 8192 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 512 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 512 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 512 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 1536 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 1536 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 1536 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 8960 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 8960 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 8960 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 1536 k 8960 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 1536 k 8960 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 1536 k 8960 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 256 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 256 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 256 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 300 k 1024 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 300 k 1024 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 300 k 1024 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0 rows 896 k 896 cols 16 mmq_x 16: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q8_0 rows 4864 k 896 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q8_0: translated 0.409 TOPS, native 1.213 TOPS, speedup 2.97x
+q4_0 rows 2048 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 2048 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 2048 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 8192 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 8192 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 8192 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 2048 k 8192 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 2048 k 8192 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 2048 k 8192 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 512 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 512 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 512 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 1536 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 1536 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 1536 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 8960 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 8960 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 8960 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 1536 k 8960 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 1536 k 8960 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 1536 k 8960 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 256 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 256 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 256 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 300 k 1024 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 300 k 1024 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 300 k 1024 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0 rows 896 k 896 cols 16 mmq_x 16: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_0 rows 4864 k 896 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_0: translated 0.674 TOPS, native 2.162 TOPS, speedup 3.21x
+q5_0 rows 2048 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 2048 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 2048 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 8192 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 8192 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 8192 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 2048 k 8192 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 2048 k 8192 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 2048 k 8192 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 512 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 512 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 512 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 1536 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 1536 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 1536 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 8960 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 8960 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 8960 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 1536 k 8960 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 1536 k 8960 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 1536 k 8960 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 256 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 256 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 256 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 300 k 1024 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 300 k 1024 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 300 k 1024 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0 rows 896 k 896 cols 16 mmq_x 16: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_0 rows 4864 k 896 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_0: translated 0.653 TOPS, native 1.419 TOPS, speedup 2.17x
+q4_k rows 2048 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 2048 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 2048 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 8192 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 8192 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 8192 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 2048 k 8192 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 2048 k 8192 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 2048 k 8192 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 512 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 512 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 512 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 1536 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 1536 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 1536 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 8960 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 8960 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 8960 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 1536 k 8960 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 1536 k 8960 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 1536 k 8960 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 256 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 256 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 256 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 300 k 1024 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q4_k rows 300 k 1024 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k rows 300 k 1024 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q4_k: translated 0.651 TOPS, native 3.139 TOPS, speedup 4.82x
+q5_k rows 2048 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 2048 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 2048 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 8192 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 8192 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 8192 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 2048 k 8192 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 2048 k 8192 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 2048 k 8192 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 512 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 512 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 512 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 1536 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 1536 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 1536 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 8960 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 8960 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 8960 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 1536 k 8960 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 1536 k 8960 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 1536 k 8960 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 256 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 256 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 256 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 300 k 1024 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q5_k rows 300 k 1024 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k rows 300 k 1024 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q5_k: translated 0.642 TOPS, native 3.083 TOPS, speedup 4.80x
+q6_k rows 2048 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 2048 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 2048 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 8192 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 8192 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 8192 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 2048 k 8192 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 2048 k 8192 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 2048 k 8192 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 512 k 2048 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 512 k 2048 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 512 k 2048 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 1536 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 1536 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 1536 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 8960 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 8960 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 8960 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 1536 k 8960 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 1536 k 8960 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 1536 k 8960 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 256 k 1536 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 256 k 1536 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 256 k 1536 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 300 k 1024 cols 7 mmq_x 8: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), translated-vs-ref 
+0.00e0
+q6_k rows 300 k 1024 cols 33 mmq_x 40: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k rows 300 k 1024 cols 64 mmq_x 64: native-vs-ref 0.00e0, native-vs-translated 0.00e0 (0 bitwise), 
+translated-vs-ref 0.00e0
+q6_k: translated 0.552 TOPS, native 1.975 TOPS, speedup 3.58x
+q8_0   speedup   2.97x  worst native-vs-ref 0.00e0  native-vs-translated 0.00e0  bitwise-diff floats 0
+q4_0   speedup   3.21x  worst native-vs-ref 0.00e0  native-vs-translated 0.00e0  bitwise-diff floats 0
+q5_0   speedup   2.17x  worst native-vs-ref 0.00e0  native-vs-translated 0.00e0  bitwise-diff floats 0
+q4_k   speedup   4.82x  worst native-vs-ref 0.00e0  native-vs-translated 0.00e0  bitwise-diff floats 0
+q5_k   speedup   4.80x  worst native-vs-ref 0.00e0  native-vs-translated 0.00e0  bitwise-diff floats 0
+q6_k   speedup   3.58x  worst native-vs-ref 0.00e0  native-vs-translated 0.00e0  bitwise-diff floats 0
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 94 filtered out; finished in 483.88s
+released kq-subst

@@ -374,6 +374,12 @@ fn auto_policy_follows_the_measurements() {
     assert!(matches!(decide("_Z13quantize_q8_1PKfPvxxxxxj5uint3", &quantize_layout(), &auto), Decision::Substitute(_)));
     let mmq = "_Z9mul_mat_qIL9ggml_type8ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     assert!(matches!(decide(mmq, &mmq_layout(), &auto), Decision::Substitute(_)), "mmq is in auto");
+    for ty in [2, 6, 12, 13, 14] {
+        let e = format!("_Z9mul_mat_qIL9ggml_type{ty}ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
+        assert!(matches!(decide(&e, &mmq_layout(), &auto), Decision::Substitute(_)), "mmq type {ty} in auto");
+    }
+    let q41 = "_Z9mul_mat_qIL9ggml_type3ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
+    assert_eq!(decide(q41, &mmq_layout(), &auto), Decision::NotApplicable);
     // `-family` switches one family off
     let no_mmq = Switch::parse("auto,-mmq");
     assert_eq!(decide(mmq, &mmq_layout(), &no_mmq), Decision::NotApplicable);

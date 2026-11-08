@@ -160,7 +160,7 @@ fn u3() -> Param {
 
 /// mmq types enabled in `auto` (the rest need an explicit `mmq:<type>` / `mmq` / `all`); raised
 /// only where hw_subst shows exact shadow checks and a speedup of at least 2x.
-const AUTO_MMQ: [u32; 1] = [refs::Q8_0];
+const AUTO_MMQ: [u32; 6] = [refs::Q8_0, refs::Q4_0, refs::Q5_0, refs::Q4_K, refs::Q5_K, refs::Q6_K];
 
 /// The measured default: with weights loaded once per row the native mmvq beat or tied the
 /// translated PTX on the Arc at every type and ncols 1..8 (Q8_0 1.02-1.88x, Q4_0 1.02-1.44x,
