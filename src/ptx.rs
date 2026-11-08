@@ -1038,6 +1038,12 @@ mod tier2_tests;
 mod tier3_tests;
 #[cfg(test)]
 mod tier3_mma_tests;
+#[cfg(test)]
+mod sim;
+#[cfg(test)]
+mod ggml_ref;
+#[cfg(test)]
+mod ggml_conformance;
 
 #[cfg(test)]
 mod tests {
