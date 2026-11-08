@@ -1566,6 +1566,25 @@ fn module_function(
     Ok(function)
 }
 
+/// Whether a non-null pointer kernel argument is acceptable. A captured launch only records
+/// its arguments and never runs them at capture time (GGML reserves its graph with dummy
+/// pointers such as 0x80 and discards it), so CUDA does not validate them either.
+fn pointer_arg_valid(known: bool, capturing: bool) -> bool {
+    known || capturing
+}
+
+#[cfg(test)]
+mod pointer_arg_tests {
+    use super::pointer_arg_valid;
+
+    #[test]
+    fn captured_launches_accept_dummy_pointers() {
+        assert!(pointer_arg_valid(true, false));
+        assert!(!pointer_arg_valid(false, false));
+        assert!(pointer_arg_valid(false, true));
+    }
+}
+
 fn validate_launch(
     info: &DeviceInfo,
     grid: [u32; 3],
@@ -1650,12 +1669,14 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 entry_threads,
             )?;
             let mut staged_pointers: Vec<Box<u64>> = Vec::new();
+            let capturing = context.streams.capture(stream)?.is_some();
             let args = unsafe {
                 launch_args::read(&params, kernel_params, extra, |address| {
                     // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
                     // host USM and valid kernel arguments, like in CUDA's unified addressing.
-                    contains_range(&context.allocations, address as usize, 1)
-                        || contains_range(&context.host_allocations, address as usize, 1)
+                    let known = contains_range(&context.allocations, address as usize, 1)
+                        || contains_range(&context.host_allocations, address as usize, 1);
+                    pointer_arg_valid(known, capturing)
                 })
             };
             let args = match args {

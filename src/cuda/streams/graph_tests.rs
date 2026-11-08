@@ -158,9 +158,10 @@ fn fake_capture_modes_and_state_errors() {
         StreamCaptureInvalidated
     );
 
-    // Out-of-range allocations are rejected at capture time.
+    // Out-of-range copies are rejected at capture time. Kernel pointer arguments are not:
+    // GGML captures with dummy pointers and never replays them.
     begin(s, RELAXED);
-    assert_eq!(launch(f, s, 0xdead_0000), InvalidValue);
+    assert_eq!(launch(f, s, 0xdead_0000), Success);
     assert_eq!(cuMemsetD8Async(0xdead_0000, 0, 8, s), InvalidValue);
     assert_eq!(cuGraphDestroy(end(s)), Success);
 
@@ -571,4 +572,26 @@ fn fake_destroying_a_context_drops_its_graphs() {
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
     assert_eq!(cuGraphExecDestroy(exec), InvalidHandle);
     assert_baseline();
+}
+
+#[test]
+fn fake_captured_launch_accepts_dummy_pointer_but_eager_launch_rejects_it() {
+    // GGML reserves its CUDA graph with dummy pointers (0x80) and discards it unlaunched.
+    let _fixture = Fixture::new();
+    let ctx = context(None);
+    let s = stream();
+    let f = function(module());
+    let (device, _host) = allocations();
+    const DUMMY: u64 = 0x80;
+
+    assert_eq!(launch(f, s, DUMMY), InvalidValue, "unregistered pointer outside capture");
+    assert_eq!(launch(f, s, device), Success);
+    begin(s, RELAXED);
+    assert_eq!(launch(f, s, DUMMY), Success, "capture only records the launch");
+    let graph = end(s);
+    assert_eq!(cuGraphDestroy(graph), Success);
+    assert_eq!(launch(f, s, DUMMY), InvalidValue, "validation is back after capture");
+    assert_eq!(cuStreamSynchronize(s), Success);
+    assert_eq!(cuStreamDestroy_v2(s), Success);
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
 }
