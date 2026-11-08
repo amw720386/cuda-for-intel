@@ -12,9 +12,9 @@ filt = sys.argv[3] if len(sys.argv) > 3 else ''
 os.environ.setdefault('CUDA_FOR_INTEL_HYBRID_DIR', R + r'\hybrid')
 os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
 ctypes.WinDLL(R + r'\nvcuda.dll')
-if mode == 'cudnn':
+if mode in ('cudnn', 'direct'):
     ctypes.WinDLL(R + r'\cudnn64_8.dll')
-if mode == 'cudnn' and os.path.exists(R + r'\direct.flag'):
+if mode == 'direct':
     os.environ['CFI_CUDNN_DIRECT'] = '1'   # old direct-kernel path (pre-GEMM engine), for baselines
     mode = 'cudnn_direct'
 import torch, torch.nn.functional as F
@@ -39,6 +39,7 @@ CFG = [
  ('convT_k2s2_128to64_28', 128, 64, 28, 2, 2, 0, 1, 1),
 ]
 def sync(): torch.cuda.synchronize()
+_w = torch.randn(64, 64, device='cuda'); _w @ _w; torch.cuda.synchronize()  # create the context and cuBLAS handle before timing
 def timeit(fn, budget=3.0):
     fn(); sync()
     t = time.perf_counter(); fn(); sync(); one = time.perf_counter() - t
@@ -68,10 +69,10 @@ for (tag, C, K, H, ks, st, pd, g, tr) in CFG:
         # correctness on 2 images vs CPU fp32
         xs = x[:2].clone(); xc = xs.float().requires_grad_(); wc = w.float().requires_grad_()
         yc = f(xc, wc); gy = torch.randn_like(yc); yc.backward(gy)
-        xg = xs.cuda().to(memory_format=mf).requires_grad_(); wg = w.cuda().to(memory_format=mf).requires_grad_()
+        xg = xs.cuda().to(memory_format=mf).detach().requires_grad_(); wg = w.cuda().to(memory_format=mf).detach().requires_grad_()
         yg = f(xg, wg); yg.backward(gy.cuda().to(dt).to(memory_format=mf))
         rec.update(nmse_y=nmse(yg, yc), nmse_dx=nmse(xg.grad, xc.grad), nmse_dw=nmse(wg.grad, wc.grad))
-        xg = x.cuda().to(memory_format=mf).requires_grad_(); wg = w.cuda().to(memory_format=mf).requires_grad_()
+        xg = x.cuda().to(memory_format=mf).detach().requires_grad_(); wg = w.cuda().to(memory_format=mf).detach().requires_grad_()
         with torch.no_grad(): rec['fwd_ms'] = timeit(lambda: f(xg, wg))
         yg = f(xg, wg); gyg = torch.randn_like(yg)
         def fb():

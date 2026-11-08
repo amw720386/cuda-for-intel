@@ -8,9 +8,9 @@ out = sys.argv[2] if len(sys.argv) > 2 else None
 os.environ.setdefault('CUDA_FOR_INTEL_HYBRID_DIR', R + r'\hybrid')
 os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
 ctypes.WinDLL(R + r'\nvcuda.dll')
-if mode == 'cudnn':
+if mode in ('cudnn', 'direct'):
     ctypes.WinDLL(R + r'\cudnn64_8.dll')
-if mode == 'cudnn' and os.path.exists(R + r'\direct.flag'):
+if mode == 'direct':
     os.environ['CFI_CUDNN_DIRECT'] = '1'; mode = 'cudnn_direct'
 import torch, torch.nn as nn
 torch.backends.cudnn.enabled = (mode != 'aten')

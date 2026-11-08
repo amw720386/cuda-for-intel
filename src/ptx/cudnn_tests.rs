@@ -469,3 +469,27 @@ fn sim_gemm_path_half_types() {
         }
     }
 }
+
+#[test]
+fn sim_bwd_filter_reduction_kernel() {
+    for e in [Elem::F32, Elem::F16] {
+        for (nhwc, groups) in [(false, 1), (true, 4)] {
+            let g = conv_geom(false, nhwc, groups, 1, 1, 1);
+            let (x, dy, w0) = (sample(g.x_len(), 1), sample(g.y_len(), 3), sample(g.w_len(), 2));
+            let rt = |v: &[f32]| decode(e, &encode(e, v));
+            let (x, dy, w0) = (rt(&x), rt(&dy), rt(&w0));
+            let mut gpu = Gpu::default();
+            let (a, b, out) = (gpu.upload(&encode(e, &x)), gpu.upload(&encode(e, &dy)), gpu.upload(&encode(e, &w0)));
+            let mut args = vec![a, b, out, Arg::f(1.5), Arg::f(0.5)];
+            args.extend(g.kernel_args(Kind::BwdFilter).iter().map(|v| u64::from(*v)));
+            let total = g.total(Kind::BwdFilter);
+            run(&pg::generate_conv_bwd_filter_red(e), &pg::conv_bwd_filter_red_entry(e), &mut gpu, [total, 1, 1], [256, 1, 1], args);
+            let got = decode(e, &gpu.download(out, g.w_len() * (1 << e.shift())));
+            let mut want = w0.clone();
+            rm::conv_bwd_filter(&g, &x, &dy, &mut want, 1.5, 0.5);
+            for (i, (g_, w_)) in got.iter().zip(&rt(&want)).enumerate() {
+                assert!((g_ - w_).abs() <= 1e-2 * (1.0 + w_.abs()), "{e:?} elem {i}: got {g_} want {w_}");
+            }
+        }
+    }
+}

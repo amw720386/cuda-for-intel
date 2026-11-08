@@ -543,6 +543,68 @@ pub fn generate_col2im(e: Elem, c_fast: bool) -> String {
     s
 }
 
+/// Entry of the work-group-per-element weight-gradient kernel (few outputs, long reductions such as
+/// depthwise filters). Same parameters as [`generate_conv`]; launch grid = number of dw elements, block 256.
+pub fn conv_bwd_filter_red_entry(e: Elem) -> String {
+    format!("cfi_cudnn_conv_bwd_filter_red_{}", e.tag())
+}
+
+pub fn generate_conv_bwd_filter_red(e: Elem) -> String {
+    let name = conv_bwd_filter_red_entry(e);
+    let mut s = String::new();
+    let mut tys = vec!["u64", "u64", "u64", "f32", "f32"];
+    tys.extend(std::iter::repeat_n("u32", 30));
+    header(&mut s, &name, &tys);
+    let _ = writeln!(s, ".shared .align 4 .b8 red[{}];", BN_BLOCK * 4);
+    let p = |i: usize| format!("[{name}_param_{i}]");
+    for (i, rd) in [(0, 1), (1, 2), (2, 3)] {
+        let _ = writeln!(s, "ld.param.u64 %rd{rd}, {};\ncvta.to.global.u64 %rd{rd}, %rd{rd};", p(i));
+    }
+    let _ = writeln!(s, "ld.param.f32 %f1, {};\nld.param.f32 %f2, {};", p(3), p(4));
+    for i in 5..CONV_PARAMS {
+        let _ = writeln!(s, "ld.param.u32 %r{i}, {};", p(i));
+    }
+    let _ = writeln!(s, "mov.f32 %f0, 0f00000000;");
+    let _ = writeln!(s, "mov.u32 %r43, %ctaid.x;\nmov.u32 %r42, %tid.x;");
+    let _ = writeln!(s, "div.u32 %r44, %r6, %r20;\ndiv.u32 %r45, %r9, %r20;"); // Cg, Kg
+    // element -> s, r, c local, k (as in gen_bwd_filter)
+    let _ = writeln!(s, "rem.u32 %r50, %r43, %r11;\ndiv.u32 %r51, %r43, %r11;");
+    let _ = writeln!(s, "rem.u32 %r52, %r51, %r10;\ndiv.u32 %r51, %r51, %r10;");
+    let _ = writeln!(s, "rem.u32 %r53, %r51, %r44;\ndiv.u32 %r54, %r51, %r44;");
+    let _ = writeln!(s, "div.u32 %r55, %r54, %r45;\nmad.lo.s32 %r56, %r55, %r44, %r53;");
+    let _ = writeln!(s, "setp.ne.u32 %p2, %r21, 0;");
+    let _ = writeln!(s, "sub.s32 %r57, %r10, 1;\nsub.s32 %r57, %r57, %r52;\nselp.u32 %r57, %r57, %r52, %p2;");
+    let _ = writeln!(s, "sub.s32 %r58, %r11, 1;\nsub.s32 %r58, %r58, %r50;\nselp.u32 %r58, %r58, %r50, %p2;");
+    let _ = writeln!(s, "mul.lo.u32 %r59, %r12, %r13;"); // PQ
+    let _ = writeln!(s, "mul.lo.u32 %r60, %r59, %r5;"); // N*PQ
+    let _ = writeln!(s, "mov.f32 %f3, 0f00000000;");
+    let _ = writeln!(s, "mov.u32 %r61, %r42;"); // m
+    let _ = writeln!(s, "$L_m:\nsetp.ge.u32 %p1, %r61, %r60;\n@%p1 bra $L_mdone;");
+    let _ = writeln!(s, "div.u32 %r62, %r61, %r59;\nrem.u32 %r63, %r61, %r59;"); // n, pq
+    let _ = writeln!(s, "div.u32 %r64, %r63, %r13;\nrem.u32 %r65, %r63, %r13;"); // p, q
+    let _ = writeln!(s, "mul.lo.s32 %r66, %r64, %r16;\nsub.s32 %r66, %r66, %r14;\nmad.lo.s32 %r66, %r57, %r18, %r66;"); // ih
+    let _ = writeln!(s, "mul.lo.s32 %r67, %r65, %r17;\nsub.s32 %r67, %r67, %r15;\nmad.lo.s32 %r67, %r58, %r19, %r67;"); // iw
+    let _ = writeln!(s, "setp.ge.u32 %p3, %r66, %r7;\nsetp.ge.u32 %p4, %r67, %r8;\nor.pred %p3, %p3, %p4;\n@%p3 bra $L_mn;");
+    emit_addr(&mut s, "%rd11", "%rd1", &[("%r62", "%r22"), ("%r56", "%r23"), ("%r66", "%r24"), ("%r67", "%r25")], e.shift());
+    emit_addr(&mut s, "%rd12", "%rd2", &[("%r62", "%r30"), ("%r54", "%r31"), ("%r64", "%r32"), ("%r65", "%r33")], e.shift());
+    emit_load(&mut s, e, "%rd11", "%f10");
+    emit_load(&mut s, e, "%rd12", "%f11");
+    let _ = writeln!(s, "fma.rn.ftz.f32 %f3, %f10, %f11, %f3;");
+    let _ = writeln!(s, "$L_mn:\nadd.s32 %r61, %r61, {BN_BLOCK};\nbra $L_m;\n$L_mdone:");
+    bn_block_sum(&mut s, "%f3", "red");
+    // thread 0 stores
+    let _ = writeln!(s, "setp.ne.u32 %p8, %r42, 0;\n@%p8 bra $L_out;");
+    emit_addr(&mut s, "%rd10", "%rd3", &[("%r54", "%r26"), ("%r53", "%r27"), ("%r52", "%r28"), ("%r50", "%r29")], e.shift());
+    let _ = writeln!(s, "mul.ftz.f32 %f3, %f30, %f1;");
+    let _ = writeln!(s, "setp.eq.ftz.f32 %p7, %f2, 0f00000000;\n@%p7 bra $L_store;");
+    emit_load(&mut s, e, "%rd10", "%f14");
+    let _ = writeln!(s, "fma.rn.ftz.f32 %f3, %f2, %f14, %f3;");
+    let _ = writeln!(s, "$L_store:");
+    emit_store(&mut s, e, "%rd10", "%f3");
+    let _ = writeln!(s, "$L_out:\nret;\n}}");
+    s
+}
+
 /// `C = alpha * broadcast(A) + beta * C` over a 4-D logical shape (cudnnAddTensor).
 /// Params: 0 A, 1 C (u64), 2 alpha, 3 beta (f32), 4..7 dims n,c,h,w, 8..11 A strides
 /// (0 where A's dim is 1), 12..14 C strides n,c,h (w stride in 15 -> see below).
@@ -909,6 +971,7 @@ pub fn all_entries() -> Vec<(String, String, usize)> {
         for k in [ConvKind::Fwd, ConvKind::BwdData, ConvKind::BwdFilter] {
             v.push((conv_entry(k, e), generate_conv(k, e), CONV_PARAMS));
         }
+        v.push((conv_bwd_filter_red_entry(e), generate_conv_bwd_filter_red(e), CONV_PARAMS));
         for f in [false, true] {
             v.push((im2col_entry(e, f), generate_im2col(e, f), IM2COL_PARAMS));
             v.push((col2im_entry(e, f), generate_col2im(e, f), COL2IM_PARAMS));

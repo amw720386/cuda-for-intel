@@ -26,9 +26,14 @@ use driver::{Arg, CUstream, Kid, LaunchError};
 use ptxgen::ConvKind;
 use std::ffi::{c_char, c_int, c_void};
 
+pub(crate) fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
 macro_rules! trace {
     ($($arg:tt)*) => {
-        if std::env::var_os("CFI_CUDNN_TRACE").is_some_and(|v| !v.is_empty() && v != "0") {
+        if crate::trace_on() {
             eprintln!("CUDA for Intel cudnn: {}", format!($($arg)*));
         }
     };
@@ -852,6 +857,10 @@ fn run_conv(stream: CUstream, plan: &ConvPlan, a: u64, b: u64, out: u64, alpha: 
     let mut args = vec![Arg::P(a), Arg::P(b), Arg::P(out), Arg::F(alpha), Arg::F(beta)];
     args.extend(plan.geom.kernel_args(rk).iter().map(|v| Arg::U(*v)));
     trace!("conv direct {:?} {:?} {:?}", plan.dir, plan.elem, plan.geom);
+    // Weight gradients with few outputs and a long reduction (depthwise): one work-group per output.
+    if plan.dir == Dir::BwdFilter && total <= 8192 && plan.geom.n as u64 * plan.geom.p as u64 * plan.geom.q as u64 >= 1024 {
+        return launch_status(driver::launch(Kid::ConvBwdFilterRed(plan.elem), total, ptxgen::BN_BLOCK, stream, &args), "conv_bwd_filter_red");
+    }
     launch_status(driver::launch(Kid::Conv(gk, plan.elem), total.div_ceil(256), 256, stream, &args), "conv")
 }
 

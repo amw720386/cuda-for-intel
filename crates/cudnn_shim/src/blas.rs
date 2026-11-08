@@ -61,9 +61,20 @@ fn load() -> Option<Blas> {
 }
 
 /// The process-wide handle; `None` when no cuBLAS is loadable (the direct kernels are used then).
+/// A failed creation (for instance before the first context exists) is retried on the next call.
 pub fn global() -> Option<&'static Mutex<Blas>> {
-    static B: OnceLock<Option<Mutex<Blas>>> = OnceLock::new();
-    B.get_or_init(|| load().map(Mutex::new)).as_ref()
+    static B: OnceLock<Mutex<Blas>> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
+    if let Some(b) = B.get() {
+        return Some(b);
+    }
+    let _g = INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if B.get().is_none() {
+        if let Some(l) = load() {
+            let _ = B.set(Mutex::new(l));
+        }
+    }
+    B.get()
 }
 
 impl Blas {

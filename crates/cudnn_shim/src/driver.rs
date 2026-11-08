@@ -67,6 +67,7 @@ pub enum Kid {
     BnBwd(Elem),
     Im2col(Elem, bool),
     Col2im(Elem, bool),
+    ConvBwdFilterRed(Elem),
 }
 
 impl Kid {
@@ -80,6 +81,7 @@ impl Kid {
             Kid::BnBwd(e) => ptxgen::bn_bwd_entry(e),
             Kid::Im2col(e, f) => ptxgen::im2col_entry(e, f),
             Kid::Col2im(e, f) => ptxgen::col2im_entry(e, f),
+            Kid::ConvBwdFilterRed(e) => ptxgen::conv_bwd_filter_red_entry(e),
         }
     }
     pub fn ptx(self) -> String {
@@ -92,6 +94,7 @@ impl Kid {
             Kid::BnBwd(e) => ptxgen::generate_bn_bwd(e),
             Kid::Im2col(e, f) => ptxgen::generate_im2col(e, f),
             Kid::Col2im(e, f) => ptxgen::generate_col2im(e, f),
+            Kid::ConvBwdFilterRed(e) => ptxgen::generate_conv_bwd_filter_red(e),
         }
     }
 }
