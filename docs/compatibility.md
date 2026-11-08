@@ -1,7 +1,7 @@
 # Compatibility matrix
 
 Experimental software. Every "works" below was run and has a log; "untested" means nobody has run it.
-Report your own results with the compatibility issue template (it asks for `scripts\cfi-doctor.ps1` output).
+Report your own results with the compatibility issue template (it asks for `scripts\cfi-doctor.ps1` output); how reports are verified and added here is described in [community/COMPAT-PROCESS.md](community/COMPAT-PROCESS.md). Only reports a maintainer reproduced or backed with a log under `hw-logs/` count as verified.
 
 ## GPUs and drivers
 
@@ -19,9 +19,9 @@ though the Level Zero loader code compiles there. macOS builds and runs library 
 
 | Application | Status | Notes and recipe |
 | --- | --- | --- |
-| Ollama v0.12.6 (stock `ollama.exe` and stock `cuda_v13\ggml-cuda.dll`) | Works with the models listed in [hw-logs/model-matrix.md](hw-logs/model-matrix.md) | Needs NVIDIA's signed companion DLL that you obtain yourself: [ollama.md](ollama.md). Other Ollama versions are untested. Slower than the CPU backend for small models. |
+| Ollama v0.12.6 (stock `ollama.exe` and stock `cuda_v13\ggml-cuda.dll`) | Runs the models listed in [hw-logs/model-matrix.md](hw-logs/model-matrix.md) (coherent output; several diverge from the CPU backend's greedy text) | Needs NVIDIA's signed companion DLL that you obtain yourself: [ollama.md](ollama.md). Other Ollama versions are untested. Slower than the CPU backend for small models. |
 | llama.cpp (build for `75-virtual`) | Works on the logged runs | [llama-cpp.md](llama-cpp.md); flash attention off |
-| PyTorch | In progress | Built-up results: [pytorch.md](pytorch.md). A consolidated `pytorch-status.md` is planned; until it lands, `pytorch.md` is the reference. Wheels cu121 and newer carry SASS only and cannot run. |
+| PyTorch | In progress | Built-up results: [pytorch.md](pytorch.md). Per-workload matrix: [pytorch-status.md](pytorch-status.md). Wheels cu121 and newer carry SASS only and cannot run. |
 | CUDA C programs with embedded PTX | Works for the bundled samples | [cuda-programs.md](cuda-programs.md) |
 | cuDNN | Opt-in, experimental | Not part of the default install. Convolutions use PyTorch's native kernels with `torch.backends.cudnn.enabled = False`. |
 | NCCL, cuFFT, cuSOLVER | Not implemented | |
