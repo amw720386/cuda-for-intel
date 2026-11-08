@@ -321,3 +321,28 @@ fn hw_level_zero_device_supports_subgroup_size_32() {
 }
 
 fn ok_unused() {}
+
+/// Prints the device count/name the driver reports under the current environment
+/// (CUDA_VISIBLE_DEVICES / CUDA_DEVICE_ORDER); the dense script runs it with several settings.
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn hw_device_count_probe() {
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuDeviceGetCount(*mut i32),
+        cuDeviceGetName(*mut std::ffi::c_char, i32, i32),
+    );
+    ok!(cuInit(0));
+    let mut count = -1;
+    ok!(cuDeviceGetCount(&mut count));
+    let mut name = [0 as std::ffi::c_char; 128];
+    let named = if count > 0 {
+        unsafe { cuDeviceGetName(name.as_mut_ptr(), 128, 0) };
+        unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned()
+    } else {
+        String::new()
+    };
+    println!("DEVICE_COUNT {count} NAME {named}");
+}

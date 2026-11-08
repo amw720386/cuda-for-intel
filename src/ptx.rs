@@ -1,6 +1,8 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod ext;
 mod flow;
+mod uniform;
+mod fxhash;
 pub(crate) mod globals;
 mod inline;
 mod normalize;
@@ -865,15 +867,30 @@ pub(crate) struct Translation {
 
 /// Scope flattening, source canonicalisation and `.func` inlining.
 fn prepare(source: &str) -> Result<String, Error> {
+    let timing = std::env::var_os("CFI_PREP_TIMING").is_some();
+    let mut t = std::time::Instant::now();
+    let mut lap = |what: &str| {
+        if timing {
+            eprintln!("  prepare/{what}: {:.2?}", t.elapsed());
+            t = std::time::Instant::now();
+        }
+    };
     let rewritten = parse::rewrite_half_scopes(source);
+    lap("half_scopes");
     // Constant-bank variables live in ordinary device memory, so reads are global loads.
     let rewritten = if rewritten.contains("ld.const.") {
         rewritten.replace("ld.const.", "ld.global.")
     } else {
         rewritten
     };
+    lap("ld.const");
     let normalized = normalize::run(&rewritten)?;
-    normalize::finish(&parse::rewrite_half_scopes(&normalized))
+    lap("normalize::run");
+    let again = parse::rewrite_half_scopes(&normalized);
+    lap("half_scopes2");
+    let out = normalize::finish(&again);
+    lap("finish");
+    out
 }
 
 pub(crate) fn translate(source: &str) -> Result<Translation, Error> {
@@ -904,10 +921,7 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
             // One unsupported kernel must not block the rest of a library (stock GGML
             // ships every quantisation variant in one module). Keep the entries that
             // translate; a lookup of a dropped kernel reports the translation failure.
-            let survivors: Vec<_> = entries
-                .into_iter()
-                .filter(|entry| spirv::emit(vec![entry.clone()], vars.device.clone()).is_ok())
-                .collect();
+            let survivors = surviving_entries(entries, &vars.device);
             if survivors.is_empty() {
                 return Err(error);
             }
@@ -916,17 +930,65 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
     }
 }
 
+/// Number of worker threads for per-entry work (`CFI_TRANSLATE_THREADS` overrides).
+fn worker_threads(jobs: usize) -> usize {
+    let configured = std::env::var("CFI_TRANSLATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok());
+    let available = std::thread::available_parallelism().map_or(1, usize::from).min(8);
+    configured.unwrap_or(available).clamp(1, jobs.max(1))
+}
+
+/// The entries that translate on their own, in order. Entries are independent, so they are
+/// checked on several threads.
+fn surviving_entries<'a>(entries: Vec<Entry<'a>>, device: &[globals::GlobalVar]) -> Vec<Entry<'a>> {
+    let threads = worker_threads(entries.len());
+    let lenient = lenient_undefined();
+    let ok: Vec<std::sync::atomic::AtomicBool> = entries.iter().map(|_| std::sync::atomic::AtomicBool::new(false)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let check = || {
+        loop {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(entry) = entries.get(i) else { break };
+            if spirv::emit(vec![entry.clone()], device.to_vec()).is_ok() {
+                ok[i].store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    };
+    if threads <= 1 {
+        check();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    set_lenient_undefined(lenient);
+                    check();
+                });
+            }
+        });
+    }
+    entries
+        .into_iter()
+        .zip(&ok)
+        .filter_map(|(entry, ok)| ok.load(std::sync::atomic::Ordering::Relaxed).then_some(entry))
+        .collect()
+}
+
 /// Translate one `.entry` of an already prepared module (lazy cudart 11.x modules).
 /// Kernels that fail elsewhere in the module do not matter.
 pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Translation, Error> {
-    let (entries, vars) = parse::parse_module(prepared)?;
+    // Parse only the requested entry plus the module-scope declarations before it, instead of
+    // every entry of a multi-megabyte module (the result is the same: other entries cannot
+    // influence this one).
+    let narrowed = parse::narrow_to_entry(prepared, name);
+    let (entries, vars) = parse::parse_module(narrowed.as_deref().unwrap_or(prepared))?;
     let entry = entries
         .into_iter()
         .find(|entry| entry.name == name)
         .ok_or_else(|| Error::new("PTX entry is absent or unsupported"))?;
-    let body = format!("{:?}", entry.blocks);
     let mut device = vars.device.clone();
-    device.retain(|data| body.contains(&format!("{:?}", data.name)));
+    if !device.is_empty() {
+        let body = format!("{:?}", entry.blocks);
+        device.retain(|data| body.contains(&format!("{:?}", data.name)));
+    }
     spirv::emit(vec![entry], device)
 }
 
@@ -955,6 +1017,23 @@ pub(crate) fn skipped_entries() -> Vec<(String, String)> {
 }
 
 /// Translate every parsed entry of a prepared module on its own and report per kernel.
+/// Per-entry SPIR-V hash and time through `translate_prepared_entry`, for the perf harness.
+#[allow(dead_code)]
+pub(crate) fn probe_prepared_hashed(prepared: &str, threads: usize) -> Result<Vec<(String, Result<u64, String>, std::time::Duration)>, Error> {
+    probe::probe_lazy_hashed_with(prepared, threads, true)
+}
+
+/// Per-entry SPIR-V hash and time, for the perf harness.
+#[allow(dead_code)]
+pub(crate) fn probe_module_hashed(prepared: &str, threads: usize) -> Result<Vec<(String, Result<u64, String>, std::time::Duration)>, Error> {
+    probe::probe_module_hashed(prepared, threads)
+}
+
+#[allow(dead_code)]
+pub(crate) fn probe_lazy_hashed(prepared: &str, threads: usize) -> Result<Vec<(String, Result<u64, String>, std::time::Duration)>, Error> {
+    probe::probe_lazy_hashed(prepared, threads)
+}
+
 #[allow(dead_code)]
 pub(crate) fn probe_module(prepared: &str) -> Result<Vec<(String, Result<(), String>)>, Error> {
     probe::probe_module(prepared)
@@ -1038,6 +1117,16 @@ mod tier2_tests;
 mod tier3_tests;
 #[cfg(test)]
 mod tier3_mma_tests;
+#[cfg(test)]
+mod sim;
+#[cfg(test)]
+mod flow_tests;
+#[cfg(test)]
+mod ggml_ref;
+#[cfg(test)]
+mod ggml_conformance;
+#[cfg(test)]
+mod nvrtc_tests;
 
 #[cfg(test)]
 mod tests {

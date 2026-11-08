@@ -15,6 +15,7 @@ mod native_cache;
 mod regular;
 pub(crate) use regular::{Queue, QueueFence};
 mod streams;
+pub(crate) use streams::WaitFn;
 pub(crate) use streams::KernelArg;
 pub(crate) use streams::{CommandList, Fence, Fences};
 #[cfg(test)]
@@ -288,6 +289,8 @@ struct PciProperties {
 }
 
 type GetPci = unsafe extern "system" fn(Raw, *mut PciProperties) -> Status;
+/// `zeDeviceCanAccessPeer(device, peer, *mut ze_bool_t)`
+type CanAccessPeer = unsafe extern "system" fn(Raw, Raw, *mut u8) -> Status;
 
 macro_rules! loader_api {
     ($( $name:ident($($arg:ty),*) ),+ $(,)?) => {
@@ -295,6 +298,7 @@ macro_rules! loader_api {
         pub(crate) struct Api {
             $( $name: unsafe extern "system" fn($($arg),*) -> Status, )+
             get_pci: Option<GetPci>,
+            can_access_peer: Option<CanAccessPeer>,
             #[cfg(not(test))]
             _library: Library,
             #[cfg(test)]
@@ -321,6 +325,8 @@ macro_rules! loader_api {
                         .map(|symbol| *symbol).map_err(Error::Loader)?, )+
                     get_pci: unsafe { library.get::<GetPci>(b"zeDevicePciGetPropertiesExt\0") }
                         .ok().map(|symbol| *symbol),
+                    can_access_peer: unsafe { library.get::<CanAccessPeer>(b"zeDeviceCanAccessPeer\0") }
+                        .ok().map(|symbol| *symbol),
                     #[cfg(not(test))]
                     _library: library,
                     #[cfg(test)]
@@ -338,6 +344,7 @@ macro_rules! loader_api {
                         unsupported
                     }, )+
                     get_pci: None,
+                    can_access_peer: None,
                     _library: None,
                 }
             }
@@ -569,6 +576,30 @@ pub(crate) struct Device {
     pub(crate) info: DeviceInfo,
     driver: Handle,
     handle: Handle,
+    /// Position of the Level Zero driver and of the device inside it, before any
+    /// CUDA-style reordering or filtering.
+    pub(crate) driver_index: u32,
+    pub(crate) device_index: u32,
+    /// Per-device translator probe results (see `cuda::devices::probe`).
+    pub(crate) probe: std::sync::OnceLock<crate::cuda::devices::probe::DeviceProbe>,
+}
+
+impl Device {
+    /// Raw driver handle address; equal values mean the same Level Zero driver.
+    pub(crate) fn driver_id(&self) -> usize {
+        self.driver.0.addr()
+    }
+
+    /// `zeDeviceCanAccessPeer`, or `None` when the loader does not export it or the
+    /// devices belong to different drivers (the call is only defined within one).
+    pub(crate) fn can_access_peer(&self, api: &Api, peer: &Device) -> Option<bool> {
+        if self.driver_id() != peer.driver_id() {
+            return None;
+        }
+        let query = api.can_access_peer?;
+        let mut value = 0u8;
+        (unsafe { query(self.handle.0, peer.handle.0, &mut value) } == 0).then_some(value != 0)
+    }
 }
 
 pub(crate) struct Runtime {
@@ -600,6 +631,15 @@ pub(crate) struct Context {
     ordinal: u32,
     /// Device and driver identity mixed into native-binary cache keys.
     cache_tag: String,
+}
+
+/// Device and driver identity mixed into native-binary cache keys. Per device: two
+/// different GPUs never share a binary, identical models can.
+pub(crate) fn cache_tag(info: &DeviceInfo) -> String {
+    format!(
+        "{:x}:{:x}:{}:{:x}:{:x}",
+        info.vendor_id, info.device_id, info.name, info.driver_version, info.api_version
+    )
 }
 
 pub(crate) struct Module {
@@ -721,14 +761,7 @@ impl Context {
             commands: None,
             build_logs: Vec::new(),
             ordinal,
-            cache_tag: format!(
-                "{:x}:{:x}:{}:{:x}:{:x}",
-                device.info.vendor_id,
-                device.info.device_id,
-                device.info.name,
-                device.info.driver_version,
-                device.info.api_version
-            ),
+            cache_tag: cache_tag(&device.info),
         })
     }
 
@@ -878,6 +911,25 @@ impl Context {
         Ok(module)
     }
 
+    /// A thread-safe handle for compiling SPIR-V into the native-binary cache off the launch
+    /// path. `None` on fake backends or when the native cache is disabled.
+    pub(crate) fn native_compiler(&self, api: &Api) -> Option<NativeCompiler> {
+        #[cfg(test)]
+        if api.is_fake() {
+            return None;
+        }
+        native_cache::directory()?;
+        Some(NativeCompiler {
+            create: api.zeModuleCreate,
+            destroy: api.zeModuleDestroy,
+            native_binary: api.zeModuleGetNativeBinary,
+            log_destroy: api.zeModuleBuildLogDestroy,
+            context: self.handle,
+            device: self.device,
+            tag: self.cache_tag.clone(),
+        })
+    }
+
     /// `format` 0 is SPIR-V and 1 is a native binary (`ZE_MODULE_FORMAT_*`).
     fn create_module(&mut self, api: &Api, format: u32, input: *const u8, size: usize, flags: &str) -> Result<Module, Error> {
         let flags = std::ffi::CString::new(flags).unwrap_or_default();
@@ -955,11 +1007,20 @@ impl Runtime {
             (api.zeDriverGet)(count, out)
         })?;
         let mut devices = Vec::new();
-        for driver in drivers {
-            let handles = enumerate("zeDeviceGet", std::ptr::null_mut(), |count, out| unsafe {
+        let mut skipped = None;
+        for (driver_index, driver) in drivers.into_iter().enumerate() {
+            // One broken driver (for example a non-GPU one) must not hide the others.
+            let handles = match enumerate("zeDeviceGet", std::ptr::null_mut(), |count, out| unsafe {
                 (api.zeDeviceGet)(driver, count, out)
-            })?;
+            }) {
+                Ok(handles) => handles,
+                Err(error) => {
+                    skipped.get_or_insert(error);
+                    continue;
+                }
+            };
             let mut metadata = None;
+            let mut device_index = 0u32;
             for handle in handles {
                 // These C output structures contain only integers and pointers.
                 let mut properties: Properties = unsafe { std::mem::zeroed() };
@@ -968,6 +1029,7 @@ impl Runtime {
                     (api.zeDeviceGetProperties)(handle, &mut properties)
                 })?;
                 if properties.vendor != 0x8086 || properties.kind != 1 {
+                    device_index += 1;
                     continue;
                 }
 
@@ -1089,6 +1151,9 @@ impl Runtime {
                 devices.push(Device {
                     driver: Handle(driver),
                     handle: Handle(handle),
+                    driver_index: driver_index as u32,
+                    device_index,
+                    probe: Default::default(),
 
                     info: DeviceInfo {
                         name: name(&properties.name)?,
@@ -1146,7 +1211,13 @@ impl Runtime {
                         kernel_timestamp_valid_bits: properties.kernel_timestamp_valid_bits,
                     },
                 });
+                device_index += 1;
             }
+        }
+        if devices.is_empty()
+            && let Some(error) = skipped
+        {
+            return Err(error);
         }
         Ok(Self { api, devices })
     }
@@ -1216,5 +1287,64 @@ mod tests {
             enumerate("test", 0u8, |_, _| 0x78000001),
             Err(Error::Driver("test", 0x78000001))
         ));
+    }
+}
+
+/// Compiles SPIR-V with the Intel compiler and stores the native binary in the persistent
+/// cache, so a later `load_module` of the same SPIR-V skips the compiler. `zeModuleCreate`
+/// and `zeModuleDestroy` are thread-safe in Level Zero; the function pointers stay valid
+/// because the loader library lives for the whole process.
+pub(crate) struct NativeCompiler {
+    create: unsafe extern "system" fn(Raw, Raw, *const ModuleDesc, *mut Raw, *mut Raw) -> Status,
+    destroy: unsafe extern "system" fn(Raw) -> Status,
+    native_binary: unsafe extern "system" fn(Raw, *mut usize, *mut u8) -> Status,
+    log_destroy: unsafe extern "system" fn(Raw) -> Status,
+    context: Handle,
+    device: Handle,
+    tag: String,
+}
+
+// Function pointers and opaque handles only.
+unsafe impl Send for NativeCompiler {}
+unsafe impl Sync for NativeCompiler {}
+
+impl NativeCompiler {
+    /// Returns true when a binary for `words` is in the cache afterwards.
+    pub(crate) fn precompile(&self, words: &[u32]) -> bool {
+        let Some(dir) = native_cache::directory() else { return false };
+        let flags = build_flags(words.len());
+        let key = native_cache::key(words, &self.tag, &flags);
+        if native_cache::contains(dir, &key) {
+            return true;
+        }
+        let flags = std::ffi::CString::new(flags).unwrap_or_default();
+        let desc = ModuleDesc {
+            header: Header::new(0x1b),
+            format: 0,
+            input_size: std::mem::size_of_val(words),
+            input: words.as_ptr().cast(),
+            build_flags: if flags.as_bytes().is_empty() { std::ptr::null() } else { flags.as_ptr() },
+            constants: std::ptr::null(),
+        };
+        let (mut module, mut log) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let status = unsafe { (self.create)(self.context.0, self.device.0, &desc, &mut module, &mut log) };
+        if !log.is_null() {
+            unsafe { (self.log_destroy)(log) };
+        }
+        if status != 0 || module.is_null() {
+            return false;
+        }
+        let mut size = 0usize;
+        let mut stored = false;
+        if unsafe { (self.native_binary)(module, &mut size, std::ptr::null_mut()) } == 0 && size != 0 {
+            let mut data = vec![0u8; size];
+            if unsafe { (self.native_binary)(module, &mut size, data.as_mut_ptr()) } == 0 {
+                data.truncate(size);
+                native_cache::store(dir, &key, &data);
+                stored = true;
+            }
+        }
+        unsafe { (self.destroy)(module) };
+        stored
     }
 }

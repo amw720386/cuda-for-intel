@@ -19,6 +19,7 @@ mod batch;
 #[cfg(all(test, windows))]
 mod batch_tests;
 mod batch_wake;
+mod cross_device;
 pub(super) mod events;
 pub(super) mod timing;
 #[cfg(test)]
@@ -31,6 +32,8 @@ mod globals_tests;
 mod graph_tests;
 #[cfg(test)]
 mod timing_tests;
+#[cfg(test)]
+mod subst_tests;
 #[cfg(all(test, windows))]
 mod profiling;
 #[cfg(all(test, windows))]

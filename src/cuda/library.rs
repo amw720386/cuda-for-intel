@@ -16,8 +16,10 @@ impl Libraries {
 
 pub(in crate::cuda) struct Library {
     ptx: Vec<u8>,
-    /// Normalised PTX for per-kernel translation: `None` until needed, `Some(None)` if unusable.
-    prepared: Option<Option<std::sync::Arc<String>>>,
+    /// Source text, content hash and normalised PTX shared with the background prefetcher.
+    shared: Option<std::sync::Arc<super::prefetch::LibShared>>,
+    /// Whether the other kernels of this library were queued for background translation.
+    prefetched: bool,
     entries: HashMap<CString, Option<usize>>,
     unloading: bool,
 }
@@ -157,7 +159,8 @@ pub unsafe extern "system" fn cuLibraryLoadData(
                 key,
                 Library {
                     ptx: bytes,
-                    prepared: None,
+                    shared: None,
+                    prefetched: false,
                     entries,
                     unloading: false,
                 },
@@ -301,45 +304,60 @@ fn lazy_kernel_function(state: &mut State, library: usize, name: &CStr) -> Resul
         let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
         return module_function(&state.runtime.api, context, &mut state.next_handle, module, name).map(Some);
     }
-    if image.prepared.is_none() {
-        let started = std::time::Instant::now();
-        let prepared = std::str::from_utf8(&image.ptx)
-            .ok()
-            .and_then(|source| ptx::prepare_source(source).ok())
-            .map(std::sync::Arc::new);
-        export_log(format_args!(
-            "lazy library prepared: ptx_bytes={} ok={} prepare_ms={}",
-            image.ptx.len(),
-            prepared.is_some(),
-            started.elapsed().as_millis()
-        ));
-        image.prepared = Some(prepared);
+    if image.shared.is_none() {
+        let Ok(text) = std::str::from_utf8(&image.ptx) else { return Ok(None) };
+        image.shared = Some(std::sync::Arc::new(super::prefetch::LibShared::new(text.to_owned())));
     }
-    let Some(Some(prepared)) = image.prepared.clone() else {
-        return Ok(None);
+    let shared = image.shared.clone().expect("set above");
+    let entry_name = name.to_string_lossy();
+    let cache_key = xcache::key_for_hash(shared.hash, &entry_name);
+    // A background worker may be producing this very kernel: wait for it instead of repeating it.
+    super::prefetch::claim_or_wait(cache_key);
+    let translated = match xcache::get(cache_key) {
+        Some(hit) => hit,
+        None => {
+            let started = std::time::Instant::now();
+            let Some(prepared) = shared.prepared() else { return Ok(None) };
+            // CFI_DUMP_ENTRY=<substring> with CFI_DUMP_PTX_DIR keeps the normalised PTX of matching kernels.
+            if let (Some(pattern), Some(dir)) = (std::env::var_os("CFI_DUMP_ENTRY"), std::env::var_os("CFI_DUMP_PTX_DIR"))
+                && entry_name.contains(&*pattern.to_string_lossy())
+                && let Some(start) = prepared.find(&format!(".entry {entry_name}"))
+            {
+                let end = prepared[start + 6..].find(".entry").map_or(prepared.len(), |e| start + 6 + e);
+                let file = format!("entry-{}.ptx", entry_name.chars().take(80).collect::<String>());
+                let _ = std::fs::write(std::path::Path::new(&dir).join(file), &prepared[start..end]);
+            }
+            let translated = match ptx::translate_prepared_entry(&prepared, &entry_name) {
+                Ok(t) => t,
+                Err(error) => {
+                    export_log(format_args!("lazy entry translation fell back: {entry_name}: {error}"));
+                    return Ok(None);
+                }
+            };
+            xcache::put(cache_key, &translated);
+            export_log(format_args!("lazy entry translated: {entry_name} translate_ms={}", started.elapsed().as_millis()));
+            translated
+        }
     };
-    // CFI_DUMP_ENTRY=<substring> with CFI_DUMP_PTX_DIR keeps the normalised PTX of matching kernels.
-    if let (Some(pattern), Some(dir)) = (std::env::var_os("CFI_DUMP_ENTRY"), std::env::var_os("CFI_DUMP_PTX_DIR"))
-        && name.to_string_lossy().contains(&*pattern.to_string_lossy())
-        && let Some(start) = prepared.find(&format!(".entry {}", name.to_string_lossy()))
-    {
-        let end = prepared[start + 6..].find(".entry").map_or(prepared.len(), |e| start + 6 + e);
-        let file = format!("entry-{}.ptx", name.to_string_lossy().chars().take(80).collect::<String>());
-        let _ = std::fs::write(std::path::Path::new(&dir).join(file), &prepared[start..end]);
+    // Module variables are per-module storage, so kernels that use them keep the shared module.
+    if !translated.globals.is_empty() {
+        return Ok(None);
     }
+    let ptx_len = shared.text.len();
+    let others: Vec<CString> = if image.prefetched { Vec::new() } else { image.entries.keys().cloned().collect() };
+    let first_in_library = !image.prefetched;
+    image.prefetched = true;
     let context = state.contexts.get_mut(&context_key).ok_or(ContextIsDestroyed)?;
     context.check_live()?;
-    let module = match load_ptx_entry(
-        &state.runtime,
-        context,
-        &mut state.next_handle,
-        &prepared,
-        &name.to_string_lossy(),
-    ) {
+    let module = match install_translation(&state.runtime, context, &mut state.next_handle, translated, ptx_len, std::time::Duration::ZERO) {
         Ok(module) => module,
         Err(InvalidPtx) => return Ok(None),
         Err(error) => return Err(error),
     };
+    if first_in_library {
+        let compiler = context.backend.native_compiler(&state.runtime.api);
+        super::prefetch::start_library(&shared, &others, &entry_name, compiler);
+    }
     context.entry_modules.insert((library, name.to_owned()), module);
     module_function(&state.runtime.api, context, &mut state.next_handle, module, name).map(Some)
 }

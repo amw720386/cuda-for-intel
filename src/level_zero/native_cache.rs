@@ -122,6 +122,11 @@ pub(crate) fn load(dir: &Path, key: &str) -> Option<Vec<u8>> {
     Some(data[24..].to_vec())
 }
 
+/// Whether a (not yet verified) entry exists; `load` verifies it on use.
+pub(crate) fn contains(dir: &Path, key: &str) -> bool {
+    path(dir, key).is_file()
+}
+
 pub(crate) fn discard(dir: &Path, key: &str) {
     let _ = std::fs::remove_file(path(dir, key));
 }

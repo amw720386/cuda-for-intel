@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void};
 use std::ptr::null_mut;
 
-fn extract_all(path: &str) -> Vec<String> {
+pub fn extract_all(path: &str) -> Vec<String> {
     let data = std::fs::read(path).expect("read dll");
     let magic = cfi_fatbin::FRAME_MAGIC.to_le_bytes();
     let mut blobs = Vec::new();

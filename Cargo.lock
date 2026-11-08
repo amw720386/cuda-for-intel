@@ -64,6 +64,7 @@ version = "0.1.0"
 dependencies = [
  "cfi-fatbin",
  "libloading",
+ "nvrtc_shim",
  "rspirv",
 ]
 
@@ -143,6 +144,10 @@ dependencies = [
  "adler2",
  "simd-adler32",
 ]
+
+[[package]]
+name = "nvrtc_shim"
+version = "0.1.0"
 
 [[package]]
 name = "pkg-config"
