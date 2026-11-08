@@ -22,6 +22,10 @@ pub(crate) fn log_enabled() -> bool {
     })
 }
 
+mod errors;
+mod extra;
+mod stubs;
+
 use libloading::Library;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void, CStr};
@@ -617,28 +621,31 @@ pub unsafe extern "system" fn cudaMemcpyAsync(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaMemcpy2DAsync(
-    _dst: *mut c_void,
-    _dpitch: usize,
-    _src: *const c_void,
-    _spitch: usize,
-    _width: usize,
-    _height: usize,
-    _kind: c_int,
-    _stream: CUstream,
+    dst: *mut c_void,
+    dpitch: usize,
+    src: *const c_void,
+    spitch: usize,
+    width: usize,
+    height: usize,
+    kind: c_int,
+    stream: CUstream,
 ) -> c_int {
-    set_error(NOT_SUPPORTED)
+    unsafe { extra::copy_2d_rows(dst, dpitch, src, spitch, width, height, kind, stream) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaMemcpyPeerAsync(
-    _dst: *mut c_void,
-    _dst_device: c_int,
-    _src: *const c_void,
-    _src_device: c_int,
-    _count: usize,
-    _stream: CUstream,
+    dst: *mut c_void,
+    dst_device: c_int,
+    src: *const c_void,
+    src_device: c_int,
+    count: usize,
+    stream: CUstream,
 ) -> c_int {
-    set_error(NOT_SUPPORTED)
+    if !extra::peer_copy_supported(dst_device, src_device) {
+        return set_error(NOT_SUPPORTED);
+    }
+    unsafe { cudaMemcpyAsync(dst, src, count, 3, stream) }
 }
 
 #[unsafe(no_mangle)]
@@ -785,15 +792,7 @@ pub unsafe extern "system" fn cudaPeekAtLastError() -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaGetErrorString(error: c_int) -> *const c_char {
-    match error {
-        0 => c"no error".as_ptr(),
-        1 => c"invalid argument".as_ptr(),
-        3 => c"initialization error".as_ptr(),
-        35 => c"CUDA driver version is insufficient for CUDA runtime version".as_ptr(),
-        101 => c"invalid device ordinal".as_ptr(),
-        801 => c"operation not supported".as_ptr(),
-        _ => c"unknown error".as_ptr(),
-    }
+    extra::error_text(error)
 }
 
 #[unsafe(no_mangle)]
@@ -996,14 +995,21 @@ pub unsafe extern "system" fn cudaFuncSetAttribute(
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
     num_blocks: *mut c_int,
-    _func: *const c_void,
-    _block_size: c_int,
-    _dynamic_smem: usize,
-    _flags: c_uint,
+    func: *const c_void,
+    block_size: c_int,
+    dynamic_smem: usize,
+    flags: c_uint,
 ) -> c_int {
-    if !num_blocks.is_null() {
-        unsafe { num_blocks.write(1) };
+    if num_blocks.is_null() || block_size <= 0 || flags > 1 {
+        return set_error(INVALID_VALUE);
     }
+    // Ask the driver; keep the historical answer of 1 when the kernel cannot be resolved.
+    let blocks = driver()
+        .ok()
+        .filter(|drv| ensure_context(drv) == SUCCESS)
+        .and_then(|drv| extra::driver_occupancy(drv, func, block_size, dynamic_smem, flags))
+        .unwrap_or(1);
+    unsafe { num_blocks.write(blocks) };
     set_error(SUCCESS)
 }
 
@@ -1235,7 +1241,17 @@ pub unsafe extern "system" fn cudaLaunchCooperativeKernel(
     shared: usize,
     stream: CUstream,
 ) -> c_int {
-    // No hardware cooperative groups yet — fall back to a normal launch.
+    // Grid-wide synchronization needs every block resident at once: refuse grids that
+    // cannot be (cudaErrorCooperativeLaunchTooLarge), otherwise launch normally.
+    let threads = block.x.saturating_mul(block.y).saturating_mul(block.z);
+    if threads == 0 || threads > c_int::MAX as u32 {
+        return set_error(INVALID_VALUE);
+    }
+    if let Some(capacity) = unsafe { extra::cooperative_limit(func, threads as c_int, shared) }
+        && !extra::cooperative_fits([grid.x, grid.y, grid.z], capacity)
+    {
+        return set_error(720);
+    }
     unsafe { cudaLaunchKernel(func, grid, block, args, shared, stream) }
 }
 

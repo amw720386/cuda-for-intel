@@ -611,4 +611,21 @@ mod tests {
         assert_eq!(unsafe { cuStreamAddCallback(null_mut(), Some(cb), null_mut(), 1) }, InvalidValue);
         assert_eq!(cuCtxDestroy_v2(ctx), Success);
     }
+
+    #[test]
+    fn new_entry_points_are_discoverable() {
+        use crate::cuda::discovery::cuGetProcAddress_v2;
+        for name in [
+            c"cuCtxGetLimit", c"cuCtxSetLimit", c"cuCtxGetCacheConfig", c"cuCtxGetId",
+            c"cuStreamGetFlags", c"cuStreamGetPriority", c"cuStreamAddCallback",
+            c"cuModuleLoadDataEx", c"cuMemsetD2D8", c"cuMemsetD2D32Async",
+            c"cuLaunchCooperativeKernel", c"cuProfilerStart", c"cuDeviceGetProperties",
+        ] {
+            let mut pointer = null_mut();
+            let mut query = -1;
+            let result = unsafe { cuGetProcAddress_v2(name.as_ptr(), &mut pointer, 13000, 0, &mut query) };
+            assert_eq!((result, query), (Success, 0), "{name:?}");
+            assert!(!pointer.is_null(), "{name:?}");
+        }
+    }
 }

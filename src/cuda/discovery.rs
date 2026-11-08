@@ -750,6 +750,28 @@ mod tests {
     }
 
     #[test]
+    fn error_table_covers_the_cuda_result_enum() {
+        for (code, name) in [
+            (0, "CUDA_SUCCESS"),
+            (34, "CUDA_ERROR_STUB_LIBRARY"),
+            (222, "CUDA_ERROR_UNSUPPORTED_PTX_VERSION"),
+            (700, "CUDA_ERROR_ILLEGAL_ADDRESS"),
+            (720, "CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE"),
+            (801, "CUDA_ERROR_NOT_SUPPORTED"),
+            (999, "CUDA_ERROR_UNKNOWN"),
+        ] {
+            let mut out = std::ptr::null();
+            assert_eq!(unsafe { cuGetErrorName(code, &mut out) }, Success, "{code}");
+            assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), name);
+            assert_eq!(unsafe { cuGetErrorString(code, &mut out) }, Success, "{code}");
+            assert!(!unsafe { CStr::from_ptr(out) }.to_bytes().is_empty());
+        }
+        let mut out = std::ptr::null();
+        assert_eq!(unsafe { cuGetErrorName(123456, &mut out) }, InvalidValue);
+        assert!(out.is_null());
+    }
+
+    #[test]
     fn version_and_error_strings_work_before_initialization() {
         let mut version = 0;
         assert_eq!(unsafe { cuDriverGetVersion(&mut version) }, Success);

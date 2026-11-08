@@ -26,6 +26,7 @@ mod launch_args;
 mod library;
 mod primary;
 mod streams;
+mod stubs;
 mod subst_hook;
 mod trace;
 
