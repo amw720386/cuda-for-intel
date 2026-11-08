@@ -896,6 +896,16 @@ fn rewrite_ldst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     if parts.iter().any(|p| matches!(*p, "async" | "bulk" | "param" | "const")) {
         // ld.param.f64 and friends only need the type mapping.
         if parts.contains(&"param") {
+            // nvcc loads 32-bit parameters straight into 64-bit registers
+            // (`ld.param.u32 %rd3, [p]`): load into a scratch word and extend.
+            if let ([_, "param", ty @ ("u32" | "s32" | "b32")], [dst, addr]) = (&parts[..], &inst.operands[..]) {
+                if ctx.width_of(dst) == Some(64) && !is_store {
+                    ctx.need32(1);
+                    let load = render(&inst.guard, &format!("ld.param.{ty}"), &["%__t32_0".to_owned(), addr.clone()]);
+                    let cvt = if *ty == "s32" { "cvt.s64.s32" } else { "cvt.u64.u32" };
+                    return Some(vec![load, render(&inst.guard, cvt, &[dst.clone(), "%__t32_0".to_owned()])]);
+                }
+            }
             let mut changed = false;
             let mapped: Vec<String> = parts
                 .iter()

@@ -53,7 +53,10 @@ struct Parser<'a> {
 }
 
 /// Stock GGML MMQ kernels declare roughly 7000 registers.
-const MAX_PTX_REGISTERS: usize = 400_000;
+const MAX_PTX_REGISTERS: usize = 1_500_000;
+/// Hard cap on basic blocks per entry. The flow analyses are linear in blocks (bitsets, worklists,
+/// dominator trees), so this only guards pathological inputs.
+const MAX_BLOCKS: usize = 262_144;
 
 impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&'a str> {
@@ -1483,7 +1486,7 @@ impl<'a> Parser<'a> {
         let mut labels = HashMap::new();
         let mut blocks = Vec::new();
         while !self.eat("}") {
-            if blocks.len() >= 8192 {
+            if blocks.len() >= MAX_BLOCKS {
                 return Err(Error::new("too many PTX blocks"));
             }
             while self.label() {

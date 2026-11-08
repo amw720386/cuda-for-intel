@@ -1,6 +1,9 @@
 use super::{Block, Comparison, Error, Instruction, IntegerOp, Terminator};
 use std::collections::HashSet;
 
+/// Memory ceiling for the definite-assignment bit matrices.
+const MAX_FLOW_BYTES: usize = 1 << 30;
+
 pub(super) struct Flow<'a> {
     pub(super) order: Vec<usize>,
     names: Vec<&'a str>,
@@ -98,6 +101,10 @@ impl<'a> Flow<'a> {
             gen_lists.push(list);
         }
         let words = names.len().div_ceil(64).max(1);
+        // Two bit matrices of blocks x registers; refuse inputs that would not fit a sane budget.
+        if blocks.len().saturating_mul(words).saturating_mul(16) > MAX_FLOW_BYTES {
+            return Err(Error::new("PTX entry too large for flow analysis"));
+        }
         let mut inputs = vec![0u64; blocks.len() * words];
         let mut outputs = vec![!0u64; blocks.len() * words];
         let mut row = vec![0u64; words];
