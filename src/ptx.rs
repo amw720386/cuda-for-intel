@@ -13,6 +13,19 @@ mod probe;
 #[cfg(test)]
 #[path = "../crates/cublas_shim/src/ptxgen.rs"]
 mod cublas_ptxgen;
+#[cfg(test)]
+#[path = "../crates/cudnn_shim/src/ptxgen.rs"]
+mod cudnn_ptxgen;
+#[cfg(test)]
+#[path = "../crates/cudnn_shim/src/refmath.rs"]
+mod cudnn_refmath;
+#[cfg(test)]
+use cudnn_ptxgen as ptxgen;
+#[cfg(test)]
+use cudnn_refmath as refmath;
+#[cfg(test)]
+#[path = "../crates/cudnn_shim/src/gemmconv.rs"]
+mod cudnn_gemmconv;
 
 pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
     let tokens = parse::tokens(source)?;
@@ -1108,6 +1121,10 @@ pub(crate) fn diagnose_entry(source: &str, name: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod coverage_tests;
 #[cfg(test)]
+mod sim;
+#[cfg(test)]
+mod cudnn_tests;
+#[cfg(test)]
 mod globals_tests;
 #[cfg(test)]
 mod param_space_tests;
@@ -1117,8 +1134,6 @@ mod tier2_tests;
 mod tier3_tests;
 #[cfg(test)]
 mod tier3_mma_tests;
-#[cfg(test)]
-mod sim;
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]

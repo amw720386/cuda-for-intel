@@ -1,0 +1,17 @@
+[package]
+name = "cudnn_shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "cuDNN v8/v9 C API shim over cuda-for-intel's Driver API (descriptors, conv, batchnorm via generated PTX)"
+
+[lib]
+name = "cudnn64_9"
+crate-type = ["cdylib"]
+
+[dependencies]
+libloading = "0.8"
+
+[features]
+# Build the v8 ABI flavour (status codes 1..14, version 8.9.7). Install the DLL as cudnn64_8.dll.
+v8 = []
