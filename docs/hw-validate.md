@@ -70,7 +70,7 @@ a stage off.
 | 6 | XMX | 30-60 min | `hw_xmx_blk`, `hw_xmx_shapes` with `CFI_XMX_BENCH_MODES=0,1,2`, `hw_xmx_probe` with `CFI_XMX_TRACE=1`, remaining `hw_xmx_gemm`, Ollama f16 A/B (`CFI_XMX=0`, default, `CFI_XMX_BLK=0`, trace) | `xmx-speed` (or `xmx-gqa-fix` inside it). Isolate with `CFI_XMX_BLK=0` (block loads off) then `CFI_XMX=0` (XMX off) |
 | 7 | cuDNN | 20-90 min | `hw_cudnn`, then `scripts/cudnn/gate_final.ps1 -NoQueue -SkipSuite` (callers, resnet18, conv bench, no-workspace sweep) against a v8-flavoured cudnn DLL | `cudnn-final`. Skipped when no torch python is configured |
 | 8 | perf matrix | 60-150 min | per model: CPU reference, then SUBST auto x FA off/on x `CFI_OPT_LD16` 0/1; 631-token prefill, 48-token decode, text equality vs CPU | a new `LaunchFailed`/error line = LD16 (`perf-depth`) or the batched-GEMM path; slow = compare against the same cell on `main` |
-| 9 | installer | 5-20 min | `cfi.ps1 install -DryRun`, real install into a scratch dir, `doctor`, `selftest`, grep of all output for user name / host / IPv4, `uninstall` round trip; then `torch_stage.ps1` if the `hw-prep` branch added it | `main` packaging scripts (not one of the five branches) unless the leak grep trips on a branch-added message |
+| 9 | installer | 5-20 min | `cfi.ps1 install -DryRun`, real install into a scratch dir, `doctor`, `selftest`, grep of all output for user name / host / IPv4, `uninstall` round trip; then `torch_stage.ps1` (the `hw-prep` PyTorch ladder L0-L7, `scripts/torch/progressive.py`, per-level timeouts, no queue/kill of its own) when a torch python is configured | `main` packaging scripts (not one of the five branches) unless the leak grep trips on a branch-added message; a torch ladder failure names the failing level (L0 import, L2 matmul = cublas shim, L4 conv = `cudnn-final`, L6 generation = FA/XMX/divergence) |
 
 Status values: `pass`, `fail`, `timeout`, `review` (needs a human read, not automatically red), `info`, `skip`.
 `summary.md` lists blame and the isolation switch next to every non-green item.
@@ -106,7 +106,7 @@ switch set; every `run_all.ps1` item names its test, and the raw output is in `l
 
 ## Mac-side checks that were run before handing over
 
-`cargo test --lib` (377 passed, 16 ignored) and `cargo check --workspace --tests --target x86_64-pc-windows-gnu` are clean.
+`cargo test --lib` (379 passed, 16 ignored) and `cargo check --workspace --tests --target x86_64-pc-windows-gnu` are clean.
 `bash -n` passes on `sync.sh` and `collect.sh`. PowerShell is not installed on the Mac (installing it needs sudo), so the
 `.ps1` files were only checked for balanced braces and quotes; stage 0 of the first box run parse-checks every script with the
 real PowerShell parser and reports any that does not parse (if `run_all.ps1` itself does not parse, PowerShell says so immediately).
