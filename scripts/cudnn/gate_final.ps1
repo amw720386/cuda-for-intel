@@ -1,13 +1,13 @@
 # Final cuDNN hardware gate in ONE queue slot. Everything runs to exit by itself (timeouts, no process killing needed).
 # Prereq: work dir $env:USERPROFILE\cfi-work\cd4 with src\ (this repo), run\ (nvcuda.dll, cudnn64_8.dll built with --features v8, hybrid\)
 #         and stock\ggml-cuda.dll path in $env:CFI_STOCK_GGML_DLL. Logs: cd4\gate.   Usage: gate_final.ps1 [-SkipSuite]
-param([switch]$SkipSuite)
-$w = Join-Path $env:USERPROFILE 'cfi-work'; $d = "$w\cd4"; $g = "$d\gate"; $run = "$d\run"; $src = "$d\src\scripts\cudnn"
+param([switch]$SkipSuite, [switch]$NoQueue, [string]$Dir = '', [string]$Gate = '')
+$w = Join-Path $env:USERPROFILE 'cfi-work'; $d = if ($Dir) { $Dir } else { "$w\cd4" }; $g = if ($Gate) { $Gate } else { "$d\gate" }; $run = "$d\run"; $src = "$d\src\scripts\cudnn"
 $py = "$w\torch\torch222\Scripts\python.exe"
 New-Item -ItemType Directory -Force $g | Out-Null
-& "$w\gpu-queue.ps1" -Action acquire -Id cudnn4-gate -MaxWaitSec 14400
+if (-not $NoQueue) { & "$w\gpu-queue.ps1" -Action acquire -Id cudnn4-gate -MaxWaitSec 14400 }
 $lock = "$w\gpu.lock"
-$hb = Start-Job -ScriptBlock { param($l) while ($true) { try { (Get-Item $l).LastWriteTime = Get-Date } catch {}; Start-Sleep 45 } } -ArgumentList $lock
+$hb = if ($NoQueue) { $null } else { Start-Job -ScriptBlock { param($l) while ($true) { try { (Get-Item $l).LastWriteTime = Get-Date } catch {}; Start-Sleep 45 } } -ArgumentList $lock }
 function Step($name, $exe, $argv, $out, $timeoutMin) {
   $p = Start-Process $exe -ArgumentList $argv -RedirectStandardOutput "$out.out" -RedirectStandardError "$out.err" -PassThru -NoNewWindow
   if (-not $p.WaitForExit($timeoutMin * 60000)) { "$name TIMEOUT (left to finish on its own)" | Tee-Object -Append "$g\summary.txt"; return }
@@ -34,7 +34,7 @@ try {
     "gpu suite rc=$LASTEXITCODE" | Tee-Object -Append "$g\summary.txt"
   }
 } finally {
-  Stop-Job $hb -EA 0; Remove-Job $hb -Force -EA 0
-  & "$w\gpu-queue.ps1" -Action release -Id cudnn4-gate
+  if ($hb) { Stop-Job $hb -EA 0; Remove-Job $hb -Force -EA 0 }
+  if (-not $NoQueue) { & "$w\gpu-queue.ps1" -Action release -Id cudnn4-gate }
 }
 'done' | Out-File "$g\done.txt"
