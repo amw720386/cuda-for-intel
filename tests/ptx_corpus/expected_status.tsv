@@ -5,6 +5,7 @@ ggml/convert_unary_half_to_f32_dump.ptx	pass	strict-pass
 ggml/cpy_scalar_half_dump.ptx	pass	strict-pass	
 ggml/ctaid_probe.ptx	pass	strict-pass	
 ggml/dequantize_block_dump.ptx	pass	strict-pass	
+ggml/dp4a_const_operand.ptx	pass	strict-pass	
 ggml/forge_reduce.ptx	pass	strict-pass	
 ggml/forge_residual.ptx	pass	strict-pass	
 ggml/ggml_add_f32.ptx	pass	strict-pass	
@@ -553,7 +554,7 @@ zluda/memory/param_is_addressable.ptx	pass	strict-fail
 zluda/memory/reg_local.ptx	unsupported	strict-fail	unsupported PTX instruction: st.global.u64 [ %__lsym+0 ] , %temp + 1
 zluda/memory/reg_multi.ptx	pass	strict-fail	
 zluda/memory/shared_ptr_32.ptx	pass	strict-fail	
-zluda/memory/shared_ptr_take_address.ptx	error	strict-fail	unknown PTX local symbol shared_mem
+zluda/memory/shared_ptr_take_address.ptx	pass	strict-fail	
 zluda/memory/shared_unify_extern.ptx	error	strict-fail	missing or mismatched PTX declaration for out
 zluda/memory/shared_unify_local.ptx	unsupported	strict-fail	unsupported PTX instruction: call ( out ) , add , ( %__c1_temp2 )
 zluda/memory/shared_variable.ptx	pass	strict-fail	
