@@ -920,16 +920,55 @@ fn translate_with(source: &str, lenient: bool) -> Result<Translation, Error> {
             // One unsupported kernel must not block the rest of a library (stock GGML
             // ships every quantisation variant in one module). Keep the entries that
             // translate; a lookup of a dropped kernel reports the translation failure.
-            let survivors: Vec<_> = entries
-                .into_iter()
-                .filter(|entry| spirv::emit(vec![entry.clone()], vars.device.clone()).is_ok())
-                .collect();
+            let survivors = surviving_entries(entries, &vars.device);
             if survivors.is_empty() {
                 return Err(error);
             }
             spirv::emit(survivors, vars.device)
         }
     }
+}
+
+/// Number of worker threads for per-entry work (`CFI_TRANSLATE_THREADS` overrides).
+fn worker_threads(jobs: usize) -> usize {
+    let configured = std::env::var("CFI_TRANSLATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok());
+    let available = std::thread::available_parallelism().map_or(1, usize::from).min(8);
+    configured.unwrap_or(available).clamp(1, jobs.max(1))
+}
+
+/// The entries that translate on their own, in order. Entries are independent, so they are
+/// checked on several threads.
+fn surviving_entries<'a>(entries: Vec<Entry<'a>>, device: &[globals::GlobalVar]) -> Vec<Entry<'a>> {
+    let threads = worker_threads(entries.len());
+    let lenient = lenient_undefined();
+    let ok: Vec<std::sync::atomic::AtomicBool> = entries.iter().map(|_| std::sync::atomic::AtomicBool::new(false)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let check = || {
+        loop {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(entry) = entries.get(i) else { break };
+            if spirv::emit(vec![entry.clone()], device.to_vec()).is_ok() {
+                ok[i].store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    };
+    if threads <= 1 {
+        check();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    set_lenient_undefined(lenient);
+                    check();
+                });
+            }
+        });
+    }
+    entries
+        .into_iter()
+        .zip(&ok)
+        .filter_map(|(entry, ok)| ok.load(std::sync::atomic::Ordering::Relaxed).then_some(entry))
+        .collect()
 }
 
 /// Translate one `.entry` of an already prepared module (lazy cudart 11.x modules).
