@@ -20,6 +20,10 @@ is already exact on this driver (`hw_div_sqrt_rn_f32_correctly_rounded` passes w
 The flag changes only the native substitute kernels (built from OpenCL C, where `/` is not correctly rounded without the flag; quantize_q8_1 computes `x / d`), and moves them to
 agree with the translated stock kernels on 5 more prompts. The scan is deterministic (two runs of the default build: identical rows).
 
+Direct check (`hw_subst_quantize_fuzz`, 393216 random blocks, fresh caches): native quantize_q8_1 vs the translated kernel differs in
+**16 quant bytes with `FAST_DIV=1` and 0 with the default**; the translated kernel matches the host reference (0 bytes) both ways. So the flag
+fixes exactly the native kernel's division.
+
 ## NWARPS control and family isolation (logits, `cfi_logits.exe`, teacher-forced on the SUBST=none tokens, 96 steps)
 
 Each row is one run with only that family substituted; compared with the SUBST=none free run (same token inputs). `nwcmp` table: `nwarps_vs_none.md`.

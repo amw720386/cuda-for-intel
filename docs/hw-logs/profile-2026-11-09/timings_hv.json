@@ -1,0 +1,236 @@
+﻿{
+    "qwen_fa0.plain":  {
+                           "run.warm":  {
+                                            "wall_s":  111.81,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  48.503,
+                                            "prefill_tps":  12.9,
+                                            "eval_tokens":  8,
+                                            "decode_tps":  28.4,
+                                            "load_s":  61.94
+                                        },
+                           "run.short":  {
+                                             "wall_s":  6.34,
+                                             "prompt_tokens":  15,
+                                             "prompt_s":  6.221,
+                                             "prefill_tps":  2.4,
+                                             "eval_tokens":  1,
+                                             "decode_tps":  1000000000,
+                                             "load_s":  0.09
+                                         },
+                           "run.long":  {
+                                            "wall_s":  0.46,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  0.092,
+                                            "prefill_tps":  6764.4,
+                                            "eval_tokens":  1,
+                                            "decode_tps":  1000000000,
+                                            "load_s":  0.09
+                                        },
+                           "run.decode":  {
+                                              "wall_s":  2.47,
+                                              "prompt_tokens":  15,
+                                              "prompt_s":  0.031,
+                                              "prefill_tps":  483.5,
+                                              "eval_tokens":  64,
+                                              "decode_tps":  34.7,
+                                              "load_s":  0.09
+                                          },
+                           "server_errors":  0
+                       },
+    "qwen_fa0.prof":  {
+                          "run.warm":  {
+                                           "wall_s":  110.86,
+                                           "prompt_tokens":  624,
+                                           "prompt_s":  47.93,
+                                           "prefill_tps":  13,
+                                           "eval_tokens":  8,
+                                           "decode_tps":  22.8,
+                                           "load_s":  61.56
+                                       },
+                          "run.short":  {
+                                            "wall_s":  6.39,
+                                            "prompt_tokens":  15,
+                                            "prompt_s":  6.28,
+                                            "prefill_tps":  2.4,
+                                            "eval_tokens":  1,
+                                            "decode_tps":  1000000000,
+                                            "load_s":  0.09
+                                        },
+                          "run.long":  {
+                                           "wall_s":  0.56,
+                                           "prompt_tokens":  624,
+                                           "prompt_s":  0.099,
+                                           "prefill_tps":  6330,
+                                           "eval_tokens":  1,
+                                           "decode_tps":  1000000000,
+                                           "load_s":  0.09
+                                       },
+                          "run.decode":  {
+                                             "wall_s":  2.86,
+                                             "prompt_tokens":  15,
+                                             "prompt_s":  0.113,
+                                             "prefill_tps":  133,
+                                             "eval_tokens":  64,
+                                             "decode_tps":  28.4,
+                                             "load_s":  0.09
+                                         },
+                          "server_errors":  0
+                      },
+    "qwen_fa1.plain":  {
+                           "run.warm":  {
+                                            "wall_s":  133.83,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  47.952,
+                                            "prefill_tps":  13,
+                                            "eval_tokens":  8,
+                                            "decode_tps":  45.1,
+                                            "load_s":  84.57
+                                        },
+                           "run.short":  {
+                                             "wall_s":  16.03,
+                                             "prompt_tokens":  15,
+                                             "prompt_s":  15.927,
+                                             "prefill_tps":  0.9,
+                                             "eval_tokens":  1,
+                                             "decode_tps":  1000000000,
+                                             "load_s":  0.09
+                                         },
+                           "run.long":  {
+                                            "wall_s":  0.6,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  0.14,
+                                            "prefill_tps":  4458.4,
+                                            "eval_tokens":  1,
+                                            "decode_tps":  1000000000,
+                                            "load_s":  0.09
+                                        },
+                           "run.decode":  {
+                                              "wall_s":  2.25,
+                                              "prompt_tokens":  15,
+                                              "prompt_s":  0.036,
+                                              "prefill_tps":  417.7,
+                                              "eval_tokens":  64,
+                                              "decode_tps":  43.2,
+                                              "load_s":  0.09
+                                          },
+                           "server_errors":  0
+                       },
+    "qwen_fa1.prof":  {
+                          "run.warm":  {
+                                           "wall_s":  134.76,
+                                           "prompt_tokens":  624,
+                                           "prompt_s":  48.157,
+                                           "prefill_tps":  13,
+                                           "eval_tokens":  8,
+                                           "decode_tps":  43,
+                                           "load_s":  85.32
+                                       },
+                          "run.short":  {
+                                            "wall_s":  15.37,
+                                            "prompt_tokens":  15,
+                                            "prompt_s":  15.266,
+                                            "prefill_tps":  1,
+                                            "eval_tokens":  1,
+                                            "decode_tps":  1000000000,
+                                            "load_s":  0.09
+                                        },
+                          "run.long":  {
+                                           "wall_s":  0.73,
+                                           "prompt_tokens":  624,
+                                           "prompt_s":  0.15,
+                                           "prefill_tps":  4150.9,
+                                           "eval_tokens":  1,
+                                           "decode_tps":  1000000000,
+                                           "load_s":  0.09
+                                       },
+                          "run.decode":  {
+                                             "wall_s":  2.57,
+                                             "prompt_tokens":  15,
+                                             "prompt_s":  0.121,
+                                             "prefill_tps":  124,
+                                             "eval_tokens":  64,
+                                             "decode_tps":  34.4,
+                                             "load_s":  0.1
+                                         },
+                          "server_errors":  0
+                      },
+    "llama32-1b-q4km_fa1.plain":  {
+                                      "run.warm":  {
+                                                       "wall_s":  270.64,
+                                                       "prompt_tokens":  623,
+                                                       "prompt_s":  103.883,
+                                                       "prefill_tps":  6,
+                                                       "eval_tokens":  8,
+                                                       "decode_tps":  42.9,
+                                                       "load_s":  165.03
+                                                   },
+                                      "run.short":  {
+                                                        "wall_s":  12.02,
+                                                        "prompt_tokens":  16,
+                                                        "prompt_s":  11.886,
+                                                        "prefill_tps":  1.3,
+                                                        "eval_tokens":  1,
+                                                        "decode_tps":  1000000000,
+                                                        "load_s":  0.12
+                                                    },
+                                      "run.long":  {
+                                                       "wall_s":  1,
+                                                       "prompt_tokens":  623,
+                                                       "prompt_s":  0.205,
+                                                       "prefill_tps":  3038.4,
+                                                       "eval_tokens":  1,
+                                                       "decode_tps":  1000000000,
+                                                       "load_s":  0.11
+                                                   },
+                                      "run.decode":  {
+                                                         "wall_s":  2.06,
+                                                         "prompt_tokens":  16,
+                                                         "prompt_s":  0.047,
+                                                         "prefill_tps":  337.8,
+                                                         "eval_tokens":  64,
+                                                         "decode_tps":  45.2,
+                                                         "load_s":  0.11
+                                                     },
+                                      "server_errors":  0
+                                  },
+    "llama32-1b-q4km_fa1.prof":  {
+                                     "run.warm":  {
+                                                      "wall_s":  269.55,
+                                                      "prompt_tokens":  623,
+                                                      "prompt_s":  104.072,
+                                                      "prefill_tps":  6,
+                                                      "eval_tokens":  8,
+                                                      "decode_tps":  42.4,
+                                                      "load_s":  163.78
+                                                  },
+                                     "run.short":  {
+                                                       "wall_s":  12.15,
+                                                       "prompt_tokens":  16,
+                                                       "prompt_s":  12.021,
+                                                       "prefill_tps":  1.3,
+                                                       "eval_tokens":  1,
+                                                       "decode_tps":  1000000000,
+                                                       "load_s":  0.11
+                                                   },
+                                     "run.long":  {
+                                                      "wall_s":  1.13,
+                                                      "prompt_tokens":  623,
+                                                      "prompt_s":  0.196,
+                                                      "prefill_tps":  3178.6,
+                                                      "eval_tokens":  1,
+                                                      "decode_tps":  1000000000,
+                                                      "load_s":  0.11
+                                                  },
+                                     "run.decode":  {
+                                                        "wall_s":  2.28,
+                                                        "prompt_tokens":  16,
+                                                        "prompt_s":  0.132,
+                                                        "prefill_tps":  121.6,
+                                                        "eval_tokens":  64,
+                                                        "decode_tps":  38.4,
+                                                        "load_s":  0.12
+                                                    },
+                                     "server_errors":  0
+                                 }
+}

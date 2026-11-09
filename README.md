@@ -20,7 +20,7 @@
 
 <p align="center"><a href="docs/demo/prefill-chart.mp4"><img src="docs/demo/prefill-chart.gif" alt="Bar chart of prefill tokens per second, substitution off versus on: Qwen2.5-0.5B 1818 to 6767, Llama-3.2-1B 817 to 4877, Qwen2.5-1.5B 627 to 3727" width="100%"></a></p>
 
-Prefill tokens/s on Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off (flash attention is being fixed), release candidate `7fc40fb`. Single runs on a shared machine; the raw log for these three pairs is not yet committed under `docs/hw-logs/` ([claims audit](docs/claims-audit.md)), the nearest logged runs are in [docs/kernel-subst.md](docs/kernel-subst.md). Qwen2.5-0.5B Q8_0 **3.7x**, Llama-3.2-1B Q4_K_M **6.0x**, Qwen2.5-1.5B Q4_K_M **5.9x**. Details: [docs/kernel-subst.md](docs/kernel-subst.md).
+Prefill tokens/s on Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off (flash attention is being fixed), release candidate `7fc40fb`. Single runs on a shared machine; a 2026-11-09 rerun gives 1814 to 6876 (3.8x), 924 to 5258 (5.7x) and 635 to 4028 (6.3x) ([log](docs/hw-logs/prefill-subst-2026-11-09/README.md)). Qwen2.5-0.5B Q8_0 **3.7x**, Llama-3.2-1B Q4_K_M **6.0x**, Qwen2.5-1.5B Q4_K_M **5.9x**. Details: [docs/kernel-subst.md](docs/kernel-subst.md).
 
 ## 🧩 Architecture
 
@@ -62,7 +62,7 @@ Everything in this table was run, and the evidence is linked. "Untested" means n
 | Windows x64, Intel Arc B390 (Xe3, PCI `8086:b080`, driver 32.0.101.9033) | Primary target. Everything below was verified here. | [docs/hw-logs/](docs/hw-logs/README.md) |
 | Windows x64, Intel Iris Xe (Alder Lake, PCI `8086:46a8`, driver 32.0.101.7085) | Driver API tests, vector add, reduction, RMSNorm, ggml residual add, genuine CUDA Runtime 13.0.88 kernel; stock Ollama enumerates it as CUDA0. Nothing newer (PyTorch, stock model generation, XMX) has been run on it. | [docs/milestone-12.md](docs/milestone-12.md), [docs/milestone-13.md](docs/milestone-13.md), [docs/agent-handoff.md](docs/agent-handoff.md) |
 | Other Intel GPUs (Arc A-series, other Arc B-series, Lunar Lake, Data Center) | Untested. | |
-| XMX (DPAS) GEMM path | Needs Xe2/Xe3 with `SPV_INTEL_subgroup_matrix_multiply_accumulate`; verified on Arc B390 only (`tests/gpu/hw_xmx_gemm.rs`, [log](docs/hw-logs/xmx-2026-11-09.txt)); end to end about 9 % faster prefill on Qwen2.5-0.5B in one run, decode unchanged. Other GPUs fall back to the tiled PTX GEMM. | commit `57b9fa5`, `tests/gpu/hw_xmx_gemm.rs` (no committed log) |
+| XMX (DPAS) GEMM path | Needs Xe2/Xe3 with `SPV_INTEL_subgroup_matrix_multiply_accumulate`; verified on Arc B390 only (`tests/gpu/hw_xmx_gemm.rs`, [log](docs/hw-logs/xmx-2026-11-09.txt)); end to end no clear gain: Qwen2.5-0.5B prefill +9 % in one run and -3 % in another (single runs, within run-to-run noise). Other GPUs fall back to the tiled PTX GEMM. | commit `57b9fa5`, `tests/gpu/hw_xmx_gemm.rs` (no committed log) |
 | Linux | The Level Zero loader path is included for portability. Untested on hardware. | |
 | macOS | Build and library unit tests only (no GPU). | `cargo test --lib`: 215 passed on the Windows box ([test-unit.log](docs/hw-logs/test-unit.log)); the count on macOS is UNVERIFIED |
 

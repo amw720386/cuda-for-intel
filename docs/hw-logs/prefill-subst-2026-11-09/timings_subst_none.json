@@ -1,0 +1,131 @@
+﻿{
+    "qwen_fa0.plain":  {
+                           "run.warm":  {
+                                            "wall_s":  114.23,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  48.342,
+                                            "prefill_tps":  12.9,
+                                            "eval_tokens":  8,
+                                            "decode_tps":  25.3,
+                                            "load_s":  63.7,
+                                            "response":  " 4, 5, 6"
+                                        },
+                           "run.short":  {
+                                             "wall_s":  6.37,
+                                             "prompt_tokens":  15,
+                                             "prompt_s":  6.26,
+                                             "prefill_tps":  2.4,
+                                             "eval_tokens":  1,
+                                             "decode_tps":  1000000000,
+                                             "load_s":  0.09,
+                                             "response":  " Paris"
+                                         },
+                           "run.long":  {
+                                            "wall_s":  1.72,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  0.344,
+                                            "prefill_tps":  1814.4,
+                                            "eval_tokens":  1,
+                                            "decode_tps":  1000000000,
+                                            "load_s":  0.09,
+                                            "response":  " ...,"
+                                        },
+                           "run.decode":  {
+                                              "wall_s":  2.7,
+                                              "prompt_tokens":  15,
+                                              "prompt_s":  0.062,
+                                              "prefill_tps":  242.3,
+                                              "eval_tokens":  64,
+                                              "decode_tps":  36.7,
+                                              "load_s":  0.09,
+                                              "response":  " Rome, the ancient capital of Italy, is a sprawling metropolis with a rich history and diverse culture. The city has been a center of power and trade for centuries, and its influence can be seen in every aspect of life from architecture to cuisine.\n\nThe city\u0027s central area, called the \"Città del V"
+                                          },
+                           "server_errors":  0
+                       },
+    "llama32-1b-q4km_fa0.plain":  {
+                                      "run.warm":  {
+                                                       "wall_s":  238.63,
+                                                       "prompt_tokens":  623,
+                                                       "prompt_s":  103.944,
+                                                       "prefill_tps":  6,
+                                                       "eval_tokens":  8,
+                                                       "decode_tps":  21.3,
+                                                       "load_s":  131.36,
+                                                       "response":  " ..., 299\n\n## Step 1"
+                                                   },
+                                      "run.short":  {
+                                                        "wall_s":  13.41,
+                                                        "prompt_tokens":  16,
+                                                        "prompt_s":  13.288,
+                                                        "prefill_tps":  1.2,
+                                                        "eval_tokens":  1,
+                                                        "decode_tps":  1000000000,
+                                                        "load_s":  0.11,
+                                                        "response":  " The"
+                                                    },
+                                      "run.long":  {
+                                                       "wall_s":  3.63,
+                                                       "prompt_tokens":  623,
+                                                       "prompt_s":  0.675,
+                                                       "prefill_tps":  923.5,
+                                                       "eval_tokens":  1,
+                                                       "decode_tps":  1000000000,
+                                                       "load_s":  0.11,
+                                                       "response":  " "
+                                                   },
+                                      "run.decode":  {
+                                                         "wall_s":  2.65,
+                                                         "prompt_tokens":  16,
+                                                         "prompt_s":  0.087,
+                                                         "prefill_tps":  183.4,
+                                                         "eval_tokens":  64,
+                                                         "decode_tps":  34.6,
+                                                         "load_s":  0.11,
+                                                         "response":  " Rome, also known as Roma, is a large and historic city located on the Tiber River in central Italy. It has been an important center of culture, politics, and religion for centuries.\n\nRome is situated in the region of Lazio, which is one of the 20 regions that make up Italy. The"
+                                                     },
+                                      "server_errors":  0
+                                  },
+    "qwen25-15b-q4km_fa0.plain":  {
+                                      "run.warm":  {
+                                                       "wall_s":  239.09,
+                                                       "prompt_tokens":  624,
+                                                       "prompt_s":  104.691,
+                                                       "prefill_tps":  6,
+                                                       "eval_tokens":  8,
+                                                       "decode_tps":  19.2,
+                                                       "load_s":  129.34,
+                                                       "response":  " 4, 5, 6"
+                                                   },
+                                      "run.short":  {
+                                                        "wall_s":  13.37,
+                                                        "prompt_tokens":  15,
+                                                        "prompt_s":  13.262,
+                                                        "prefill_tps":  1.1,
+                                                        "eval_tokens":  1,
+                                                        "decode_tps":  1000000000,
+                                                        "load_s":  0.09,
+                                                        "response":  " The"
+                                                    },
+                                      "run.long":  {
+                                                       "wall_s":  5.11,
+                                                       "prompt_tokens":  624,
+                                                       "prompt_s":  0.983,
+                                                       "prefill_tps":  634.6,
+                                                       "eval_tokens":  1,
+                                                       "decode_tps":  1000000000,
+                                                       "load_s":  0.09,
+                                                       "response":  " "
+                                                   },
+                                      "run.decode":  {
+                                                         "wall_s":  3.27,
+                                                         "prompt_tokens":  15,
+                                                         "prompt_s":  0.126,
+                                                         "prefill_tps":  119.4,
+                                                         "eval_tokens":  64,
+                                                         "decode_tps":  23.9,
+                                                         "load_s":  0.09,
+                                                         "response":  " The city of Rome, located on the Tiber River in central Italy, has a rich history dating back to ancient times and continues to be one of the most important cities in Europe today. It was founded by the Romans as their capital city around 753 BC.\n\nRome is known for its stunning architecture,"
+                                                     },
+                                      "server_errors":  0
+                                  }
+}
