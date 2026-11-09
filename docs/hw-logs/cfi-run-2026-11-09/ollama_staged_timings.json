@@ -1,0 +1,88 @@
+﻿{
+    "qwen_fa0.plain":  {
+                           "run.warm":  {
+                                            "wall_s":  112.14,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  48.461,
+                                            "prefill_tps":  12.9,
+                                            "eval_tokens":  8,
+                                            "decode_tps":  23.9,
+                                            "load_s":  62.7,
+                                            "response":  " 4, 5, 6"
+                                        },
+                           "run.short":  {
+                                             "wall_s":  6.34,
+                                             "prompt_tokens":  15,
+                                             "prompt_s":  6.235,
+                                             "prefill_tps":  2.4,
+                                             "eval_tokens":  1,
+                                             "decode_tps":  1000000000,
+                                             "load_s":  0.1,
+                                             "response":  " Paris"
+                                         },
+                           "run.long":  {
+                                            "wall_s":  0.45,
+                                            "prompt_tokens":  624,
+                                            "prompt_s":  0.092,
+                                            "prefill_tps":  6778.7,
+                                            "eval_tokens":  1,
+                                            "decode_tps":  1000000000,
+                                            "load_s":  0.09,
+                                            "response":  " "
+                                        },
+                           "run.decode":  {
+                                              "wall_s":  2.66,
+                                              "prompt_tokens":  15,
+                                              "prompt_s":  0.032,
+                                              "prefill_tps":  465.8,
+                                              "eval_tokens":  64,
+                                              "decode_tps":  38.5,
+                                              "load_s":  0.09,
+                                              "response":  " The capital of Italy, Rome, is a sprawling metropolis with a rich history and diverse culture that has shaped the nation for centuries. Here are some key aspects to consider:\n\n1. Location: Located on the Italian Peninsula, near the mouth of the Tiber River, Rome is situated at the heart of the Mediterranean Sea"
+                                          },
+                           "server_errors":  0
+                       },
+    "llama32-1b-q4km_fa0.plain":  {
+                                      "run.warm":  {
+                                                       "wall_s":  235.49,
+                                                       "prompt_tokens":  623,
+                                                       "prompt_s":  103.706,
+                                                       "prefill_tps":  6,
+                                                       "eval_tokens":  8,
+                                                       "decode_tps":  27.7,
+                                                       "load_s":  130.44,
+                                                       "response":  " ..., 299\n\n## Step 1"
+                                                   },
+                                      "run.short":  {
+                                                        "wall_s":  13.36,
+                                                        "prompt_tokens":  16,
+                                                        "prompt_s":  13.228,
+                                                        "prefill_tps":  1.2,
+                                                        "eval_tokens":  1,
+                                                        "decode_tps":  1000000000,
+                                                        "load_s":  0.11,
+                                                        "response":  " The"
+                                                    },
+                                      "run.long":  {
+                                                       "wall_s":  0.68,
+                                                       "prompt_tokens":  623,
+                                                       "prompt_s":  0.119,
+                                                       "prefill_tps":  5233.5,
+                                                       "eval_tokens":  1,
+                                                       "decode_tps":  1000000000,
+                                                       "load_s":  0.11,
+                                                       "response":  " "
+                                                   },
+                                      "run.decode":  {
+                                                         "wall_s":  2.26,
+                                                         "prompt_tokens":  16,
+                                                         "prompt_s":  0.039,
+                                                         "prefill_tps":  414.7,
+                                                         "eval_tokens":  64,
+                                                         "decode_tps":  45.2,
+                                                         "load_s":  0.11,
+                                                         "response":  " Rome, also known as Roma, is a city located on the coast of the Mediterranean Sea. It is situated in the central part of Italy and has been an important center for trade, culture, and politics since ancient times.\n\nRome\u0027s history dates back to around 753 BC when it was founded by Romulus and"
+                                                     },
+                                      "server_errors":  0
+                                  }
+}

@@ -1,0 +1,6 @@
+MODULE nvcuda.dll %USERPROFILE%\cfi-work\hwval\wr_install\nvcuda.dll
+MODULE cublas64_11.dll %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublas64_11.dll
+MODULE cublasLt64_11.dll %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublasLt64_11.dll
+MODULE cudnn64_8.dll %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\cudnn64_8.dll
+MODULE cudart64_110.dll %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\cudart64_110.dll
+matmul ok 878.236

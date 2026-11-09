@@ -3,6 +3,8 @@
 ## Status
 S1 is implemented: a SASS-only fatbin or a standalone cubin ELF (e_machine 190) prints a one-time error naming the SASS architectures and this page, and still returns CUDA_ERROR_NO_BINARY_FOR_GPU (209). `scripts/ptxscan.py` is in the repo.
 
+The error names the module that carries the image, once per module: `cfi_fatbin::offending_module` resolves the DLL whose mapped range holds the fatbin (`GetModuleHandleExW(FROM_ADDRESS)`; `dladdr` on Linux). For a heap copy, it uses the first caller on the stack that is neither our module nor a Windows system DLL (`RtlCaptureStackBackTrace`). Example: "`cublas64_12.dll` carries SASS only (sm_50, ...) and no PTX; use cuda-for-intel's stand-in for it (scripts/cfi.ps1 install) or start the program with cfi-run". Other modules, such as `torch_cuda.dll`, get the "use a PTX build" advice. Unit test: `cfi-fatbin` `sass_only_diagnostic_names_the_carrying_module_once` (synthetic SASS-only frame). Not yet confirmed on the box with torch's stock cuBLAS (roadmap item 5, GPU part).
+
 ## Verdict
 Translating SASS (cubin) to SPIR-V is **technically possible but not realistic** as a general path: ~6-12+ person-months for a narrow, unverified subset, per-arch (sm_75/80/86/89/90 each have different encodings), no PTX-style spec, and a ToS problem. The **realistic path is to avoid needing SASS**: PTX-carrying builds, own library stand-ins, and a clear diagnostic. Cheapest useful step: a PTX-less detector + diagnostic (prototype done, ~1 day to wire into the shim).
 
