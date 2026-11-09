@@ -105,12 +105,12 @@ try {
     $all = [ordered]@{}
     foreach ($m in ($Models -split ',')) {
         $mn = [IO.Path]::GetFileNameWithoutExtension($m)
-        foreach ($fa in ($Fa -split ',')) {
-            $tag = "${mn}_fa$fa"
+        foreach ($faOn in ($Fa -split ',')) {   # not $fa: PowerShell names are case-insensitive, $fa would overwrite -Fa
+            $tag = "${mn}_fa$faOn"
             # unary comma: a one-element @(@(a, b)) would flatten to a, b and the loop would see 'prof' and the hashtable separately
-            $modes = @(, @('prof', @{ CFI_PROFILE = '1'; CFI_PROFILE_OUT = "$Out\$tag.live.tsv"; CFI_PROFILE_FLUSH_MS = '100'; OLLAMA_FLASH_ATTENTION = $fa }))
+            $modes = @(, @('prof', @{ CFI_PROFILE = '1'; CFI_PROFILE_OUT = "$Out\$tag.live.tsv"; CFI_PROFILE_FLUSH_MS = '100'; OLLAMA_FLASH_ATTENTION = $faOn }))
             if ($NoProfiled) { $modes = @() }
-            if (-not $NoUnprofiled) { $modes = @(, @('plain', @{ OLLAMA_FLASH_ATTENTION = $fa })) + $modes }
+            if (-not $NoUnprofiled) { $modes = @(, @('plain', @{ OLLAMA_FLASH_ATTENTION = $faOn })) + $modes }
             foreach ($mode in $modes) {
                 $S = Start-Srv "${tag}_$($mode[0])" $mode[1]
                 $rec = [ordered]@{}
