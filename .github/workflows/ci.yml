@@ -43,6 +43,41 @@ jobs:
         run: "cargo test --locked --lib -p cuda-for-intel -- ptx::"
       - name: XMX interpreter and generators
         run: cargo test --locked -p cublas_shim
+  ptx-corpus-macos:
+    name: translator, simulator and ZLUDA vectors on macOS (corpus harness)
+    # The main crate does not build on macOS; the harness compiles src/ptx on its own.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - name: "src/ptx unit tests, including zluda_vector_tests"
+        run: cargo test --release --locked --manifest-path tests/ptx_corpus/harness/Cargo.toml
+      - name: PTX corpus matches expected_status.tsv
+        run: sh tests/ptx_corpus/run.sh
+  coverage-docs:
+    name: generated coverage docs are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ZLUDA (MIT OR Apache-2.0) is fetched here only, read as text, never built or committed.
+      # Bump the ref together with docs/zluda-parity.md and tests/ptx_corpus/zluda/vectors.tsv.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vosen/ZLUDA
+          ref: f4df215edbc3b6698a1c61ef7a8688fdff3872be
+          path: _zluda
+          persist-credentials: false
+      - name: docs/api-coverage.md matches the tree
+        run: |
+          python3 -I scripts/api_audit.py --check || { echo "stale: run python3 -I scripts/api_audit.py"; exit 1; }
+      - name: docs/zluda-parity.md section 1 matches the tree and pinned ZLUDA
+        run: python3 -I scripts/zluda_parity/parity.py _zluda . "$RUNNER_TEMP/parity" --check-doc
+      - name: tests/ptx_corpus/zluda/vectors.tsv matches pinned ZLUDA
+        run: |
+          python3 -I tests/ptx_corpus/import_zluda.py _zluda --vectors
+          git diff --exit-code -- tests/ptx_corpus/zluda/vectors.tsv
   lints:
     runs-on: ubuntu-latest
     steps:
