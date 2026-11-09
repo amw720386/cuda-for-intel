@@ -31,7 +31,7 @@ The shim translates PTX and never executes SASS, so PyTorch must ship PTX in its
    If a new wheel imports names that are missing, `import torch` fails with an unresolved import: regenerate the stubs.
 5. Set `CUDA_FOR_INTEL_HYBRID_DIR` to a directory holding the signed `nvcudart_hybrid64.dll` (see `docs/ollama.md` for hash and source;
    not bundled, you obtain it yourself). Set `CUDA_MODULE_LOADING=LAZY`.
-6. In your program: `torch.backends.cudnn.enabled = False` (there is no cuDNN backend; convolutions use ATen's native kernels).
+6. cuDNN shim (on by default): build `cargo build --release --locked -p cudnn_shim --features v8` (cu118 wheels; CUDA 12 builds use the default v9 flavour) and install the DLL as `cudnn64_8.dll` (v9: `cudnn64_9.dll`) next to the other shims. In your program, right after `import torch`, call `import cfi_torch; cfi_torch.install()` (`scripts/torch/cfi_torch.py`): it leaves `torch.backends.cudnn.enabled = True` and routes the calls the shim cannot run (3-D and fp64 convolution, RNN/LSTM/GRU, CTC loss) to ATen. `CFI_CUDNN=0` turns the shim path off (`torch.backends.cudnn.enabled = False`, ATen kernels everywhere). See [docs/cudnn-shim.md](cudnn-shim.md).
 
 ## Compute capability and attention (SDP) settings
 
@@ -75,7 +75,7 @@ cuda128: matmul, Linear, softmax, layer_norm, gelu, sum, conv2d forward and back
 
 - Two `complex<double>` foreach kernels do not translate. About 6 % of the entries in the probed cuda128 modules still fail
   (listed in `docs/torch-bringup.md`), and 61 of 308 cuda128 ATen modules were too large to probe within 15 minutes each.
-- cuDNN, NCCL, cuFFT and cuSOLVER paths are unavailable. The first use of a very large module takes tens of seconds
+- NCCL, cuFFT and cuSOLVER paths are unavailable; the cuDNN shim covers 2-D convolution and batch norm only ([docs/cudnn-shim.md](cudnn-shim.md)). The first use of a very large module takes tens of seconds
   (the translation cache removes this on later runs).
 - At process exit you may see `cuLibraryUnload 999` after Level Zero teardown; it is harmless.
 

@@ -89,7 +89,7 @@ What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a transl
 - **Speed.** Correctness first: the GPU path is currently slower than the CPU backend for the Qwen2.5-0.5B decode measured in the logs
   (logging off: 30 to 46 tok/s decode on the GPU vs 119 tok/s on the CPU backend, see [docs/hw-logs/perf-matrix.md](docs/hw-logs/perf-matrix.md); llama-bench tg128 18.3 tok/s with large variance). Do not expect native-Vulkan speed.
 - **Flash attention** kernels (`flash_attn_ext_*`) do not all translate (87 entries in the stock Ollama scan); disable flash attention.
-- **No cuDNN, NCCL, cuFFT, cuSOLVER.** Convolutions use PyTorch's native kernels (`torch.backends.cudnn.enabled = False`).
+- **No NCCL, cuFFT, cuSOLVER.** cuDNN is a partial shim: 2-D convolution and batch norm run on it (enabled by `cfi_torch.install()`, [docs/pytorch.md](docs/pytorch.md); hardware gate pending); everything else (3-D/fp64 convolution, RNN, CTC) falls back to PyTorch's native kernels ([docs/cudnn-shim.md](docs/cudnn-shim.md)).
 - **Not implemented:** SASS execution, VMM (`cuMemCreate` family reports no capability), multi-GPU peer access, conditional and memory-allocation graph nodes,
   texture/surface instructions.
 - **Numerics.** GPU and CPU outputs can differ at near-ties (2 of 12 greedy prompts diverged); Q8_0 perplexity is 0.11 % below CPU in one run, unexplained.
@@ -199,6 +199,9 @@ unless the description says otherwise. Defaults are taken from the source at thi
 | --- | --- | --- |
 | `CFI_NO_CACHE` | off | Set: disable the PTX-to-SPIR-V translation cache. |
 | `CFI_CACHE_DIR` | `%LOCALAPPDATA%\cuda-for-intel\spvcache` (Linux: `$XDG_CACHE_HOME` or `~/.cache`) | Location of the translation cache. Keyed by PTX hash, entry, versions and the `CFI_*` switches. |
+| `CFI_CUDNN` | on | Read by `scripts/torch/cfi_torch.py` (`cfi_torch.install()`): `0` sets `torch.backends.cudnn.enabled = False`, so ATen's own kernels run every convolution. |
+| `CFI_CUDNN_DIRECT` | off | `1`: the cuDNN shim skips the im2col + cuBLAS GEMM engine and uses its slower direct kernels. |
+| `CFI_CUDNN_WS_MB` | 256 | Column-buffer workspace budget of the cuDNN shim's GEMM engine, in MB. |
 | `CUDA_FOR_INTEL_CACHE` | on | `0`: disable the native (compiled module) binary cache. |
 | `CUDA_FOR_INTEL_CACHE_DIR` | `%LOCALAPPDATA%\cuda-for-intel\cache\v1` (Linux: `$XDG_CACHE_HOME` or `~/.cache`) | Location of the native binary cache. |
 | `CUDA_FOR_INTEL_CACHE_MAX_MB` | 4096 | Size cap of the native binary cache. |

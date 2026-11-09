@@ -77,6 +77,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cudnn_shim"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "cufft_shim"
 version = "0.1.0"
 

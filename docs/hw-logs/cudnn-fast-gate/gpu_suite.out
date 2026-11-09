@@ -1,0 +1,109 @@
+
+running 92 tests
+test asynchronous_stream_order_and_lifetimes ... ok
+test compiled_ptx_atomic_tickets ... ok
+test compiled_ptx_block_reduction ... ok
+test compiled_ptx_rmsnorm ... ok
+test compiled_ptx_vector_add ... ok
+test convert_unary::convert_unary_f32_half_roundtrip ... ok
+test ctaid::ctaid_yz_are_zero_for_1d_grid ... ok
+test device_memory_round_trip ... ok
+test discovery::resolved_primary_context_runs_multiple_module_entries ... ok
+test dp4a_all::dp4a_and_dp2a_match_the_reference_in_every_signedness ... ok
+test event_timing::event_elapsed_time_tracks_device_work ... ok
+test forge::dependent_forge_chain ... ok
+test forge::event_driver_api ... ok
+test forge::forge_transfer_pipeline ... ok
+test fp32_rounding_and_contraction ... ok
+test ggml::ggml_cuda_scale_clamp_chain ... ok
+test ggml::modern_integer_edges ... ok
+test ggml_dp4a::ggml_cuda_dp4a_smoke ... ok
+test ggml_half::ggml_cuda_half_roundtrip_f16 ... ok
+test ggml_norm::ggml_cuda_norm_f32_li32 ... ok
+test ggml_q8_0::ggml_cuda_q8_0_vec_dot_f32 ... ok
+test ggml_q8_0_auth::ggml_cuda_q8_0_auth_f32 ... ok
+test ggml_quantize_q8_1::ggml_cuda_quantize_q8_1_matches_host ... ok
+test ggml_rms_norm::ggml_cuda_rms_norm_f32_li32 ... ok
+test ggml_rope::ggml_cuda_rope_norm_f32 ... ok
+test graph_capture::captured_copy_memset_kernel_graph_replays_and_updates ... ok
+test graph_capture::captured_fork_join_preserves_dependencies_on_hardware ... ok
+test hgemm::cublas_hgemm_tn_small_matches_cpu ... ok
+test hw_cublas_batched::hw_gqa_batched_f16_gemm_failing_shapes ... ok
+test hw_cublas_batched::hw_gqa_ptr_table_then_gemm_back_to_back_on_a_stream ... ok
+test hw_cublas_batched::hw_k_compute_batched_ptrs_broadcast_tables ... ok
+test hw_cudnn::hw_cudnn_dense ... ok
+test hw_float::hw_cvt_float_to_integral_float_and_int_rounding ... ok
+test hw_float::hw_cvt_int_to_float_and_half_conversions ... ok
+test hw_float::hw_cvt_sat_and_ftz_variants ... ok
+test hw_float::hw_directed_rounding_add_sub_mul_rz_rm_rp ... ok
+test hw_float::hw_directed_rounding_regressions ... ok
+test hw_ggml::hw_ggml_bin_bcast_add_f32_broadcast ... ok
+test hw_ggml::hw_ggml_dequantize_block_q8_0_to_half ... ok
+test hw_ggml::hw_ggml_get_rows_float_batched ... ok
+test hw_ggml::hw_ggml_mul_mat_vec_q8_0_q8_1 ... ok
+test hw_ggml_stock::hw_stock_ggml_kernels_compile ... ok
+test hw_launch_stress::hw_big_dispatch_loop_unsynchronised ... ok
+test hw_launch_stress::hw_launch_stress_sync_intervals_do_not_leak_or_exhaust ... ok
+test hw_mma::hw_ldmatrix_all_counts_and_trans ... ok
+test hw_mma::hw_ldmatrix_generic_pointer_without_shared_qualifier ... ok
+test hw_mma::hw_mma_f16_f32_accumulate ... ok
+test hw_mma::hw_mma_int8_all_shapes_all_signedness ... ok
+test hw_round2::hw_atomics_32bit_all_ops_global_and_shared ... ok
+test hw_round2::hw_atomics_64bit_all_ops_global_and_shared ... ok
+test hw_round2::hw_device_count_probe ... ok
+test hw_round2::hw_exited_threads_do_not_deadlock_bar_sync ... ok
+test hw_round2::hw_level_zero_device_supports_subgroup_size_32 ... ok
+test hw_round2::hw_shared_alignment_32_64_128 ... ok
+test hw_round2::hw_special_registers_have_sensible_values ... ok
+test hw_subst::hw_subst_native_vs_translated ... FAILED
+test hw_tier2::hw_approximate_math_error_bounds ... ok
+test hw_tier2::hw_atomics_64bit_and_f64_under_heavy_contention ... ok
+test hw_tier2::hw_cp_async_copies_through_shared_memory ... ok
+test hw_tier2::hw_f16_and_bf16_scalar_arithmetic ... ok
+test hw_tier2::hw_f64_arithmetic_matches_cpu ... ok
+test hw_tier2::hw_f64_conversions_match_cpu ... ok
+test hw_tier2::hw_packed_half2_arithmetic ... ok
+test hw_tier2::hw_redux_match_vote_elect ... ok
+test hw_tier2::hw_wmma_m16n16k16_f16_f32 ... ok
+test hw_warp::hw_aligned_global_loads_and_stores_all_widths ... ok
+test hw_warp::hw_atom_add_f32_shared ... ok
+test hw_warp::hw_atomic_add_f32_global_return_value ... ok
+test hw_warp::hw_bar_sync_orders_shared_memory_across_warps ... ok
+test hw_warp::hw_red_add_f32_global ... ok
+test hw_warp::hw_shared_symbols_honor_declared_alignment_for_v4 ... ok
+test hw_warp::hw_shfl_idx_up_down_with_clamp_and_segments ... ok
+test hw_warp::hw_subgroup_is_32_lanes_laneid_ballot_activemask ... ok
+test hw_warp::hw_vote_ballot_all_any_and_divergent_activemask ... ok
+test hw_xmx_gemm::hw_xmx_gemm_table ... ok
+test hw_xmx_gemm::hw_xmx_perf ... ok
+test hw_xmx_gemm::hw_xmx_probe ... ok
+test isolation::multi_device_context_isolation ... ok
+test isolation::same_device_context_isolation ... ok
+test module_globals::module_globals_initializers_copies_and_kernel_access ... ok
+test ollama::ggml_cuda_add_f32 ... ok
+test param_words::aggregate_param_offset16_roundtrip ... ok
+test pinned::pinned_async_transfers ... ok
+test pinned::pinned_partial_then_full_copy ... ok
+test progress::event_linked_transfers_make_progress_without_synchronize ... ok
+test quantize_warp_ops::quantize_warp_ops_no_device_lost ... ok
+test redux::redux_sync_add_sums_warp ... ok
+test sgemm_attn::sgemm_tn_attn_qk_matches_cpu ... ok
+test shfl::shfl_sync_bfly_reverses_warp_lanes ... ok
+test shr_s64::shr_s64_signed_div32 ... ok
+test soft_max_generic::soft_max_generic_ncols12_matches_cpu ... ok
+test store_u8::store_u8_and_v2_u16_roundtrip ... ok
+
+failures:
+
+---- hw_subst::hw_subst_native_vs_translated stdout ----
+
+thread 'hw_subst::hw_subst_native_vs_translated' (11304) panicked at tests\gpu\hw_subst.rs:204:52:
+CFI_STOCK_GGML_DLL: NotPresent
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    hw_subst::hw_subst_native_vs_translated
+
+test result: FAILED. 91 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 153.48s
+

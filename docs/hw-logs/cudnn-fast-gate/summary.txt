@@ -1,0 +1,14 @@
+resnet cudnn 112 rc=0
+resnet aten 112 rc=0
+resnet cudnn 224 rc=0
+resnet aten 224 rc=0
+direct repro rc=0
+cudnn conv1 rc=0
+gpu suite rc=99
+resnet cudnn 112 rc=0
+resnet aten 112 rc=0
+resnet cudnn 224 rc=0
+resnet aten 224 rc=0
+no-workspace sweep (fp32 nchw) rc=0
+default sweep (fp32 nchw) rc=0
+gpu suite rc=101

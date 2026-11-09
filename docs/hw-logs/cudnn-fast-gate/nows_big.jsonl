@@ -1,0 +1,14 @@
+{"name": "r18_conv1_7x7s2|fp32|nchw", "mode": "cudnn", "N": 8, "error": "RuntimeError('GET was unable to find an engine to execute this computation')"}
+{"name": "r18_3x3_64_56|fp32|nchw", "mode": "cudnn", "N": 8, "error": "RuntimeError('GET was unable to find an engine to execute this computation')"}
+{"name": "r18_3x3s2_64to128|fp32|nchw", "mode": "cudnn", "N": 8, "error": "RuntimeError('GET was unable to find an engine to execute this computation')"}
+{"name": "r18_3x3_128_28|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 1.8636148730798237e-13, "nmse_dx": 8.599787393480277e-14, "nmse_dw": 0.0, "fwd_ms": 3.5536650015274063, "fwdbwd_ms": 11.088645001291297}
+{"name": "r18_1x1s2_down|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 0.0, "nmse_dx": 0.0, "nmse_dw": 5.518681770832246e-13, "fwd_ms": 0.32303000043611974, "fwdbwd_ms": 1.0816199996042997}
+{"name": "r18_3x3_256_14|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 2.588092228874769e-13, "nmse_dx": 1.6173419971585367e-13, "nmse_dw": 0.0, "fwd_ms": 2.6149699988309294, "fwdbwd_ms": 10.257609997643158}
+{"name": "r18_3x3_512_7|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 3.375495131251346e-13, "nmse_dx": 2.398140132100301e-13, "nmse_dw": 0.0, "fwd_ms": 3.0691649997606874, "fwdbwd_ms": 10.993155001779087}
+{"name": "r50_1x1_256to64_56|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 7.472923723161136e-14, "nmse_dx": 0.0, "nmse_dw": 2.1402942401100735e-12, "fwd_ms": 1.5749649988720194, "fwdbwd_ms": 6.14796000008937}
+{"name": "r50_1x1_256to1024_14|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 7.499450984256411e-14, "nmse_dx": 3.5713234788591867e-13, "nmse_dw": 1.3087222589434054e-13, "fwd_ms": 1.1602750018937513, "fwdbwd_ms": 4.250509999110363}
+{"name": "dw3x3_64_56|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 0.0, "nmse_dx": 3.724171995729267e-15, "nmse_dw": 1.1693433197417864e-12, "fwd_ms": 0.3896350011928007, "fwdbwd_ms": 1.896739998483099}
+{"name": "dw3x3s2_128_28|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 0.0, "nmse_dx": 1.4872774371941823e-15, "nmse_dw": 1.3788397196701512e-13, "fwd_ms": 0.0534399994648993, "fwdbwd_ms": 0.4334299999754876}
+{"name": "group4_3x3_128_28|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 8.592608503715182e-14, "nmse_dx": 0.0, "nmse_dw": 0.0, "fwd_ms": 1.3245450012618676, "fwdbwd_ms": 4.950725001981482}
+{"name": "convT_k4s2_64to32_32|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 3.938124863115905e-14, "nmse_dx": 1.5572876949536284e-13, "nmse_dw": 0.0, "fwd_ms": 1.2808150000637397, "fwdbwd_ms": 4.108909997739829}
+{"name": "convT_k2s2_128to64_28|fp32|nchw", "mode": "cudnn", "N": 8, "nmse_y": 0.0, "nmse_dx": 5.4918820113184834e-14, "nmse_dw": 0.0, "fwd_ms": 0.9302349993959069, "fwdbwd_ms": 3.0400299991015345}
