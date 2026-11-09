@@ -39,7 +39,7 @@ Behaviour notes for the entry points that are not plain forwards:
 | cuBLASLt | 45 | 17 | 28 | 0 | 0 | 11 (11/0/0) |
 | NVML | 398 | 33 | 365 | 0 | 0 | 0 (0/0/0) |
 | cuFFT | 60 | 38 | 22 | 0 | 0 | 7 (7/0/0) |
-| cuSPARSE | 448 | 4 | 444 | 0 | 0 | 98 (1/97/0) |
+| cuSPARSE | 448 | 81 | 367 | 0 | 0 | 98 (36/62/0) |
 | cuSOLVER | 97 | 0 | 97 | 0 | 0 | 97 (0/97/0) |
 
 ## CUDA driver API (cuda.h)
@@ -2247,20 +2247,20 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseCnnz` | stub | core |  |
 | `cusparseCnnz_compress` | stub | core |  |
 | `cusparseConstBlockedEllGet` | stub | core |  |
-| `cusparseConstCooGet` | stub | core |  |
-| `cusparseConstCscGet` | stub | core |  |
-| `cusparseConstCsrGet` | stub | core |  |
-| `cusparseConstDnMatGet` | stub | core |  |
-| `cusparseConstDnMatGetValues` | stub | core |  |
-| `cusparseConstDnVecGet` | stub | core |  |
-| `cusparseConstDnVecGetValues` | stub | core |  |
-| `cusparseConstSpMatGetValues` | stub | core |  |
+| `cusparseConstCooGet` | implemented | core |  |
+| `cusparseConstCscGet` | implemented | core |  |
+| `cusparseConstCsrGet` | implemented | core |  |
+| `cusparseConstDnMatGet` | implemented | core |  |
+| `cusparseConstDnMatGetValues` | implemented | core |  |
+| `cusparseConstDnVecGet` | implemented | core |  |
+| `cusparseConstDnVecGetValues` | implemented | core |  |
+| `cusparseConstSpMatGetValues` | implemented | core |  |
 | `cusparseConstSpVecGet` | stub | core |  |
 | `cusparseConstSpVecGetValues` | stub | core |  |
-| `cusparseCooGet` | stub | core |  |
-| `cusparseCooSetPointers` | stub | core |  |
-| `cusparseCooSetStridedBatch` | stub | core |  |
-| `cusparseCreate` | stub | core | yes |
+| `cusparseCooGet` | implemented | core |  |
+| `cusparseCooSetPointers` | implemented | core |  |
+| `cusparseCooSetStridedBatch` | implemented | core |  |
+| `cusparseCreate` | implemented | core | yes |
 | `cusparseCreateBlockedEll` | stub | core |  |
 | `cusparseCreateBsr` | stub | core |  |
 | `cusparseCreateBsric02Info` | stub | core |  |
@@ -2270,33 +2270,33 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseCreateColorInfo` | stub | core |  |
 | `cusparseCreateConstBlockedEll` | stub | core |  |
 | `cusparseCreateConstBsr` | stub | core |  |
-| `cusparseCreateConstCoo` | stub | core |  |
-| `cusparseCreateConstCsc` | stub | core |  |
-| `cusparseCreateConstCsr` | stub | core |  |
-| `cusparseCreateConstDnMat` | stub | core |  |
-| `cusparseCreateConstDnVec` | stub | core |  |
+| `cusparseCreateConstCoo` | implemented | core |  |
+| `cusparseCreateConstCsc` | implemented | core |  |
+| `cusparseCreateConstCsr` | implemented | core |  |
+| `cusparseCreateConstDnMat` | implemented | core |  |
+| `cusparseCreateConstDnVec` | implemented | core |  |
 | `cusparseCreateConstSlicedEll` | stub | core |  |
 | `cusparseCreateConstSpVec` | stub | core |  |
-| `cusparseCreateCoo` | stub | core | yes |
-| `cusparseCreateCsc` | stub | core |  |
-| `cusparseCreateCsr` | stub | core | yes |
+| `cusparseCreateCoo` | implemented | core | yes |
+| `cusparseCreateCsc` | implemented | core |  |
+| `cusparseCreateCsr` | implemented | core | yes |
 | `cusparseCreateCsric02Info` | stub | core |  |
 | `cusparseCreateCsrilu02Info` | stub | core |  |
 | `cusparseCreateCsru2csrInfo` | stub | core |  |
-| `cusparseCreateDnMat` | stub | core | yes |
-| `cusparseCreateDnVec` | stub | core | yes |
-| `cusparseCreateIdentityPermutation` | stub | core | yes |
-| `cusparseCreateMatDescr` | stub | core | yes |
+| `cusparseCreateDnMat` | implemented | core | yes |
+| `cusparseCreateDnVec` | implemented | core | yes |
+| `cusparseCreateIdentityPermutation` | implemented | core | yes |
+| `cusparseCreateMatDescr` | implemented | core | yes |
 | `cusparseCreatePruneInfo` | stub | core |  |
 | `cusparseCreateSlicedEll` | stub | core |  |
 | `cusparseCreateSpVec` | stub | core |  |
-| `cusparseCscGet` | stub | core |  |
-| `cusparseCscSetPointers` | stub | core |  |
+| `cusparseCscGet` | implemented | core |  |
+| `cusparseCscSetPointers` | implemented | core |  |
 | `cusparseCsr2cscEx2` | stub | core |  |
 | `cusparseCsr2cscEx2_bufferSize` | stub | core |  |
-| `cusparseCsrGet` | stub | core |  |
-| `cusparseCsrSetPointers` | stub | core | yes |
-| `cusparseCsrSetStridedBatch` | stub | core | yes |
+| `cusparseCsrGet` | implemented | core |  |
+| `cusparseCsrSetPointers` | implemented | core | yes |
+| `cusparseCsrSetStridedBatch` | implemented | core | yes |
 | `cusparseDbsr2csr` | stub | core |  |
 | `cusparseDbsric02` | stub | core |  |
 | `cusparseDbsric02_analysis` | stub | core |  |
@@ -2307,8 +2307,8 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseDbsrilu02_bufferSize` | stub | core |  |
 | `cusparseDbsrilu02_bufferSizeExt` | stub | core |  |
 | `cusparseDbsrilu02_numericBoost` | stub | core |  |
-| `cusparseDbsrmm` | stub | core | yes |
-| `cusparseDbsrmv` | stub | core | yes |
+| `cusparseDbsrmm` | implemented | core | yes |
+| `cusparseDbsrmv` | implemented | core | yes |
 | `cusparseDbsrsm2_analysis` | stub | core | yes |
 | `cusparseDbsrsm2_bufferSize` | stub | core | yes |
 | `cusparseDbsrsm2_bufferSizeExt` | stub | core |  |
@@ -2341,7 +2341,7 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseDenseToSparse_analysis` | stub | core |  |
 | `cusparseDenseToSparse_bufferSize` | stub | core |  |
 | `cusparseDenseToSparse_convert` | stub | core |  |
-| `cusparseDestroy` | stub | core | yes |
+| `cusparseDestroy` | implemented | core | yes |
 | `cusparseDestroyBsric02Info` | stub | core |  |
 | `cusparseDestroyBsrilu02Info` | stub | core |  |
 | `cusparseDestroyBsrsm2Info` | stub | core | yes |
@@ -2350,11 +2350,11 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseDestroyCsric02Info` | stub | core |  |
 | `cusparseDestroyCsrilu02Info` | stub | core |  |
 | `cusparseDestroyCsru2csrInfo` | stub | core |  |
-| `cusparseDestroyDnMat` | stub | core | yes |
-| `cusparseDestroyDnVec` | stub | core | yes |
-| `cusparseDestroyMatDescr` | stub | core | yes |
+| `cusparseDestroyDnMat` | implemented | core | yes |
+| `cusparseDestroyDnVec` | implemented | core | yes |
+| `cusparseDestroyMatDescr` | implemented | core | yes |
 | `cusparseDestroyPruneInfo` | stub | core |  |
-| `cusparseDestroySpMat` | stub | core | yes |
+| `cusparseDestroySpMat` | implemented | core | yes |
 | `cusparseDestroySpVec` | stub | core |  |
 | `cusparseDgebsr2csr` | stub | core |  |
 | `cusparseDgebsr2gebsc` | stub | core |  |
@@ -2375,14 +2375,14 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseDgtsv2_nopivot_bufferSizeExt` | stub | core |  |
 | `cusparseDgtsvInterleavedBatch` | stub | core |  |
 | `cusparseDgtsvInterleavedBatch_bufferSizeExt` | stub | core |  |
-| `cusparseDnMatGet` | stub | core |  |
-| `cusparseDnMatGetStridedBatch` | stub | core |  |
-| `cusparseDnMatGetValues` | stub | core |  |
-| `cusparseDnMatSetStridedBatch` | stub | core | yes |
-| `cusparseDnMatSetValues` | stub | core |  |
-| `cusparseDnVecGet` | stub | core |  |
-| `cusparseDnVecGetValues` | stub | core |  |
-| `cusparseDnVecSetValues` | stub | core |  |
+| `cusparseDnMatGet` | implemented | core |  |
+| `cusparseDnMatGetStridedBatch` | implemented | core |  |
+| `cusparseDnMatGetValues` | implemented | core |  |
+| `cusparseDnMatSetStridedBatch` | implemented | core | yes |
+| `cusparseDnMatSetValues` | implemented | core |  |
+| `cusparseDnVecGet` | implemented | core |  |
+| `cusparseDnVecGetValues` | implemented | core |  |
+| `cusparseDnVecSetValues` | implemented | core |  |
 | `cusparseDnnz` | stub | core |  |
 | `cusparseDnnz_compress` | stub | core |  |
 | `cusparseDpruneCsr2csr` | stub | core |  |
@@ -2400,13 +2400,13 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseGather` | stub | core |  |
 | `cusparseGetErrorName` | implemented | core |  |
 | `cusparseGetErrorString` | implemented | core | yes |
-| `cusparseGetMatDiagType` | stub | core |  |
-| `cusparseGetMatFillMode` | stub | core |  |
-| `cusparseGetMatIndexBase` | stub | core |  |
-| `cusparseGetMatType` | stub | core |  |
-| `cusparseGetPointerMode` | stub | core |  |
+| `cusparseGetMatDiagType` | implemented | core |  |
+| `cusparseGetMatFillMode` | implemented | core |  |
+| `cusparseGetMatIndexBase` | implemented | core |  |
+| `cusparseGetMatType` | implemented | core |  |
+| `cusparseGetPointerMode` | implemented | core |  |
 | `cusparseGetProperty` | implemented | core |  |
-| `cusparseGetStream` | stub | core |  |
+| `cusparseGetStream` | implemented | core |  |
 | `cusparseGetVersion` | implemented | core |  |
 | `cusparseLoggerForceDisable` | stub | core |  |
 | `cusparseLoggerOpenFile` | stub | core |  |
@@ -2415,9 +2415,9 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseLoggerSetLevel` | stub | core |  |
 | `cusparseLoggerSetMask` | stub | core |  |
 | `cusparseRot` | stub | core |  |
-| `cusparseSDDMM` | stub | core | yes |
-| `cusparseSDDMM_bufferSize` | stub | core | yes |
-| `cusparseSDDMM_preprocess` | stub | core | yes |
+| `cusparseSDDMM` | implemented | core | yes |
+| `cusparseSDDMM_bufferSize` | implemented | core | yes |
+| `cusparseSDDMM_preprocess` | implemented | core | yes |
 | `cusparseSbsr2csr` | stub | core |  |
 | `cusparseSbsric02` | stub | core |  |
 | `cusparseSbsric02_analysis` | stub | core |  |
@@ -2428,8 +2428,8 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseSbsrilu02_bufferSize` | stub | core |  |
 | `cusparseSbsrilu02_bufferSizeExt` | stub | core |  |
 | `cusparseSbsrilu02_numericBoost` | stub | core |  |
-| `cusparseSbsrmm` | stub | core | yes |
-| `cusparseSbsrmv` | stub | core | yes |
+| `cusparseSbsrmm` | implemented | core | yes |
+| `cusparseSbsrmv` | implemented | core | yes |
 | `cusparseSbsrsm2_analysis` | stub | core | yes |
 | `cusparseSbsrsm2_bufferSize` | stub | core | yes |
 | `cusparseSbsrsm2_bufferSizeExt` | stub | core |  |
@@ -2460,12 +2460,12 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseScsrilu02_numericBoost` | stub | core |  |
 | `cusparseScsru2csr` | stub | core |  |
 | `cusparseScsru2csr_bufferSizeExt` | stub | core |  |
-| `cusparseSetMatDiagType` | stub | core | yes |
-| `cusparseSetMatFillMode` | stub | core | yes |
-| `cusparseSetMatIndexBase` | stub | core | yes |
-| `cusparseSetMatType` | stub | core | yes |
-| `cusparseSetPointerMode` | stub | core | yes |
-| `cusparseSetStream` | stub | core | yes |
+| `cusparseSetMatDiagType` | implemented | core | yes |
+| `cusparseSetMatFillMode` | implemented | core | yes |
+| `cusparseSetMatIndexBase` | implemented | core | yes |
+| `cusparseSetMatType` | implemented | core | yes |
+| `cusparseSetPointerMode` | implemented | core | yes |
+| `cusparseSetStream` | implemented | core | yes |
 | `cusparseSgebsr2csr` | stub | core |  |
 | `cusparseSgebsr2gebsc` | stub | core |  |
 | `cusparseSgebsr2gebsc_bufferSize` | stub | core |  |
@@ -2498,23 +2498,23 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseSpGEMMreuse_copy` | stub | core |  |
 | `cusparseSpGEMMreuse_nnz` | stub | core |  |
 | `cusparseSpGEMMreuse_workEstimation` | stub | core |  |
-| `cusparseSpMM` | stub | core | yes |
+| `cusparseSpMM` | implemented | core | yes |
 | `cusparseSpMMOp` | stub | core |  |
 | `cusparseSpMMOp_createPlan` | stub | core |  |
 | `cusparseSpMMOp_destroyPlan` | stub | core |  |
-| `cusparseSpMM_bufferSize` | stub | core | yes |
-| `cusparseSpMM_preprocess` | stub | core |  |
-| `cusparseSpMV` | stub | core | yes |
-| `cusparseSpMV_bufferSize` | stub | core | yes |
-| `cusparseSpMV_preprocess` | stub | core |  |
-| `cusparseSpMatGetAttribute` | stub | core |  |
-| `cusparseSpMatGetFormat` | stub | core |  |
-| `cusparseSpMatGetIndexBase` | stub | core |  |
-| `cusparseSpMatGetSize` | stub | core | yes |
-| `cusparseSpMatGetStridedBatch` | stub | core |  |
-| `cusparseSpMatGetValues` | stub | core |  |
-| `cusparseSpMatSetAttribute` | stub | core | yes |
-| `cusparseSpMatSetValues` | stub | core |  |
+| `cusparseSpMM_bufferSize` | implemented | core | yes |
+| `cusparseSpMM_preprocess` | implemented | core |  |
+| `cusparseSpMV` | implemented | core | yes |
+| `cusparseSpMV_bufferSize` | implemented | core | yes |
+| `cusparseSpMV_preprocess` | implemented | core |  |
+| `cusparseSpMatGetAttribute` | implemented | core |  |
+| `cusparseSpMatGetFormat` | implemented | core |  |
+| `cusparseSpMatGetIndexBase` | implemented | core |  |
+| `cusparseSpMatGetSize` | implemented | core | yes |
+| `cusparseSpMatGetStridedBatch` | implemented | core |  |
+| `cusparseSpMatGetValues` | implemented | core |  |
+| `cusparseSpMatSetAttribute` | implemented | core | yes |
+| `cusparseSpMatSetValues` | implemented | core |  |
 | `cusparseSpSM_analysis` | stub | core | yes |
 | `cusparseSpSM_bufferSize` | stub | core | yes |
 | `cusparseSpSM_createDescr` | stub | core | yes |
@@ -2551,14 +2551,14 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseXbsrilu02_zeroPivot` | stub | core |  |
 | `cusparseXbsrsm2_zeroPivot` | stub | core | yes |
 | `cusparseXbsrsv2_zeroPivot` | stub | core | yes |
-| `cusparseXcoo2csr` | stub | core | yes |
+| `cusparseXcoo2csr` | implemented | core | yes |
 | `cusparseXcoosortByColumn` | stub | core |  |
 | `cusparseXcoosortByRow` | stub | core | yes |
 | `cusparseXcoosort_bufferSizeExt` | stub | core | yes |
 | `cusparseXcscsort` | stub | core |  |
 | `cusparseXcscsort_bufferSizeExt` | stub | core |  |
 | `cusparseXcsr2bsrNnz` | stub | core |  |
-| `cusparseXcsr2coo` | stub | core |  |
+| `cusparseXcsr2coo` | implemented | core |  |
 | `cusparseXcsr2gebsrNnz` | stub | core |  |
 | `cusparseXcsrgeam2Nnz` | stub | core | yes |
 | `cusparseXcsric02_zeroPivot` | stub | core |  |
