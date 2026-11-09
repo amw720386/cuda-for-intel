@@ -30,7 +30,9 @@ param(
     [string]$Id = 'cfi-profile',
     [switch]$NoQueue,
     [switch]$NoUnprofiled,
-    [switch]$NoProfiled       # timings only (e.g. a shim build without CFI_PROFILE)
+    [switch]$NoProfiled,      # timings only (e.g. a shim build without CFI_PROFILE)
+    [string]$Launcher = '',   # start the server through this program, e.g. cfi-run.exe (the tree then needs no shim DLLs)
+    [string]$LauncherArgs = ''   # launcher options placed before `-- ollama.exe serve` (for cfi-run, set CFI_REDIRECT_DIR instead of --install-dir)
 )
 $ErrorActionPreference = 'Continue'
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -53,7 +55,9 @@ function Start-Srv([string]$Tag, [hashtable]$E) {
     $saved = @{}
     foreach ($h in @($base, $ExtraEnv, $E)) { foreach ($k in $h.Keys) { if (-not $saved.ContainsKey($k)) { $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process') }; [Environment]::SetEnvironmentVariable($k, [string]$h[$k], 'Process') } }
     $exe = Join-Path $Tree 'ollama.exe'
-    $p = Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $wd -FilePath $exe -ArgumentList 'serve' -RedirectStandardOutput "$wd\o.txt" -RedirectStandardError "$wd\e.txt"
+    $file = $exe; $al = 'serve'
+    if ($Launcher) { $file = $Launcher; $al = "$LauncherArgs -- `"$exe`" serve".Trim() }
+    $p = Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $wd -FilePath $file -ArgumentList $al -RedirectStandardOutput "$wd\o.txt" -RedirectStandardError "$wd\e.txt"
     foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
     $up = $false
     for ($i = 0; $i -lt 40 -and -not $up; $i++) { Start-Sleep 2; if ((Get-Content "$wd\e.txt" -Raw -ErrorAction SilentlyContinue) -match "Listening on 127\.0\.0\.1:$port") { $up = $true } elseif ($p.HasExited) { break } }
