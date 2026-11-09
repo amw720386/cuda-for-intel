@@ -250,6 +250,8 @@ struct Lane {
     pc: usize,
     done: bool,
     waiting: bool,
+    /// Function-storage variables (destinations of 2D block loads).
+    locals: HashMap<Word, V>,
 }
 
 fn as_i(v: &V) -> u64 {
@@ -330,6 +332,9 @@ fn step(p: &Prog, lane: &mut Lane, mem: &mut Mem, params: &[V], wg: [u64; 3], li
                     BuiltIn::LocalInvocationId => V::Vec(vec![V::I(lid), V::I(0), V::I(0)]),
                     b => panic!("builtin {b:?}"),
                 };
+                set!(v);
+            } else if let Some(v) = lane.locals.get(&id(&o[0])) {
+                let v = v.clone();
                 set!(v);
             } else {
                 let ptr = as_i(&g(lane, 0));
@@ -457,6 +462,51 @@ fn step(p: &Prog, lane: &mut Lane, mem: &mut Mem, params: &[V], wg: [u64; 3], li
             lane.pc -= 1; // re-executed by the rendezvous
             lane.waiting = true;
         }
+        Op::Variable => {
+            lane.locals.insert(inst.result_id.unwrap(), V::Vec(Vec::new()));
+        }
+        Op::Subgroup2DBlockLoadINTEL | Op::Subgroup2DBlockLoadTransformINTEL | Op::Subgroup2DBlockLoadTransposeINTEL => {
+            // Operands: element size, block width, block height, count, base, surface width
+            // (bytes), surface height, pitch (bytes), coordinate (x in elements, y in rows), dst.
+            let (es, bw, bh) = (as_i(&g(lane, 0)) as usize, as_i(&g(lane, 1)) as usize, as_i(&g(lane, 2)) as usize);
+            assert_eq!(as_i(&g(lane, 3)), 1, "block count");
+            let base = as_i(&g(lane, 4));
+            let (sw, sh, pitch) = (as_i(&g(lane, 5)) as usize, as_i(&g(lane, 6)) as usize, as_i(&g(lane, 7)) as usize);
+            let (cx, cy) = match g(lane, 8) {
+                V::Vec(v) => (as_i(&v[0]) as usize, as_i(&v[1]) as usize),
+                other => panic!("coordinate {other:?}"),
+            };
+            // Hardware rules the generator relies on.
+            assert!(sw % 4 == 0 && sw >= 64 && pitch % 16 == 0 && pitch >= sw, "surface width {sw} pitch {pitch}");
+            assert!(base % 4 == 0, "surface base {base:#x}");
+            assert!((cx * es) % 4 == 0, "x coordinate {cx} not dword aligned");
+            // Element (row y, column x) of the surface; zero outside it.
+            let elem = |mem: &Mem, y: usize, x: usize| -> u64 {
+                if y >= sh || (x + 1) * es > sw {
+                    return 0;
+                }
+                let b = mem.read(base + (y * pitch + x * es) as u64, es);
+                b.iter().enumerate().fold(0u64, |acc, (i, &v)| acc | (v as u64) << (8 * i))
+            };
+            let l = lid as usize;
+            let v: Vec<V> = match op {
+                Op::Subgroup2DBlockLoadINTEL => {
+                    assert!(es == 2 && bw == 16 && bh == 8, "plain load shape");
+                    (0..bh).map(|r| V::I(elem(mem, cy + r, cx + l))).collect()
+                }
+                Op::Subgroup2DBlockLoadTransposeINTEL => {
+                    assert!(es == 4 && bw == 8 && bh == 16, "transpose load shape");
+                    (0..bw).map(|c| V::I(elem(mem, cy + l, cx + c))).collect()
+                }
+                _ => {
+                    assert!(es == 2 && bw == 16 && bh == 16, "transform load shape");
+                    (0..bh / 2)
+                        .map(|p| V::I(elem(mem, cy + 2 * p, cx + l) | elem(mem, cy + 2 * p + 1, cx + l) << 16))
+                        .collect()
+                }
+            };
+            lane.locals.insert(id(&o[9]), V::Vec(v));
+        }
         Op::SelectionMerge | Op::LoopMerge => {}
         Op::Branch => {
             let t = id(&o[0]);
@@ -557,7 +607,7 @@ pub fn run(words: &[u32], args: &[Arg], grid: (u32, u32, u32), mem: &mut Mem) {
                         for (pid, v) in p.params.iter().zip(&params) {
                             regs[*pid as usize] = Some(v.clone());
                         }
-                        Lane { regs, blk: 0, pc: 0, done: false, waiting: false }
+                        Lane { regs, blk: 0, pc: 0, done: false, waiting: false, locals: HashMap::new() }
                     })
                     .collect();
                 let mut guard = 0u64;
@@ -623,6 +673,12 @@ mod tests {
         tile: (u32, u32),
         pad: usize,
         flags: Flags,
+        /// CUBLAS_COMPUTE_16F: f16 scalars, `opts.acc16` set (f16 in/out only).
+        acc16: bool,
+        /// Pointer-table operands start 2 bytes past a 256-byte boundary (ggml views).
+        misalign: bool,
+        /// Use the 2D block variant with this many K steps per iteration.
+        blk: Option<u32>,
     }
 
     fn dt_of(t: Ty) -> DType {
@@ -668,7 +724,7 @@ mod tests {
             a: in_dt,
             b: in_dt,
             c: out_dt,
-            scalar: ScalarKind::F32,
+            scalar: if c.acc16 { ScalarKind::F16 } else { ScalarKind::F32 },
         };
         let (ea, eb, ec) = (lda * cols_a, ldb * cols_b, ldc * c.n);
         // Distinct matrices per batch entry; the pointer variant broadcasts A across the batch.
@@ -738,7 +794,7 @@ mod tests {
                 Some(Ty::Bf16) => crate::ptxgen::Elem::Bf16,
                 _ => crate::ptxgen::Elem::F32,
             },
-            acc16: false,
+            acc16: c.acc16,
         };
         Prep { c, d, opts, abytes, bbytes, cbytes, bias_bytes, want, ea, eb, ec, ldc }
     }
@@ -772,11 +828,22 @@ mod tests {
         let p = prepare(c, seed);
         let (d, in_dt, out_dt) = (p.d, p.d.a, p.d.c);
         let mut mem = Mem::new();
-        let (da, db, dc) = (mem.alloc(&p.abytes), mem.alloc(&p.bbytes), mem.alloc(&p.cbytes));
+        let shift = if c.misalign && c.ptrs { 2usize } else { 0 };
+        let shifted = |mem: &mut Mem, b: &[u8]| -> u64 {
+            let mut v = vec![0u8; shift];
+            v.extend_from_slice(b);
+            mem.alloc(&v) + shift as u64
+        };
+        let (da, db) = (shifted(&mut mem, &p.abytes), shifted(&mut mem, &p.bbytes));
+        let dc = mem.alloc(&p.cbytes);
         let dbias = if c.bias.is_some() { mem.alloc(&p.bias_bytes) } else { 0 };
         let (sa, sb, sc) = (p.ea as i64, p.eb as i64, p.ec as i64);
-        let call = Call { d, pointer_arrays: c.ptrs, beta: c.beta, opts: p.opts, a: da, b: db, sa, sb };
-        let cfg = xmx_host::qualify(&call, Mode::Force, c.tile, c.flags).expect("shape qualifies");
+        let call = Call { d, pointer_arrays: c.ptrs, beta: c.beta, opts: p.opts, a: da, b: db, sa, sb, batch: c.batch as u32 };
+        let mut cfg = xmx_host::qualify(&call, Mode::Force, c.tile, c.flags).expect("shape qualifies");
+        if let Some(ku) = c.blk {
+            assert!(xmx_host::blk_eligible(&call), "2D block variant must be eligible: {c:?}");
+            cfg = Cfg { ku, ..xmx_host::with_blk(cfg, &call) };
+        }
         let words = xmx::build(&cfg).unwrap();
         let (gx, gy) = xmx_host::grid(&d, &cfg);
         let args = if c.ptrs {
@@ -842,7 +909,7 @@ mod tests {
                         for bias in [None, Some(Ty::F32), Some(Ty::F16), Some(Ty::Bf16)] {
                             for (ta, tb, m, n, k, beta) in [(true, false, 37usize, 19usize, 45usize, 0.0f32), (false, true, 64, 64, 64, 0.5), (true, true, 17, 33, 20, 0.0)] {
                                 seed += 1;
-                                let c = Case { m, n, k, ta, tb, input, out, batch: 2, ptrs: false, alpha: 1.0, beta, bias, act, tile: (2, 4), pad: 1, flags: Flags::Packed };
+                                let c = Case { m, n, k, ta, tb, input, out, batch: 2, ptrs: false, alpha: 1.0, beta, bias, act, tile: (2, 4), pad: 1, flags: Flags::Packed, acc16: false, misalign: false, blk: None };
                                 let pr = prepare(c, seed);
                                 let (da, db, dc) = (up(&pr.abytes), up(&pr.bbytes), up(&pr.cbytes));
                                 let dbias = if bias.is_some() { up(&pr.bias_bytes) } else { 0 };
@@ -868,7 +935,7 @@ mod tests {
     fn base() -> Case {
         Case {
             m: 16, n: 8, k: 16, ta: false, tb: false, input: Input::F16, out: Ty::F32, batch: 1, ptrs: false,
-            alpha: 1.0, beta: 0.0, bias: None, act: Act::None, tile: (1, 1), pad: 0, flags: Flags::Packed,
+            alpha: 1.0, beta: 0.0, bias: None, act: Act::None, tile: (1, 1), pad: 0, flags: Flags::Packed, acc16: false, misalign: false, blk: None,
         }
     }
 
@@ -919,6 +986,47 @@ mod tests {
     }
 
     #[test]
+    fn two_d_block_variant_matches_reference() {
+        // ta = T (weights K-contiguous: transpose message) and ta = N (transform message), op(B) = N,
+        // ragged m/n/k (zero-filled), padded leading dimensions, strided batches, both unrolls.
+        xmx_host::BLK_ALIGN.store(4, std::sync::atomic::Ordering::Relaxed);
+        let mut seed = 3000;
+        let mut ran = 0;
+        for &(m, n, k) in &[(32usize, 8usize, 32usize), (34, 9, 50), (48, 41, 96), (70, 24, 38), (64, 1, 104), (96, 33, 64), (50, 17, 34)] {
+            for ta in [true, false] {
+                for (ku, tile, out, batch) in [(1u32, (2u32, 4u32), Ty::F32, 1usize), (2, (2, 4), Ty::F16, 2), (2, (1, 1), Ty::F32, 1), (3, (4, 2), Ty::Bf16, 1)] {
+                    for input in [Input::F16, Input::Bf16] {
+                        if input == Input::Bf16 && out == Ty::F16 {
+                            continue;
+                        }
+                        let p0 = (8 - k % 8) % 8;
+                        for pad in [p0, p0 + 8] {
+                            seed += 1;
+                            let c = Case { m, n, k, ta, tb: false, input, out, batch, tile, pad, alpha: 0.5, beta: if pad == p0 { 0.0 } else { 0.25 }, blk: Some(ku), ..base() };
+                            let cfg = check(c, seed);
+                            assert!(cfg.blk && cfg.ku == ku && cfg.blk_ta == ta);
+                            ran += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(ran > 100);
+    }
+
+    #[test]
+    fn two_d_block_epilogues() {
+        xmx_host::BLK_ALIGN.store(4, std::sync::atomic::Ordering::Relaxed);
+        let mut seed = 4000;
+        for act in [Act::None, Act::Relu, Act::Gelu] {
+            for bias in [None, Some(Ty::F32), Some(Ty::F16)] {
+                seed += 1;
+                check(Case { m: 48, n: 20, k: 64, ta: true, act, bias, tile: (2, 4), blk: Some(2), beta: 1.0, ..base() }, seed);
+            }
+        }
+    }
+
+    #[test]
     fn epilogues_and_bias_types() {
         let mut seed = 900;
         for act in [Act::None, Act::Relu, Act::Gelu] {
@@ -938,6 +1046,111 @@ mod tests {
                 check(Case { m: 20, n: 11, k: 23, batch: 3, ptrs, out, tile: (1, 2), pad: 1, ..base() }, seed);
             }
         }
+    }
+
+    #[test]
+    fn compute_16f_rounds_once_from_f32_accumulators() {
+        // ggml KQV shape family: f16 A/B/C, f16 alpha/beta, pointer tables and strided batches.
+        let mut seed = 2000;
+        for ptrs in [true, false] {
+            for (m, n, k, ta, tb) in [(64usize, 40usize, 50usize, false, false), (33, 17, 70, true, false), (16, 16, 16, true, true)] {
+                seed += 1;
+                check(Case { m, n, k, ta, tb, input: Input::F16, out: Ty::F16, batch: 4, ptrs, acc16: true, alpha: 0.5, beta: 0.25, tile: (2, 4), pad: 1, ..base() }, seed);
+            }
+        }
+        // A long K accumulation that an f16 accumulator would round away: sum of 2048 values near 1/8.
+        let c = Case { m: 16, n: 8, k: 2048, input: Input::F16, out: Ty::F16, acc16: true, ..base() };
+        check(c, 9);
+    }
+
+    /// Regression for the ragged-n KQV report (m=64 n=33 k=512, f16 16F, pointer table, ratio 7
+    /// broadcast of A): the second n tile has a single valid column. Hardware showed the diff on
+    /// a call that was below the Auto threshold (PTX per-op f16 rounding), not on XMX; this pins
+    /// the XMX kernel itself on that shape family, including ragged k.
+    #[test]
+    fn ragged_n_pointer_table_16f_matches_single_rounded_reference() {
+        let mut seed = 4000;
+        for k in [512usize, 500, 497] {
+            for n in [33usize, 1, 9, 65] {
+                seed += 1;
+                check(Case { m: 64, n, k, input: Input::F16, out: Ty::F16, batch: 14, ptrs: true, acc16: true, tile: (2, 4), ..base() }, seed);
+            }
+        }
+    }
+
+    #[test]
+    fn two_byte_aligned_pointer_table_operands() {
+        // ggml views can hand out 2-byte aligned addresses; the pointer-table variant must use
+        // 16-bit loads only (the interpreter asserts every Aligned operand).
+        let mut seed = 3000;
+        for (ta, tb) in [(true, false), (false, false), (true, true), (false, true)] {
+            seed += 1;
+            let cfg = check(Case { m: 48, n: 24, k: 48, ta, tb, ptrs: true, batch: 3, misalign: true, tile: (2, 4), ..base() }, seed);
+            assert!(cfg.ptrs && !cfg.pair_a && !cfg.vec_b);
+        }
+    }
+
+    /// Evidence for leaving f32 GEMMs (llama.cpp QK) on the PTX kernels: error of split-precision
+    /// XMX schemes against an f64 reference, relative to sum|a||b|, versus the fp32 PTX kernel
+    /// (sequential f32 fma). bf16 2-term splits are ~20x worse than fp32; a 3-way bf16 split
+    /// (6 DPAS products) gets within ~3x of fp32 error, which divides the 5-8 TFLOP/s measured for
+    /// f16 XMX by 6 and adds the split ALU cost, i.e. break-even with the ~1 TFLOP/s PTX kernel.
+    #[test]
+    fn f32_split_precision_study() {
+        let mut rng = Rng(0xfeed);
+        let (k, trials) = (64usize, 400usize);
+        let gauss = |rng: &mut Rng| -> f32 {
+            let u = |r: &mut Rng| (r.next() % 1_000_003) as f64 / 1_000_003.0 + 1e-9;
+            ((-2.0 * u(rng).ln()).sqrt() * (6.283185307179586 * u(rng)).cos()) as f32
+        };
+        let bf = |x: f32| bf16_bits_to_f32(f32_to_bf16_bits(x));
+        let hf = |x: f32| f16_bits_to_f32(f32_to_f16_bits(x));
+        let split_bf = |x: f32| {
+            let h = bf(x);
+            let m = bf(x - h);
+            let l = bf(x - h - m);
+            [h, m, l]
+        };
+        let split_h = |x: f32| {
+            let h = hf(x);
+            [h, hf(x - h)]
+        };
+        let (mut e32, mut e_bf3, mut e_bf2, mut e_h2) = (0f64, 0f64, 0f64, 0f64);
+        for _ in 0..trials {
+            let a: Vec<f32> = (0..k).map(|_| gauss(&mut rng)).collect();
+            let b: Vec<f32> = (0..k).map(|_| gauss(&mut rng)).collect();
+            let exact: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let scale: f64 = a.iter().zip(&b).map(|(x, y)| (*x as f64 * *y as f64).abs()).sum();
+            let mut f = 0f32;
+            for i in 0..k {
+                f = a[i].mul_add(b[i], f);
+            }
+            let (mut s6, mut s3b, mut s3h) = (0f32, 0f32, 0f32);
+            for i in 0..k {
+                let (sa, sb) = (split_bf(a[i]), split_bf(b[i]));
+                for (x, y) in [(0, 0), (0, 1), (1, 0), (0, 2), (1, 1), (2, 0)] {
+                    s6 += sa[x] * sb[y];
+                }
+                let (ta, tb) = ([sa[0], sa[1]], [sb[0], sb[1]]);
+                for (x, y) in [(0, 0), (0, 1), (1, 0)] {
+                    s3b += ta[x] * tb[y];
+                }
+                let (ha, hb) = (split_h(a[i]), split_h(b[i]));
+                for (x, y) in [(0, 0), (0, 1), (1, 0)] {
+                    s3h += ha[x] * hb[y];
+                }
+            }
+            let rel = |v: f32| (v as f64 - exact).abs() / scale;
+            e32 = e32.max(rel(f));
+            e_bf3 = e_bf3.max(rel(s6));
+            e_bf2 = e_bf2.max(rel(s3b));
+            e_h2 = e_h2.max(rel(s3h));
+        }
+        println!("f32 split study (max err/sum|ab|, k={k}): fp32 fma {e32:.2e}, bf16x3 6-product {e_bf3:.2e}, bf16x2 3-product {e_bf2:.2e}, f16x2 3-product {e_h2:.2e}");
+        // Measured: bf16x2 ~20x, bf16x3 ~3x, f16x2 ~2x the fp32 kernel's error.
+        assert!(e_bf2 > 10.0 * e32, "bf16x2 is not fp32-class");
+        assert!(e_bf3 > 2.0 * e32, "bf16x3 (6 products) is not within 2x either");
+        assert!(e_h2 < 3.0 * e32, "f16x2 is the only 3-product scheme near fp32 on gaussian data");
     }
 
     #[test]

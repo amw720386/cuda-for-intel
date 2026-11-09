@@ -94,6 +94,8 @@ pub struct Call {
     pub b: u64,
     pub sa: i64,
     pub sb: i64,
+    /// Number of matrices in the call (1 for plain GEMM).
+    pub batch: u32,
 }
 
 /// Pick the kernel variant for a call, or `None` when the call does not qualify
@@ -105,8 +107,16 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 pub fn qualify(c: &Call, mode: Mode, tile: (u32, u32), flags: Flags) -> Option<Cfg> {
     let d = &c.d;
-    if mode == Mode::Off || d.a != d.b || d.scalar != ScalarKind::F32 || c.opts.acc16 {
+    if mode == Mode::Off || d.a != d.b {
         return None;
+    }
+    // CUBLAS_COMPUTE_16F (ggml's KQV GEMM): f16 A/B/C with f16 alpha/beta. The DPAS accumulators
+    // are f32 and the result is rounded to f16 once at the end, like tensor-core cuBLAS; the PTX
+    // 16F path rounds the accumulator to f16 after every operation. CFI_XMX_ACC16=0 opts out.
+    if d.scalar == ScalarKind::F16 || c.opts.acc16 {
+        if d.a != DType::F16 || d.c != DType::F16 || std::env::var("CFI_XMX_ACC16").as_deref() == Ok("0") {
+            return None;
+        }
     }
     let input = match d.a {
         DType::F16 => Input::F16,
@@ -123,7 +133,18 @@ pub fn qualify(c: &Call, mode: Mode, tile: (u32, u32), flags: Flags) -> Option<C
         let min_dim = env_u64("CFI_XMX_MIN_DIM", 128);
         let min_work = env_u64("CFI_XMX_MIN_WORK", 1 << 24);
         let work = d.m as u64 * d.n as u64 * d.k as u64;
-        if !(d.m >= 16 && d.n >= 8 && d.k >= 16) || (d.m.min(d.n) as u64) < min_dim || work < min_work {
+        if !(d.m >= 16 && d.n >= 8 && d.k >= 16) {
+            return None;
+        }
+        if c.batch > 1 {
+            // Batched calls (attention QK / KQV): every matrix is its own grid layer, so the
+            // threshold applies to the whole call's work and to min(m, n) >= 16.
+            let min_dim_b = env_u64("CFI_XMX_MIN_DIM_BATCHED", 16);
+            let min_work_b = env_u64("CFI_XMX_MIN_WORK_BATCHED", 1 << 26);
+            if (d.m.min(d.n) as u64) < min_dim_b || (work * c.batch as u64) < min_work_b {
+                return None;
+            }
+        } else if (d.m.min(d.n) as u64) < min_dim || work < min_work {
             return None;
         }
     }
@@ -165,8 +186,51 @@ pub fn qualify(c: &Call, mode: Mode, tile: (u32, u32), flags: Flags) -> Option<C
         jb,
         pair_a,
         vec_b,
+        blk: false,
+        blk_ta: false,
+        ku: 1,
         flags,
     })
+}
+
+/// `CFI_XMX_BLK`: `0` never use 2D block loads, unset or `1` use them where the call allows.
+fn blk_enabled() -> bool {
+    std::env::var("CFI_XMX_BLK").as_deref() != Ok("0")
+}
+
+/// `CFI_XMX_KU`: K steps per loop iteration of the 2D block kernel (default 2).
+fn blk_ku() -> u32 {
+    std::env::var("CFI_XMX_KU").ok().and_then(|v| v.parse().ok()).filter(|k| (1..=4).contains(k)).unwrap_or(2)
+}
+
+/// Base-pointer alignment the 2D block messages need, set by the probe (4 or 64 bytes).
+pub(crate) static BLK_ALIGN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(64);
+
+/// Whether the 2D block variant can serve this call: strided batches with `op(B) = N`, even
+/// `k` and `m` (surface widths are 4-byte multiples), pitches that are 16-byte multiples and
+/// operands aligned as the probe found necessary. Out-of-surface reads are zero, so no K tail.
+pub fn blk_eligible(c: &Call) -> bool {
+    let d = &c.d;
+    let s = d.strides();
+    let al = BLK_ALIGN.load(std::sync::atomic::Ordering::Relaxed);
+    !c.pointer_arrays
+        && !d.trans_b
+        && s.b_sl == 1
+        && d.k >= 32
+        && d.k % 2 == 0
+        && d.m % 2 == 0
+        && d.m >= 32
+        && c.a % al == 0
+        && c.b % al == 0
+        && (c.sa as u64 * 2) % al == 0
+        && (c.sb as u64 * 2) % al == 0
+        && d.ldb % 8 == 0
+        && d.lda % 8 == 0
+}
+
+/// Same kernel with 2D block loads (caller checked eligibility and the probe).
+pub fn with_blk(cfg: Cfg, c: &Call) -> Cfg {
+    Cfg { blk: true, blk_ta: c.d.trans_a, ku: blk_ku(), pair_a: false, vec_b: false, ..cfg }
 }
 
 /// Kernel arguments for one launch chunk (base pointers already advanced to the chunk).
@@ -289,7 +353,14 @@ fn probe_val(x: usize) -> f32 {
 /// Run a tiny GEMM (edge shape in every dimension) through the variant with the
 /// given operand-flag spelling and compare against an exact host result.
 fn selftest(drv: &Driver, input: Input, flags: Flags) -> bool {
-    let (m, n, k) = (21usize, 10usize, 37usize);
+    selftest_with(drv, input, flags, None, 0)
+}
+
+/// `blk = Some(ta)` runs the 2D block variant on a shape that is eligible for it.
+/// `off` shifts both operands by that many bytes inside their allocations.
+fn selftest_with(drv: &Driver, input: Input, flags: Flags, blk: Option<bool>, off: u64) -> bool {
+    let (m, n, k) = if blk.is_some() { (48usize, 40usize, 96usize) } else { (21usize, 10usize, 37usize) };
+    let ta = blk == Some(true);
     let enc = |v: f32| -> u16 {
         match input {
             Input::F16 => f32_to_f16_bits(v),
@@ -301,17 +372,19 @@ fn selftest(drv: &Driver, input: Input, flags: Flags) -> bool {
     let mut want = vec![0f32; m * n];
     for j in 0..n {
         for i in 0..m {
-            // A is m x k column-major (lda = m), B is k x n column-major (ldb = k).
-            want[i + j * m] = (0..k).map(|l| probe_val(i + l * m) * probe_val((l + j * k) * 5 + 1)).sum();
+            // A is m x k column-major (lda = m) or, with ta, k x m column-major (lda = k);
+            // B is k x n column-major (ldb = k).
+            let ai = |l: usize| if ta { l + i * k } else { i + l * m };
+            want[i + j * m] = (0..k).map(|l| probe_val(ai(l)) * probe_val((l + j * k) * 5 + 1)).sum();
         }
     }
     let d = GemmDesc {
-        trans_a: false,
+        trans_a: ta,
         trans_b: false,
         m: m as u32,
         n: n as u32,
         k: k as u32,
-        lda: m as u32,
+        lda: if ta { k as u32 } else { m as u32 },
         ldb: k as u32,
         ldc: m as u32,
         a: if input == Input::F16 { DType::F16 } else { DType::Bf16 },
@@ -328,22 +401,30 @@ fn selftest(drv: &Driver, input: Input, flags: Flags) -> bool {
         b: 0,
         sa: 0,
         sb: 0,
+        batch: 1,
     };
-    let Some(cfg) = qualify(&call, Mode::Force, (1, 1), flags) else { return false };
+    let tile = if blk.is_some() { (2, 4) } else { (1, 1) };
+    let Some(mut cfg) = qualify(&call, Mode::Force, tile, flags) else { return false };
+    if blk.is_some() {
+        if !blk_eligible(&call) {
+            return false;
+        }
+        cfg = with_blk(cfg, &call);
+    }
     let Some(kern) = kernel(drv, &cfg) else { return false };
     let bytes = |v: &[u16]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     let (ab, bb) = (bytes(&a), bytes(&b));
     let (mut da, mut db, mut dc) = (0u64, 0u64, 0u64);
     unsafe {
-        if (drv.cuMemAlloc_v2)(&mut da, ab.len()) != 0
-            || (drv.cuMemAlloc_v2)(&mut db, bb.len()) != 0
+        if (drv.cuMemAlloc_v2)(&mut da, ab.len() + 64) != 0
+            || (drv.cuMemAlloc_v2)(&mut db, bb.len() + 64) != 0
             || (drv.cuMemAlloc_v2)(&mut dc, m * n * 4) != 0
         {
             return false;
         }
         let ok = (|| {
-            if (drv.cuMemcpyHtoD_v2)(da, ab.as_ptr().cast(), ab.len()) != 0
-                || (drv.cuMemcpyHtoD_v2)(db, bb.as_ptr().cast(), bb.len()) != 0
+            if (drv.cuMemcpyHtoD_v2)(da + off, ab.as_ptr().cast(), ab.len()) != 0
+                || (drv.cuMemcpyHtoD_v2)(db + off, bb.as_ptr().cast(), bb.len()) != 0
             {
                 return false;
             }
@@ -352,7 +433,7 @@ fn selftest(drv: &Driver, input: Input, flags: Flags) -> bool {
                 return false;
             }
             let (gx, gy) = grid(&d, &cfg);
-            let args = kernel_args(&d, da, db, dc, 1.0, 0.0, (0, 0, 0), 0);
+            let args = kernel_args(&d, da + off, db + off, dc, 1.0, 0.0, (0, 0, 0), 0);
             if launch(drv, kern, (gx, gy, 1), std::ptr::null_mut(), &args) != 0
                 || (drv.cuStreamSynchronize)(std::ptr::null_mut()) != 0
             {
@@ -373,6 +454,8 @@ fn selftest(drv: &Driver, input: Input, flags: Flags) -> bool {
     }
 }
 
+static BLK_F16: OnceLock<bool> = OnceLock::new();
+static BLK_BF16: OnceLock<bool> = OnceLock::new();
 static F16: OnceLock<Option<Flags>> = OnceLock::new();
 static BF16: OnceLock<Option<Flags>> = OnceLock::new();
 static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -381,6 +464,14 @@ static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 #[unsafe(no_mangle)]
 pub extern "system" fn cfiXmxLaunchCount() -> u64 {
     LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static BLK_LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Diagnostics for the hardware test: number of 2D-block XMX kernel launches so far.
+#[unsafe(no_mangle)]
+pub extern "system" fn cfiXmxBlkLaunchCount() -> u64 {
+    BLK_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Diagnostics: probe outcome, 2 bits per input type (bits 0-1 f16, 2-3 bf16):
@@ -412,6 +503,30 @@ fn probed_flags(drv: &Driver, input: Input) -> Option<Flags> {
     })
 }
 
+/// Probe the 2D block variant once per input type (both A layouts must be exact).
+fn probed_blk(drv: &Driver, input: Input, flags: Flags) -> bool {
+    let cell = match input {
+        Input::F16 => &BLK_F16,
+        Input::Bf16 => &BLK_BF16,
+    };
+    *cell.get_or_init(|| {
+        let started = std::time::Instant::now();
+        // 4-byte aligned operands first (what ggml's 32-byte tensor offsets need), else 64.
+        let both = |off: u64| {
+            selftest_with(drv, input, flags, Some(true), off) && selftest_with(drv, input, flags, Some(false), off)
+        };
+        let ok = if both(4) {
+            BLK_ALIGN.store(4, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            BLK_ALIGN.store(64, std::sync::atomic::Ordering::Relaxed);
+            both(0)
+        };
+        xtrace!("blk probe {input:?}: ok={ok} align={} in {} ms", BLK_ALIGN.load(std::sync::atomic::Ordering::Relaxed), started.elapsed().as_millis());
+        ok
+    })
+}
+
 /// Fast path entry. `Some(status)` = handled (status is the cuBLAS result before
 /// the shim's stream synchronisation); `None` = not eligible or unsupported, use
 /// the PTX kernels.
@@ -440,11 +555,14 @@ pub(crate) unsafe fn try_gemm(
         DType::Bf16 => Input::Bf16,
         DType::F32 => return None,
     };
-    let call = Call { d: *d, pointer_arrays, beta, opts: *opts, a, b, sa, sb };
+    let call = Call { d: *d, pointer_arrays, beta, opts: *opts, a, b, sa, sb, batch: batch as u32 };
     // Cheap shape test first so ineligible calls never trigger the probe.
     qualify(&call, mode, tile(), Flags::Packed)?;
     let flags = probed_flags(drv, input)?;
-    let cfg = qualify(&call, mode, tile(), flags)?;
+    let mut cfg = qualify(&call, mode, tile(), flags)?;
+    if blk_enabled() && !call.pointer_arrays && !d.trans_b && probed_blk(drv, input, flags) && blk_eligible(&call) {
+        cfg = with_blk(cfg, &call);
+    }
     let kern = kernel(drv, &cfg)?;
     xtrace!("{} m={} n={} k={} batch={batch}", cfg.name(), d.m, d.n, d.k);
     let (gx, gy) = grid(d, &cfg);
@@ -472,6 +590,9 @@ pub(crate) unsafe fn try_gemm(
         let args = kernel_args(d, pa, pb, pc, alpha, beta, (sa_e, sb_e, sc_e), bias);
         let err = unsafe { launch(drv, kern, (gx, gy, count), stream, &args) };
         LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg.blk {
+            BLK_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if err != 0 {
             eprintln!("CUDA for Intel cublas: xmx launch failed err={err}");
             return Some(EXECUTION_FAILED);
@@ -498,6 +619,7 @@ mod tests {
             b: 0x2000,
             sa: 0,
             sb: 0,
+            batch: 1,
         }
     }
 
@@ -544,12 +666,57 @@ mod tests {
     }
 
     #[test]
-    fn acc16_and_f16_scalars_decline() {
+    fn two_d_block_eligibility() {
+        BLK_ALIGN.store(4, std::sync::atomic::Ordering::Relaxed);
+        let ok = call(896, 631, 896, true, false, DType::F16, DType::F32);
+        assert!(blk_eligible(&ok));
+        assert!(with_blk(qualify(&ok, Mode::Auto, (2, 4), Flags::Packed).unwrap(), &ok).blk);
+        // op(B) = T, pointer tables, odd or tiny extents, unaligned leading dimensions and
+        // operands the messages cannot address all stay on the gather kernels.
+        assert!(!blk_eligible(&call(896, 631, 896, true, true, DType::F16, DType::F32)));
+        let mut c = ok;
+        c.pointer_arrays = true;
+        assert!(!blk_eligible(&c));
+        assert!(!blk_eligible(&call(896, 631, 30, true, false, DType::F16, DType::F32)));
+        assert!(!blk_eligible(&call(30, 631, 896, true, false, DType::F16, DType::F32)));
+        assert!(!blk_eligible(&call(896, 631, 898, true, false, DType::F16, DType::F32)));
+        c = ok;
+        c.a = 0x1002;
+        assert!(!blk_eligible(&c));
+    }
+
+    #[test]
+    fn compute_16f_uses_f32_accumulators_unless_opted_out() {
         let mut c = call(64, 64, 64, true, false, DType::F16, DType::F16);
         c.opts.acc16 = true;
-        assert!(qualify(&c, Mode::Force, (2, 4), Flags::Packed).is_none());
-        c.opts.acc16 = false;
         c.d.scalar = ScalarKind::F16;
+        if std::env::var_os("CFI_XMX_ACC16").is_none() {
+            assert!(qualify(&c, Mode::Force, (2, 4), Flags::Packed).is_some());
+        }
+        // 16F only exists for f16 A/B/C.
+        c.d.c = DType::F32;
         assert!(qualify(&c, Mode::Force, (2, 4), Flags::Packed).is_none());
+        let mut c = call(64, 64, 64, true, false, DType::Bf16, DType::Bf16);
+        c.opts.acc16 = true;
+        assert!(qualify(&c, Mode::Force, (2, 4), Flags::Packed).is_none());
+    }
+
+    #[test]
+    fn batched_attention_shapes_qualify_in_auto_mode() {
+        // ggml KQV: m=64 n=512 k=512 f16 16F, batch 14; QK-like f16: m=n=512 k=64.
+        let mut kqv = call(64, 512, 512, false, false, DType::F16, DType::F16);
+        kqv.opts.acc16 = true;
+        kqv.d.scalar = ScalarKind::F16;
+        kqv.pointer_arrays = true;
+        if std::env::var_os("CFI_XMX_ACC16").is_none() {
+            assert!(qualify(&kqv, Mode::Auto, (2, 4), Flags::Packed).is_none()); // batch 1: too small
+            kqv.batch = 14;
+            assert!(qualify(&kqv, Mode::Auto, (2, 4), Flags::Packed).is_some());
+            kqv.batch = 2; // 2 * 16.7M is below the 2^26 batched floor
+            assert!(qualify(&kqv, Mode::Auto, (2, 4), Flags::Packed).is_none());
+        }
+        let mut thin = call(8, 512, 512, false, false, DType::F16, DType::F32);
+        thin.batch = 64;
+        assert!(qualify(&thin, Mode::Auto, (2, 4), Flags::Packed).is_none());
     }
 }
