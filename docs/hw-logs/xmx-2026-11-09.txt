@@ -1,0 +1,68 @@
+# hw_xmx_gemm on Arc B390 (driver 32.0.101.9033), 2026-11-09, hw-validate build (main + fix-divergence), cargo test --release --test gpu hw_xmx -- --ignored --nocapture --test-threads=1
+# torch L2 (cu118 venv) seconds: CFI_XMX=0 1.7 s, default 1.6 s; all L2 checks pass both ways (f16_1024 max_rel 0.24 off, 0.36 on: fp16 accumulation order)
+
+running 6 tests
+test hw_xmx_gemm::hw_xmx_blk ... BLK cases run 252; mismatches 0
+ok
+test hw_xmx_gemm::hw_xmx_gemm_table ... TABLE 574 cases in 123.1s; xmx launches +574; max abs err ptx 0.000e0 xmx 0.000e0; inexact entries ptx 0 xmx 0
+ok
+test hw_xmx_gemm::hw_xmx_ggml_attention ... GGML Case { m: 512, n: 512, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 512, k: 512, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 512, n: 33, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=false max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 33, k: 512, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=false max abs err 7.500e-1 inexact 18446744073709551615
+GGML Case { m: 256, n: 256, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=false max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=false max abs err 4.688e-1 inexact 18446744073709551615
+GGML Case { m: 1024, n: 128, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 128, k: 1024, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 14, ratio: 7 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: F16, out: F16, kind: Bcast(14), pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=false max abs err 4.375e-1 inexact 18446744073709551615
+GGML Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: F16, out: F16, kind: Strided(14), pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=false max abs err 6.250e-1 inexact 18446744073709551615
+GGML Case { m: 512, n: 512, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 512, k: 512, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 512, n: 33, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=false max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 33, k: 512, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=false max abs err 1.125e0 inexact 18446744073709551615
+GGML Case { m: 256, n: 256, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 1024, n: 128, k: 64, ta: true, tb: false, inp: F16, out: F32, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: false }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 128, k: 1024, ta: false, tb: false, inp: F16, out: F16, kind: Ptrs { batch: 32, ratio: 4 }, pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: F16, out: F16, kind: Bcast(32), pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML Case { m: 64, n: 256, k: 256, ta: false, tb: false, inp: F16, out: F16, kind: Strided(32), pad: 0, alpha: 1.0, beta: 0.0, c16: true }: xmx launched=true max abs err 0.000e0 inexact 0
+GGML summary: 12 calls on XMX, 8 below the threshold
+ok
+test hw_xmx_gemm::hw_xmx_perf ... PERF 512x512x512 ta=1 tb=0 f16->f32: ptx    369.0 GFLOP/s | xmx 2x4   6881.5 (18.65x) | xmx 4x2   9629.6 (26.10x) | xmx 2x2   9539.3 (25.85x) | xmx 4x4   4502.3 (12.20x) | xmx 1x4   6971.6 (18.89x) | xmx 2x8   3492.6 (9.47x)
+PERF 512x512x512 ta=0 tb=0 f16->f32: ptx    419.9 GFLOP/s | xmx 2x4   6780.7 (16.15x) | xmx 4x2   9059.6 (21.58x) | xmx 2x2   7935.8 (18.90x) | xmx 4x4   4287.7 (10.21x) | xmx 1x4   6448.1 (15.36x) | xmx 2x8   3399.6 (8.10x)
+PERF 512x512x512 ta=1 tb=1 f16->f32: ptx    297.3 GFLOP/s | xmx 2x4   5521.5 (18.57x) | xmx 4x2   5306.5 (17.85x) | xmx 2x2   5186.8 (17.45x) | xmx 4x4   3846.4 (12.94x) | xmx 1x4   5397.2 (18.16x) | xmx 2x8   3040.0 (10.23x)
+PERF 2048x2048x2048 ta=1 tb=0 f16->f32: ptx    956.4 GFLOP/s | xmx 2x4   9703.1 (10.15x) | xmx 4x2   5579.2 (5.83x) | xmx 2x2   4978.0 (5.20x) | xmx 4x4   9364.4 (9.79x) | xmx 1x4   9851.3 (10.30x) | xmx 2x8  12832.5 (13.42x)
+PERF 2048x2048x2048 ta=0 tb=0 f16->f32: ptx   1126.2 GFLOP/s | xmx 2x4  24463.7 (21.72x) | xmx 4x2   3453.4 (3.07x) | xmx 2x2  18152.5 (16.12x) | xmx 4x4  24233.2 (21.52x) | xmx 1x4  15351.8 (13.63x) | xmx 2x8  20569.3 (18.26x)
+PERF 2048x2048x2048 ta=1 tb=1 f16->f32: ptx    585.9 GFLOP/s | xmx 2x4   8204.3 (14.00x) | xmx 4x2   6413.1 (10.95x) | xmx 2x2   3613.2 (6.17x) | xmx 4x4  12803.4 (21.85x) | xmx 1x4   5267.0 (8.99x) | xmx 2x8  15464.3 (26.39x)
+PERF 4096x32x4096 ta=1 tb=0 f16->f32: ptx    607.2 GFLOP/s | xmx 2x4   1793.2 (2.95x) | xmx 4x2   2209.6 (3.64x) | xmx 2x2   1915.8 (3.15x) | xmx 4x4   1497.4 (2.47x) | xmx 1x4   1668.5 (2.75x) | xmx 2x8   1533.1 (2.52x)
+PERF 4096x32x4096 ta=0 tb=0 f16->f32: ptx    843.5 GFLOP/s | xmx 2x4   3073.7 (3.64x) | xmx 4x2   3286.2 (3.90x) | xmx 2x2   3307.5 (3.92x) | xmx 4x4   2521.1 (2.99x) | xmx 1x4   2750.4 (3.26x) | xmx 2x8   2810.5 (3.33x)
+PERF 4096x32x4096 ta=1 tb=1 f16->f32: ptx    436.0 GFLOP/s | xmx 2x4   1447.0 (3.32x) | xmx 4x2   1358.0 (3.11x) | xmx 2x2   1839.9 (4.22x) | xmx 4x4   1265.6 (2.90x) | xmx 1x4   1319.6 (3.03x) | xmx 2x8   1017.6 (2.33x)
+PERF 4096x512x4096 ta=1 tb=0 f16->f32: ptx    513.8 GFLOP/s | xmx 2x4   7316.1 (14.24x) | xmx 4x2   5253.9 (10.23x) | xmx 2x2   3786.7 (7.37x) | xmx 4x4   7090.4 (13.80x) | xmx 1x4   5874.5 (11.43x) | xmx 2x8   9601.7 (18.69x)
+PERF 4096x512x4096 ta=0 tb=0 f16->f32: ptx   1093.3 GFLOP/s | xmx 2x4  13003.4 (11.89x) | xmx 4x2   5052.9 (4.62x) | xmx 2x2   4420.6 (4.04x) | xmx 4x4  14221.0 (13.01x) | xmx 1x4   8539.8 (7.81x) | xmx 2x8  15930.3 (14.57x)
+PERF 4096x512x4096 ta=1 tb=1 f16->f32: ptx    555.8 GFLOP/s | xmx 2x4   7394.3 (13.30x) | xmx 4x2   3245.4 (5.84x) | xmx 2x2   2505.8 (4.51x) | xmx 4x4   6708.4 (12.07x) | xmx 1x4   4858.5 (8.74x) | xmx 2x8   7467.6 (13.44x)
+ok
+test hw_xmx_gemm::hw_xmx_probe ... PROBE F16: status bits 0b0001 (per input: 0 unprobed, 1 packed flags ok, 2 bare flags ok, 3 FAILED), xmx launches +1, max abs err 0, inexact 0
+PROBE Bf16: status bits 0b0101 (per input: 0 unprobed, 1 packed flags ok, 2 bare flags ok, 3 FAILED), xmx launches +1, max abs err 0, inexact 0
+ok
+test hw_xmx_gemm::hw_xmx_shapes ... SHAPE m=896 n=631 k=896 out=F32: CFI_XMX=0    542.2 GFLOP/s (1.869 ms, 1.00x) CFI_XMX=1    534.3 GFLOP/s (1.896 ms, 0.99x)
+SHAPE m=896 n=631 k=896 out=F16: CFI_XMX=0    851.3 GFLOP/s (1.190 ms, 1.00x) CFI_XMX=1    670.0 GFLOP/s (1.512 ms, 0.79x)
+SHAPE m=4864 n=631 k=896 out=F32: CFI_XMX=0    856.8 GFLOP/s (6.419 ms, 1.00x) CFI_XMX=1  13231.3 GFLOP/s (0.416 ms, 15.44x)
+SHAPE m=4864 n=631 k=896 out=F16: CFI_XMX=0    865.0 GFLOP/s (6.359 ms, 1.00x) CFI_XMX=1  13380.5 GFLOP/s (0.411 ms, 15.47x)
+SHAPE m=896 n=631 k=4864 out=F32: CFI_XMX=0    892.5 GFLOP/s (6.162 ms, 1.00x) CFI_XMX=1   3676.6 GFLOP/s (1.496 ms, 4.12x)
+SHAPE m=896 n=631 k=4864 out=F16: CFI_XMX=0    893.3 GFLOP/s (6.157 ms, 1.00x) CFI_XMX=1   2965.7 GFLOP/s (1.855 ms, 3.32x)
+SHAPE m=4096 n=631 k=4096 out=F32: CFI_XMX=0    868.5 GFLOP/s (24.379 ms, 1.00x) CFI_XMX=1   7025.6 GFLOP/s (3.014 ms, 8.09x)
+SHAPE m=4096 n=631 k=4096 out=F16: CFI_XMX=0    867.8 GFLOP/s (24.397 ms, 1.00x) CFI_XMX=1   7033.2 GFLOP/s (3.010 ms, 8.10x)
+SHAPE m=11008 n=631 k=4096 out=F32: CFI_XMX=0    834.8 GFLOP/s (68.162 ms, 1.00x) CFI_XMX=1   2786.1 GFLOP/s (20.424 ms, 3.34x)
+SHAPE m=11008 n=631 k=4096 out=F16: CFI_XMX=0    835.5 GFLOP/s (68.106 ms, 1.00x) CFI_XMX=1   2780.0 GFLOP/s (20.469 ms, 3.33x)
+SHAPE m=896 n=512 k=896 out=F32: CFI_XMX=0    854.8 GFLOP/s (0.962 ms, 1.00x) CFI_XMX=1    430.1 GFLOP/s (1.912 ms, 0.50x)
+SHAPE m=896 n=512 k=896 out=F16: CFI_XMX=0    856.6 GFLOP/s (0.960 ms, 1.00x) CFI_XMX=1    857.2 GFLOP/s (0.959 ms, 1.00x)
+SHAPE m=4864 n=512 k=896 out=F32: CFI_XMX=0    873.6 GFLOP/s (5.108 ms, 1.00x) CFI_XMX=1  10620.6 GFLOP/s (0.420 ms, 12.16x)
+SHAPE m=4864 n=512 k=896 out=F16: CFI_XMX=0    875.0 GFLOP/s (5.100 ms, 1.00x) CFI_XMX=1  10619.5 GFLOP/s (0.420 ms, 12.14x)
+SHAPE m=4096 n=512 k=4096 out=F32: CFI_XMX=0    879.3 GFLOP/s (19.538 ms, 1.00x) CFI_XMX=1   6486.9 GFLOP/s (2.648 ms, 7.38x)
+SHAPE m=4096 n=512 k=4096 out=F16: CFI_XMX=0    885.4 GFLOP/s (19.403 ms, 1.00x) CFI_XMX=1   6912.1 GFLOP/s (2.485 ms, 7.81x)
+SHAPE m=2048 n=2048 k=2048 out=F32: CFI_XMX=0    907.0 GFLOP/s (18.942 ms, 1.00x) CFI_XMX=1   8470.2 GFLOP/s (2.028 ms, 9.34x)
+SHAPE m=2048 n=2048 k=2048 out=F16: CFI_XMX=0    908.3 GFLOP/s (18.915 ms, 1.00x) CFI_XMX=1   8697.6 GFLOP/s (1.975 ms, 9.58x)
+SHAPE m=128 n=631 k=64 out=F32: CFI_XMX=0    766.3 GFLOP/s (0.013 ms, 1.00x) CFI_XMX=1    774.7 GFLOP/s (0.013 ms, 1.01x)
+SHAPE m=128 n=631 k=64 out=F16: CFI_XMX=0    758.0 GFLOP/s (0.014 ms, 1.00x) CFI_XMX=1    763.8 GFLOP/s (0.014 ms, 1.01x)
+ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 113 filtered out; finished in 371.49s
