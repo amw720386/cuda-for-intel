@@ -29,7 +29,8 @@ param(
     [hashtable]$ExtraEnv = @{},
     [string]$Id = 'cfi-profile',
     [switch]$NoQueue,
-    [switch]$NoUnprofiled
+    [switch]$NoUnprofiled,
+    [switch]$NoProfiled       # timings only (e.g. a shim build without CFI_PROFILE)
 )
 $ErrorActionPreference = 'Continue'
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -101,6 +102,7 @@ try {
         foreach ($fa in ($Fa -split ',')) {
             $tag = "${mn}_fa$fa"
             $modes = @(@('prof', @{ CFI_PROFILE = '1'; CFI_PROFILE_OUT = "$Out\$tag.live.tsv"; CFI_PROFILE_FLUSH_MS = '100'; OLLAMA_FLASH_ATTENTION = $fa }))
+            if ($NoProfiled) { $modes = @() }
             if (-not $NoUnprofiled) { $modes = @(@('plain', @{ OLLAMA_FLASH_ATTENTION = $fa })) + $modes }
             foreach ($mode in $modes) {
                 $S = Start-Srv "${tag}_$($mode[0])" $mode[1]
