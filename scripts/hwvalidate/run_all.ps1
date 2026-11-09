@@ -462,7 +462,7 @@ try {
                 if (-not $S.up -or -not (Invoke-OllamaCreate $S $gg "hv-xmx-$($cfg[0])")) { Add-Result "ollama-$($cfg[0])" 'fail' 'server/create failed'; continue }
                 if (-not $n) { $c = (Invoke-Gen $S (Long-Prompt 600) 1).prompt_eval_count; $n = 600 + (631 - $c) } else { [void](Invoke-Gen $S (Long-Prompt $n) 1) }
                 $r = Invoke-Gen $S (Long-Prompt $n) 48
-                $pp = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max(1, $r.prompt_eval_duration), 1); $dd = [math]::Round($r.eval_count * 1e9 / [math]::Max(1, $r.eval_duration), 1)
+                $pp = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max([double]1, [double]$r.prompt_eval_duration), 1); $dd = [math]::Round($r.eval_count * 1e9 / [math]::Max([double]1, [double]$r.eval_duration), 1)
                 $texts[$cfg[0]] = $r.response
                 $x = ''; if ($cfg[0] -eq 'trace') { $x = " xmx_trace_lines=$(@(Select-String -Path "$($S.wd)\e.txt" -Pattern 'xmx' -ErrorAction SilentlyContinue).Count)" }
                 Add-Result "ollama-$mn-$($cfg[0])" 'info' "prefill_tps=$pp decode_tps=$dd tokens=$($r.prompt_eval_count)+$($r.eval_count)$x" -Data @{ prefill_tps = $pp; decode_tps = $dd }
@@ -527,7 +527,7 @@ try {
                     $best = $null
                     foreach ($i in 1..2) {
                         $r = Invoke-Gen $S (Long-Prompt $n) 48
-                        $pp = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max(1, $r.prompt_eval_duration), 1); $dd = [math]::Round($r.eval_count * 1e9 / [math]::Max(1, $r.eval_duration), 1)
+                        $pp = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max([double]1, [double]$r.prompt_eval_duration), 1); $dd = [math]::Round($r.eval_count * 1e9 / [math]::Max([double]1, [double]$r.eval_duration), 1)
                         if (-not $best -or $dd -gt $best.dd) { $best = @{ pp = $pp; dd = $dd; text = $r.response; pe = $r.prompt_eval_count; ev = $r.eval_count } }
                     }
                     $d = First-Diff $cpuText $best.text

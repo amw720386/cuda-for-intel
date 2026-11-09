@@ -76,8 +76,8 @@ function Gen($S, [string]$Prompt, [int]$Predict) {
     $r = Invoke-RestMethod -Uri "http://127.0.0.1:$($S.port)/api/generate" -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 5400
     $sw.Stop()
     return [ordered]@{ wall_s = [math]::Round($sw.Elapsed.TotalSeconds, 2); prompt_tokens = $r.prompt_eval_count; prompt_s = [math]::Round($r.prompt_eval_duration / 1e9, 3)
-        prefill_tps = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max(1, $r.prompt_eval_duration), 1); eval_tokens = $r.eval_count
-        decode_tps = [math]::Round($r.eval_count * 1e9 / [math]::Max(1, $r.eval_duration), 1); load_s = [math]::Round($r.load_duration / 1e9, 2) }
+        prefill_tps = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max([double]1, [double]$r.prompt_eval_duration), 1); eval_tokens = $r.eval_count
+        decode_tps = [math]::Round($r.eval_count * 1e9 / [math]::Max([double]1, [double]$r.eval_duration), 1); load_s = [math]::Round($r.load_duration / 1e9, 2) }
 }
 $short = 'The capital of France is Paris. Describe the city of Paris in detail.'
 $long = '1 ' + ((@('lorem') * 600) -join ' ') + "`nCount from 1 to 300 separated by commas: 1, 2, 3,"
