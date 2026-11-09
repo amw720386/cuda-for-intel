@@ -70,6 +70,7 @@ function Create($S, [string]$Gguf, [string]$Name) {
     "FROM $Gguf" | Set-Content "$($S.wd)\Mf"; $S.model = $Name
     $env:OLLAMA_HOST = "127.0.0.1:$($S.port)"
     $p = Start-Process -PassThru -NoNewWindow -FilePath $S.exe -ArgumentList "create $Name -f `"$($S.wd)\Mf`"" -RedirectStandardOutput "$($S.wd)\c.out" -RedirectStandardError "$($S.wd)\c.err"
+    $null = $p.Handle   # without the cached handle ExitCode stays $null on Windows PowerShell 5
     [void]$p.WaitForExit(900000); return ($p.ExitCode -eq 0)
 }
 function Gen($S, [string]$Prompt, [int]$Predict) {
@@ -101,9 +102,10 @@ try {
         $mn = [IO.Path]::GetFileNameWithoutExtension($m)
         foreach ($fa in ($Fa -split ',')) {
             $tag = "${mn}_fa$fa"
-            $modes = @(@('prof', @{ CFI_PROFILE = '1'; CFI_PROFILE_OUT = "$Out\$tag.live.tsv"; CFI_PROFILE_FLUSH_MS = '100'; OLLAMA_FLASH_ATTENTION = $fa }))
+            # unary comma: a one-element @(@(a, b)) would flatten to a, b and the loop would see 'prof' and the hashtable separately
+            $modes = @(, @('prof', @{ CFI_PROFILE = '1'; CFI_PROFILE_OUT = "$Out\$tag.live.tsv"; CFI_PROFILE_FLUSH_MS = '100'; OLLAMA_FLASH_ATTENTION = $fa }))
             if ($NoProfiled) { $modes = @() }
-            if (-not $NoUnprofiled) { $modes = @(@('plain', @{ OLLAMA_FLASH_ATTENTION = $fa })) + $modes }
+            if (-not $NoUnprofiled) { $modes = @(, @('plain', @{ OLLAMA_FLASH_ATTENTION = $fa })) + $modes }
             foreach ($mode in $modes) {
                 $S = Start-Srv "${tag}_$($mode[0])" $mode[1]
                 $rec = [ordered]@{}
