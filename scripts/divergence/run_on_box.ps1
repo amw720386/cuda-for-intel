@@ -14,10 +14,11 @@
 .PARAMETER VariantList comma separated subset of variants to run (default all)
 .PARAMETER SkipTool only run the Ollama scan
 .PARAMETER NoQueue the caller (scripts/hwvalidate/run_all.ps1) already holds the GPU queue slot: do not acquire/release or heartbeat here
+.PARAMETER FastDiv set CUDA_FOR_INTEL_FAST_DIV=1 in every run (control for the correctly rounded division default)
 .PARAMETER Fixed    index (0-based) of the prompt to analyse even if the modes agree on it (default: first diverging)
 #>
 param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$OllamaRun, [Parameter(Mandatory)][string]$Model,
-      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1, [string]$ResultsName = 'results', [string]$ShimDir = '', [switch]$SkipTool, [string]$VariantList = '', [switch]$NoQueue)
+      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1, [string]$ResultsName = 'results', [string]$ShimDir = '', [switch]$SkipTool, [string]$VariantList = '', [switch]$NoQueue, [switch]$FastDiv)
 $ErrorActionPreference = 'Continue'
 $queue = Join-Path (Split-Path $Work -Parent) 'gpu-queue.ps1'
 $lock  = Join-Path (Split-Path $Work -Parent) 'gpu.lock'
@@ -51,6 +52,7 @@ try {
   function Set-ModeEnv($mode, $cacheDir) {
     Get-ChildItem Env: | ? { $_.Name -match 'CFI|CUDA_FOR_INTEL|NEO_' } | % { Remove-Item "Env:$($_.Name)" }
     $env:CUDA_FOR_INTEL_HYBRID_DIR = $Hybrid; $env:CUDA_FOR_INTEL_CACHE_DIR = $cacheDir; $env:CUDA_FOR_INTEL_LOG = '1'
+    if ($FastDiv) { $env:CUDA_FOR_INTEL_FAST_DIV = '1' }   # control run: modules built without the correctly rounded div/sqrt flag
     if ($mode -eq 'none') { $env:CUDA_FOR_INTEL_SUBST = 'none' }
   }
   # ---------- A: stock Ollama scan ----------
