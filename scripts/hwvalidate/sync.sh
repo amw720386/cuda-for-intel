@@ -21,8 +21,9 @@ retry() { local i out; for i in 1 2 3 4 5 6; do if "$@"; then return 0; fi; echo
 win_root="${REMOTE_ROOT//\//\\}"
 SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=25 -o ControlMaster=auto -o ControlPath="$cp" -o ControlPersist=120)
 # 1 file over scp (binary safe regardless of the box's default shell), 1 command to unpack; both ride the same TCP connection.
+# The parentheses matter: in cmd, `if exist X a & b & c` makes b and c part of the if body, so a fresh box unpacked nothing.
 retry "${SCP[@]}" "$tmp/src.tar.gz" "$BOX:$REMOTE_ROOT-src.tgz"
-retry "${SSH[@]}" "cmd /c \"if exist $win_root\\src rmdir /s /q $win_root\\src & mkdir $win_root\\src & tar xzf $win_root-src.tgz -C $win_root\\src & del $win_root-src.tgz\""
+retry "${SSH[@]}" "cmd /c \"(if exist $win_root\\src rmdir /s /q $win_root\\src) & mkdir $win_root\\src & tar xzf $win_root-src.tgz -C $win_root\\src & del $win_root-src.tgz\""
 echo "synced revision $rev to the box ($(du -h "$tmp/src.tar.gz" | cut -f1) transferred)"
 if [ "${1:-}" = "--run" ]; then
   shift
