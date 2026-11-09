@@ -28,6 +28,7 @@ mod primary;
 mod streams;
 mod stubs;
 mod subst_hook;
+mod cfiprof;
 mod trace;
 
 pub(crate) fn profile_on() -> bool {
@@ -387,6 +388,7 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
 #[unsafe(no_mangle)]
 pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
     trace::call("cuCtxDestroy_v2", || {
+        cfiprof::dump(false);
         let destroyed = state(|state| {
             let key = handle.addr();
             if state
@@ -833,6 +835,7 @@ unsafe fn copy_async(
     stream: Opaque,
     to_device: bool,
 ) -> CuResult {
+    cfiprof::record_copy(if to_device { "HtoD" } else { "DtoH" }, size);
     // Pageable fallback waits on the stream; do that wait without the lock.
     if size != 0
         && !host.is_null()
@@ -939,6 +942,7 @@ pub unsafe extern "system" fn cuMemcpyDtoHAsync_v2(
 }
 
 unsafe fn copy(host: Opaque, device: u64, size: usize, to_device: bool) -> CuResult {
+    cfiprof::record_copy(if to_device { "HtoD" } else { "DtoH" }, size);
     if size != 0 {
         streams::drain_unlocked(Some(0));
     }
@@ -982,6 +986,7 @@ pub unsafe extern "system" fn cuMemcpyDtoH_v2(dst: Opaque, src: u64, size: usize
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuMemcpyDtoD_v2(dst: u64, src: u64, size: usize) -> CuResult {
     trace::call("cuMemcpyDtoD_v2", || {
+        cfiprof::record_copy("DtoD", size);
         if size != 0 {
             streams::drain_unlocked(Some(0));
         }
@@ -1017,6 +1022,7 @@ pub unsafe extern "system" fn cuMemcpyDtoDAsync_v2(
     stream: Opaque,
 ) -> CuResult {
     trace::call("cuMemcpyDtoDAsync_v2", || {
+        cfiprof::record_copy("DtoD", size);
         if let Some(result) = devices::peer::foreign_dtod(dst, src, size) {
             return result;
         }
@@ -1806,6 +1812,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 return Ok(());
             }
             let timed = trace::kernel_profile_enabled().then(std::time::Instant::now);
+            let cfi_prof = cfiprof::enabled().then(std::time::Instant::now);
             launched = name.to_string_lossy().into_owned();
             let copyback = if copyback::enabled() {
                 copyback::before(&runtime.api, context, stream, &launched, &params, &args)
@@ -1824,6 +1831,15 @@ pub unsafe extern "system" fn cuLaunchKernel(
             if let Some(pending) = copyback {
                 launch_result?;
                 copyback::after(&runtime.api, context, stream, pending, &launched, (grid, block), &args);
+                return Ok(());
+            }
+            if let Some(started) = cfi_prof {
+                // CFI_PROFILE=1: serialise the launch to split submit time from completion time.
+                launch_result?;
+                let submitted = started.elapsed().as_nanos() as u64;
+                context.streams.wait_stream(&runtime.api, stream, u64::MAX)?;
+                let total = started.elapsed().as_nanos() as u64;
+                cfiprof::record_kernel(&launched, submitted, total.saturating_sub(submitted));
                 return Ok(());
             }
             if let Some(started) = timed {

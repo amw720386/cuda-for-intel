@@ -74,6 +74,7 @@ pub(super) fn call(api: &'static str, action: impl FnOnce() -> CuResult) -> CuRe
         record(format_args!("{api} enter"));
     }
     let started = profile_enabled().then(std::time::Instant::now);
+    let cfi_started = super::cfiprof::enabled().then(std::time::Instant::now);
     let on_target = started.is_some() && sampler::is_target();
     if on_target {
         sampler::enter();
@@ -84,6 +85,9 @@ pub(super) fn call(api: &'static str, action: impl FnOnce() -> CuResult) -> CuRe
     }
     if let Some(started) = started {
         profile_record(api, started.elapsed().as_nanos() as u64);
+    }
+    if let Some(started) = cfi_started {
+        super::cfiprof::record_api(api, started.elapsed().as_nanos() as u64);
     }
     if enabled() {
         record(format_args!("{api} -> {}", result as i32));
