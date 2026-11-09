@@ -24,19 +24,26 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 /// instruction set rather than the naming gap (recorded in docs/ptx-gap-report.md).
 fn prefix_regs(src: &str) -> String {
     // (name, is_range): `temp<3>` declares temp0..temp2 and uses them as `temp0`.
+    // Declarations are `.reg` statements and `.reg` parameters of `.func` headers; the type may be
+    // several tokens (`.reg .v2 .u32 v`) or fused (`.reg.v4.u16 v`).
     let mut names: Vec<(String, bool)> = Vec::new();
-    for l in src.lines() {
-        let t = l.trim_start();
-        if let Some(rest) = t.strip_prefix(".reg") {
-            let mut it = rest.trim_start().trim_end_matches(';').split_whitespace();
-            let _ty = it.next();
-            for tok in it {
-                let tok = tok.trim_matches(',');
-                let base = tok.split('<').next().unwrap_or(tok);
-                if !base.is_empty() && !base.starts_with('%') { names.push((base.to_string(), tok.contains('<'))); }
-            }
+    let code: String = src.lines().map(|l| l.split("//").next().unwrap()).collect::<Vec<_>>().join("\n");
+    let spaced = code.replace(['(', ')', ';', '{', '}', '='], " ; ").replace(',', " , ");
+    let mut in_reg = false;
+    for tok in spaced.split_whitespace() {
+        if tok == ".reg" || tok.starts_with(".reg.") {
+            in_reg = true;
+        } else if tok == ";" || tok == ".param" || tok.starts_with(".param.") {
+            in_reg = false;
+        } else if tok.starts_with('.') || tok == "," {
+            // Type tokens precede the names.
+        } else if in_reg {
+            let base = tok.split('<').next().unwrap_or(tok);
+            if !base.is_empty() && !base.starts_with('%') { names.push((base.to_string(), tok.contains('<'))); }
         }
     }
+    names.sort();
+    names.dedup();
     if names.is_empty() { return src.to_string(); }
     names.sort_by_key(|n| std::cmp::Reverse(n.0.len()));
     let isid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
@@ -148,8 +155,11 @@ fn main() {
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--prep") {
-        let raw = fs::read_to_string(std::env::args().nth(2).unwrap()).unwrap();
-        print!("{}", ptx::prepare_module(&raw).unwrap());
+        let raw = prefix_regs(&fs::read_to_string(std::env::args().nth(2).unwrap()).unwrap());
+        match ptx::prepare_module(&raw) {
+            Ok(text) => print!("{text}"),
+            Err(e) => println!("prepare failed: {e}"),
+        }
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--probe") { probe(&std::env::args().nth(2).expect("ptx file")); return; }
