@@ -55,7 +55,9 @@ fn hw_shfl_lane_operand_uses_only_low_five_bits() {
 #[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU; not yet run"]
 fn hw_barrier_with_exited_threads_completes() {
     // Threads >= 48 exit before bar.sync 0; PTX counts exited threads as arrived.
-    let body = "\tsetp.ge.u32 %p1, %r0, 48;\n\t@%p1 bra $exit;\n\tmov.u64 %rd6, sh;\n\tcvt.u64.u32 %rd7, %r0;\n\tshl.b64 %rd7, %rd7, 2;\n\tadd.s64 %rd8, %rd6, %rd7;\n\tst.shared.u32 [%rd8], %r0;\n\tbar.sync 0;\n\txor.b32 %r5, %r0, 1;\n\tcvt.u64.u32 %rd9, %r5;\n\tshl.b64 %rd9, %rd9, 2;\n\tadd.s64 %rd10, %rd6, %rd9;\n\tld.shared.u32 %r6, [%rd10];\n\tst.global.u32 [%rd22], %r6;\n$exit:\n";
+    // Registers start at %rd12: prologue() keeps the param pointers in %rd8/%rd9, and the translator
+    // types a register by name, so reusing %rd8 for a shared address made the module fail to load (218).
+    let body = "\tsetp.ge.u32 %p1, %r0, 48;\n\t@%p1 bra $exit;\n\tmov.u64 %rd12, sh;\n\tcvt.u64.u32 %rd13, %r0;\n\tshl.b64 %rd13, %rd13, 2;\n\tadd.s64 %rd14, %rd12, %rd13;\n\tst.shared.u32 [%rd14], %r0;\n\tbar.sync 0;\n\txor.b32 %r5, %r0, 1;\n\tcvt.u64.u32 %rd15, %r5;\n\tshl.b64 %rd15, %rd15, 2;\n\tadd.s64 %rd16, %rd12, %rd15;\n\tld.shared.u32 %r6, [%rd16];\n\tst.global.u32 [%rd22], %r6;\n$exit:\n";
     let mut s = prologue("bar_exit", 2, 0, "\t.shared .align 4 .b8 sh[1024];\n");
     s += TID;
     s += body;
