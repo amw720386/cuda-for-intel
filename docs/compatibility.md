@@ -24,7 +24,8 @@ though the Level Zero loader code compiles there. macOS builds and runs library 
 | PyTorch | In progress | Built-up results: [pytorch.md](pytorch.md). Per-workload matrix: [pytorch-status.md](pytorch-status.md). Wheels cu121 and newer carry SASS only and cannot run. |
 | CUDA C programs with embedded PTX | Works for the bundled samples | [cuda-programs.md](cuda-programs.md) |
 | cuDNN | Opt-in, experimental | Not part of the default install. Convolutions use PyTorch's native kernels with `torch.backends.cudnn.enabled = False`. |
-| NCCL, cuFFT, cuSOLVER | Not implemented | |
+| cuFFT | Implemented (38 entry points, ZLUDA's 32 plus torch's `cufftXt*` path) | C2C/R2C/C2R in f32 and f64, 1D-3D, batched, advanced layouts. `torch.fft` on cu118 matches CPU ([hw-logs/cufft-2026-11-09.md](hw-logs/cufft-2026-11-09.md)). No callbacks, multi-GPU or half precision; not performance-tuned |
+| NCCL, cuSOLVER | Not implemented | |
 
 ## Feature status
 
