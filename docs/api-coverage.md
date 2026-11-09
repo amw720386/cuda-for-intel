@@ -38,7 +38,7 @@ Behaviour notes for the entry points that are not plain forwards:
 | cuBLAS | 530 | 25 | 505 | 0 | 0 | 55 (16/39/0) |
 | cuBLASLt | 45 | 17 | 28 | 0 | 0 | 11 (11/0/0) |
 | NVML | 398 | 33 | 365 | 0 | 0 | 0 (0/0/0) |
-| cuFFT | 60 | 2 | 58 | 0 | 0 | 7 (0/7/0) |
+| cuFFT | 60 | 38 | 22 | 0 | 0 | 7 (7/0/0) |
 | cuSPARSE | 448 | 4 | 444 | 0 | 0 | 98 (1/97/0) |
 | cuSOLVER | 97 | 0 | 97 | 0 | 0 | 97 (0/97/0) |
 
@@ -2114,46 +2114,46 @@ Binary: `cufft64_11`. Exported but not in the reference list: 0.
 
 | Symbol | Status | Class | Imported by real torch_cuda |
 |---|---|---|---|
-| `cufftCreate` | stub | core | yes |
-| `cufftDestroy` | stub | core | yes |
+| `cufftCreate` | implemented | core | yes |
+| `cufftDestroy` | implemented | core | yes |
 | `cufftEnterCS` | stub | core |  |
-| `cufftEstimate1d` | stub | core |  |
-| `cufftEstimate2d` | stub | core |  |
-| `cufftEstimate3d` | stub | core |  |
-| `cufftEstimateMany` | stub | core |  |
-| `cufftExecC2C` | stub | core |  |
-| `cufftExecC2R` | stub | core |  |
-| `cufftExecD2Z` | stub | core |  |
-| `cufftExecR2C` | stub | core |  |
-| `cufftExecZ2D` | stub | core |  |
-| `cufftExecZ2Z` | stub | core |  |
-| `cufftGetPlanPropertyInt64` | stub | core |  |
+| `cufftEstimate1d` | implemented | core |  |
+| `cufftEstimate2d` | implemented | core |  |
+| `cufftEstimate3d` | implemented | core |  |
+| `cufftEstimateMany` | implemented | core |  |
+| `cufftExecC2C` | implemented | core |  |
+| `cufftExecC2R` | implemented | core |  |
+| `cufftExecD2Z` | implemented | core |  |
+| `cufftExecR2C` | implemented | core |  |
+| `cufftExecZ2D` | implemented | core |  |
+| `cufftExecZ2Z` | implemented | core |  |
+| `cufftGetPlanPropertyInt64` | implemented | core |  |
 | `cufftGetProperty` | implemented | core |  |
-| `cufftGetSize` | stub | core |  |
-| `cufftGetSize1d` | stub | core |  |
-| `cufftGetSize2d` | stub | core |  |
-| `cufftGetSize3d` | stub | core |  |
-| `cufftGetSizeMany` | stub | core |  |
-| `cufftGetSizeMany64` | stub | core |  |
+| `cufftGetSize` | implemented | core |  |
+| `cufftGetSize1d` | implemented | core |  |
+| `cufftGetSize2d` | implemented | core |  |
+| `cufftGetSize3d` | implemented | core |  |
+| `cufftGetSizeMany` | implemented | core |  |
+| `cufftGetSizeMany64` | implemented | core |  |
 | `cufftGetVersion` | implemented | core |  |
 | `cufftLeaveCS` | stub | core |  |
-| `cufftMakePlan1d` | stub | core |  |
-| `cufftMakePlan2d` | stub | core |  |
-| `cufftMakePlan3d` | stub | core |  |
+| `cufftMakePlan1d` | implemented | core |  |
+| `cufftMakePlan2d` | implemented | core |  |
+| `cufftMakePlan3d` | implemented | core |  |
 | `cufftMakePlanGuru64` | stub | core |  |
-| `cufftMakePlanMany` | stub | core |  |
-| `cufftMakePlanMany64` | stub | core |  |
-| `cufftPlan1d` | stub | core |  |
-| `cufftPlan2d` | stub | core |  |
-| `cufftPlan3d` | stub | core |  |
-| `cufftPlanMany` | stub | core |  |
-| `cufftResetPlanProperty` | stub | core |  |
-| `cufftSetAutoAllocation` | stub | core | yes |
-| `cufftSetPlanPropertyInt64` | stub | core |  |
-| `cufftSetStream` | stub | core | yes |
-| `cufftSetWorkArea` | stub | core | yes |
+| `cufftMakePlanMany` | implemented | core |  |
+| `cufftMakePlanMany64` | implemented | core |  |
+| `cufftPlan1d` | implemented | core |  |
+| `cufftPlan2d` | implemented | core |  |
+| `cufftPlan3d` | implemented | core |  |
+| `cufftPlanMany` | implemented | core |  |
+| `cufftResetPlanProperty` | implemented | core |  |
+| `cufftSetAutoAllocation` | implemented | core | yes |
+| `cufftSetPlanPropertyInt64` | implemented | core |  |
+| `cufftSetStream` | implemented | core | yes |
+| `cufftSetWorkArea` | implemented | core | yes |
 | `cufftXtClearCallback` | stub | core |  |
-| `cufftXtExec` | stub | core | yes |
+| `cufftXtExec` | implemented | core | yes |
 | `cufftXtExecDescriptor` | stub | core |  |
 | `cufftXtExecDescriptorC2C` | stub | core |  |
 | `cufftXtExecDescriptorC2R` | stub | core |  |
@@ -2162,9 +2162,9 @@ Binary: `cufft64_11`. Exported but not in the reference list: 0.
 | `cufftXtExecDescriptorZ2D` | stub | core |  |
 | `cufftXtExecDescriptorZ2Z` | stub | core |  |
 | `cufftXtFree` | stub | core |  |
-| `cufftXtGetSizeMany` | stub | core |  |
+| `cufftXtGetSizeMany` | implemented | core |  |
 | `cufftXtMakePlanGuru64` | stub | core |  |
-| `cufftXtMakePlanMany` | stub | core | yes |
+| `cufftXtMakePlanMany` | implemented | core | yes |
 | `cufftXtMalloc` | stub | core |  |
 | `cufftXtMemcpy` | stub | core |  |
 | `cufftXtQueryPlan` | stub | core |  |

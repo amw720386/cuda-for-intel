@@ -6,6 +6,7 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 ## [Unreleased]
 
 ### Added
+- cuFFT shim (`cufft64_11.dll`, also served as `cufft64_10.dll` by `cfi-run`): plans (`cufftPlan*`, `cufftMakePlan*`, `cufftXtMakePlanMany`), size queries, work area, stream, and `cufftExec{C2C,R2C,C2R,Z2Z,D2Z,Z2D}`/`cufftXtExec` as mixed-radix Stockham kernels in generated PTX. Covers ZLUDA's 32 cuFFT entry points and torch's `cufftXt*` path.
 - PTX translator: fp8 pair conversions (`cvt.rn.satfinite[.relu].{e4m3x2,e5m2x2}.{f32,f16x2}`, `cvt.rn[.relu].f16x2.{e4m3x2,e5m2x2}`), `.reg .v2/.v4` vector registers, `mov.vN` and `ld/st .v8`.
 - PTX translator: function pointers and indirect calls (a switch over the address-taken `.func`s matching the call prototype), `.reg` parameters and return values of `.func`, and function-scope `.shared`/`.global`/`.const` variables. Calls that cannot be inlined (into another module, recursive) fail with `unsupported PTX call: <reason>`.
 
