@@ -1,0 +1,95 @@
+{
+ "meta": {
+  "fake_cpu": false
+ },
+ "levels": {
+  "L2": {
+   "level": "L2",
+   "status": "pass",
+   "checks": [
+    {
+     "name": "f32_64x64x64",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_130x70x90",
+     "ok": true,
+     "max_abs": 1.1444091796875e-05,
+     "max_rel": 8.811413135845214e-05,
+     "note": null
+    },
+    {
+     "name": "f32_256x512x128",
+     "ok": true,
+     "max_abs": 6.866455078125e-05,
+     "max_rel": 0.006726553663611412,
+     "note": null
+    },
+    {
+     "name": "f16_256",
+     "ok": true,
+     "max_abs": 0.02158355712890625,
+     "max_rel": 0.0036484245210886,
+     "note": null
+    },
+    {
+     "name": "f16_1024_xmx_range",
+     "ok": true,
+     "max_abs": 0.060455322265625,
+     "max_rel": 0.3568965494632721,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_00",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_01",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_10",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_11",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "bmm",
+     "ok": true,
+     "max_abs": 4.76837158203125e-06,
+     "max_rel": 0.0001713320816634223,
+     "note": null
+    },
+    {
+     "name": "linear_fwd",
+     "ok": true,
+     "max_abs": 5.364418029785156e-07,
+     "max_rel": 1.0919556189037394e-05,
+     "note": null
+    }
+   ],
+   "info": {
+    "device": "cuda"
+   },
+   "seconds": 1.55,
+   "rc": 0
+  }
+ }
+}

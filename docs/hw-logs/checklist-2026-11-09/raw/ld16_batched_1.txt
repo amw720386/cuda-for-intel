@@ -1,0 +1,4 @@
+test hw_cublas_batched::hw_gqa_batched_f16_gemm_failing_shapes ... kq 512x512x64 pointers=true f16_out=false: max abs err 0.000e0
+test hw_cublas_batched::hw_gqa_ptr_table_then_gemm_back_to_back_on_a_stream ... kq iter 0: status 0, device free 34218 MB of 34385 MB
+test hw_cublas_batched::hw_k_compute_batched_ptrs_broadcast_tables ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 116 filtered out; finished in 2.81s

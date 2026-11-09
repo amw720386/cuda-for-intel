@@ -1,0 +1,5 @@
+%USERPROFILE%\cfi-work\torch\venv128\Lib\site-packages\torch\lib\torch_cuda.dll: 404 fatbin(s), 404 without PTX
+  PTX : none
+  SASS: {'sm_50': 100, 'sm_60': 100, 'sm_70': 100, 'sm_75': 304, 'sm_80': 404, 'sm_86': 404, 'sm_89': 1, 'sm_90': 407, 'sm_100': 406, 'sm_120': 405}
+  DIAGNOSTIC: this binary has device code the shim cannot run (SASS only, no PTX).
+  Use a PTX-carrying build (see docs/sass-support.md), or set TORCH_CUDA_ARCH_LIST='...+PTX' when building.

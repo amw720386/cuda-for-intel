@@ -1,0 +1,36 @@
+2026-11-09T04:04:00 slot acquired
+2026-11-09T04:06:12 prof_hv rc=0
+2026-11-09T04:06:56 prof_hv_xmx0 rc=0
+2026-11-09T04:07:39 prof_gate4build rc=0
+2026-11-09T04:07:48 sass_venv128 rc=1
+2026-11-09T04:07:48 ptxscan_venv128 rc=2
+2026-11-09T04:07:56 sass_venv130 rc=1
+2026-11-09T04:07:56 ptxscan_venv130 rc=2
+2026-11-09T04:08:00 sass_followup_cu118 rc=0
+2026-11-09T04:12:58 div_nwarps rc=0
+2026-11-09T04:16:20 div_fastdiv rc=0
+2026-11-09T04:18:26 div_default64 rc=0
+2026-11-09T04:25:25 xmx_cargo rc=0
+2026-11-09T04:25:27 xmx_L2_off rc=0
+2026-11-09T04:25:29 xmx_L2_on rc=0
+cudnn-on edits: 2 (expect 2)
+2026-11-09T04:25:50 cudnn_on_1 rc=0
+2026-11-09T04:26:10 cudnn_on_2 rc=0
+2026-11-09T04:26:31 cudnn_on_3 rc=0
+2026-11-09T04:26:49 cudnn_off rc=0
+2026-11-09T04:44:51 gpu_suite rc=101
+2026-11-09T04:45:53 tedge_cu128 rc=1
+2026-11-09T04:45:56 ld16_batched_1 rc=0
+2026-11-09T04:45:59 ld16_batched_2 rc=0
+2026-11-09T04:46:02 ld16_batched_3 rc=0
+2026-11-09T04:46:18 ld16_ladder_1 rc=0
+2026-11-09T04:46:34 ld16_ladder_2 rc=0
+2026-11-09T04:46:50 ld16_ladder_3 rc=0
+2026-11-09T04:53:26 ld16_ollama_0_1 rc=0
+2026-11-09T05:00:06 ld16_ollama_0_2 rc=0
+2026-11-09T05:06:45 ld16_ollama_0_3 rc=0
+2026-11-09T05:13:33 ld16_ollama_1_1 rc=0
+2026-11-09T05:20:20 ld16_ollama_1_2 rc=0
+2026-11-09T05:27:07 ld16_ollama_1_3 rc=0
+2026-11-09T05:27:07 slot released
+2026-11-09T05:27:07 CHECKLIST_DONE

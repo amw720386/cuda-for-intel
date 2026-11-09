@@ -1,0 +1,289 @@
+{
+ "meta": {
+  "fake_cpu": false
+ },
+ "levels": {
+  "L1": {
+   "level": "L1",
+   "status": "pass",
+   "checks": [
+    {
+     "name": "zeros",
+     "ok": true
+    },
+    {
+     "name": "roundtrip",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "add",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "mul",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "relu",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "gelu",
+     "ok": true,
+     "max_abs": 2.384185791015625e-07,
+     "max_rel": 0.001495902892202139,
+     "note": null
+    },
+    {
+     "name": "exp",
+     "ok": true,
+     "max_abs": 1.9073486328125e-06,
+     "max_rel": 1.4367614653565397e-07,
+     "note": null
+    },
+    {
+     "name": "fp16_cast",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "cat",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "index_select",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "embedding",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "pinned_nonblocking",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    }
+   ],
+   "info": {
+    "device": "cuda"
+   },
+   "seconds": 17.5,
+   "rc": 0
+  },
+  "L2": {
+   "level": "L2",
+   "status": "pass",
+   "checks": [
+    {
+     "name": "f32_64x64x64",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_130x70x90",
+     "ok": true,
+     "max_abs": 1.1444091796875e-05,
+     "max_rel": 8.811413135845214e-05,
+     "note": null
+    },
+    {
+     "name": "f32_256x512x128",
+     "ok": true,
+     "max_abs": 6.866455078125e-05,
+     "max_rel": 0.006726553663611412,
+     "note": null
+    },
+    {
+     "name": "f16_256",
+     "ok": true,
+     "max_abs": 0.02158355712890625,
+     "max_rel": 0.0036484245210886,
+     "note": null
+    },
+    {
+     "name": "f16_1024_xmx_range",
+     "ok": true,
+     "max_abs": 0.060455322265625,
+     "max_rel": 0.3568965494632721,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_00",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_01",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_10",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "f32_transpose_11",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "bmm",
+     "ok": true,
+     "max_abs": 4.76837158203125e-06,
+     "max_rel": 0.0001713320816634223,
+     "note": null
+    },
+    {
+     "name": "linear_fwd",
+     "ok": true,
+     "max_abs": 2.384185791015625e-07,
+     "max_rel": 2.866328259187867e-06,
+     "note": null
+    }
+   ],
+   "info": {
+    "device": "cuda"
+   },
+   "seconds": 2.7,
+   "rc": 0
+  },
+  "L3": {
+   "level": "L3",
+   "status": "pass",
+   "checks": [
+    {
+     "name": "softmax",
+     "ok": true,
+     "max_abs": 1.4901161193847656e-08,
+     "max_rel": 3.046668268780195e-07,
+     "note": null
+    },
+    {
+     "name": "log_softmax",
+     "ok": true,
+     "max_abs": 9.5367431640625e-07,
+     "max_rel": 1.1970045932230278e-07,
+     "note": null
+    },
+    {
+     "name": "layer_norm",
+     "ok": true,
+     "max_abs": 4.76837158203125e-07,
+     "max_rel": 0.0002016714570345357,
+     "note": null
+    },
+    {
+     "name": "batch_norm",
+     "ok": true,
+     "max_abs": 4.76837158203125e-07,
+     "max_rel": 0.0011558984406292439,
+     "note": null
+    },
+    {
+     "name": "sum",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "mean_dim",
+     "ok": true,
+     "max_abs": 2.2351741790771484e-08,
+     "max_rel": 1.087740201910492e-06,
+     "note": null
+    },
+    {
+     "name": "max",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "argmax",
+     "ok": true
+    },
+    {
+     "name": "cumsum",
+     "ok": true,
+     "max_abs": 5.7220458984375e-06,
+     "max_rel": 0.0022046207450330257,
+     "note": null
+    },
+    {
+     "name": "var",
+     "ok": true,
+     "max_abs": 1.1920928955078125e-07,
+     "max_rel": 1.1703618696401463e-07,
+     "note": null
+    },
+    {
+     "name": "cross_entropy",
+     "ok": true,
+     "max_abs": 4.76837158203125e-07,
+     "max_rel": 8.108684568242097e-08,
+     "note": null
+    },
+    {
+     "name": "softmax_f16",
+     "ok": true,
+     "max_abs": 3.217160701751709e-05,
+     "max_rel": 0.0004821013135369867,
+     "note": null
+    }
+   ],
+   "info": {
+    "device": "cuda"
+   },
+   "seconds": 26.04,
+   "rc": 0
+  },
+  "L5": {
+   "level": "L5",
+   "status": "error",
+   "checks": [],
+   "error": "child exited rc=3221226505 without a result",
+   "error_class": "error",
+   "seconds": 13.3,
+   "rc": 3221226505,
+   "stderr_tail": "Could not locate cudnn_graph64_9.dll. Please make sure it is in your library path!\nInvalid handle. Cannot load symbol cudnnGetVersion\n"
+  }
+ }
+}
