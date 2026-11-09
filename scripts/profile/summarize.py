@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Turn a CFI_PROFILE_OUT dump into a ranked markdown table.
 
-usage: summarize.py DUMP [--top N] [--out FILE]
+usage: summarize.py DUMP [--top N] [--out FILE] [--base EARLIER_DUMP]
+--base subtracts an earlier snapshot of the same (cumulative) profile, so one phase of a long-running
+process (e.g. one Ollama request) can be isolated.
 Dump format (tab separated, see src/cuda/cfiprof.rs):
   CFIPROF 1
   K count total_ns launch_ns sync_ns name
@@ -28,8 +30,25 @@ def parse(text):
     return kernels, apis, copies
 
 
-def render(text, top=25):
+def subtract(cur, base):
+    """Per-name difference of two parsed dumps (cur - base); rows that did not change are dropped."""
+    out = []
+    for rows, brows in zip(cur, base):
+        b = {r[0]: r[1:] for r in brows}
+        diff = []
+        for r in rows:
+            prev = b.get(r[0], (0,) * (len(r) - 1))
+            d = (r[0],) + tuple(x - y for x, y in zip(r[1:], prev))
+            if d[1] > 0:
+                diff.append(d)
+        out.append(diff)
+    return tuple(out)
+
+
+def render(text, top=25, base=None):
     kernels, apis, copies = parse(text)
+    if base is not None:
+        kernels, apis, copies = subtract((kernels, apis, copies), parse(base))
     kernels.sort(key=lambda k: -k[2])
     apis.sort(key=lambda a: -a[2])
     total = sum(k[2] for k in kernels) or 1
@@ -56,8 +75,10 @@ def main():
     ap.add_argument("dump")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--out")
+    ap.add_argument("--base", help="earlier snapshot of the same profile to subtract")
     a = ap.parse_args()
-    md = render(open(a.dump, encoding="utf-8", errors="replace").read(), a.top)
+    base = open(a.base, encoding="utf-8", errors="replace").read() if a.base else None
+    md = render(open(a.dump, encoding="utf-8", errors="replace").read(), a.top, base)
     if a.out:
         open(a.out, "w", encoding="utf-8").write(md)
     else:
