@@ -22,7 +22,7 @@ pub(super) type Stmt = Vec<String>;
 pub(super) fn run(source: &str) -> Result<String, Error> {
     let source = tier3::strip_debug(source);
     let tokens = merge_addresses(merge_double_colons(parse::tokens(&source)?));
-    let statements = split(tokens);
+    let statements = vector_regs::run(split(tokens));
     tier3::check_unsupported(&statements)?;
     let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
@@ -659,6 +659,9 @@ fn bit_type(part: &str) -> &str {
 #[path = "vec_small.rs"]
 mod vec_small;
 
+#[path = "vector_regs.rs"]
+mod vector_regs;
+
 #[path = "rewrites_cu128.rs"]
 mod rewrites_cu128;
 
@@ -840,6 +843,11 @@ fn rewrite_mov(inst: &Inst) -> Option<Vec<String>> {
             _ => return None,
         };
         return Some(lines);
+    }
+    let symbol = src.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '$');
+    if matches!(ty, "b32" | "s32") && symbol && !src.contains(['{', '.']) {
+        // `mov.b32 %r, shared_array`: the 32-bit shared address form the parser knows as mov.u32.
+        return Some(vec![render(&inst.guard, "mov.u32", &[dst.into(), src])]);
     }
     let mapped = match ty {
         "b16" | "u16" | "s16" | "f16" | "bf16" | "f16x2" | "bf16x2" | "pred" => "mov.b32",

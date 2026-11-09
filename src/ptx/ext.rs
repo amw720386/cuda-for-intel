@@ -247,6 +247,19 @@ pub(super) enum ExtOp {
     // Atomics beyond the 32-bit integer forms handled by `Instruction::Atomic`.
     Atom { op: AtomicOp, ty: AtomTy, space: Space, returns: bool },
     AtomIncDec { dec: bool, space: Space, returns: bool },
+    /// fp8 pair conversions (`ext_fp8.rs`). `e5m2` selects E5M2 over E4M3 (OCP FP8).
+    Fp8 { dir: Fp8Dir, e5m2: bool, relu: bool },
+}
+
+/// Direction and source type of an fp8 pair conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Fp8Dir {
+    /// `cvt.rn.satfinite[.relu].{e4m3x2,e5m2x2}.f32 d, a, b`: `a` fills the upper byte.
+    FromF32,
+    /// `cvt.rn.satfinite[.relu].{e4m3x2,e5m2x2}.f16x2 d, a`.
+    FromF16x2,
+    /// `cvt.rn[.relu].f16x2.{e4m3x2,e5m2x2} d, a`: the upper byte fills the upper half.
+    ToF16x2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -726,11 +739,14 @@ fn parse_cvt<'a>(
     if parts.len() < 3 {
         return Ok(None);
     }
+    if let Some(fp8) = parse_fp8_cvt(ops, parts) {
+        return fp8.map(Some).ok_or_else(fail);
+    }
     let (Some(d), Some(s)) = (
         NumTy::parse(parts[parts.len() - 2]),
         NumTy::parse(parts[parts.len() - 1]),
     ) else {
-        // cvt.pack and the fp8 / fp4 forms are not implemented.
+        // cvt.pack and the fp4 / fp6 / ue8m0 forms are not implemented.
         return Ok(None);
     };
     let mut round = Round::None;
@@ -784,6 +800,37 @@ fn parse_cvt<'a>(
         dst: [ops[0][0], ""],
         src,
     }))
+}
+
+/// `Some(None)` for a malformed fp8 conversion, `None` when `parts` is not one.
+fn parse_fp8_cvt<'a>(ops: &[Vec<&'a str>], parts: &[&str]) -> Option<Option<Instruction<'a>>> {
+    let fp8 = |t: &str| match t {
+        "e4m3x2" => Some(false),
+        "e5m2x2" => Some(true),
+        _ => None,
+    };
+    let (d, s) = (parts[parts.len() - 2], parts[parts.len() - 1]);
+    let (dir, e5m2) = match (fp8(d), fp8(s)) {
+        (Some(e5m2), None) if s == "f32" => (Fp8Dir::FromF32, e5m2),
+        (Some(e5m2), None) if s == "f16x2" => (Fp8Dir::FromF16x2, e5m2),
+        (None, Some(e5m2)) if d == "f16x2" => (Fp8Dir::ToF16x2, e5m2),
+        _ => return None,
+    };
+    let modifiers = &parts[1..parts.len() - 2];
+    let relu = modifiers.contains(&"relu");
+    // Narrowing requires `.rn.satfinite`; widening is exact and takes `.rn`.
+    let rounding_ok = modifiers.contains(&"rn")
+        && (dir == Fp8Dir::ToF16x2 || modifiers.contains(&"satfinite"))
+        && modifiers.iter().all(|m| matches!(*m, "rn" | "satfinite" | "relu"));
+    let want = if dir == Fp8Dir::FromF32 { 3 } else { 2 };
+    if !rounding_ok || ops.len() != want || ops.iter().any(|o| o.len() != 1) {
+        return Some(None);
+    }
+    let mut src = ["0"; 4];
+    for (slot, operand) in src.iter_mut().zip(&ops[1..]) {
+        *slot = operand[0];
+    }
+    Some(Some(Instruction::Ext { op: ExtOp::Fp8 { dir, e5m2, relu }, dst: [ops[0][0], ""], src }))
 }
 
 fn fcmp(name: &str) -> Option<FCmp> {

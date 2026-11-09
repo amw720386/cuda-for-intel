@@ -61,6 +61,8 @@ impl Value {
 mod ext_emit;
 #[path = "ext_float.rs"]
 mod ext_float;
+#[path = "ext_fp8.rs"]
+mod ext_fp8;
 #[path = "param_space_emit.rs"]
 mod param_space_emit;
 

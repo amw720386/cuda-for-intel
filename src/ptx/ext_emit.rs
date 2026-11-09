@@ -22,6 +22,7 @@ impl<'a> Emitter<'a> {
             | ExtOp::FSetp { .. }
             | ExtOp::FSet { .. }
             | ExtOp::Testp { .. } => self.emit_float_ext(op, dst, src),
+            ExtOp::Fp8 { dir, e5m2, relu } => self.emit_fp8(dir, e5m2, relu, dst[0], src),
             ExtOp::Brev { wide } => {
                 let kind = if wide { Kind::B64 } else { Kind::B32 };
                 let a = self.integer(src[0], kind)?;

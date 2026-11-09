@@ -1161,6 +1161,8 @@ mod nvrtc_tests;
 mod corpus_scan;
 #[cfg(test)]
 mod fuzz_tests;
+#[cfg(test)]
+mod fp8_tests;
 
 #[cfg(test)]
 mod tests {
