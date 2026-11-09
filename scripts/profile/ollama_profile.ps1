@@ -11,8 +11,9 @@
     decode (short prompt, 64 tokens)        -> decode
   CFI_PROFILE_OUT is cumulative per runner process and is rewritten every CFI_PROFILE_FLUSH_MS, so the script copies it
   after each request (<tag>_<step>.tsv). Diff consecutive snapshots on the Mac with
-  `python3 scripts/profile/summarize.py B.tsv --base A.tsv`. A second, unprofiled server first gives the real tok/s of the same
-  sequence twice (timings.json: `cold.*` includes kernel translation on first use, `warm.*` is the repeat).
+  `python3 scripts/profile/summarize.py B.tsv --base A.tsv`. An unprofiled server first gives the real tok/s of the same sequence
+  (timings.json; `warm` includes kernel translation on first use, the later steps run on compiled kernels; every prompt
+  differs from the previous ones so Ollama's KV prefix cache cannot skip the prefill).
   Nothing is killed except the Ollama server tree this script started (after asking it to unload the model).
 
 .EXAMPLE
@@ -81,7 +82,10 @@ function Gen($S, [string]$Prompt, [int]$Predict) {
 }
 $short = 'The capital of France is Paris. Describe the city of Paris in detail.'
 $long = '1 ' + ((@('lorem') * 600) -join ' ') + "`nCount from 1 to 300 separated by commas: 1, 2, 3,"
-$steps = @(@('warm', $long, 8), @('short', $short, 1), @('long', $long, 1), @('decode', $short, 64))
+# Same length, different text: an identical prompt would be served from Ollama's KV prefix cache and skip the prefill.
+$warm = '2 ' + ((@('ipsum') * 600) -join ' ') + "`nCount from 1 to 300 separated by commas: 1, 2, 3,"
+$short2 = 'The capital of Italy is Rome. Describe the city of Rome in detail.'
+$steps = @(@('warm', $warm, 8), @('short', $short, 1), @('long', $long, 1), @('decode', $short2, 64))
 
 $held = $false; $hb = $null
 try {
@@ -103,8 +107,7 @@ try {
                 $rec = [ordered]@{}
                 try {
                     if (-not $S.up -or -not (Create $S $m "prof-$mn")) { $rec.error = 'server/create failed'; continue }
-                    foreach ($round in @('cold', 'warm')) {
-                        if ($mode[0] -eq 'prof' -and $round -eq 'warm') { break }
+                    foreach ($round in @('run')) {
                         foreach ($st in $steps) {
                             try { $rec["$round.$($st[0])"] = Gen $S $st[1] $st[2] } catch { $rec["$round.$($st[0])"] = @{ error = $_.Exception.Message } }
                             if ($mode[0] -eq 'prof') { Start-Sleep 2; Copy-Item "$Out\$tag.live.tsv" "$Out\${tag}_$($st[0]).tsv" -Force -ErrorAction SilentlyContinue }
