@@ -3,7 +3,7 @@ name: ci
 # run by hand on an Intel Arc machine; see docs/release-checklist.md.
 on:
   push:
-    branches: [main, integration, release-cand, win-redirect]
+    branches: [main, integration, release-cand]
   workflow_dispatch:
   pull_request:
 permissions:
