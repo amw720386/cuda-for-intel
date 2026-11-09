@@ -1,6 +1,6 @@
 //! Level-2/1 BLAS built on the verified GEMM path, plus the small configuration entry
-//! points PyTorch and cuBLAS clients probe. Everything unsupported keeps returning
-//! `CUBLAS_STATUS_NOT_SUPPORTED` (15).
+//! points PyTorch and cuBLAS clients probe (strided and f64/complex level-1/2 live in
+//! `blas_dcz`). Everything unsupported keeps returning `CUBLAS_STATUS_NOT_SUPPORTED` (15).
 use super::*;
 
 /// How a unit-stride GEMV maps onto GEMM: `C(rows x 1) = op(A)(rows x cols) * x(cols x 1)`.
@@ -21,7 +21,8 @@ pub(crate) fn gemv_as_gemm(trans: c_int, m: c_int, n: c_int, incx: c_int, incy: 
     Ok(if trans == 0 { GemvAsGemm { rows: m, cols: n } } else { GemvAsGemm { rows: n, cols: m } })
 }
 
-/// y = alpha * op(A) * x + beta * y for unit-stride vectors, through the f32 GEMM kernels.
+/// y = alpha * op(A) * x + beta * y. Unit-stride vectors run through the f32 GEMM kernels;
+/// other increments (including negative ones) use the strided GEMV kernel in `blas_dcz`.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cublasSgemv_v2(
     handle: *mut c_void,
@@ -39,6 +40,11 @@ pub unsafe extern "system" fn cublasSgemv_v2(
 ) -> c_int {
     let shape = match gemv_as_gemm(trans, m, n, incx, incy) {
         Ok(shape) => shape,
+        Err(NOT_SUPPORTED) => {
+            return unsafe {
+                super::blas_dcz::gemv(handle, kernels::ptxgen::Ty::S, trans, m, n, alpha.cast(), a as u64, lda, x as u64, incx, beta.cast(), y as u64, incy)
+            };
+        }
         Err(code) => return code,
     };
     if handle.is_null() {
@@ -52,8 +58,8 @@ pub unsafe extern "system" fn cublasSgemv_v2(
     }
 }
 
-/// Dot product of unit-stride vectors with the result on the host (host pointer mode):
-/// a 1x1 GEMM into a scratch device word that is read back.
+/// Dot product with any increments, the result on the host or (device pointer mode, as
+/// PyTorch uses it) in device memory: the reduction kernel in `blas_dcz`.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cublasSdot_v2(
     handle: *mut c_void,
@@ -64,40 +70,7 @@ pub unsafe extern "system" fn cublasSdot_v2(
     incy: c_int,
     result: *mut c_float,
 ) -> c_int {
-    if result.is_null() || n < 0 {
-        return INVALID_VALUE;
-    }
-    let state = match handle_mut(handle) {
-        Ok(state) => state,
-        Err(_) => return NOT_INITIALIZED,
-    };
-    if incx != 1 || incy != 1 || state.pointer_mode != POINTER_MODE_HOST {
-        return NOT_SUPPORTED;
-    }
-    if n == 0 {
-        unsafe { result.write(0.0) };
-        return SUCCESS;
-    }
-    let Ok(drv) = driver() else {
-        return NOT_INITIALIZED;
-    };
-    let mut scratch = 0u64;
-    if unsafe { (drv.cuMemAlloc_v2)(&mut scratch, 4) } != 0 {
-        return INTERNAL_ERROR;
-    }
-    let (one, zero) = (1.0f32, 0.0f32);
-    let mut status = unsafe {
-        cublasSgemm_v2(handle, 1, 0, 1, 1, n, &one, x, n, y, n, &zero, scratch as *mut c_float, 1)
-    };
-    if status == SUCCESS {
-        if unsafe { (drv.cuStreamSynchronize)(state.stream) } != 0
-            || unsafe { (drv.cuMemcpyDtoH_v2)(result.cast(), scratch, 4) } != 0
-        {
-            status = INTERNAL_ERROR;
-        }
-    }
-    unsafe { (drv.cuMemFree_v2)(scratch) };
-    status
+    unsafe { super::blas_dcz::dot(handle, kernels::ptxgen::Ty::S, n, x as u64, incx, y as u64, incy, result.cast(), false) }
 }
 
 /// `cublasEmulationStrategy_t`: DEFAULT (0) only.
@@ -133,6 +106,19 @@ pub extern "system" fn cublasLtDisableCpuInstructionsSetMask(_mask: u32) -> u32 
     0
 }
 
+/// The CUDA Runtime version the library pairs with (`size_t`), the one `cudart_shim` reports.
+#[unsafe(no_mangle)]
+pub extern "system" fn cublasGetCudartVersion() -> usize {
+    12090
+}
+
+/// BLAS error handler: report the routine and the invalid parameter position, as cuBLAS does.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasXerbla(name: *const c_char, info: c_int) {
+    let name = if name.is_null() { "?".into() } else { unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy() };
+    eprintln!(" ** On entry to {name} parameter number {info} had an illegal value");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,7 +139,7 @@ mod tests {
     fn invalid_calls_return_statuses_without_a_driver() {
         unsafe {
             assert_eq!(cublasSgemv_v2(null_mut(), 0, 2, 2, null(), null(), 2, null(), 1, null(), null_mut(), 1), NOT_INITIALIZED);
-            assert_eq!(cublasSgemv_v2(null_mut(), 0, 2, 2, null(), null(), 2, null(), 2, null(), null_mut(), 1), NOT_SUPPORTED);
+            assert_eq!(cublasSgemv_v2(null_mut(), 0, 2, 2, null(), null(), 2, null(), 2, null(), null_mut(), 1), NOT_INITIALIZED);
             assert_eq!(cublasSdot_v2(null_mut(), 4, null(), 1, null(), 1, null_mut()), INVALID_VALUE);
             let mut out = 1.0;
             assert_eq!(cublasSdot_v2(null_mut(), 4, null(), 1, null(), 1, &mut out), NOT_INITIALIZED);
@@ -163,6 +149,8 @@ mod tests {
         assert_eq!(cublasSetEnvironmentMode(0), SUCCESS);
         assert_eq!(cublasSetEnvironmentMode(2), NOT_SUPPORTED);
         assert_eq!(cublasLtDisableCpuInstructionsSetMask(7), 0);
+        assert_eq!(cublasGetCudartVersion(), 12090);
+        unsafe { cublasXerbla(c"cublasDgemm".as_ptr(), 3) };
     }
 
     #[test]
@@ -172,6 +160,7 @@ mod tests {
             math_mode: 0,
             pointer_mode: POINTER_MODE_HOST,
             workspace: (0, 0),
+            sm_count_target: 0,
         }));
         let mut strategy = 9;
         unsafe {

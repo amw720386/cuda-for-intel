@@ -437,6 +437,7 @@ pub unsafe extern "system" fn cublasLtMatmul(
         math_mode: 0,
         pointer_mode: if pointer_mode == PM_DEVICE { POINTER_MODE_DEVICE } else { POINTER_MODE_HOST },
         workspace: (0, 0),
+        sm_count_target: 0,
     };
     if driver().is_err() {
         return NOT_INITIALIZED;

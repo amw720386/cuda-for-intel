@@ -14,31 +14,21 @@ pub extern "system" fn cublasAxpyEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCaxpy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCaxpy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCaxpy_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCbdmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCcopy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCcopy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCcopy_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCdgmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCdgmm_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCdotc() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCdotc_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCdotc_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCdotu() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCdotu_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCdotu_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -48,17 +38,11 @@ pub extern "system" fn cublasCgbmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgbmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgeam() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgeam_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgelsBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemm() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemm3m() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemm3mBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemm3mBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -66,25 +50,15 @@ pub extern "system" fn cublasCgemm3mEx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemm3mEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemm3mStridedBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemm3mStridedBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemm3m_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemmBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemmBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemmEx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemmEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemmStridedBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemmStridedBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemm_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -98,29 +72,19 @@ pub extern "system" fn cublasCgemvStridedBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemvStridedBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgemv_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgemv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgeqrfBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgerc() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgerc_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgerc_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCgeru() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgeru_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgeru_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCgetrfBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCgetriBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCgetrsBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasChbmv() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -130,13 +94,9 @@ pub extern "system" fn cublasChbmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasChemm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasChemm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasChemm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasChemv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasChemv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasChemv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -149,8 +109,6 @@ pub extern "system" fn cublasCher2_v2() -> i32 { 15 }
 pub extern "system" fn cublasCher2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCher2k() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCher2k_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCher2k_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -168,11 +126,7 @@ pub extern "system" fn cublasCherkEx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCherkEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCherk_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCherk_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCherkx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCherkx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -212,8 +166,6 @@ pub extern "system" fn cublasCrotg_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCscal() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCscal_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCscal_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsrot() -> i32 { 15 }
@@ -224,23 +176,15 @@ pub extern "system" fn cublasCsrot_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsscal() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCsscal_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCsscal_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCswap() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCswap_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCswap_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsymm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCsymm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCsymm_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCsymv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsymv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -249,8 +193,6 @@ pub extern "system" fn cublasCsyr2_v2() -> i32 { 15 }
 pub extern "system" fn cublasCsyr2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsyr2k() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCsyr2k_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsyr2k_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -268,11 +210,7 @@ pub extern "system" fn cublasCsyrkEx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsyrkEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCsyrk_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCsyrk_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCsyrkx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCsyrkx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -304,29 +242,19 @@ pub extern "system" fn cublasCtpttr() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCtrmm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrmm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrmv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCtrmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrsm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasCtrsmBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrsmBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCtrsm_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrsm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrsv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasCtrsv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasCtrsv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -340,25 +268,17 @@ pub extern "system" fn cublasDasum_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDaxpy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDaxpy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDaxpy_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDbdmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDcopy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDcopy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDcopy_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDdgmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDdgmm_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDdot() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDdot_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDdot_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -368,15 +288,11 @@ pub extern "system" fn cublasDgbmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgbmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDgeam() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDgeam_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgelsBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgemm() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDgemmBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgemmBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -384,11 +300,7 @@ pub extern "system" fn cublasDgemmGroupedBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgemmGroupedBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDgemmStridedBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDgemmStridedBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDgemm_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgemm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -402,37 +314,23 @@ pub extern "system" fn cublasDgemvStridedBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgemvStridedBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDgemv_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDgemv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDgeqrfBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDger() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDger_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDger_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDgetrfBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDgetriBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDgetrsBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDmatinvBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDnrm2() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDnrm2_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDnrm2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDotEx() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDotEx_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDotcEx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDotcEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -464,8 +362,6 @@ pub extern "system" fn cublasDsbmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDscal() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDscal_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDscal_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDspmv() -> i32 { 15 }
@@ -488,19 +384,13 @@ pub extern "system" fn cublasDspr_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDswap() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDswap_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDswap_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDsymm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDsymm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDsymm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDsymv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDsymv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDsymv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -514,8 +404,6 @@ pub extern "system" fn cublasDsyr2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDsyr2k() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDsyr2k_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDsyr2k_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDsyr_v2() -> i32 { 15 }
@@ -524,11 +412,7 @@ pub extern "system" fn cublasDsyr_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDsyrk() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDsyrk_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDsyrk_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDsyrkx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDsyrkx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -560,29 +444,19 @@ pub extern "system" fn cublasDtpttr() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDtrmm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrmm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrmv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDtrmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrsm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasDtrsmBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrsmBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDtrsm_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrsm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrsv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDtrsv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDtrsv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -595,8 +469,6 @@ pub extern "system" fn cublasDzasum_v2() -> i32 { 15 }
 pub extern "system" fn cublasDzasum_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDznrm2() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasDznrm2_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasDznrm2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -616,27 +488,15 @@ pub extern "system" fn cublasGetAtomicsMode() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasGetBackdoor() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasGetCudartVersion() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasGetError() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasGetLoggerCallback() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasGetMatrix() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasGetMatrixAsync() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasGetMatrixAsync_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasGetMatrix_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasGetProperty() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasGetSmCountTarget() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasGetVector() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasGetVectorAsync() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasGetVectorAsync_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -680,25 +540,17 @@ pub extern "system" fn cublasIaminEx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIcamax() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasIcamax_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasIcamax_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIcamin() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasIcamin_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIcamin_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIdamax() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasIdamax_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasIdamax_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIdamin() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasIdamin_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIdamin_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -706,25 +558,17 @@ pub extern "system" fn cublasInit() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIsamax() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasIsamax_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasIsamax_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIsamin() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasIsamin_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIsamin_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIzamax() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasIzamax_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasIzamax_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIzamin() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasIzamin_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasIzamin_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1296,8 +1140,6 @@ pub extern "system" fn cublasSasum_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSaxpy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSaxpy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSaxpy_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSbdmm() -> i32 { 15 }
@@ -1314,17 +1156,11 @@ pub extern "system" fn cublasScasum_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasScnrm2() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasScnrm2_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasScnrm2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasScopy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasScopy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasScopy_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSdgmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSdgmm_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1342,19 +1178,9 @@ pub extern "system" fn cublasSetKernelStream() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSetLoggerCallback() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSetMatrix() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSetMatrixAsync() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSetMatrixAsync_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSetMatrix_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSetSmCountTarget() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSetVector() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSetVectorAsync() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSetVectorAsync_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1365,8 +1191,6 @@ pub extern "system" fn cublasSgbmv() -> i32 { 15 }
 pub extern "system" fn cublasSgbmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSgbmv_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSgeam() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSgeam_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1402,23 +1226,15 @@ pub extern "system" fn cublasSgeqrfBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSger() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSger_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSger_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSgetrfBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSgetriBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSgetrsBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasShutdown() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSmatinvBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSnrm2() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSnrm2_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSnrm2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1450,8 +1266,6 @@ pub extern "system" fn cublasSsbmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSscal() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSscal_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSscal_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSspmv() -> i32 { 15 }
@@ -1474,19 +1288,13 @@ pub extern "system" fn cublasSspr_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSswap() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSswap_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSswap_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSsymm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSsymm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSsymm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSsymv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSsymv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSsymv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1500,8 +1308,6 @@ pub extern "system" fn cublasSsyr2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSsyr2k() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSsyr2k_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSsyr2k_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSsyr_v2() -> i32 { 15 }
@@ -1510,11 +1316,7 @@ pub extern "system" fn cublasSsyr_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSsyrk() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSsyrk_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSsyrk_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSsyrkx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSsyrkx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1546,13 +1348,9 @@ pub extern "system" fn cublasStpttr() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasStrmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasStrmm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasStrmm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasStrmv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasStrmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasStrmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1560,13 +1358,9 @@ pub extern "system" fn cublasStrsm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasStrsmBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasStrsm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasStrsm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasStrsv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasStrsv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasStrsv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1593,8 +1387,6 @@ pub extern "system" fn cublasTSTgemvStridedBatched() -> i32 { 15 }
 pub extern "system" fn cublasTSTgemvStridedBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasUint8gemmBias() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasXerbla() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasXtCgemm() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1700,31 +1492,21 @@ pub extern "system" fn cublasXtZtrsm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZaxpy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZaxpy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZaxpy_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZbdmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZcopy() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZcopy_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZcopy_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZdgmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZdgmm_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZdotc() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZdotc_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZdotc_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZdotu() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZdotu_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZdotu_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1736,8 +1518,6 @@ pub extern "system" fn cublasZdrot_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZdscal() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZdscal_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZdscal_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgbmv() -> i32 { 15 }
@@ -1746,27 +1526,17 @@ pub extern "system" fn cublasZgbmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgbmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZgeam() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZgeam_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgelsBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgemm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZgemm3m() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZgemm3m_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZgemmBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgemmBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZgemmStridedBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZgemmStridedBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZgemm_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgemm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1780,29 +1550,19 @@ pub extern "system" fn cublasZgemvStridedBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgemvStridedBatched_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZgemv_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZgemv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgeqrfBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgerc() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZgerc_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZgerc_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZgeru() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZgeru_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZgeru_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZgetrfBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZgetriBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZgetrsBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZhbmv() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1812,13 +1572,9 @@ pub extern "system" fn cublasZhbmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZhemm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZhemm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZhemm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZhemv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZhemv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZhemv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1832,8 +1588,6 @@ pub extern "system" fn cublasZher2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZher2k() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZher2k_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZher2k_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZher_v2() -> i32 { 15 }
@@ -1842,11 +1596,7 @@ pub extern "system" fn cublasZher_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZherk() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZherk_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZherk_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZherkx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZherkx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1882,23 +1632,15 @@ pub extern "system" fn cublasZrotg_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZscal() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZscal_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZscal_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZswap() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZswap_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZswap_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZsymm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZsymm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZsymm_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZsymv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZsymv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1908,8 +1650,6 @@ pub extern "system" fn cublasZsyr2_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZsyr2k() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZsyr2k_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZsyr2k_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZsyr_v2() -> i32 { 15 }
@@ -1918,11 +1658,7 @@ pub extern "system" fn cublasZsyr_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZsyrk() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZsyrk_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZsyrk_v2_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZsyrkx() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZsyrkx_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
@@ -1954,29 +1690,19 @@ pub extern "system" fn cublasZtpttr() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrmm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZtrmm_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrmm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrmv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZtrmv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrmv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrsm() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasZtrsmBatched() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrsmBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZtrsm_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrsm_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrsv() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasZtrsv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasZtrsv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
