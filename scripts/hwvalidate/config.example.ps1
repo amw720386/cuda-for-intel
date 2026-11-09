@@ -8,3 +8,4 @@ $env:CFI_HYBRID_DIR      = "$w\stock\hybrid"                       # dir with nv
 $env:CFI_STOCK_GGML_DLL  = "$w\stock\runcfi\lib\ollama\cuda_v13\ggml-cuda.dll"
 $env:CFI_CORPUS_DIR      = "$w\corpus"                             # PTX corpus subset (optional)
 $env:CFI_TORCH_PY        = "$w\torch\torch222\Scripts\python.exe"  # torch venv python (optional)
+$env:NVRTC_SHIM_CLANG    = "$w\llvm\bin\clang.exe"                 # LLVM clang with the NVPTX backend; without it hw_nvrtc fails with "no clang found"
