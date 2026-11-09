@@ -160,19 +160,26 @@ function Invoke-GpuTest([string]$Name, [string[]]$Filters, [int]$TimeoutMin, [ha
 
 # ---- Ollama helpers (used by stages 2, 3, 6, 8) -------------------------------------------------
 function Get-OllamaTree {
-    $priv = Join-Path $hw 'ollama_run'
-    if (-not (Test-Path (Join-Path $priv 'ollama.exe'))) {
-        if (-not $OllamaRun -or -not (Test-Path (Join-Path $OllamaRun 'ollama.exe'))) { return $null }
-        & robocopy $OllamaRun $priv /E /XF *.orig /NFL /NDL /NJH /NJS /NP | Out-Null
+    # A process still running from this tree (e.g. a server another script failed to stop) locks its DLLs; nothing is
+    # killed, the next private tree (ollama_run_2, _3, ...) is used instead.
+    foreach ($n in 1..6) {
+        $priv = Join-Path $hw $(if ($n -eq 1) { 'ollama_run' } else { "ollama_run_$n" })
+        if (-not (Test-Path (Join-Path $priv 'ollama.exe'))) {
+            if (-not $OllamaRun -or -not (Test-Path (Join-Path $OllamaRun 'ollama.exe'))) { return $null }
+            & robocopy $OllamaRun $priv /E /XF *.orig /NFL /NDL /NJH /NJS /NP | Out-Null
+        }
+        $g = Join-Path $priv 'lib\ollama\cuda_v13'
+        New-Item -ItemType Directory -Force $g | Out-Null
+        try {
+            Copy-Item (Join-Path $rel 'nvcuda.dll') $g -Force -ErrorAction Stop
+            Copy-Item (Join-Path $rel 'cublas64_12.dll') (Join-Path $g 'cublas64_13.dll') -Force -ErrorAction Stop
+            Copy-Item (Join-Path $rel 'cublas64_12.dll') (Join-Path $g 'cublasLt64_13.dll') -Force -ErrorAction Stop
+        } catch { Write-Host "ollama tree $priv is in use ($($_.Exception.Message)); trying the next one"; continue }
+        $x = Join-Path $priv 'ollama-hv.exe'
+        if (-not (Test-Path $x)) { Copy-Item (Join-Path $priv 'ollama.exe') $x }
+        return $priv
     }
-    $g = Join-Path $priv 'lib\ollama\cuda_v13'
-    New-Item -ItemType Directory -Force $g | Out-Null
-    Copy-Item (Join-Path $rel 'nvcuda.dll') $g -Force
-    Copy-Item (Join-Path $rel 'cublas64_12.dll') (Join-Path $g 'cublas64_13.dll') -Force
-    Copy-Item (Join-Path $rel 'cublas64_12.dll') (Join-Path $g 'cublasLt64_13.dll') -Force
-    $x = Join-Path $priv 'ollama-hv.exe'
-    if (-not (Test-Path $x)) { Copy-Item (Join-Path $priv 'ollama.exe') $x }
-    return $priv
+    return $null
 }
 function Get-DescendantIds([int]$ParentId) {
     $ids = @()

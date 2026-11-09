@@ -63,7 +63,7 @@ try {
     $env:PATH = "$OllamaRun;$OllamaRun\lib\ollama;$g;$env:PATH"; $env:OLLAMA_LIBRARY_PATH = "$OllamaRun\lib\ollama;$g"; $env:OLLAMA_VULKAN = '0'
     $env:OLLAMA_MODELS = "$(Split-Path $Model -Parent)\models"; $env:OLLAMA_HOST = "127.0.0.1:$port"; $env:OLLAMA_NUM_PARALLEL = '1'
     $env:OLLAMA_FLASH_ATTENTION = '0'; $env:OLLAMA_LOAD_TIMEOUT = '120m'; $env:OLLAMA_KEEP_ALIVE = '30m'
-    if (Get-Process ollama-divc -EA 0) { "ABORT $mode : a stale ollama-divc is running; refusing to start another" | Add-Content "$res\scan_errors.txt"; continue }
+    if (@(Get-Process ollama-divc -EA 0 | Where-Object { $_.Path -and $_.Path -like "$OllamaRun\*" }).Count) { "ABORT $mode : a stale ollama-divc is running; refusing to start another" | Add-Content "$res\scan_errors.txt"; continue }
     $srv = Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $wd -FilePath $exe -ArgumentList 'serve' -RedirectStandardOutput "$wd\o.txt" -RedirectStandardError "$wd\e.txt"
     Start-Sleep 8
     # guard: our own server log must say it listens on our port (a foreign server on the port would make ours fail with "bind")
@@ -77,7 +77,12 @@ try {
       try { $r = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/api/generate" -Method Post -Body $utf8.GetBytes($body) -ContentType 'application/json; charset=utf-8' -TimeoutSec 5400
             $ms = New-Object IO.MemoryStream; $r.RawContentStream.CopyTo($ms); [IO.File]::WriteAllBytes("$wd\p$i.json", $ms.ToArray()) } catch { "FAIL $mode $i $($_.Exception.Message)" | Add-Content "$res\scan_errors.txt" }
     }
-    try { $srv.Kill() } catch {}; [void]$srv.WaitForExit(30000)   # our own child handle only
+    # Unload first (the runner then exits by itself), then end the process tree WE started: killing only the server
+    # left its runner child alive, and the next mode aborted on the stale ollama-divc.
+    try { Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/generate" -Method Post -Body (@{ model = "divc-$mode"; keep_alive = 0 } | ConvertTo-Json) -ContentType 'application/json' -TimeoutSec 30 | Out-Null } catch {}
+    Start-Sleep 5
+    foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($srv.Id)" -EA 0)) { try { [Diagnostics.Process]::GetProcessById([int]$c.ProcessId).Kill() } catch {} }
+    try { if (-not $srv.HasExited) { $srv.Kill() } } catch {}; [void]$srv.WaitForExit(30000); Start-Sleep 3
     if (Test-Path "$wd\cuda-for-intel-export.log") { Copy-Item "$wd\cuda-for-intel-export.log" "$res\ollama_${mode}_export.log" }
   }
   # compare
