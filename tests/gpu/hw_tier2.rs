@@ -140,7 +140,9 @@ fn hw_f64_conversions_match_cpu() {
         for i in 0..n {
             let x = a[i];
             let r = match f { 0 => x.trunc(), 1 => { let r = x.round(); if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 { r - x.signum() } else { r } }, 2 => x.floor(), _ => x.ceil() };
-            let want = if x.is_nan() { 0 } else { r.clamp(-2147483648.0, 2147483647.0) as i32 };
+            // PTX ISA 9.0 cvt: NaN gives 0 only when the source is not .f64 and the destination not 64-bit; an
+            // .f64 source gives 1 << 31 (as NVIDIA's d2i, see LLVM NVPTX "Fix NaN + overflow semantics of f2ll/d2i").
+            let want = if x.is_nan() { i32::MIN } else { r.clamp(-2147483648.0, 2147483647.0) as i32 };
             assert_eq!(out[i] as i32, want, "{instr} {x:e}");
         }
     }
