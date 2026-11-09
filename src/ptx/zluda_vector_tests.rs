@@ -18,27 +18,12 @@ const VECTORS: &str = include_str!("../../tests/ptx_corpus/zluda/vectors.tsv");
 /// Vectors that do not match, with the reason. Keep sorted by name.
 const EXPECTED_FAILURES: &[(&str, &str)] = &[
     ("const_ident", "module .const initialised with symbol addresses ({ x, y }) is unsupported"),
-    ("cp_async", "function-scope .global variable with an initialiser is unsupported"),
-    ("cvt_rn_f16x2_e4m3x2", "fp8 cvt (e4m3x2/e5m2x2) is unsupported; roadmap item 7"),
-    ("cvt_rn_f16x2_e5m2x2", "fp8 cvt (e4m3x2/e5m2x2) is unsupported; roadmap item 7"),
-    ("cvt_rn_satfinite_e4m3x2_f32", "fp8 cvt (e4m3x2/e5m2x2) is unsupported; roadmap item 7"),
-    ("cvt_rn_satfinite_e5m2x2_f32", "fp8 cvt (e4m3x2/e5m2x2) is unsupported; roadmap item 7"),
+    ("cp_async", "entry-scope .global variable with an initialiser is unsupported (only .func-scope statics move to module scope)"),
     ("div_ftz", ".ftz is ignored, denormals are not flushed (docs/translator-coverage.md)"),
-    ("ldmatrix_trans", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7 (.v2.b16 register)"),
-    ("mma_m16n8k32_s32_s8_s8_s32", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7 (.v4.u16 register)"),
-    ("mma_m16n8k32_s32_s8_s8_s32_interleave", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7 (.v4.u16 register)"),
     ("mul_ftz", ".ftz is ignored, denormals are not flushed (docs/translator-coverage.md)"),
-    ("multiple_return", ".func with .reg (not .param) parameters, two returns incl. a .pred; roadmap item 8"),
     ("reg_local", "non-standard `reg + imm` value operand (st.u64 [x], temp + 1)"),
-    ("shared_unify_extern", ".func with .reg (not .param) parameters and a nested call; roadmap item 8"),
-    ("shared_unify_local", ".func with .reg (not .param) parameters and a nested call; roadmap item 8"),
     ("sqrt_rn_ftz", ".ftz is ignored, denormals are not flushed (docs/translator-coverage.md)"),
     ("stateful_neg_offset", "adding (or subtracting) two global addresses is rejected, even when the result is dead"),
-    ("vector", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7"),
-    ("vector4", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7"),
-    ("vector8", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7"),
-    ("vector8_extract", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7"),
-    ("vector_extract", "vector registers (.reg .v2/.v4, ld/st .v8) are unsupported; roadmap item 7"),
 ];
 
 /// Kernels that access memory outside their buffers on 64 threads. ZLUDA's harness does not

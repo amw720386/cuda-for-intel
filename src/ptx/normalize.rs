@@ -21,8 +21,8 @@ pub(super) type Stmt = Vec<String>;
 /// Entry point: returns canonical PTX text.
 pub(super) fn run(source: &str) -> Result<String, Error> {
     let source = tier3::strip_debug(source);
-    let tokens = merge_addresses(merge_double_colons(split_glued_state_space(parse::tokens(&source)?)));
-    let statements = split(tokens);
+    let tokens = merge_addresses(merge_double_colons(parse::tokens(&source)?));
+    let statements = vector_regs::run(split(tokens));
     tier3::check_unsupported(&statements)?;
     let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
@@ -300,25 +300,6 @@ fn merge_addresses(tokens: Vec<String>) -> Vec<String> {
             }
         }
         i += 1;
-    }
-    out
-}
-
-/// ptxas accepts a declaration's state space glued to its type (`.reg.u64 t;`, `.param.u64 p;`,
-/// ZLUDA's `b64tof64` vector). Split them so every later pass sees `.reg .u64`.
-fn split_glued_state_space(tokens: Vec<&str>) -> Vec<&str> {
-    if !tokens.iter().any(|t| t.starts_with(".reg.") || t.starts_with(".param.")) {
-        return tokens;
-    }
-    let mut out = Vec::with_capacity(tokens.len() + 4);
-    for t in tokens {
-        let at = if t.starts_with(".reg.") { 4 } else if t.starts_with(".param.") { 6 } else { 0 };
-        if at == 0 {
-            out.push(t);
-        } else {
-            out.push(&t[..at]);
-            out.push(&t[at..]);
-        }
     }
     out
 }
@@ -677,6 +658,9 @@ fn bit_type(part: &str) -> &str {
 
 #[path = "vec_small.rs"]
 mod vec_small;
+
+#[path = "vector_regs.rs"]
+mod vector_regs;
 
 #[path = "rewrites_cu128.rs"]
 mod rewrites_cu128;

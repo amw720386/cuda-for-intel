@@ -1497,6 +1497,9 @@ impl<'a> Parser<'a> {
                     src: [a, b, c, d],
                 }
             }
+            [op, ..] if op.starts_with("call.cfi_") => {
+                return Err(unsupported_call(&slice[..end]));
+            }
             _ => {
                 return Err(Error::new(format!(
                     "unsupported PTX instruction: {}",
@@ -2624,4 +2627,28 @@ fn infer_direct_global_params(params: &mut [(&str, Param)], blocks: &[Block<'_>]
             *ty = Param::GlobalPtr;
         }
     }
+}
+
+/// A `call` the inliner could not expand; `call.cfi_<reason>` names why (see `inline.rs`).
+fn unsupported_call(body: &[&str]) -> Error {
+    let reason = body[0].trim_start_matches("call.cfi_");
+    // The callee follows the optional `( returns ) ,` group.
+    let mut i = 1;
+    if body.get(i) == Some(&"(") {
+        i = body.iter().position(|t| *t == ")").map_or(i, |close| close + 1);
+        if body.get(i) == Some(&",") {
+            i += 1;
+        }
+    }
+    let target = body.get(i).copied().unwrap_or("?");
+    let why = match reason {
+        "extern" => format!("{target} is an .extern .func with no definition in this module (separately compiled PTX is not linked)"),
+        "undefined" => format!("{target} has no .func definition in this module"),
+        "indirect" => format!("no address-taken .func in this module matches the prototype of the indirect call through {target}"),
+        "recursive" => format!("{target} is recursive or nested more than 12 calls deep, so it cannot be inlined"),
+        "static" => format!("{target} declares a function-scope variable that could not be moved to module scope"),
+        _ => format!("{target} cannot be inlined"),
+    };
+    let original: Vec<&str> = std::iter::once("call").chain(body[1..].iter().copied()).collect();
+    Error::new(format!("unsupported PTX call: {why}: {}", original.join(" ")))
 }

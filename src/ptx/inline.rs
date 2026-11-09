@@ -7,6 +7,18 @@
 //! value become moves into the registers the caller later reads with
 //! `ld.param`, and `ret` becomes a branch to the end of the inlined region.
 //! Callee registers and labels are renamed per call site.
+//!
+//! `.reg` parameters and return values (`.func (.reg .u32 r) f (.reg .u32 a)`) become
+//! per-call-site registers: moves from the actual arguments before the body, moves to the
+//! actual return registers after it. Function-scope `.shared`, `.global` and `.const`
+//! variables are static, so they move to module scope once per function.
+//!
+//! Function pointers follow the design of ZLUDA's `resolve_function_pointers` pass, adapted
+//! to inlining: `mov.u64 %rd, f` (and `f` in a module-scope initializer) yields a small
+//! non-zero token for `f`, and `call (r), %rd, (a), proto;` becomes a switch over the
+//! address-taken functions whose signature matches the prototype (or the `.calltargets`
+//! list), each arm an inlined call. Calls that cannot be inlined keep their text with a
+//! `call.cfi_<reason>` opcode, which the parser reports as a precise unsupported error.
 
 use super::Error;
 use super::normalize::Stmt;
@@ -18,7 +30,38 @@ const MAX_STATEMENTS: usize = 12_000_000;
 struct Func {
     returns: Vec<String>,
     params: Vec<String>,
+    /// Register type (`.u32`, `.pred`) of each return value passed in a `.reg`, else `None`.
+    return_regs: Vec<Option<String>>,
+    /// Register type of each parameter passed in a `.reg`, else `None` (a `.param`).
+    param_regs: Vec<Option<String>>,
     body: Vec<Stmt>,
+    /// Function-pointer token (`mov.u64 %rd, f` yields it).
+    token: u64,
+}
+
+/// A call prototype: `.reg` flags of the return values and parameters.
+#[derive(Clone, PartialEq, Eq)]
+struct Signature {
+    returns: Vec<bool>,
+    params: Vec<bool>,
+}
+
+impl Func {
+    fn signature(&self) -> Signature {
+        Signature {
+            returns: self.return_regs.iter().map(Option::is_some).collect(),
+            params: self.param_regs.iter().map(Option::is_some).collect(),
+        }
+    }
+}
+
+/// Module-wide facts the expansion consults.
+struct Module {
+    funcs: HashMap<String, Func>,
+    /// Functions declared (`.extern .func f (...) ;` or a prototype) but not defined here.
+    declared: HashSet<String>,
+    /// Defined functions whose address is taken, in definition order.
+    address_taken: Vec<String>,
 }
 
 pub(super) fn expand(statements: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
@@ -30,6 +73,7 @@ pub(super) fn expand(statements: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
         }
     }
     let mut funcs: HashMap<String, Func> = HashMap::new();
+    let mut declared: HashSet<String> = HashSet::new();
     let mut rest: Vec<Stmt> = Vec::with_capacity(statements.len());
     let mut iter = statements.into_iter();
     while let Some(stmt) = iter.next() {
@@ -39,6 +83,9 @@ pub(super) fn expand(statements: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
         }
         if stmt.last().is_some_and(|t| t == ";") {
             // Declaration only (`.extern .func`, forward declaration).
+            if let Some((name, _)) = parse_func(&stmt, Vec::new()) {
+                declared.insert(name);
+            }
             continue;
         }
         // Definition: header ends with `{`; take the body through the matching `}`.
@@ -57,13 +104,130 @@ pub(super) fn expand(statements: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
             }
             body.push(inner);
         }
-        if let Some((name, func)) = parse_func(&stmt, body) {
+        let token = funcs.len() as u64 + 1;
+        if let Some((name, mut func)) = parse_func(&stmt, body) {
+            func.token = token;
             funcs.insert(name, func);
         }
     }
+    for name in funcs.keys() {
+        declared.remove(name);
+    }
+    let statics = hoist_statics(&mut funcs);
+    if !statics.is_empty() {
+        // Module scope, before the first kernel (or at the end when there is none).
+        let at = rest.iter().position(|s| s.iter().any(|t| t == ".entry")).unwrap_or(rest.len());
+        rest.splice(at..at, statics);
+    }
+    let mut address_taken: Vec<(u64, String)> = Vec::new();
+    {
+        let mut seen = |stmts: &[Stmt]| {
+            for stmt in stmts {
+                for name in taken_functions(stmt, &funcs) {
+                    let token = funcs[name].token;
+                    if !address_taken.iter().any(|(_, n)| n == name) {
+                        address_taken.push((token, name.to_owned()));
+                    }
+                }
+            }
+        };
+        seen(&rest);
+        for func in funcs.values() {
+            seen(&func.body);
+        }
+    }
+    address_taken.sort();
+    let module = Module { funcs, declared, address_taken: address_taken.into_iter().map(|(_, n)| n).collect() };
     let mut counter = 0usize;
     let mut budget = MAX_STATEMENTS;
-    expand_stmts(&rest, &funcs, 0, &mut counter, &mut budget)
+    expand_stmts(&rest, &module, 0, &mut counter, &mut budget)
+}
+
+/// Names of defined functions used as values in `stmt` (`mov.u64 %rd, f`, `.global .u64 t[] = {f}`).
+fn taken_functions<'m>(stmt: &Stmt, funcs: &'m HashMap<String, Func>) -> Vec<&'m str> {
+    let (_, rest) = split_guard(stmt);
+    let op = rest.first().map_or("", String::as_str);
+    let value_position = op.starts_with("mov.")
+        || op.starts_with("cvta.")
+        || op.starts_with("st.")
+        || op.starts_with("selp.")
+        || (matches!(op, ".global" | ".const" | ".visible" | ".weak") && stmt.iter().any(|t| t == "="));
+    if !value_position {
+        return Vec::new();
+    }
+    let start = if op.starts_with('.') { stmt.iter().position(|t| t == "=").unwrap_or(stmt.len()) } else { 0 };
+    stmt[start..]
+        .iter()
+        .filter_map(|t| funcs.get_key_value(t.as_str()).map(|(name, _)| name.as_str()))
+        .collect()
+}
+
+/// Replaces function names in value positions with their pointer tokens.
+fn replace_function_values(stmt: &Stmt, module: &Module) -> Option<Stmt> {
+    if taken_functions(stmt, &module.funcs).is_empty() {
+        return None;
+    }
+    let (_, rest) = split_guard(stmt);
+    let op = rest.first().map_or("", String::as_str);
+    let start = if op.starts_with('.') { stmt.iter().position(|t| t == "=").unwrap_or(stmt.len()) } else { 0 };
+    Some(
+        stmt.iter()
+            .enumerate()
+            .map(|(k, t)| match module.funcs.get(t.as_str()) {
+                Some(func) if k >= start => func.token.to_string(),
+                _ => t.clone(),
+            })
+            .collect(),
+    )
+}
+
+/// Moves function-scope `.shared` / `.global` / `.const` declarations to module scope, renamed
+/// `<function>__<name>`; every call site of the function shares the one variable, as in PTX.
+fn hoist_statics(funcs: &mut HashMap<String, Func>) -> Vec<Stmt> {
+    let mut names: Vec<&String> = funcs.keys().collect();
+    names.sort();
+    let names: Vec<String> = names.into_iter().cloned().collect();
+    let mut out = Vec::new();
+    for fname in names {
+        let func = funcs.get_mut(&fname).unwrap();
+        if !func.body.iter().any(unsupported_in_callee) {
+            continue;
+        }
+        let mut renames: HashMap<String, String> = HashMap::new();
+        let mut kept = Vec::with_capacity(func.body.len());
+        for stmt in std::mem::take(&mut func.body) {
+            if !unsupported_in_callee(&stmt) {
+                kept.push(stmt);
+                continue;
+            }
+            let end = stmt.iter().position(|t| matches!(t.as_str(), "[" | ";" | "=" | "<")).unwrap_or(stmt.len());
+            let Some(at) = stmt[..end].iter().rposition(|t| !t.starts_with('.') && !t.chars().all(|c| c.is_ascii_digit())) else {
+                kept.push(stmt);
+                continue;
+            };
+            let renamed = format!("{fname}__{}", stmt[at]);
+            renames.insert(stmt[at].clone(), renamed.clone());
+            let mut decl = stmt.clone();
+            decl[at] = renamed;
+            out.push(decl);
+        }
+        for stmt in &mut kept {
+            for token in stmt.iter_mut() {
+                if let Some(new) = rename_symbol(token, &renames) {
+                    *token = new;
+                }
+            }
+        }
+        func.body = kept;
+    }
+    out
+}
+
+/// `sym`, `sym+8` and `sym-8` with `sym` renamed.
+fn rename_symbol(token: &str, renames: &HashMap<String, String>) -> Option<String> {
+    let split = token.find(['+', '-']).unwrap_or(token.len());
+    let (name, tail) = token.split_at(split);
+    renames.get(name).map(|new| format!("{new}{tail}"))
 }
 
 fn is_func_statement(stmt: &Stmt) -> bool {
@@ -86,31 +250,47 @@ fn parse_func(header: &Stmt, body: Vec<Stmt>) -> Option<(String, Func)> {
     } else {
         Vec::new()
     };
-    Some((name, Func { returns, params, body }))
+    let (returns, return_regs) = returns.into_iter().unzip();
+    let (params, param_regs) = params.into_iter().unzip();
+    Some((name, Func { returns, params, return_regs, param_regs, body, token: 0 }))
 }
 
-/// Names of the `.param` declarations in the parenthesised list at `open`.
-fn param_names(tokens: &[String], open: usize) -> Option<(Vec<String>, usize)> {
+/// Names of the declarations in the parenthesised list at `open`, each with its register type
+/// when it is a `.reg` (not a `.param`).
+fn param_names(tokens: &[String], open: usize) -> Option<(Vec<(String, Option<String>)>, usize)> {
     let mut names = Vec::new();
     let mut i = open + 1;
     let mut last: Option<String> = None;
+    let mut is_reg = false;
+    let mut ty: Option<String> = None;
     let mut bracket = 0;
+    let mut finish = |last: &mut Option<String>, is_reg: &mut bool, ty: &mut Option<String>| {
+        if let Some(name) = last.take() {
+            names.push((name, if *is_reg { Some(ty.clone().unwrap_or_else(|| ".b32".into())) } else { None }));
+        }
+        *is_reg = false;
+        *ty = None;
+    };
     while i < tokens.len() {
         match tokens[i].as_str() {
             ")" => {
-                if let Some(name) = last.take() {
-                    names.push(name);
-                }
+                finish(&mut last, &mut is_reg, &mut ty);
                 return Some((names, i + 1));
             }
-            "," => {
-                if let Some(name) = last.take() {
-                    names.push(name);
-                }
-            }
+            "," => finish(&mut last, &mut is_reg, &mut ty),
             "[" => bracket += 1,
             "]" => bracket -= 1,
-            token if bracket == 0 && !token.starts_with('.') => last = Some(token.to_owned()),
+            ".reg" => is_reg = true,
+            token if token.starts_with(".reg.") => {
+                is_reg = true;
+                ty = token.rsplit('.').next().map(|t| format!(".{t}"));
+            }
+            token if bracket == 0 && token.starts_with('.') && !token.starts_with(".param") && !token.starts_with(".align") => {
+                ty = Some(token.to_owned());
+            }
+            token if bracket == 0 && !token.starts_with('.') && !token.chars().all(|c| c.is_ascii_digit()) => {
+                last = Some(token.to_owned())
+            }
             _ => {}
         }
         i += 1;
@@ -126,17 +306,40 @@ struct Frame {
 
 fn expand_stmts(
     stmts: &[Stmt],
-    funcs: &HashMap<String, Func>,
+    module: &Module,
     depth: usize,
     counter: &mut usize,
     budget: &mut usize,
 ) -> Result<Vec<Stmt>, Error> {
     let mut out: Vec<Stmt> = Vec::with_capacity(stmts.len());
     let mut frame = Frame::default();
+    // `label: .callprototype ...` and `label: .calltargets ...` seen so far in this body.
+    let mut prototypes: HashMap<String, Signature> = HashMap::new();
+    let mut target_lists: HashMap<String, Vec<String>> = HashMap::new();
     let mut i = 0;
     while i < stmts.len() {
         let stmt = &stmts[i];
         i += 1;
+        if stmt.len() == 2 && stmt[1] == ":" {
+            if let Some(next) = stmts.get(i) {
+                match next.first().map(String::as_str) {
+                    Some(".callprototype") => {
+                        if let Some(signature) = prototype_signature(next) {
+                            prototypes.insert(stmt[0].clone(), signature);
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    Some(".calltargets") => {
+                        let names = next[1..].iter().filter(|t| !matches!(t.as_str(), "," | ";")).cloned().collect();
+                        target_lists.insert(stmt[0].clone(), names);
+                        i += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
         let (guard, rest) = split_guard(stmt);
         let op = rest.first().map(String::as_str).unwrap_or("");
         if op == ".param" && stmt.last().is_some_and(|t| t == ";") && depth_ok_param(stmt) {
@@ -158,16 +361,46 @@ fn expand_stmts(
                 out.push(stmt.clone());
                 continue;
             };
-            let Some(func) = funcs.get(&call.target) else {
+            let candidates: Vec<&str> = if call.pointer.is_some() {
+                let signature = call.prototype.as_ref().and_then(|p| prototypes.get(p)).cloned();
+                let listed = call.prototype.as_ref().and_then(|p| target_lists.get(p));
+                module
+                    .address_taken
+                    .iter()
+                    .filter(|name| match listed {
+                        Some(list) => list.contains(name),
+                        None => {
+                            let func = &module.funcs[name.as_str()];
+                            match &signature {
+                                Some(signature) => func.signature() == *signature,
+                                None => func.returns.len() == call.returns.len() && func.params.len() == call.args.len(),
+                            }
+                        }
+                    })
+                    .map(String::as_str)
+                    .collect()
+            } else {
+                vec![call.target.as_str()]
+            };
+            if call.pointer.is_none() && !module.funcs.contains_key(&call.target) {
                 if let Some(special) = special_call(&call, &mut i, stmts, &mut frame, &mut out) {
                     special?;
                     continue;
                 }
-                out.push(stmt.clone());
+                let reason = if module.declared.contains(&call.target) { "extern" } else { "undefined" };
+                out.push(mark_unsupported(stmt, reason));
                 continue;
-            };
-            if depth >= MAX_DEPTH || func.body.iter().any(unsupported_in_callee) {
-                out.push(stmt.clone());
+            }
+            if candidates.is_empty() {
+                out.push(mark_unsupported(stmt, "indirect"));
+                continue;
+            }
+            if depth >= MAX_DEPTH {
+                out.push(mark_unsupported(stmt, "recursive"));
+                continue;
+            }
+            if candidates.iter().any(|name| module.funcs[*name].body.iter().any(unsupported_in_callee)) {
+                out.push(mark_unsupported(stmt, "static"));
                 continue;
             }
             // Return-value consumers follow the call.
@@ -188,8 +421,34 @@ fn expand_stmts(
             }
             *counter += 1;
             let id = *counter;
-            let body = expand_stmts(&func.body, funcs, depth + 1, counter, budget)?;
-            let inlined = inline_body(func, &call, &frame, &retmap, &body, id)?;
+            let mut inlined: Vec<Stmt> = Vec::new();
+            let count = candidates.len();
+            if let Some(pointer) = call.pointer.as_ref().filter(|_| count > 1) {
+                // Switch over the candidates; the last one is the fall-through arm.
+                let predicate = format!("%__icp{id}");
+                let end = format!("$L__icall_end{id}");
+                inlined.push(vec!["{".into()]);
+                inlined.push(vec![".reg".into(), ".pred".into(), predicate.clone(), ";".into()]);
+                for (k, name) in candidates[..count - 1].iter().enumerate() {
+                    let token = module.funcs[*name].token.to_string();
+                    inlined.push(vec!["setp.eq.u64".into(), predicate.clone(), ",".into(), pointer.clone(), ",".into(), token, ";".into()]);
+                    inlined.push(vec!["@".into(), predicate.clone(), "bra".into(), format!("$L__icall{id}_{k}"), ";".into()]);
+                }
+                for (k, name) in candidates.iter().enumerate().rev() {
+                    if k + 1 < count {
+                        inlined.push(vec![format!("$L__icall{id}_{k}"), ":".into()]);
+                    }
+                    *counter += 1;
+                    let body = inline_one(&module.funcs[*name], &call, &frame, &retmap, module, depth, counter, budget)?;
+                    inlined.extend(body);
+                    inlined.push(vec!["bra.uni".into(), end.clone(), ";".into()]);
+                }
+                inlined.push(vec![end, ":".into()]);
+                inlined.push(vec!["}".into()]);
+            } else {
+                *counter -= 1;
+                inlined = inline_one(&module.funcs[candidates[0]], &call, &frame, &retmap, module, depth, counter, budget)?;
+            }
             if *budget < inlined.len() {
                 return Err(Error::new("PTX function inlining is too large"));
             }
@@ -213,9 +472,55 @@ fn expand_stmts(
             }
             continue;
         }
+        if let Some(replaced) = replace_function_values(stmt, module) {
+            out.push(replaced);
+            continue;
+        }
         out.push(stmt.clone());
     }
     Ok(out)
+}
+
+/// One inlined copy of `func` for `call`, with a fresh call-site id.
+#[allow(clippy::too_many_arguments)]
+fn inline_one(
+    func: &Func,
+    call: &Call,
+    frame: &Frame,
+    retmap: &HashMap<u64, String>,
+    module: &Module,
+    depth: usize,
+    counter: &mut usize,
+    budget: &mut usize,
+) -> Result<Vec<Stmt>, Error> {
+    *counter += 1;
+    let id = *counter;
+    let body = expand_stmts(&func.body, module, depth + 1, counter, budget)?;
+    inline_body(func, call, frame, retmap, &body, id)
+}
+
+/// Keeps a call that cannot be inlined, with an opcode the parser reports precisely.
+fn mark_unsupported(stmt: &Stmt, reason: &str) -> Stmt {
+    stmt.iter()
+        .map(|t| if t == "call" || t.starts_with("call.") { format!("call.cfi_{reason}") } else { t.clone() })
+        .collect()
+}
+
+/// `.callprototype (.param .b32 _) _ (.reg .u32 _, .param .b64 _) ;`
+fn prototype_signature(stmt: &Stmt) -> Option<Signature> {
+    let mut i = 1;
+    let mut returns = Vec::new();
+    if stmt.get(i).is_some_and(|t| t == "(") {
+        let (names, next) = param_names(stmt, i)?;
+        returns = names;
+        i = next;
+    }
+    i += 1; // `_`
+    let params = if stmt.get(i).is_some_and(|t| t == "(") { param_names(stmt, i)?.0 } else { Vec::new() };
+    Some(Signature {
+        returns: returns.iter().map(|(_, r)| r.is_some()).collect(),
+        params: params.iter().map(|(_, r)| r.is_some()).collect(),
+    })
 }
 
 fn depth_ok_param(stmt: &Stmt) -> bool {
@@ -343,9 +648,13 @@ struct Call {
     returns: Vec<String>,
     target: String,
     args: Vec<String>,
+    /// The register holding the callee of an indirect call.
+    pointer: Option<String>,
+    /// The `.callprototype` or `.calltargets` label of an indirect call.
+    prototype: Option<String>,
 }
 
-/// `call[.uni] [(rets) ,] target [, (args)] ;`
+/// `call[.uni] [(rets) ,] target [, (args)] [, proto] ;`
 fn parse_call(rest: &[String]) -> Option<Call> {
     let mut i = 1;
     let mut returns = Vec::new();
@@ -358,16 +667,19 @@ fn parse_call(rest: &[String]) -> Option<Call> {
         }
     }
     let target = rest.get(i)?.clone();
-    if target.starts_with('%') || target == "(" {
-        return None; // indirect call
+    if target == "(" {
+        return None;
     }
     i += 1;
     let mut args = Vec::new();
     if rest.get(i).is_some_and(|t| t == ",") && rest.get(i + 1).is_some_and(|t| t == "(") {
         let close = rest[i + 1..].iter().position(|t| t == ")")? + i + 1;
         args = rest[i + 2..close].iter().filter(|t| *t != ",").cloned().collect();
+        i = close + 1;
     }
-    Some(Call { returns, target, args })
+    let pointer = target.starts_with('%').then(|| target.clone());
+    let prototype = if rest.get(i).is_some_and(|t| t == ",") { rest.get(i + 1).filter(|t| *t != ";").cloned() } else { None };
+    Some(Call { returns, target, args, pointer, prototype })
 }
 
 /// Library calls that nvcc emits for assertions and printing.
@@ -499,6 +811,16 @@ fn trim_register_ranges(out: &mut Vec<Stmt>, suffix: &str) {
     });
 }
 
+/// Move between registers of a `.reg` parameter's type.
+fn reg_mov(ty: &str) -> &'static str {
+    match ty {
+        ".pred" => "mov.pred",
+        _ if element_bytes(ty.trim_start_matches('.')) == 8 => "mov.b64",
+        ".u16" | ".s16" | ".b16" | ".f16" | ".bf16" => "mov.b16",
+        _ => "mov.b32",
+    }
+}
+
 fn mov_for(ty: &str) -> &'static str {
     if element_bytes(ty) == 8 { "mov.b64" } else { "mov.b32" }
 }
@@ -530,6 +852,25 @@ fn inline_body(
         }
     }
     let mut out: Vec<Stmt> = vec![vec!["{".into()]];
+    // `.reg` parameters: a per-call-site register initialised from the actual argument.
+    for (position, (name, reg)) in func.params.iter().zip(&func.param_regs).enumerate() {
+        let Some(ty) = reg else { continue };
+        let Some(actual) = call.args.get(position) else {
+            return Err(Error::new("PTX call has too few arguments"));
+        };
+        let local = rename_token(name, &suffix, &labels);
+        out.push(vec![".reg".into(), ty.clone(), local.clone(), ";".into()]);
+        out.push(vec![reg_mov(ty).into(), local, ",".into(), actual.clone(), ";".into()]);
+    }
+    let mut reg_results: Vec<Stmt> = Vec::new();
+    for (position, (name, reg)) in func.returns.iter().zip(&func.return_regs).enumerate() {
+        let Some(ty) = reg else { continue };
+        let local = rename_token(name, &suffix, &labels);
+        out.push(vec![".reg".into(), ty.clone(), local.clone(), ";".into()]);
+        if let Some(actual) = call.returns.get(position) {
+            reg_results.push(vec![reg_mov(ty).into(), actual.clone(), ",".into(), local, ";".into()]);
+        }
+    }
     for stmt in body {
         if stmt.first().is_some_and(|t| t == ".local") {
             hoisted.push(stmt.iter().map(|t| rename_token(t, &suffix, &labels)).collect());
@@ -595,6 +936,7 @@ fn inline_body(
         out.push(stmt.iter().map(|t| rename_token(t, &suffix, &labels)).collect());
     }
     out.push(vec![end_label, ":".into()]);
+    out.extend(reg_results);
     out.push(vec!["}".into()]);
     trim_register_ranges(&mut out, &suffix);
     if hoisted.is_empty() {

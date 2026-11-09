@@ -5,6 +5,10 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 
 ## [Unreleased]
 
+### Added
+- PTX translator: fp8 pair conversions (`cvt.rn.satfinite[.relu].{e4m3x2,e5m2x2}.{f32,f16x2}`, `cvt.rn[.relu].f16x2.{e4m3x2,e5m2x2}`), `.reg .v2/.v4` vector registers, `mov.vN` and `ld/st .v8`.
+- PTX translator: function pointers and indirect calls (a switch over the address-taken `.func`s matching the call prototype), `.reg` parameters and return values of `.func`, and function-scope `.shared`/`.global`/`.const` variables. Calls that cannot be inlined (into another module, recursive) fail with `unsupported PTX call: <reason>`.
+
 ## [0.1.0] - TBD (first release, not yet tagged)
 
 Experimental first public release: a CUDA Driver API compatibility runtime for Intel Arc GPUs via Level Zero, developed and hardware-tested on Windows with an Intel Arc B390.

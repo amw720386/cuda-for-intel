@@ -1165,6 +1165,10 @@ mod fuzz_tests;
 mod zluda_source;
 #[cfg(test)]
 mod zluda_vector_tests;
+#[cfg(test)]
+mod fp8_tests;
+#[cfg(test)]
+mod call_tests;
 
 #[cfg(test)]
 mod tests {

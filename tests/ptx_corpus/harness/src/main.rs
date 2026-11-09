@@ -99,8 +99,11 @@ fn main() {
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--prep") {
-        let raw = fs::read_to_string(std::env::args().nth(2).unwrap()).unwrap();
-        print!("{}", ptx::prepare_module(&raw).unwrap());
+        let raw = zluda_source::prefix_regs(&fs::read_to_string(std::env::args().nth(2).unwrap()).unwrap());
+        match ptx::prepare_module(&raw) {
+            Ok(text) => print!("{text}"),
+            Err(e) => println!("prepare failed: {e}"),
+        }
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--probe") { probe(&std::env::args().nth(2).expect("ptx file")); return; }
