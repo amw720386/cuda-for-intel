@@ -26,6 +26,13 @@ use cudnn_refmath as refmath;
 #[cfg(test)]
 #[path = "../crates/cudnn_shim/src/gemmconv.rs"]
 mod cudnn_gemmconv;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../crates/cufft_shim/src/plan.rs"]
+mod cufft_plan;
+#[cfg(test)]
+#[path = "../crates/cufft_shim/src/ptxgen.rs"]
+mod cufft_ptxgen;
 
 pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
     let tokens = parse::tokens(source)?;
@@ -1139,6 +1146,8 @@ mod coverage_tests;
 mod sim;
 #[cfg(test)]
 mod cudnn_tests;
+#[cfg(test)]
+mod cufft_tests;
 #[cfg(test)]
 mod globals_tests;
 #[cfg(test)]

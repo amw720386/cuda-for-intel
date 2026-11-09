@@ -3,81 +3,13 @@
 #![allow(non_snake_case)]
 
 #[unsafe(no_mangle)]
-pub extern "system" fn cufftCreate() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftDestroy() -> i32 { 16 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cufftEnterCS() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftEstimate1d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftEstimate2d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftEstimate3d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftEstimateMany() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftExecC2C() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftExecC2R() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftExecD2Z() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftExecR2C() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftExecZ2D() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftExecZ2Z() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftGetPlanPropertyInt64() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftGetSize() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftGetSize1d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftGetSize2d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftGetSize3d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftGetSizeMany() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftGetSizeMany64() -> i32 { 16 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cufftLeaveCS() -> i32 { 16 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cufftMakePlan1d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftMakePlan2d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftMakePlan3d() -> i32 { 16 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cufftMakePlanGuru64() -> i32 { 16 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cufftMakePlanMany() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftMakePlanMany64() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftPlan1d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftPlan2d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftPlan3d() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftPlanMany() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftResetPlanProperty() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftSetAutoAllocation() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftSetPlanPropertyInt64() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftSetStream() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftSetWorkArea() -> i32 { 16 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cufftXtClearCallback() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftXtExec() -> i32 { 16 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cufftXtExecDescriptor() -> i32 { 16 }
 #[unsafe(no_mangle)]
@@ -95,11 +27,7 @@ pub extern "system" fn cufftXtExecDescriptorZ2Z() -> i32 { 16 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cufftXtFree() -> i32 { 16 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cufftXtGetSizeMany() -> i32 { 16 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cufftXtMakePlanGuru64() -> i32 { 16 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cufftXtMakePlanMany() -> i32 { 16 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cufftXtMalloc() -> i32 { 16 }
 #[unsafe(no_mangle)]

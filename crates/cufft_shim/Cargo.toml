@@ -3,8 +3,11 @@ name = "cufft_shim"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "cuFFT surface for cuda-for-intel: every entry point returns the library's NOT_SUPPORTED status instead of failing to load"
+description = "cuFFT shim for cuda-for-intel: mixed-radix Stockham FFTs as generated PTX over the Driver API"
 
 [lib]
 name = "cufft64_11"
 crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libloading = "0.8"
