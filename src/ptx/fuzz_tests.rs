@@ -1103,3 +1103,46 @@ mod threads {
         assert!(bad.is_empty(), "control-flow mismatches:\n{}", bad.iter().take(12).cloned().collect::<Vec<_>>().join("\n"));
     }
 }
+
+/// PTX ISA (`min`/`max`, every float type): "If values of both inputs are 0.0, then
+/// +0.0 > -0.0". So max(+0, -0) is +0 and min(+0, -0) is -0, whatever the operand order.
+/// The simulator's OpenCL `fmin`/`fmax` returns the other zero on purpose, so this fails if a
+/// lowering leaves the sign to the library.
+#[test]
+fn min_max_order_signed_zeros() {
+    let header = ".version 8.8\n.target sm_90\n.address_size 64\n";
+    // (type, register declaration, load, store, +0 bits, -0 bits, bytes per value)
+    let forms: [(&str, &str, &str, &str, u64, u64, u32); 6] = [
+        ("f32", ".reg .f32 %v<4>;", "ld.global.f32", "st.global.f32", 0, 0x8000_0000, 4),
+        ("NaN.f32", ".reg .f32 %v<4>;", "ld.global.f32", "st.global.f32", 0, 0x8000_0000, 4),
+        ("f64", ".reg .f64 %v<4>;", "ld.global.f64", "st.global.f64", 0, 0x8000_0000_0000_0000, 8),
+        ("f16", ".reg .b16 %v<4>;", "ld.global.b16", "st.global.b16", 0, 0x8000, 2),
+        ("bf16", ".reg .b16 %v<4>;", "ld.global.b16", "st.global.b16", 0, 0x8000, 2),
+        ("f16x2", ".reg .b32 %v<4>;", "ld.global.b32", "st.global.b32", 0, 0x8000_8000, 4),
+    ];
+    for (ty, decl, ld, st, pos, neg, size) in forms {
+        for op in ["min", "max"] {
+            for (a, b) in [(pos, neg), (neg, pos), (pos, pos), (neg, neg)] {
+                let src = format!(
+                    "{header}.visible .entry k(.param .u64 p)\n{{\n.reg .b64 %rd<4>;\n{decl}\n\
+                     ld.param.u64 %rd1, [p];\ncvta.to.global.u64 %rd1, %rd1;\n\
+                     {ld} %v1, [%rd1];\n{ld} %v2, [%rd1+{size}];\n{op}.{ty} %v3, %v1, %v2;\n\
+                     {st} [%rd1+{}], %v3;\nret;\n}}\n",
+                    2 * size
+                );
+                let t = translate(&src).unwrap_or_else(|e| panic!("{op}.{ty}: {e}"));
+                let module = rspirv::dr::load_words(&t.words).unwrap();
+                let mut gpu = Gpu::default();
+                let buf = gpu.alloc(3 * size as usize);
+                gpu.mem.write(buf, size, a);
+                gpu.mem.write(buf + u64::from(size), size, b);
+                Sim::new(&module).run(&mut gpu, &Launch::new([1, 1, 1], [1, 1, 1], vec![buf])).unwrap();
+                let got = gpu.mem.read(buf + 2 * u64::from(size), size);
+                let either_negative = a == neg || b == neg;
+                let both_negative = a == neg && b == neg;
+                let want = if op == "min" { if either_negative { neg } else { pos } } else if both_negative { neg } else { pos };
+                assert_eq!(got, want, "{op}.{ty}({a:#x}, {b:#x})");
+            }
+        }
+    }
+}

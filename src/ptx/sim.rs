@@ -1083,7 +1083,12 @@ impl Sim {
             fb(w, fv(w, arg(0)).abs())
         } else if is(C::fmin) || is(C::fmax) {
             let (a, b) = (fv(w, arg(0)), fv(w, arg(1)));
-            let r = if a.is_nan() { b } else if b.is_nan() { a } else if is(C::fmin) { a.min(b) } else { a.max(b) };
+            // OpenCL leaves the sign of a zero result unspecified. Return the zero PTX would not
+            // pick, so a lowering that relies on fmin/fmax for -0.0 < +0.0 fails on every host.
+            let r = if a.is_nan() { b } else if b.is_nan() { a } else if a == 0.0 && b == 0.0 {
+                let pick_negative = is(C::fmax);
+                if a.is_sign_negative() == pick_negative { a } else { b }
+            } else if is(C::fmin) { a.min(b) } else { a.max(b) };
             fb(w, r)
         } else if is(C::fma) {
             // Single rounding in the operand precision.
