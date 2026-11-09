@@ -708,7 +708,24 @@ impl Module {
 /// `CUDA_FOR_INTEL_BIG_WORDS` (default 400000) words.
 fn build_flags(words: usize) -> String {
     let get = |name: &str| std::env::var(name).unwrap_or_default();
+    compose_build_flags(words, &get)
+}
+
+/// Flag every module is built with unless `CUDA_FOR_INTEL_FAST_DIV=1`: PTX `div.rn.f32` and
+/// `sqrt.rn.f32` are IEEE correctly rounded on NVIDIA, but Intel's OpenCL compiler lowers
+/// SPIR-V `OpFDiv` / `OpenCL.std sqrt` to 2.5 / 3 ulp versions without this option. The 1-ulp
+/// quotient errors flip q8_1 activation bytes (`x / d` in quantize_q8_1) and decorrelate greedy
+/// decoding from CUDA.
+pub(crate) const CORRECT_DIV_FLAG: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
+
+fn compose_build_flags(words: usize, get: &dyn Fn(&str) -> String) -> String {
     let mut flags = get("CUDA_FOR_INTEL_BUILD_FLAGS");
+    if get("CUDA_FOR_INTEL_FAST_DIV") != "1" && !flags.contains(CORRECT_DIV_FLAG) {
+        if !flags.is_empty() {
+            flags.push(' ');
+        }
+        flags.push_str(CORRECT_DIV_FLAG);
+    }
     let threshold = get("CUDA_FOR_INTEL_BIG_WORDS").parse().unwrap_or(400_000);
     if words > threshold {
         let big = get("CUDA_FOR_INTEL_BIG_FLAGS");
@@ -1346,5 +1363,23 @@ impl NativeCompiler {
         }
         unsafe { (self.destroy)(module) };
         stored
+    }
+}
+
+#[cfg(test)]
+mod build_flag_tests {
+    use super::*;
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> String {
+        move |k| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_string()).unwrap_or_default()
+    }
+    #[test]
+    fn correctly_rounded_div_is_default() {
+        assert_eq!(compose_build_flags(10, &env(&[])), CORRECT_DIV_FLAG);
+        assert_eq!(compose_build_flags(10, &env(&[("CUDA_FOR_INTEL_BUILD_FLAGS", "-x")])), format!("-x {CORRECT_DIV_FLAG}"));
+        assert_eq!(compose_build_flags(10, &env(&[("CUDA_FOR_INTEL_BUILD_FLAGS", CORRECT_DIV_FLAG)])), CORRECT_DIV_FLAG);
+    }
+    #[test]
+    fn fast_div_opt_out() {
+        assert_eq!(compose_build_flags(10, &env(&[("CUDA_FOR_INTEL_FAST_DIV", "1")])), "");
     }
 }
