@@ -949,7 +949,7 @@ pub extern "system" fn cuCtxPushCurrent_v2(handle: Opaque) -> CuResult {
                 .get(&handle.addr())
                 .ok_or(InvalidContext)?
                 .check_live()?;
-            CURRENT.with_borrow_mut(|stack| stack.push(handle.addr()));
+            let _ = CURRENT.try_with(|stack| stack.borrow_mut().push(handle.addr()));
             Ok(())
         }))
     })
@@ -960,7 +960,9 @@ pub unsafe extern "system" fn cuCtxPopCurrent_v2(out: *mut Opaque) -> CuResult {
     trace::call("cuCtxPopCurrent_v2", || {
         status(state(|_| {
             let key = CURRENT
-                .with_borrow_mut(|stack| stack.pop())
+                .try_with(|stack| stack.borrow_mut().pop())
+                .ok()
+                .flatten()
                 .ok_or(InvalidContext)?;
             if !out.is_null() {
                 unsafe { out.write(std::ptr::without_provenance_mut(key)) };
