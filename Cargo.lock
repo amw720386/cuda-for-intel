@@ -33,6 +33,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "cfi-detours-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "cfi-fatbin"
 version = "0.1.0"
 dependencies = [
@@ -40,6 +47,32 @@ dependencies = [
  "lz4_flex",
  "zstd",
 ]
+
+[[package]]
+name = "cfi_launcher"
+version = "0.1.0"
+dependencies = [
+ "cfi-detours-sys",
+]
+
+[[package]]
+name = "cfi_redirect"
+version = "0.1.0"
+dependencies = [
+ "cfi-detours-sys",
+]
+
+[[package]]
+name = "cfi_redirect_consumer"
+version = "0.1.0"
+
+[[package]]
+name = "cfi_redirect_dummy"
+version = "0.1.0"
+
+[[package]]
+name = "cfi_redirect_probe"
+version = "0.1.0"
 
 [[package]]
 name = "crc32fast"

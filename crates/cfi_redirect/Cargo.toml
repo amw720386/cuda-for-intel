@@ -1,0 +1,15 @@
+[package]
+name = "cfi_redirect"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Windows DLL injected by cfi-run: redirects NVIDIA CUDA library loads to the cuda-for-intel install directory"
+publish = false
+
+[lib]
+name = "cfi_redirect"
+# cdylib: the injected DLL. rlib: lets unit tests and cfi-run reuse the pure mapping code.
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(windows)'.dependencies]
+cfi-detours-sys = { path = "../detours_sys" }

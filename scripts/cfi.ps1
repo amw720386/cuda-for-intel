@@ -9,6 +9,11 @@
     selftest   Vector add through the installed shim: prints PASS or FAIL with next steps.
     doctor     Redacted diagnostic report for bug reports.
     env        Print the line that loads the environment into your current shell.
+    run        Start a program through cfi-run.exe: cfi_redirect.dll maps NVIDIA CUDA library loads
+               (nvcuda, cublas*, cublasLt*, cudnn*, nvml, nvrtc*, cufft*, cusparse*, cusolver*) to
+               the install's bin directory, also for absolute-path loads and in child processes.
+               Nothing in the program's directory is changed. Example:
+                 pwsh -File scripts\cfi.ps1 run -- python -c "import torch; print(torch.cuda.is_available())"
     uninstall  Remove what install placed and restore anything it backed up.
 
   Safety model: install writes ONLY inside -InstallDir (default %LOCALAPPDATA%\cuda-for-intel\install).
@@ -30,7 +35,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)] [ValidateSet('check', 'install', 'selftest', 'doctor', 'env', 'uninstall')] [string]$Command = 'check',
+    [Parameter(Position = 0)] [ValidateSet('check', 'install', 'selftest', 'doctor', 'env', 'uninstall', 'run')] [string]$Command = 'check',
     [string]$InstallDir,
     [string]$BinDir,
     [string]$ZipPath,
@@ -38,7 +43,8 @@ param(
     [string]$ZipSha256,
     [switch]$SkipSelfTest,
     [switch]$DryRun,
-    [switch]$Force
+    [switch]$Force,
+    [Parameter(ValueFromRemainingArguments = $true)] [string[]]$RunArgs
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'cfi-common.ps1')
@@ -46,6 +52,8 @@ if (-not $InstallDir) { $InstallDir = Get-CfiDefaultInstallDir }
 $repo = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $InstallDir 'manifest.json'
 $shimNames = @('nvcuda.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')
+# Placed when the source has them (cargo build -p cfi_redirect -p cfi_launcher); needed by `run`.
+$launcherNames = @('cfi_redirect.dll', 'cfi-run.exe')
 
 function Invoke-Prereqs {
     $problems = 0
@@ -96,10 +104,10 @@ function Get-DllSource {
     $rel = Join-Path $repo 'target\release'
     if (Test-Path -LiteralPath (Join-Path $rel 'nvcuda.dll')) { return @{ Dir = $rel; Origin = 'target\release' } }
     if (Get-Command cargo -ErrorAction SilentlyContinue) {
-        if ($DryRun) { Write-Host '[dry-run] would run: cargo build --release --locked -p cuda-for-intel -p cublas_shim'; return @{ Dir = $null; Origin = 'build-dryrun' } }
+        if ($DryRun) { Write-Host '[dry-run] would run: cargo build --release --locked -p cuda-for-intel -p cublas_shim -p cfi_redirect -p cfi_launcher'; return @{ Dir = $null; Origin = 'build-dryrun' } }
         Write-Host 'Building from source (cargo build --release --locked) ...'
         Push-Location $repo
-        try { & cargo build --release --locked -p cuda-for-intel -p cublas_shim; if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" } }
+        try { & cargo build --release --locked -p cuda-for-intel -p cublas_shim -p cfi_redirect -p cfi_launcher; if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" } }
         finally { Pop-Location }
         return @{ Dir = $rel; Origin = 'cargo' }
     }
@@ -119,6 +127,7 @@ function Install-Cfi {
     Write-Safe "--- plan: place shim DLLs in $bin (source: $($src.Origin)) ---"
     if ($DryRun) {
         foreach ($n in $shimNames) { Write-Host "[dry-run] would place $n" }
+        foreach ($n in $launcherNames) { Write-Host "[dry-run] would place $n if the source has it" }
         Write-Host "[dry-run] would write cfi-env.ps1 and manifest.json in the install directory; nothing changed."
         return
     }
@@ -145,6 +154,14 @@ function Install-Cfi {
         }
         Copy-Item -LiteralPath $from -Destination $to -Force
         $entries += [pscustomobject]@{ path = $to; sha256 = (Get-Sha256Hex $to); backup = $backup }
+        Write-Host "placed  $n"
+    }
+    foreach ($n in $launcherNames) {
+        $from = Join-Path $src.Dir $n
+        if (-not (Test-Path -LiteralPath $from -PathType Leaf)) { Write-Host "skip    $n (not in the source; 'run' needs it)"; continue }
+        $to = Join-Path $bin $n
+        Copy-Item -LiteralPath $from -Destination $to -Force
+        $entries += [pscustomobject]@{ path = $to; sha256 = (Get-Sha256Hex $to); backup = $null }
         Write-Host "placed  $n"
     }
     $envFile = Join-Path $InstallDir 'cfi-env.ps1'
@@ -201,6 +218,18 @@ function Uninstall-Cfi {
     Write-Host 'Uninstalled. Caches (kernel-cache, spv-cache) were left in the install directory if present; delete them by hand if you want the space back.'
 }
 
+function Invoke-Run {
+    $bin = Join-Path $InstallDir 'bin'
+    $exe = Join-Path $bin 'cfi-run.exe'
+    $prog = @($RunArgs)
+    if ($prog.Count -gt 0 -and $prog[0] -eq '--') { $prog = @($prog | Select-Object -Skip 1) }
+    if ($prog.Count -eq 0) { throw 'usage: cfi.ps1 run [-InstallDir DIR] -- PROGRAM [ARGS...]' }
+    if ($DryRun) { Write-Safe "[dry-run] would run: $exe --install-dir $bin -- $($prog -join ' ')"; return }
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "cfi-run.exe not found in $bin; rerun 'cfi.ps1 install' from a build that includes cfi_launcher and cfi_redirect." }
+    & $exe --install-dir $bin -- @prog
+    exit $LASTEXITCODE
+}
+
 switch ($Command) {
     'check'     { $p = Invoke-Prereqs; if ($p -gt 0) { exit 2 } }
     'install'   { Install-Cfi }
@@ -208,4 +237,5 @@ switch ($Command) {
     'doctor'    { & (Join-Path $PSScriptRoot 'cfi-doctor.ps1') -InstallDir $InstallDir }
     'env'       { Write-Safe ". `"$(Join-Path $InstallDir 'cfi-env.ps1')`"" }
     'uninstall' { Uninstall-Cfi }
+    'run'       { Invoke-Run }
 }

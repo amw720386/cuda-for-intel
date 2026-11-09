@@ -1,0 +1,10 @@
+[package]
+name = "cfi_redirect_consumer"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Test only: a DLL that imports cublas64_12.dll by name, like torch_cuda.dll"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]

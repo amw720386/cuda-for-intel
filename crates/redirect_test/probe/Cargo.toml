@@ -1,0 +1,11 @@
+[package]
+name = "cfi_redirect_probe"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Test only: checks which cublas64_12.dll the loader picked (scripts/tests/redirect-ci.ps1)"
+publish = false
+
+[[bin]]
+name = "cfi-redirect-probe"
+path = "src/main.rs"
