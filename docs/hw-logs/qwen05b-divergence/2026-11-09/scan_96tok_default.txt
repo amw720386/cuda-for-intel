@@ -1,0 +1,21 @@
+0 diverge_char=136 len_auto=385 len_none=399 :: Write a short story about a robot learning to paint.
+1 diverge_char=-1 len_auto=407 len_none=407 :: The quick brown fox jumps over the lazy dog. The quick brown fox
+2 diverge_char=367 len_auto=488 len_none=495 :: Explain why the sky is blue in one sentence:
+3 diverge_char=-1 len_auto=211 len_none=211 :: def fibonacci(n):
+4 diverge_char=94 len_auto=397 len_none=385 :: The three primary colors are red, yellow, and
+5 diverge_char=43 len_auto=469 len_none=481 :: Once upon a time in a small village there lived a young girl who loved to
+6 diverge_char=-1 len_auto=15 len_none=15 :: Q: What is 17 plus 25? A:
+7 diverge_char=124 len_auto=455 len_none=430 :: Translate to French: Good morning, how are you?
+8 diverge_char=85 len_auto=491 len_none=474 :: Once upon a time, in a distant galaxy,
+9 diverge_char=-1 len_auto=400 len_none=400 :: Write a poem about the ocean.
+10 diverge_char=-1 len_auto=429 len_none=429 :: Describe the city of Paris in detail.
+11 diverge_char=-1 len_auto=472 len_none=472 :: List five tips for staying healthy:
+12 diverge_char=-1 len_auto=340 len_none=340 :: The history of the Roman Empire began
+13 diverge_char=325 len_auto=407 len_none=427 :: Write a short story about a dragon who is afraid of fire.
+14 diverge_char=-1 len_auto=473 len_none=473 :: Explain how a car engine works.
+15 diverge_char=-1 len_auto=495 len_none=495 :: What are the benefits of exercise?
+16 diverge_char=-1 len_auto=415 len_none=415 :: Tell me a joke about programmers.
+17 diverge_char=32 len_auto=447 len_none=413 :: Write a haiku about autumn, then explain it.
+18 diverge_char=71 len_auto=429 len_none=370 :: Once there was a little boat that wanted to see the world
+19 diverge_char=371 len_auto=466 len_none=455 :: Dear Sir or Madam, I am writing to complain about
+picked=0
