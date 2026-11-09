@@ -209,7 +209,7 @@ pub(super) enum ExtOp {
     Szext { wrap: bool, signed: bool },
     Mul24 { hi: bool, signed: bool },
     Mad24 { hi: bool, signed: bool },
-    Sad { signed: bool },
+    Sad { signed: bool, wide: bool },
     Cnot { wide: bool },
     /// `add.sat.s32` / `sub.sat.s32`.
     SatAddSub { sub: bool },
@@ -383,9 +383,9 @@ pub(super) fn parse<'a>(body: &[&'a str]) -> Result<Option<Instruction<'a>>, Err
                 [a, b, c, NONE],
             )
         }
-        ["sad", ty @ ("s32" | "u32")] => {
+        ["sad", ty @ ("s32" | "u32" | "s64" | "u64")] => {
             let (d, a, b, c) = (need!(r(0)), need!(r(1)), need!(r(2)), need!(r(3)));
-            ext(ExtOp::Sad { signed: *ty == "s32" }, [d, ""], [a, b, c, NONE])
+            ext(ExtOp::Sad { signed: ty.starts_with('s'), wide: ty.ends_with("64") }, [d, ""], [a, b, c, NONE])
         }
         ["cnot", ty @ ("b32" | "b64")] => {
             let (d, a) = (need!(r(0)), need!(r(1)));

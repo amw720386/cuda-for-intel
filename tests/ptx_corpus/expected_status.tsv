@@ -416,7 +416,7 @@ zluda/bitmanip/popc_b64.ptx	pass	strict-fail
 zluda/bitmanip/prmt.ptx	pass	strict-fail	
 zluda/bitmanip/prmt_signext.ptx	pass	strict-fail	
 zluda/bitmanip/prmt_slow.ptx	pass	strict-fail	
-zluda/bitmanip/sad_s64.ptx	unsupported	strict-fail	unsupported PTX instruction: sad.s64 %result1 , %temp1 , %temp2 , %temp3
+zluda/bitmanip/sad_s64.ptx	pass	strict-fail	
 zluda/bitmanip/shf_l.ptx	pass	strict-fail	
 zluda/bitmanip/shf_l_clamp.ptx	pass	strict-fail	
 zluda/bitmanip/shf_l_wrap.ptx	pass	strict-fail	
@@ -425,15 +425,15 @@ zluda/bitmanip/shf_r_clamp.ptx	pass	strict-fail
 zluda/bitmanip/shf_r_wrap.ptx	pass	strict-fail	
 zluda/bitmanip/vshr_clamp.ptx	pass	strict-fail	
 zluda/control/assertfail.ptx	pass	strict-fail	
-zluda/control/b64tof64.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.u64 %temp
+zluda/control/b64tof64.ptx	pass	strict-fail	
 zluda/control/block.ptx	pass	strict-fail	
-zluda/control/bra.ptx	error	strict-fail	unreachable PTX block
-zluda/control/call.ptx	error	strict-fail	PTX call argument was never stored
+zluda/control/bra.ptx	pass	strict-fail	
+zluda/control/call.ptx	pass	strict-fail	
 zluda/control/call_rnd.ptx	pass	strict-fail	
 zluda/control/exit.ptx	pass	strict-fail	
 zluda/control/func_ptr.ptx	error	strict-fail	unknown PTX local symbol foobar
 zluda/control/instruction_mode_to_global_mode__call_with_mode.ptx	error	strict-fail	undefined PTX register %__c1_pred on an incoming path
-zluda/control/malformed_label.ptx	error	strict-fail	unreachable PTX block
+zluda/control/malformed_label.ptx	pass	strict-fail	
 zluda/control/nanosleep.ptx	pass	strict-fail	
 zluda/control/noreturn.ptx	pass	strict-fail	
 zluda/control/ntid.ptx	pass	strict-fail	
@@ -531,7 +531,7 @@ zluda/integer/sub.ptx	pass	strict-fail
 zluda/integer/sub_extended.ptx	pass	strict-fail	
 zluda/integer/subc_cc_s32.ptx	pass	strict-fail	
 zluda/integer/xor.ptx	pass	strict-fail	
-zluda/ldmatrix/ldmatrix.ptx	unsupported	strict-fail	unsupported integer operand values_s
+zluda/ldmatrix/ldmatrix.ptx	pass	strict-fail	
 zluda/ldmatrix/ldmatrix_trans.ptx	unsupported	strict-fail	unsupported PTX register type .v2.b16
 zluda/memory/const.ptx	pass	strict-fail	
 zluda/memory/const_ident.ptx	error	strict-fail	undefined PTX register constparams on an incoming path
@@ -578,8 +578,8 @@ zluda/memory/vector_operand.ptx	pass	strict-fail
 zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32.ptx	pass	strict-fail	
 zluda/mma/mma_m16n8k16_f32_bf16_bf16_f32_2x.ptx	pass	strict-fail	
 zluda/mma/mma_m16n8k16_f32_f16_f16_f32.ptx	pass	strict-fail	
-zluda/mma/mma_m16n8k32_s32_s8_s8_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
-zluda/mma/mma_m16n8k32_s32_s8_s8_s32_interleave.ptx	unsupported	strict-fail	unsupported PTX instruction: .reg.v4.u16 %input
+zluda/mma/mma_m16n8k32_s32_s8_s8_s32.ptx	unsupported	strict-fail	unsupported PTX register type .v4.u16
+zluda/mma/mma_m16n8k32_s32_s8_s8_s32_interleave.ptx	unsupported	strict-fail	unsupported PTX register type .v4.u16
 zluda/shfl/shfl_sync_bfly_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_bfly_dynamic_delta_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_down_b32_pred.ptx	pass	strict-fail	

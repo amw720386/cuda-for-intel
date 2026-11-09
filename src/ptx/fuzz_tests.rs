@@ -586,20 +586,21 @@ mod float_ops {
         v.push(f64c("max.f64", "max.f64 %fd20, %fd10, %fd11;", |a, b, _| if a.is_nan() { b } else if b.is_nan() { a } else if a == b { if a.is_sign_positive() { a } else { b } } else { a.max(b) }));
         v.push(f64c("abs/neg.f64", "abs.f64 %fd21, %fd10;\n neg.f64 %fd20, %fd21;", |a, _, _| -a.abs()));
         let _ = ftz64;
-        // float -> integer (always saturating, NaN -> 0)
+        // float -> integer (always saturating; NaN -> 0, but 1 << (bits - 1) from .f64 or into
+        // .s64/.u64, as the PTX ISA's cvt section specifies)
         v.push(f2i("cvt.rzi.s32.f32", "cvt.rzi.s32.f32 %r20, %f10;", Gen::F32, K::R32, |a, _| a as i32 as u32 as u64));
         v.push(f2i("cvt.rni.s32.f32", "cvt.rni.s32.f32 %r20, %f10;", Gen::F32, K::R32, |a, _| a.round_ties_even() as i32 as u32 as u64));
         v.push(f2i("cvt.rmi.s32.f32", "cvt.rmi.s32.f32 %r20, %f10;", Gen::F32, K::R32, |a, _| a.floor() as i32 as u32 as u64));
         v.push(f2i("cvt.rpi.s32.f32", "cvt.rpi.s32.f32 %r20, %f10;", Gen::F32, K::R32, |a, _| a.ceil() as i32 as u32 as u64));
         v.push(f2i("cvt.rzi.u32.f32", "cvt.rzi.u32.f32 %r20, %f10;", Gen::F32, K::R32, |a, _| a as u32 as u64));
         v.push(f2i("cvt.rni.u32.f32", "cvt.rni.u32.f32 %r20, %f10;", Gen::F32, K::R32, |a, _| a.round_ties_even() as u32 as u64));
-        v.push(f2i("cvt.rzi.s64.f32", "cvt.rzi.s64.f32 %rd20, %f10;", Gen::F32, K::R64, |a, _| a as i64 as u64));
-        v.push(f2i("cvt.rni.s64.f32", "cvt.rni.s64.f32 %rd20, %f10;", Gen::F32, K::R64, |a, _| a.round_ties_even() as i64 as u64));
-        v.push(f2i("cvt.rzi.u64.f32", "cvt.rzi.u64.f32 %rd20, %f10;", Gen::F32, K::R64, |a, _| a as u64));
-        v.push(f2i("cvt.rzi.s32.f64", "cvt.rzi.s32.f64 %r20, %fd10;", Gen::F64, K::R32, |_, d| d as i32 as u32 as u64));
-        v.push(f2i("cvt.rni.s32.f64", "cvt.rni.s32.f64 %r20, %fd10;", Gen::F64, K::R32, |_, d| d.round_ties_even() as i32 as u32 as u64));
-        v.push(f2i("cvt.rzi.s64.f64", "cvt.rzi.s64.f64 %rd20, %fd10;", Gen::F64, K::R64, |_, d| d as i64 as u64));
-        v.push(f2i("cvt.rzi.u64.f64", "cvt.rzi.u64.f64 %rd20, %fd10;", Gen::F64, K::R64, |_, d| d as u64));
+        v.push(f2i("cvt.rzi.s64.f32", "cvt.rzi.s64.f32 %rd20, %f10;", Gen::F32, K::R64, |a, _| if a.is_nan() { 1 << 63 } else { a as i64 as u64 }));
+        v.push(f2i("cvt.rni.s64.f32", "cvt.rni.s64.f32 %rd20, %f10;", Gen::F32, K::R64, |a, _| if a.is_nan() { 1 << 63 } else { a.round_ties_even() as i64 as u64 }));
+        v.push(f2i("cvt.rzi.u64.f32", "cvt.rzi.u64.f32 %rd20, %f10;", Gen::F32, K::R64, |a, _| if a.is_nan() { 1 << 63 } else { a as u64 }));
+        v.push(f2i("cvt.rzi.s32.f64", "cvt.rzi.s32.f64 %r20, %fd10;", Gen::F64, K::R32, |_, d| if d.is_nan() { 1 << 31 } else { d as i32 as u32 as u64 }));
+        v.push(f2i("cvt.rni.s32.f64", "cvt.rni.s32.f64 %r20, %fd10;", Gen::F64, K::R32, |_, d| if d.is_nan() { 1 << 31 } else { d.round_ties_even() as i32 as u32 as u64 }));
+        v.push(f2i("cvt.rzi.s64.f64", "cvt.rzi.s64.f64 %rd20, %fd10;", Gen::F64, K::R64, |_, d| if d.is_nan() { 1 << 63 } else { d as i64 as u64 }));
+        v.push(f2i("cvt.rzi.u64.f64", "cvt.rzi.u64.f64 %rd20, %fd10;", Gen::F64, K::R64, |_, d| if d.is_nan() { 1 << 63 } else { d as u64 }));
         // float -> float integral rounding
         v.push(f32c("cvt.rzi.f32.f32", "cvt.rzi.f32.f32 %f20, %f10;", |a, _, _| a.trunc()));
         v.push(f32c("cvt.rni.f32.f32", "cvt.rni.f32.f32 %f20, %f10;", |a, _, _| a.round_ties_even()));

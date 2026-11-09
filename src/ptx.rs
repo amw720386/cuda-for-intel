@@ -1161,6 +1161,10 @@ mod nvrtc_tests;
 mod corpus_scan;
 #[cfg(test)]
 mod fuzz_tests;
+#[cfg(test)]
+mod zluda_source;
+#[cfg(test)]
+mod zluda_vector_tests;
 
 #[cfg(test)]
 mod tests {

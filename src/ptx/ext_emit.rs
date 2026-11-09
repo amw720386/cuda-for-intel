@@ -94,11 +94,11 @@ impl<'a> Emitter<'a> {
                 };
                 self.write(dst[0], Value { id, kind: Kind::B32 })
             }
-            ExtOp::Sad { signed } => {
-                let ty = self.u32_type;
-                let a = self.integer(src[0], Kind::B32)?;
-                let b = self.integer(src[1], Kind::B32)?;
-                let c = self.integer(src[2], Kind::B32)?;
+            ExtOp::Sad { signed, wide } => {
+                let (ty, kind) = if wide { (self.u64_type, Kind::B64) } else { (self.u32_type, Kind::B32) };
+                let a = self.integer(src[0], kind)?;
+                let b = self.integer(src[1], kind)?;
+                let c = self.integer(src[2], kind)?;
                 let greater = if signed {
                     self.builder.s_greater_than(self.bool_type, None, a, b)?
                 } else {
@@ -108,7 +108,7 @@ impl<'a> Emitter<'a> {
                 let ba = self.builder.i_sub(ty, None, b, a)?;
                 let diff = self.builder.select(ty, None, greater, ab, ba)?;
                 let id = self.builder.i_add(ty, None, diff, c)?;
-                self.write(dst[0], Value { id, kind: Kind::B32 })
+                self.write(dst[0], Value { id, kind })
             }
             ExtOp::Cnot { wide } => {
                 let kind = if wide { Kind::B64 } else { Kind::B32 };

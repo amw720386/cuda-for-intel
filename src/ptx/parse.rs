@@ -475,6 +475,13 @@ impl<'a> Parser<'a> {
                     Instruction::Move32(dst, src)
                 }
             }
+            // `mov.b32 %r, shared_array` is the same 32-bit shared address (ZLUDA's ldmatrix).
+            // Only identifiers: `mov.b32` also moves `0f...` float and integer literals.
+            ["mov.b32", dst, ",", src]
+                if src.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '$') && !src.contains('.') =>
+            {
+                Instruction::SharedSymbol32(dst, src)
+            }
             ["mov.u64", dst, ",", src]
                 if !src.starts_with('%')
                     && !src.starts_with("0x")
