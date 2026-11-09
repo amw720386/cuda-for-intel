@@ -22,6 +22,9 @@ The shim translates PTX and never executes SASS, so PyTorch must ship PTX in its
 2. Build: `cargo build --release --locked -p cuda-for-intel -p cublas_shim`.
 3. Load this project's `nvcuda.dll` **before** `import torch`, with `ctypes.WinDLL(r"C:\cfi\bin\nvcuda.dll")`.
    A module already loaded under the name `nvcuda.dll` satisfies later by-name loads.
+   Alternative, not yet GPU-confirmed (roadmap item 4): `scripts\cfi.ps1 run -- python your_script.py` (or `cfi-run.exe --install-dir <bin> -- python ...`) loads ours for
+   `nvcuda`, `cublas*`, `cublasLt*` and the other CUDA libraries even when torch asks for `torch\lib\...` by full path, without changing `torch\lib`. If that works on your setup,
+   steps 3 and 4 are not needed.
 4. In torch's `lib` directory keep `*.orig` copies and replace the CUDA math libraries with the built `cublas64_12.dll`:
    - cu118: install it as `cublas64_11.dll` and as `cublasLt64_11.dll`;
    - cuda128 / CUDA 12: as `cublas64_12.dll` and `cublasLt64_12.dll`.
