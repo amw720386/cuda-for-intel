@@ -1,0 +1,10 @@
+test hw_tier2::hw_approximate_math_error_bounds ... [
+test hw_tier2::hw_atomics_64bit_and_f64_under_heavy_contention ... ok
+test hw_tier2::hw_cp_async_copies_through_shared_memory ... ok
+test hw_tier2::hw_f16_and_bf16_scalar_arithmetic ... fma.rn.f16: 0 of 16384 differ by one half-ulp from single-rounded CPU fma (documented double rounding)
+test hw_tier2::hw_f64_arithmetic_matches_cpu ... [
+test hw_tier2::hw_f64_conversions_match_cpu ... ok
+test hw_tier2::hw_packed_half2_arithmetic ... ok
+test hw_tier2::hw_redux_match_vote_elect ... ok
+test hw_tier2::hw_wmma_m16n16k16_f16_f32 ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.82s
