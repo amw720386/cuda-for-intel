@@ -13,10 +13,12 @@
 .PARAMETER ShimDir optional dir holding the nvcuda.dll and cublas64_13.dll to test (copied into private copies of the Ollama tree and of run\); default: the DLLs already staged
 .PARAMETER VariantList comma separated subset of variants to run (default all)
 .PARAMETER SkipTool only run the Ollama scan
+.PARAMETER NoQueue the caller (scripts/hwvalidate/run_all.ps1) already holds the GPU queue slot: do not acquire/release or heartbeat here
+.PARAMETER FastDiv set CUDA_FOR_INTEL_FAST_DIV=1 in every run (control for the correctly rounded division default)
 .PARAMETER Fixed    index (0-based) of the prompt to analyse even if the modes agree on it (default: first diverging)
 #>
 param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$OllamaRun, [Parameter(Mandatory)][string]$Model,
-      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1, [string]$ResultsName = 'results', [string]$ShimDir = '', [switch]$SkipTool, [string]$VariantList = '')
+      [Parameter(Mandatory)][string]$Hybrid, [string]$Id = 'divergence', [string]$Prompts = '', [int]$NPredict = 96, [int]$Fixed = -1, [string]$ResultsName = 'results', [string]$ShimDir = '', [switch]$SkipTool, [string]$VariantList = '', [switch]$NoQueue, [switch]$FastDiv)
 $ErrorActionPreference = 'Continue'
 $queue = Join-Path (Split-Path $Work -Parent) 'gpu-queue.ps1'
 $lock  = Join-Path (Split-Path $Work -Parent) 'gpu.lock'
@@ -44,12 +46,13 @@ if ($ShimDir) {
 Get-FileHash "$OllamaRun\lib\ollama\cuda_v13\nvcuda.dll" -Algorithm SHA256 | % { "nvcuda.dll sha256=$($_.Hash)" } | Set-Content "$res\provenance.txt"
 Get-FileHash "$OllamaRun\lib\ollama\cuda_v13\ggml-cuda.dll" -Algorithm SHA256 | % { "ollama ggml-cuda.dll sha256=$($_.Hash)" } | Add-Content "$res\provenance.txt"
 Get-FileHash $Model -Algorithm SHA256 | % { "model sha256=$($_.Hash)" } | Add-Content "$res\provenance.txt"
-& powershell -NoProfile -File $queue -Action acquire -Id $Id -MaxWaitSec 14400 | Out-Null
-$hb = Start-Job -ArgumentList $lock,$Id -ScriptBlock { param($l,$me) while ($true) { try { if ((Get-Content "$l\owner" -EA 0) -eq $me) { (Get-Item $l).LastWriteTime = Get-Date } } catch {}; Start-Sleep 60 } }
+if (-not $NoQueue) { & powershell -NoProfile -File $queue -Action acquire -Id $Id -MaxWaitSec 14400 | Out-Null }
+$hb = if ($NoQueue) { $null } else { Start-Job -ArgumentList $lock,$Id -ScriptBlock { param($l,$me) while ($true) { try { if ((Get-Content "$l\owner" -EA 0) -eq $me) { (Get-Item $l).LastWriteTime = Get-Date } } catch {}; Start-Sleep 60 } } }
 try {
   function Set-ModeEnv($mode, $cacheDir) {
     Get-ChildItem Env: | ? { $_.Name -match 'CFI|CUDA_FOR_INTEL|NEO_' } | % { Remove-Item "Env:$($_.Name)" }
     $env:CUDA_FOR_INTEL_HYBRID_DIR = $Hybrid; $env:CUDA_FOR_INTEL_CACHE_DIR = $cacheDir; $env:CUDA_FOR_INTEL_LOG = '1'
+    if ($FastDiv) { $env:CUDA_FOR_INTEL_FAST_DIV = '1' }   # control run: modules built without the correctly rounded div/sqrt flag
     if ($mode -eq 'none') { $env:CUDA_FOR_INTEL_SUBST = 'none' }
   }
   # ---------- A: stock Ollama scan ----------
@@ -62,13 +65,13 @@ try {
     $env:PATH = "$OllamaRun;$OllamaRun\lib\ollama;$g;$env:PATH"; $env:OLLAMA_LIBRARY_PATH = "$OllamaRun\lib\ollama;$g"; $env:OLLAMA_VULKAN = '0'
     $env:OLLAMA_MODELS = "$(Split-Path $Model -Parent)\models"; $env:OLLAMA_HOST = "127.0.0.1:$port"; $env:OLLAMA_NUM_PARALLEL = '1'
     $env:OLLAMA_FLASH_ATTENTION = '0'; $env:OLLAMA_LOAD_TIMEOUT = '120m'; $env:OLLAMA_KEEP_ALIVE = '30m'
-    Get-Process ollama-divc -EA 0 | Stop-Process -Force; Start-Sleep 2
+    if (@(Get-Process ollama-divc -EA 0 | Where-Object { $_.Path -and $_.Path -like "$OllamaRun\*" }).Count) { "ABORT $mode : a stale ollama-divc is running; refusing to start another" | Add-Content "$res\scan_errors.txt"; continue }
     $srv = Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $wd -FilePath $exe -ArgumentList 'serve' -RedirectStandardOutput "$wd\o.txt" -RedirectStandardError "$wd\e.txt"
     Start-Sleep 8
     # guard: our own server log must say it listens on our port (a foreign server on the port would make ours fail with "bind")
     $okSrv = $false
     for ($w = 0; $w -lt 30 -and -not $okSrv; $w++) { $log = Get-Content "$wd\e.txt" -Raw -EA 0; if ($log -match "Listening on 127.0.0.1:$port ") { $okSrv = $true } elseif ($log -match 'bind:') { break } else { Start-Sleep 2 } }
-    if (-not $okSrv -or $srv.HasExited) { "ABORT $mode : our ollama-divc did not start listening on $port" | Add-Content "$res\scan_errors.txt"; Get-Process ollama-divc -EA 0 | Stop-Process -Force; continue }
+    if (-not $okSrv -or $srv.HasExited) { "ABORT $mode : our ollama-divc did not start listening on $port" | Add-Content "$res\scan_errors.txt"; continue }
     "FROM $Model" | Set-Content "$wd\Mf"
     & $exe create "divc-$mode" -f "$wd\Mf" 2>&1 | Out-Null
     for ($i = 0; $i -lt $plist.Count; $i++) {
@@ -76,7 +79,12 @@ try {
       try { $r = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/api/generate" -Method Post -Body $utf8.GetBytes($body) -ContentType 'application/json; charset=utf-8' -TimeoutSec 5400
             $ms = New-Object IO.MemoryStream; $r.RawContentStream.CopyTo($ms); [IO.File]::WriteAllBytes("$wd\p$i.json", $ms.ToArray()) } catch { "FAIL $mode $i $($_.Exception.Message)" | Add-Content "$res\scan_errors.txt" }
     }
-    Stop-Process -Id $srv.Id -Force -EA 0; Get-Process ollama-divc -EA 0 | Stop-Process -Force
+    # Unload first (the runner then exits by itself), then end the process tree WE started: killing only the server
+    # left its runner child alive, and the next mode aborted on the stale ollama-divc.
+    try { Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/generate" -Method Post -Body (@{ model = "divc-$mode"; keep_alive = 0 } | ConvertTo-Json) -ContentType 'application/json' -TimeoutSec 30 | Out-Null } catch {}
+    Start-Sleep 5
+    foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($srv.Id)" -EA 0)) { try { [Diagnostics.Process]::GetProcessById([int]$c.ProcessId).Kill() } catch {} }
+    try { if (-not $srv.HasExited) { $srv.Kill() } } catch {}; [void]$srv.WaitForExit(30000); Start-Sleep 3
     if (Test-Path "$wd\cuda-for-intel-export.log") { Copy-Item "$wd\cuda-for-intel-export.log" "$res\ollama_${mode}_export.log" }
   }
   # compare
@@ -123,7 +131,7 @@ try {
     } }
   }
 } finally {
-  Stop-Job $hb -EA 0; Remove-Job $hb -Force -EA 0
-  & powershell -NoProfile -File $queue -Action release -Id $Id | Out-Null
+  if ($hb) { Stop-Job $hb -EA 0; Remove-Job $hb -Force -EA 0 }
+  if (-not $NoQueue) { & powershell -NoProfile -File $queue -Action release -Id $Id | Out-Null }
 }
 'DONE' | Set-Content "$res\DONE.txt"

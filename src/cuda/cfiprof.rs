@@ -5,7 +5,9 @@
 //! latency (host-side timing; Level Zero timestamp events are not used because they would need a
 //! per-launch event pool in the hot path). Use it to rank kernels, not to read absolute speed.
 //! The report goes to stderr and to the file named by `CFI_PROFILE_OUT` at process exit and on
-//! context destruction. Format: tab-separated lines, parsed by `scripts/profile/summarize.py`.
+//! context destruction, and every `CFI_PROFILE_FLUSH_MS` (default 2 s) while kernels run (written to
+//! a temp file and renamed, so a reader never sees a partial file). Format: tab-separated lines,
+//! parsed by `scripts/profile/summarize.py`.
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -111,10 +113,40 @@ fn with(action: impl FnOnce(&mut Profile)) {
 
 pub(super) fn record_kernel(name: &str, launch_ns: u64, sync_ns: u64) {
     with(|p| p.kernel(name, launch_ns, sync_ns));
+    flush_periodically();
+}
+
+/// Rewrite `CFI_PROFILE_OUT` at most every `CFI_PROFILE_FLUSH_MS` (default 2000, 0 = only at exit),
+/// checked after every kernel launch and traced API call.
+/// Hosts such as Ollama terminate their runner process, so neither `atexit` nor context destruction
+/// runs; the periodic rewrite keeps a cumulative file on disk that is at most one interval old.
+fn flush_periodically() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    static INTERVAL_MS: OnceLock<u64> = OnceLock::new();
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+    let interval = *INTERVAL_MS.get_or_init(|| {
+        if std::env::var_os("CFI_PROFILE_OUT").is_none() {
+            return 0;
+        }
+        std::env::var("CFI_PROFILE_FLUSH_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+    });
+    if interval == 0 {
+        return;
+    }
+    let now = START.get_or_init(Instant::now).elapsed().as_millis() as u64;
+    let last = LAST_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= interval
+        && LAST_MS.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        dump(false);
+    }
 }
 
 pub(super) fn record_api(name: &'static str, ns: u64) {
     with(|p| p.api(name, ns));
+    flush_periodically();
 }
 
 pub(super) fn record_copy(kind: &'static str, bytes: usize) {
@@ -136,7 +168,11 @@ pub(super) fn dump(to_stderr: bool) {
         eprintln!("CUDA for Intel CFI_PROFILE report\n{text}");
     }
     if let Some(path) = std::env::var_os("CFI_PROFILE_OUT") {
-        let _ = std::fs::write(path, text);
+        let mut tmp = path.clone();
+        tmp.push(".tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 

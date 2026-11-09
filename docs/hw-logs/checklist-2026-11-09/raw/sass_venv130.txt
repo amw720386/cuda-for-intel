@@ -1,0 +1,9 @@
+torch 2.14.1+cu130
+%USERPROFILE%\cfi-work\torch\venv130\Lib\site-packages\torch\_subclasses\functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\torch\csrc\utils\tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+CUDA for Intel: cuLibraryLoadData: this module has SASS (cubin) for sm_75, sm_80, sm_86, sm_90, sm_100, sm_120 but no PTX. This runtime translates PTX and cannot execute SASS, so the kernels cannot run on this GPU (CUDA_ERROR_NO_BINARY_FOR_GPU). Use a build that embeds PTX (PyTorch Windows cu118 wheel, conda-forge builds, or rebuild with TORCH_CUDA_ARCH_LIST="8.0+PTX" / -gencode arch=compute_80,code=compute_80). See docs/sass-support.md; scripts/ptxscan.py checks a binary.
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+torch.AcceleratorError: CUDA error: no kernel image is available for execution on the device
+Search for `cudaErrorNoKernelImageForDevice' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+

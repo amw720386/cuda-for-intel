@@ -27,3 +27,15 @@ No bug signature: auto is as close to the fp32 reference as none (RMS 0.112 vs 0
 
 ## Reproduce
 Box: `scripts/divergence/run_on_box.ps1` (Ollama scan + `cfi_logits.exe` runs, holds the GPU queue slot; build the tool with `build_cfi_logits.cmd`). Mac: `python3 scripts/divergence/analyze_divergence.py --results <dir> --gguf <model.gguf>` (needs torch, transformers, gguf). Raw logits (60 MB per run) are not committed.
+
+## Follow-up: correctly rounded division (hardware-checked 2026-11-09, see below)
+The "native quantize_q8_1 is not bit-identical" caveat above has a concrete cause. ggml computes `q = roundf(x / d)` with a correctly rounded `div.rn.f32`. Intel's OpenCL compiler lowers SPIR-V `OpFDiv` to a 2.5 ulp division (and `sqrt` to 3 ulp) unless the module is built with `-cl-fp32-correctly-rounded-divide-sqrt`. A 1 ulp quotient error next to a rounding tie flips a q8_1 byte (the fuzz test measured 16 of 12.6M bytes). The translator emits the same `OpFDiv` for `div.rn.f32`, so the translated (`SUBST=none`) kernels carry the same inexactness in softmax, norms and the quantizer. Two different division paths (translated vs native) therefore need not agree with each other or with CUDA, and the q8 activation rounding then amplifies the difference as described above.
+
+Change: every module is now built with `-cl-fp32-correctly-rounded-divide-sqrt` (`CUDA_FOR_INTEL_FAST_DIV=1` opts out; `TRANSLATOR_VERSION` 4; the native-binary cache key already includes build flags). Regression test: `hw_div_sqrt_rn_f32_correctly_rounded` (tests/gpu/hw_float.rs, hardware) checks `div.rn.f32` and `sqrt.rn.f32` bit-exactly against IEEE on 262144 operand pairs each, and `build_flag_tests` (unit) pin the default and the opt-out.
+
+Status (2026-11-09, `hw-logs/qwen05b-divergence/2026-11-09/`): the mechanism above is half right. The translated (`SUBST=none`) kernels are
+not affected: on the Arc B390 `div.rn.f32`/`sqrt.rn.f32` are bit-exact with or without the flag (the hardware test passes both ways), and the none
+texts are byte-identical. The native substitute kernels are affected: with the flag, native `quantize_q8_1` is bit-identical to the translated
+kernel (before: differed from step 9), and greedy auto-vs-none divergence drops from 12 to 7 of 20 prompts at 64 tokens (deterministic, two runs).
+The remaining gap is all mmq and is the size of a summation-order change (NWARPS control: mmvq with 1/2/8 warps gives RMS 0.073 to 0.077 vs none,
+auto 0.078), so the earlier conclusion (amplified activation-quantisation noise, not a bug) stands. The flag stays on by default.

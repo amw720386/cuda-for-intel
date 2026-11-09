@@ -1,0 +1,5 @@
+%USERPROFILE%\cfi-work\torch\venv130\Lib\site-packages\torch\lib\torch_cuda.dll: 375 fatbin(s), 375 without PTX
+  PTX : none
+  SASS: {'sm_75': 375, 'sm_80': 375, 'sm_86': 375, 'sm_89': 1, 'sm_90': 378, 'sm_100': 377, 'sm_103': 2, 'sm_120': 376, 'sm_121': 1}
+  DIAGNOSTIC: this binary has device code the shim cannot run (SASS only, no PTX).
+  Use a PTX-carrying build (see docs/sass-support.md), or set TORCH_CUDA_ARCH_LIST='...+PTX' when building.

@@ -1,0 +1,91 @@
+{
+ "meta": {
+  "fake_cpu": false
+ },
+ "levels": {
+  "L4": {
+   "level": "L4",
+   "status": "pass",
+   "checks": [
+    {
+     "name": "conv_fwd",
+     "ok": true,
+     "max_abs": 4.76837158203125e-07,
+     "max_rel": 0.00018822148558683693,
+     "note": null
+    },
+    {
+     "name": "conv_grad_w",
+     "ok": true,
+     "max_abs": 0.000152587890625,
+     "max_rel": 4.5725173549726605e-06,
+     "note": null
+    },
+    {
+     "name": "conv_grad_b",
+     "ok": true,
+     "max_abs": 3.0517578125e-05,
+     "max_rel": 8.49692787596723e-06,
+     "note": null
+    },
+    {
+     "name": "conv_grad_x",
+     "ok": true,
+     "max_abs": 1.9073486328125e-06,
+     "max_rel": 0.0003191553696524352,
+     "note": null
+    },
+    {
+     "name": "max_pool",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    },
+    {
+     "name": "avg_pool",
+     "ok": true,
+     "max_abs": 0.0,
+     "max_rel": 0.0,
+     "note": null
+    }
+   ],
+   "info": {
+    "device": "cuda"
+   },
+   "seconds": 10.41,
+   "rc": 0
+  },
+  "L5": {
+   "level": "L5",
+   "status": "pass",
+   "checks": [
+    {
+     "name": "forward",
+     "ok": true,
+     "max_abs": 5.960464477539062e-07,
+     "max_rel": 0.00011308360262773931,
+     "note": null
+    },
+    {
+     "name": "grads(12)",
+     "ok": true,
+     "max_abs": 1.1444091796875e-05,
+     "note": null
+    },
+    {
+     "name": "grad_x",
+     "ok": true,
+     "max_abs": 8.360893843928352e-07,
+     "max_rel": 21.6317081451416,
+     "note": null
+    }
+   ],
+   "info": {
+    "device": "cuda"
+   },
+   "seconds": 9.86,
+   "rc": 0
+  }
+ }
+}

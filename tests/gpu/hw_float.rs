@@ -158,6 +158,67 @@ fn hw_directed_rounding_add_sub_mul_rz_rm_rp() {
     println!("{report:#?}");
 }
 
+/// `div.rn.f32` and `sqrt.rn.f32` must be correctly rounded (IEEE) like on NVIDIA. Intel's OpenCL
+/// compiler only guarantees 2.5 ulp for `/` and 3 ulp for `sqrt` unless it is built with
+/// `-cl-fp32-correctly-rounded-divide-sqrt`; without it ggml's `x / d` in quantize_q8_1 (and every
+/// softmax/norm division) rounds differently from CUDA, which flips q8 activation bytes and
+/// decorrelates greedy decoding (docs/qwen05b-divergence.md).
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+fn hw_div_sqrt_rn_f32_correctly_rounded() {
+    let mut rng = Rng(0x1234_5678_9abc_def1);
+    let n = 1 << 18;
+    let mut pairs = float_pairs(&mut rng, n);
+    // Typical quantisation ratios x / (amax / 127): normal range operands.
+    for (i, p) in pairs.iter_mut().enumerate() {
+        if i % 2 == 0 {
+            let a = f32::from_bits((rng.u32() & 0x807f_ffff) | ((118 + rng.u32() % 12) << 23));
+            let amax = f32::from_bits((rng.u32() & 0x007f_ffff) | ((118 + rng.u32() % 12) << 23));
+            *p = (a.to_bits(), (amax / 127.0).to_bits());
+        }
+    }
+    let a: Vec<u32> = pairs.iter().map(|p| p.0).collect();
+    let b: Vec<u32> = pairs.iter().map(|p| p.1).collect();
+    let mut bufs = vec![bytes_of_u32(&a), bytes_of_u32(&b), vec![0u8; n * 4]];
+    launch(&directed_ptx("div", "rn"), "dir_k", (n / 256) as u32, 256, &mut bufs, &[n as u32]).unwrap();
+    let got = u32s_of(&bufs[2]);
+    let mut bad = 0;
+    let mut first = None;
+    for i in 0..n {
+        let want = (f32::from_bits(a[i]) / f32::from_bits(b[i])).to_bits();
+        let both_nan = f32::from_bits(want).is_nan() && f32::from_bits(got[i]).is_nan();
+        if got[i] != want && !both_nan && !is_denormal(want) && !is_denormal(got[i]) && !is_denormal(a[i]) && !is_denormal(b[i]) {
+            bad += 1;
+            first.get_or_insert((i, a[i], b[i], got[i], want));
+        }
+    }
+    println!("div.rn.f32: {bad} not correctly rounded of {n}; first {first:x?}");
+
+    // sqrt.rn.f32
+    let xs: Vec<u32> = (0..n)
+        .map(|i| if i % 2 == 0 { (rng.u32() & 0x007f_ffff) | ((100 + rng.u32() % 55) << 23) } else { interesting(&mut rng) & 0x7fff_ffff })
+        .collect();
+    let mut ptx = prologue("sq_k", 2, 1, "");
+    ptx += "\tmov.u32 %r0, %tid.x;\n\tmov.u32 %r1, %ctaid.x;\n\tmov.u32 %r2, %ntid.x;\n\tmad.lo.s32 %r3, %r1, %r2, %r0;\n\tsetp.ge.u32 %p1, %r3, %r100;\n\t@%p1 bra $done;\n";
+    ptx += "\tmul.wide.u32 %rd20, %r3, 4;\n\tadd.s64 %rd21, %rd1, %rd20;\n\tadd.s64 %rd22, %rd2, %rd20;\n";
+    ptx += "\tld.global.f32 %f1, [%rd21];\n\tsqrt.rn.f32 %f3, %f1;\n\tst.global.f32 [%rd22], %f3;\n$done:\n\tret;\n}\n";
+    let mut bufs = vec![bytes_of_u32(&xs), vec![0u8; n * 4]];
+    launch(&ptx, "sq_k", (n / 256) as u32, 256, &mut bufs, &[n as u32]).unwrap();
+    let got = u32s_of(&bufs[1]);
+    let (mut sbad, mut sfirst) = (0, None);
+    for i in 0..n {
+        let want = f32::from_bits(xs[i]).sqrt().to_bits();
+        let both_nan = f32::from_bits(want).is_nan() && f32::from_bits(got[i]).is_nan();
+        if got[i] != want && !both_nan && !is_denormal(want) && !is_denormal(got[i]) && !is_denormal(xs[i]) {
+            sbad += 1;
+            sfirst.get_or_insert((i, xs[i], got[i], want));
+        }
+    }
+    println!("sqrt.rn.f32: {sbad} not correctly rounded of {n}; first {sfirst:x?}");
+    assert_eq!(bad, 0, "div.rn.f32 is not correctly rounded; first {first:x?}");
+    assert_eq!(sbad, 0, "sqrt.rn.f32 is not correctly rounded; first {sfirst:x?}");
+}
+
 #[test]
 #[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
 fn hw_directed_rounding_regressions() {

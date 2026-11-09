@@ -1,0 +1,10 @@
+{
+ "level": "L5",
+ "status": "error",
+ "checks": [],
+ "error": "child exited rc=3221226505 without a result",
+ "error_class": "error",
+ "seconds": 13.3,
+ "rc": 3221226505,
+ "stderr_tail": "Could not locate cudnn_graph64_9.dll. Please make sure it is in your library path!\nInvalid handle. Cannot load symbol cudnnGetVersion\n"
+}
