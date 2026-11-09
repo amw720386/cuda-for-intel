@@ -1330,8 +1330,6 @@ pub extern "system" fn cublasSdgmm_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSdot() -> i32 { 15 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cublasSdot_v2() -> i32 { 15 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cublasSdot_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSetAtomicsMode() -> i32 { 15 }
@@ -1397,8 +1395,6 @@ pub extern "system" fn cublasSgemvBatched_64() -> i32 { 15 }
 pub extern "system" fn cublasSgemvStridedBatched() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSgemvStridedBatched_64() -> i32 { 15 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cublasSgemv_v2() -> i32 { 15 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cublasSgemv_v2_64() -> i32 { 15 }
 #[unsafe(no_mangle)]

@@ -8,6 +8,7 @@ use super::graphs::*;
 use super::library::*;
 use super::primary::*;
 use super::streams::events::*;
+use super::streams::extra::*;
 use super::streams::timing::*;
 use super::streams::{cuStreamCreate, cuStreamDestroy_v2, cuStreamQuery, cuStreamSynchronize};
 use super::vmm::*;
@@ -118,6 +119,76 @@ fn error_info(code: c_int) -> Option<(&'static CStr, &'static CStr)> {
             c"CUDA_ERROR_STREAM_CAPTURE_INVALIDATED",
             c"stream capture invalidated",
         ),
+        5 => (c"CUDA_ERROR_PROFILER_DISABLED", c"profiler disabled"),
+        6 => (c"CUDA_ERROR_PROFILER_NOT_INITIALIZED", c"profiler not initialized"),
+        7 => (c"CUDA_ERROR_PROFILER_ALREADY_STARTED", c"profiler already started"),
+        8 => (c"CUDA_ERROR_PROFILER_ALREADY_STOPPED", c"profiler already stopped"),
+        34 => (c"CUDA_ERROR_STUB_LIBRARY", c"stub library"),
+        46 => (c"CUDA_ERROR_DEVICE_UNAVAILABLE", c"device unavailable"),
+        102 => (c"CUDA_ERROR_DEVICE_NOT_LICENSED", c"device not licensed"),
+        202 => (c"CUDA_ERROR_CONTEXT_ALREADY_CURRENT", c"context already current"),
+        205 => (c"CUDA_ERROR_MAP_FAILED", c"map failed"),
+        206 => (c"CUDA_ERROR_UNMAP_FAILED", c"unmap failed"),
+        207 => (c"CUDA_ERROR_ARRAY_IS_MAPPED", c"array is mapped"),
+        208 => (c"CUDA_ERROR_ALREADY_MAPPED", c"already mapped"),
+        210 => (c"CUDA_ERROR_ALREADY_ACQUIRED", c"already acquired"),
+        211 => (c"CUDA_ERROR_NOT_MAPPED", c"not mapped"),
+        212 => (c"CUDA_ERROR_NOT_MAPPED_AS_ARRAY", c"not mapped as array"),
+        213 => (c"CUDA_ERROR_NOT_MAPPED_AS_POINTER", c"not mapped as pointer"),
+        214 => (c"CUDA_ERROR_ECC_UNCORRECTABLE", c"ecc uncorrectable"),
+        215 => (c"CUDA_ERROR_UNSUPPORTED_LIMIT", c"unsupported limit"),
+        217 => (c"CUDA_ERROR_PEER_ACCESS_UNSUPPORTED", c"peer access unsupported"),
+        219 => (c"CUDA_ERROR_INVALID_GRAPHICS_CONTEXT", c"invalid graphics context"),
+        220 => (c"CUDA_ERROR_NVLINK_UNCORRECTABLE", c"nvlink uncorrectable"),
+        221 => (c"CUDA_ERROR_JIT_COMPILER_NOT_FOUND", c"jit compiler not found"),
+        223 => (c"CUDA_ERROR_JIT_COMPILATION_DISABLED", c"jit compilation disabled"),
+        224 => (c"CUDA_ERROR_UNSUPPORTED_EXEC_AFFINITY", c"unsupported exec affinity"),
+        225 => (c"CUDA_ERROR_UNSUPPORTED_DEVSIDE_SYNC", c"unsupported devside sync"),
+        226 => (c"CUDA_ERROR_CONTAINED", c"contained"),
+        300 => (c"CUDA_ERROR_INVALID_SOURCE", c"invalid source"),
+        302 => (c"CUDA_ERROR_SHARED_OBJECT_SYMBOL_NOT_FOUND", c"shared object symbol not found"),
+        303 => (c"CUDA_ERROR_SHARED_OBJECT_INIT_FAILED", c"shared object init failed"),
+        402 => (c"CUDA_ERROR_LOSSY_QUERY", c"lossy query"),
+        700 => (c"CUDA_ERROR_ILLEGAL_ADDRESS", c"illegal address"),
+        701 => (c"CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES", c"launch out of resources"),
+        702 => (c"CUDA_ERROR_LAUNCH_TIMEOUT", c"launch timeout"),
+        703 => (c"CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING", c"launch incompatible texturing"),
+        710 => (c"CUDA_ERROR_ASSERT", c"assert"),
+        711 => (c"CUDA_ERROR_TOO_MANY_PEERS", c"too many peers"),
+        714 => (c"CUDA_ERROR_HARDWARE_STACK_ERROR", c"hardware stack error"),
+        715 => (c"CUDA_ERROR_ILLEGAL_INSTRUCTION", c"illegal instruction"),
+        716 => (c"CUDA_ERROR_MISALIGNED_ADDRESS", c"misaligned address"),
+        717 => (c"CUDA_ERROR_INVALID_ADDRESS_SPACE", c"invalid address space"),
+        718 => (c"CUDA_ERROR_INVALID_PC", c"invalid pc"),
+        720 => (c"CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE", c"cooperative launch too large"),
+        721 => (c"CUDA_ERROR_TENSOR_MEMORY_LEAK", c"tensor memory leak"),
+        800 => (c"CUDA_ERROR_NOT_PERMITTED", c"not permitted"),
+        802 => (c"CUDA_ERROR_SYSTEM_NOT_READY", c"system not ready"),
+        803 => (c"CUDA_ERROR_SYSTEM_DRIVER_MISMATCH", c"system driver mismatch"),
+        804 => (c"CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE", c"compat not supported on device"),
+        805 => (c"CUDA_ERROR_MPS_CONNECTION_FAILED", c"mps connection failed"),
+        806 => (c"CUDA_ERROR_MPS_RPC_FAILURE", c"mps rpc failure"),
+        807 => (c"CUDA_ERROR_MPS_SERVER_NOT_READY", c"mps server not ready"),
+        808 => (c"CUDA_ERROR_MPS_MAX_CLIENTS_REACHED", c"mps max clients reached"),
+        809 => (c"CUDA_ERROR_MPS_MAX_CONNECTIONS_REACHED", c"mps max connections reached"),
+        810 => (c"CUDA_ERROR_MPS_CLIENT_TERMINATED", c"mps client terminated"),
+        811 => (c"CUDA_ERROR_CDP_NOT_SUPPORTED", c"cdp not supported"),
+        812 => (c"CUDA_ERROR_CDP_VERSION_MISMATCH", c"cdp version mismatch"),
+        902 => (c"CUDA_ERROR_STREAM_CAPTURE_MERGE", c"stream capture merge"),
+        903 => (c"CUDA_ERROR_STREAM_CAPTURE_UNMATCHED", c"stream capture unmatched"),
+        904 => (c"CUDA_ERROR_STREAM_CAPTURE_UNJOINED", c"stream capture unjoined"),
+        905 => (c"CUDA_ERROR_STREAM_CAPTURE_ISOLATION", c"stream capture isolation"),
+        906 => (c"CUDA_ERROR_STREAM_CAPTURE_IMPLICIT", c"stream capture implicit"),
+        907 => (c"CUDA_ERROR_CAPTURED_EVENT", c"captured event"),
+        908 => (c"CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD", c"stream capture wrong thread"),
+        909 => (c"CUDA_ERROR_TIMEOUT", c"timeout"),
+        910 => (c"CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE", c"graph exec update failure"),
+        911 => (c"CUDA_ERROR_EXTERNAL_DEVICE", c"external device"),
+        912 => (c"CUDA_ERROR_INVALID_CLUSTER_SIZE", c"invalid cluster size"),
+        913 => (c"CUDA_ERROR_FUNCTION_NOT_LOADED", c"function not loaded"),
+        914 => (c"CUDA_ERROR_INVALID_RESOURCE_TYPE", c"invalid resource type"),
+        915 => (c"CUDA_ERROR_INVALID_RESOURCE_CONFIGURATION", c"invalid resource configuration"),
+        916 => (c"CUDA_ERROR_KEY_ROTATION", c"key rotation"),
         999 => (c"CUDA_ERROR_UNKNOWN", c"unknown error"),
         _ => return None,
     })
@@ -441,6 +512,34 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuMemUnmap" => entry!(cuMemUnmap, 10020),
         b"cuMemSetAccess" => entry!(cuMemSetAccess, 10020),
         b"cuMemGetAllocationGranularity" => entry!(cuMemGetAllocationGranularity, 10020),
+        b"cuCtxGetLimit" => entry!(cuCtxGetLimit, 3010),
+        b"cuCtxSetLimit" => entry!(cuCtxSetLimit, 3010),
+        b"cuCtxGetCacheConfig" => entry!(cuCtxGetCacheConfig, 3020),
+        b"cuCtxSetCacheConfig" => entry!(cuCtxSetCacheConfig, 3020),
+        b"cuCtxGetSharedMemConfig" => entry!(cuCtxGetSharedMemConfig, 4020),
+        b"cuCtxSetSharedMemConfig" => entry!(cuCtxSetSharedMemConfig, 4020),
+        b"cuCtxGetId" => entry!(cuCtxGetId, 12000),
+        b"cuCtxSetFlags" => entry!(cuCtxSetFlags, 12010),
+        b"cuDeviceComputeCapability" => entry!(cuDeviceComputeCapability, 2000),
+        b"cuDeviceGetProperties" => entry!(cuDeviceGetProperties, 2000),
+        b"cuProfilerStart" => entry!(cuProfilerStart, 4000),
+        b"cuProfilerStop" => entry!(cuProfilerStop, 4000),
+        b"cuProfilerInitialize" => entry!(cuProfilerInitialize, 4000),
+        b"cuModuleLoadDataEx" => entry!(cuModuleLoadDataEx, 2010),
+        b"cuModuleLoadFatBinary" => entry!(cuModuleLoadFatBinary, 2000),
+        b"cuStreamGetFlags" => entry!(cuStreamGetFlags, 5050),
+        b"cuStreamGetPriority" => entry!(cuStreamGetPriority, 5050),
+        b"cuStreamGetId" => entry!(cuStreamGetId, 12000),
+        b"cuStreamGetDevice" => entry!(cuStreamGetDevice, 12080),
+        b"cuMemsetD2D8" => entry!(cuMemsetD2D8_v2, 3020),
+        b"cuMemsetD2D16" => entry!(cuMemsetD2D16_v2, 3020),
+        b"cuMemsetD2D32" => entry!(cuMemsetD2D32_v2, 3020),
+        b"cuStreamGetCtx" if version >= 12050 => entry!(cuStreamGetCtx_v2, 12050),
+        b"cuMemsetD2D8Async" => entry!(cuMemsetD2D8Async, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD2D16Async" => entry!(cuMemsetD2D16Async, 3020, DRIVER_ABI + 1, true),
+        b"cuMemsetD2D32Async" => entry!(cuMemsetD2D32Async, 3020, DRIVER_ABI + 1, true),
+        b"cuStreamAddCallback" => entry!(cuStreamAddCallback, 5000, DRIVER_ABI + 1, true),
+        b"cuLaunchCooperativeKernel" => entry!(cuLaunchCooperativeKernel, 9000, DRIVER_ABI + 1, true),
         _ => Err(MISSING),
     }
 }
@@ -648,6 +747,28 @@ mod tests {
         ] {
             assert!(at(name, 13000, false).is_ok(), "{name:?}");
         }
+    }
+
+    #[test]
+    fn error_table_covers_the_cuda_result_enum() {
+        for (code, name) in [
+            (0, "CUDA_SUCCESS"),
+            (34, "CUDA_ERROR_STUB_LIBRARY"),
+            (222, "CUDA_ERROR_UNSUPPORTED_PTX_VERSION"),
+            (700, "CUDA_ERROR_ILLEGAL_ADDRESS"),
+            (720, "CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE"),
+            (801, "CUDA_ERROR_NOT_SUPPORTED"),
+            (999, "CUDA_ERROR_UNKNOWN"),
+        ] {
+            let mut out = std::ptr::null();
+            assert_eq!(unsafe { cuGetErrorName(code, &mut out) }, Success, "{code}");
+            assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), name);
+            assert_eq!(unsafe { cuGetErrorString(code, &mut out) }, Success, "{code}");
+            assert!(!unsafe { CStr::from_ptr(out) }.to_bytes().is_empty());
+        }
+        let mut out = std::ptr::null();
+        assert_eq!(unsafe { cuGetErrorName(123456, &mut out) }, InvalidValue);
+        assert!(out.is_null());
     }
 
     #[test]

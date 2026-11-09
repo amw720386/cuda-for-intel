@@ -1,0 +1,10 @@
+[package]
+name = "cusparse_shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "cuSPARSE surface for cuda-for-intel: every entry point returns the library's NOT_SUPPORTED status instead of failing to load"
+
+[lib]
+name = "cusparse64_12"
+crate-type = ["cdylib", "rlib"]

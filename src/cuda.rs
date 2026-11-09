@@ -26,6 +26,7 @@ mod launch_args;
 mod library;
 mod primary;
 mod streams;
+mod stubs;
 mod subst_hook;
 mod trace;
 
@@ -76,6 +77,7 @@ pub(crate) enum CuResult {
     HostMemoryAlreadyRegistered = 712,
     HostMemoryNotRegistered = 713,
     LaunchFailed = 719,
+    CooperativeLaunchTooLarge = 720,
     NotSupported = 801,
     StreamCaptureUnsupported = 900,
     StreamCaptureInvalidated = 901,
