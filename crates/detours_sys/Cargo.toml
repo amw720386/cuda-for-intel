@@ -1,0 +1,13 @@
+[package]
+name = "cfi-detours-sys"
+version = "0.1.0"
+edition = "2024"
+# Our bindings are MIT. vendor/ is Microsoft Detours 4.0.1 (MIT, vendor/LICENSE.md), copied unmodified
+# from github.com/microsoft/Detours at commit 1dbd4ea281d73d478aa8d09a8b83fbd265f715f7 (src/ only).
+license = "MIT"
+description = "Minimal FFI to a vendored Microsoft Detours, for the cfi_redirect DLL and cfi-run launcher"
+links = "detours"
+publish = false
+
+[build-dependencies]
+cc = "1"

@@ -1,0 +1,10 @@
+[package]
+name = "cfi_redirect_dummy"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Test only: stands in for both NVIDIA's and our cublas64_12.dll in the redirect CI job"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]

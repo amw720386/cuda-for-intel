@@ -4,6 +4,7 @@ name: ci
 on:
   push:
     branches: [main, integration, release-cand]
+  workflow_dispatch:
   pull_request:
 permissions:
   contents: read
@@ -100,6 +101,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: scan tracked files for IPs, hosts, user paths, keys
         run: bash scripts/scan-leaks.sh
+  windows-redirect:
+    name: cfi-run redirect (windows, no GPU)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - name: unit tests (mapping, PE import reader, launcher quoting, SASS-only module naming)
+        run: cargo test --locked -p cfi_redirect -p cfi_launcher -p cfi-fatbin
+      - name: "LoadLibraryW of a full-path cublas64_12.dll gets ours, also in a CreateProcessW child; app dir untouched"
+        shell: pwsh
+        run: pwsh -File scripts/tests/redirect-ci.ps1
   powershell-syntax:
     runs-on: windows-latest
     steps:
