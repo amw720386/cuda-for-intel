@@ -14,13 +14,13 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Bump when the translator's output for the same PTX can change.
-const TRANSLATOR_VERSION: u32 = 4;
+const TRANSLATOR_VERSION: u32 = 5;
 
 /// NUL-terminated build description read by `scripts/cfi-doctor.ps1`. The translator number is
 /// spelled out literally; `build_info_matches_translator_version` keeps it in sync.
-static BUILD_INFO: &[u8] = concat!("cfi-version=", env!("CARGO_PKG_VERSION"), ";translator=4\0").as_bytes();
+static BUILD_INFO: &[u8] = concat!("cfi-version=", env!("CARGO_PKG_VERSION"), ";translator=5\0").as_bytes();
 
-/// Returns a static NUL-terminated string such as `cfi-version=0.1.0;translator=4`.
+/// Returns a static NUL-terminated string such as `cfi-version=0.1.0;translator=5`.
 /// No allocation, no device access: safe to call right after `LoadLibrary`.
 #[unsafe(no_mangle)]
 pub extern "C" fn cfi_build_info() -> *const std::ffi::c_char {

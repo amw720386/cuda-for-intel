@@ -269,6 +269,7 @@ impl<'a> Emitter<'a> {
                     let y = y.unwrap();
                     let which = if op == FOp::Min { OpenclStd100Op::fmin } else { OpenclStd100Op::fmax };
                     let numeric = self.ext_f(fty, which, &[x, y])?;
+                    let numeric = self.order_signed_zeros(compute_ty, x, y, numeric, op == FOp::Min)?;
                     if mods.nan {
                         let x_nan = self.builder.f_unord_not_equal(b, None, x, x)?;
                         let y_nan = self.builder.f_unord_not_equal(b, None, y, y)?;
@@ -318,6 +319,27 @@ impl<'a> Emitter<'a> {
             return self.write(dst, Value { id, kind: Kind::B32 });
         }
         self.fl_write(dst, &results, ty)
+    }
+
+    /// PTX orders -0.0 below +0.0 in `min`/`max` (every float type); OpenCL `fmin`/`fmax`
+    /// leave the sign of a zero result unspecified. When both inputs are zeros, `min` returns
+    /// -0.0 if either is negative and `max` returns +0.0 if either is positive.
+    fn order_signed_zeros(&mut self, ty: NumTy, x: Word, y: Word, numeric: Word, min: bool) -> R<Word> {
+        let (ity, fty, magnitude) = if ty == NumTy::F64 {
+            let t = self.u64_type;
+            (t, self.f64_type(), self.builder.constant_bit64(t, 0x7fff_ffff_ffff_ffff))
+        } else {
+            (self.u32_type, self.f32_type, self.u32_const(0x7fff_ffff))
+        };
+        let zero = if ty == NumTy::F64 { self.builder.constant_bit64(ity, 0) } else { self.u32_const(0) };
+        let a = self.builder.bitcast(ity, None, x)?;
+        let b = self.builder.bitcast(ity, None, y)?;
+        let either = self.builder.bitwise_or(ity, None, a, b)?;
+        let magnitudes = self.builder.bitwise_and(ity, None, either, magnitude)?;
+        let both_zero = self.builder.i_equal(self.bool_type, None, magnitudes, zero)?;
+        let signed = if min { either } else { self.builder.bitwise_and(ity, None, a, b)? };
+        let signed = self.builder.bitcast(fty, None, signed)?;
+        Ok(self.builder.select(fty, None, both_zero, signed, numeric)?)
     }
 
     fn float_compare(&mut self, cmp: FCmp, a: Word, b_: Word) -> R<Word> {
@@ -557,7 +579,7 @@ impl<'a> Emitter<'a> {
                 let hi = self.u32_const(hi as u32);
                 let v = self.opencl_int(t, OpenclStd100Op::s_max, &[value, lo])?;
                 let v = self.opencl_int(t, OpenclStd100Op::s_min, &[v, hi])?;
-                let mask = self.u32_const((1u32 << dbits) - 1);
+                let mask = self.u32_const((1u32 << Self::reg_bits(d, dbits)) - 1);
                 self.builder.bitwise_and(t, None, v, mask)?
             } else {
                 value
@@ -600,12 +622,18 @@ impl<'a> Emitter<'a> {
         }
         let narrowed = self.builder.u_convert(self.u32_type, None, v)?;
         let id = if dbits < 32 {
-            let mask = self.u32_const((1u32 << dbits) - 1);
+            let mask = self.u32_const((1u32 << Self::reg_bits(d, dbits)) - 1);
             self.builder.bitwise_and(self.u32_type, None, narrowed, mask)?
         } else {
             narrowed
         };
         self.write(dst, Value { id, kind: Kind::B32 })
+    }
+
+    /// Bits of the destination register that carry the value: PTX sign- or zero-extends a
+    /// narrow result to the 16-bit register width, so a signed 8-bit result occupies 16 bits.
+    fn reg_bits(d: NumTy, dbits: u32) -> u32 {
+        if dbits == 8 && d.is_signed() { 16 } else { dbits }
     }
 
     /// Inclusive value range of a narrow (<= 32-bit) integer type as i64.
