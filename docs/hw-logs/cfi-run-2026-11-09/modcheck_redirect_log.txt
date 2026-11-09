@@ -1,0 +1,14 @@
+cfi_redirect: active in pid 14884, install dir  %USERPROFILE%\cfi-work\hwval\wr_install    Exception
+cfi_redirect: child pid 15796 injected: true
+cfi_redirect: active in pid 15796, install dir %USERPROFILE%\cfi-work\hwval\wr_install
+cfi_redirect:  %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\cublas64_11.dll ->  %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublas64_11.dll
+cfi_redirect:  %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\cublasLt64_11.dll ->  %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublasLt64_11.dll
+cfi_redirect: nvcuda.dll -> %USERPROFILE%\cfi-work\hwval\wr_install\nvcuda.dll
+cfi_redirect: preload cublas64_11.dll for  %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\cusolver64_11.dll ->  %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublas64_11.dll (ok)
+cfi_redirect: preload cublasLt64_11.dll for  %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\cusolver64_11.dll ->  %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublasLt64_11.dll (ok)
+cfi_redirect: preload cublas64_11.dll for  %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\cusolverMg64_11.dll ->  %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublas64_11.dll (ok)
+cfi_redirect: preload cublas64_11.dll for  %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\lib\shm.dll ->  %USERPROFILE%\cfi-work\hwval\wr_install\aliases\cublas64_11.dll (ok) %USERPROFILE%\cfi-work\torch\torch222p\Lib\site-packages\torch\nn\modules\transformer.py:20: 
+cfi_redirect: nvcuda.dll -> %USERPROFILE%\cfi-work\hwval\wr_install\nvcuda.dll
+cfi_redirect: nvcuda.dll -> %USERPROFILE%\cfi-work\hwval\wr_install\nvcuda.dll
+cfi_redirect: nvcuda.dll -> %USERPROFILE%\cfi-work\hwval\wr_install\nvcuda.dll
+cfi_redirect: nvcuda.dll -> %USERPROFILE%\cfi-work\hwval\wr_install\nvcuda.dll 
