@@ -168,7 +168,8 @@ def level_L1(torch, dev, checks, info):
     idx = torch.tensor([3, 1, 4, 1, 5])
     cmp_check(checks, "index_select", xd.index_select(0, idx.to(dev)), x.index_select(0, idx), 0, 0)
     emb = torch.nn.Embedding(50, 8)
-    cmp_check(checks, "embedding", emb.to(dev)(idx.to(dev)), emb(idx), 1e-6, 1e-6)
+    ref = emb(idx)  # before .to(dev): Module.to moves the module in place
+    cmp_check(checks, "embedding", emb.to(dev)(idx.to(dev)), ref, 1e-6, 1e-6)
     cmp_check(checks, "pinned_nonblocking", x.pin_memory().to(dev, non_blocking=True).cpu() if dev == "cuda" else x, x, 0, 0)
 
 
