@@ -33,7 +33,7 @@ though the Level Zero loader code compiles there. macOS builds and runs library 
 | PTX to SPIR-V translation | Supported; coverage and gaps in [ptx-gap-report.md](ptx-gap-report.md) |
 | SASS / cubin only binaries | **Unsupported.** The program must embed PTX |
 | cuBLAS / cuBLASLt | Entry points for the names exercised by the tested apps |
-| XMX (DPAS) GEMM | Present, on by default only for large fp16/bf16 shapes. Kernel level up to 15x over the tiled path on large Qwen shapes; end to end about 9 % faster prefill on Qwen2.5-0.5B (7213 vs 6634 tok/s, one run) and no decode change; two small shapes are slower with it on ([hw-logs/xmx-2026-11-09.txt](hw-logs/xmx-2026-11-09.txt)). Switch off with `CFI_XMX=0` to compare |
+| XMX (DPAS) GEMM | Present, on by default only for large fp16/bf16 shapes. Kernel level up to 15x over the tiled path on large Qwen shapes; end to end no clear gain (Qwen2.5-0.5B prefill 7213 vs 6634 tok/s in one run, 6764 vs 6944 in another, i.e. within run-to-run noise); two small shapes are slower with it on ([hw-logs/xmx-2026-11-09.txt](hw-logs/xmx-2026-11-09.txt)). Switch off with `CFI_XMX=0` to compare |
 | Quantised ggml kernels substitution | `CUDA_FOR_INTEL_SUBST=auto` by default; `none` turns it off |
 | VMM, multi-GPU peer access, conditional graph nodes, texture/surface | Not implemented |
 
