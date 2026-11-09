@@ -5,6 +5,45 @@ pub(super) struct Flow {
     pub(super) order: Vec<usize>,
 }
 
+/// Drops blocks that no path from the entry reaches and renumbers branch targets. ptxas accepts
+/// dead code after an unconditional `bra` (ZLUDA's `bra` and `malformed_label` vectors); it
+/// never executes, so removing it keeps the reachability checks below meaningful.
+pub(super) fn prune_unreachable(blocks: &mut Vec<Block<'_>>) {
+    if blocks.is_empty() {
+        return;
+    }
+    let mut seen = vec![false; blocks.len()];
+    let mut stack = vec![0];
+    while let Some(index) = stack.pop() {
+        if !std::mem::replace(&mut seen[index], true) {
+            stack.extend(blocks[index].end.successors());
+        }
+    }
+    if !seen.contains(&false) {
+        return;
+    }
+    let mut map = vec![usize::MAX; blocks.len()];
+    let mut next = 0;
+    for (index, live) in seen.iter().enumerate() {
+        if *live {
+            map[index] = next;
+            next += 1;
+        }
+    }
+    let old = std::mem::take(blocks);
+    for (index, mut block) in old.into_iter().enumerate() {
+        if !seen[index] {
+            continue;
+        }
+        block.end = match block.end {
+            Terminator::Return => Terminator::Return,
+            Terminator::Jump(target) => Terminator::Jump(map[target]),
+            Terminator::Branch { predicate, taken, other } => Terminator::Branch { predicate, taken: map[taken], other: map[other] },
+        };
+        blocks.push(block);
+    }
+}
+
 impl Flow {
     pub(super) fn analyze(blocks: &[Block<'_>]) -> Result<Self, Error> {
         if blocks.is_empty() {

@@ -47,6 +47,8 @@ impl<'a> Emitter<'a> {
                         NumTy::Bf16 => (0x3f80, 16),
                         NumTy::F32 => (0x3f80_0000, 32),
                         NumTy::U16 | NumTy::S16 => (0xffff, 16),
+                        // Packed sources produce one 16-bit mask per lane, also for .u32/.s32.
+                        _ if lane_count == 2 => (0xffff, 16),
                         _ => (u32::MAX, 32),
                     };
                     let yes = self.u32_const(yes);
@@ -571,6 +573,20 @@ impl<'a> Emitter<'a> {
                 [Operand::FPRoundingMode(FPRoundingMode::RTZ)],
             );
             self.builder.decorate(value, Decoration::SaturatedConversion, []);
+            // A saturated OpenCL conversion maps NaN to 0. PTX (cvt, "NaN input results in"):
+            // 0 only when the source is not .f64 and the destination is not .s64/.u64, otherwise
+            // 1 << (bits - 1) (ZLUDA's cvt_u64_f16 vector). Narrow destinations from .f64 keep 0.
+            let value = if dwide || (s == NumTy::F64 && dbits == 32) {
+                let nan = self.builder.f_unord_not_equal(self.bool_type, None, x, x)?;
+                let (min, ty) = if dwide {
+                    (self.builder.constant_bit64(self.u64_type, 1u64 << 63), self.u64_type)
+                } else {
+                    (self.u32_const(1 << 31), self.u32_type)
+                };
+                self.builder.select(ty, None, nan, min, value)?
+            } else {
+                value
+            };
             let id = if dbits < 32 {
                 // Clamp the 32-bit saturated value into the narrow destination range.
                 let t = self.u32_type;

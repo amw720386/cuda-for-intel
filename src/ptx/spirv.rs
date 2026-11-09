@@ -61,6 +61,8 @@ impl Value {
 mod ext_emit;
 #[path = "ext_float.rs"]
 mod ext_float;
+#[path = "ext_fp8.rs"]
+mod ext_fp8;
 #[path = "param_space_emit.rs"]
 mod param_space_emit;
 
@@ -3311,8 +3313,9 @@ impl<'a> Emitter<'a> {
         self.undef_slots_info.clear();
     }
 
-    fn emit_entry(&mut self, entry: Entry<'a>) -> Result<KernelMetadata, Error> {
+    fn emit_entry(&mut self, mut entry: Entry<'a>) -> Result<KernelMetadata, Error> {
         self.current_entry = entry.name.to_string();
+        super::flow::prune_unreachable(&mut entry.blocks);
         let flow = Flow::analyze(&entry.blocks)?;
         self.declarations = entry.registers;
         self.registers.clear();
