@@ -20,7 +20,10 @@ on this branch (the GPU gate was reserved for the release check); treat as unver
 | cuDNN-backed conv | n/a | n/a | optional; `cudnn-fast` branch stand-in not merged here |
 | torch.fft (fft/ifft/rfft/irfft/fftn/stft, f32 and f64) | works | not re-run | `cufft_shim` under `cfi-run`; 196 checks in `scripts/torch/fft_check.py` |
 | torch.sparse matmul (CSR/COO/BSR @ dense, `mv`, `addmm`, `sparse.mm`, COO `bmm`, `sampled_addmm`; f32 and f64) | works | not re-run | `cusparse_shim` under `cfi-run`; 129 checks in `scripts/torch/sparse_check.py`. Sparse @ sparse, sparse + sparse, sparse triangular solves, complex and f16 sparse raise `CUSPARSE_STATUS_NOT_SUPPORTED` |
-| cuSOLVER, NCCL | fails | fails | no stand-ins |
+| float64 / complex64 / complex128 matmul, addmm, bmm, baddbmm, mv, addmv, dot/vdot/inner, `linalg.solve_triangular`, batched `linalg.solve`/`inv`/`det`/`lu_factor`/`lu_solve`, `multi_dot`, matmul backward | works | not re-run | f64/complex cuBLAS in `cublas_shim` under `cfi-run`; 527 checks in `scripts/torch/blas64_check.py` |
+| single-matrix `linalg.solve`/`inv`/`det`/`cholesky`/`qr`/`lstsq` (float64) | works | not re-run | NVIDIA's `cusolver64_11.dll` from `torch\lib` on the shim's cuBLAS and driver |
+| `linalg.eigh`, `linalg.svd`, batched `linalg.qr` | fails | not re-run | eigh returns wrong values and svd raises `CUSOLVER_STATUS_EXECUTION_FAILED`, both inside cuSOLVER's own kernels with no cuBLAS call involved; batched qr needs `cublas?geqrfBatched` (`CUBLAS_STATUS_NOT_SUPPORTED`) |
+| NCCL | fails | fails | no stand-in |
 | cu126/cu128/cu121+ Windows wheels, Linux cu126/cu128 wheels | fails | n/a | SASS only; now reported by a one-time error naming the SASS architectures and pointing at `docs/sass-support.md` (CUDA_ERROR_NO_BINARY_FOR_GPU) |
 | PyTorch built with `TORCH_CUDA_ARCH_LIST=8.0+PTX` | untested | n/a | recipe in `docs/pytorch-build-ptx.md`; no build box yet |
 

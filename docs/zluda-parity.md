@@ -38,7 +38,7 @@ Caveats (measured):
 | Library | ZLUDA declared | ZLUDA implemented | ours implemented | both | ZLUDA only | ours only | torch_cuda.dll imports: ZLUDA impl / ours impl |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Driver API (nvcuda) | 728 | 156 | 229 | 120 | 36 | 109 | n/a (torch links cudart) |
-| cuBLAS | 530 | 19 | 25 | 15 | 4 | 10 | 55: 11 / 16 |
+| cuBLAS | 530 | 19 | 161 | 18 | 1 | 143 | 55: 11 / 47 |
 | cuBLASLt | 45 | 18 | 17 | 13 | 5 | 4 | 11: 11 / 11 |
 | cuDNN 9 | 220 | 40 | 94 | 37 | 3 | 57 | not in the import list (torch loads cuDNN lazily) |
 | cuFFT | 60 | 32 | 38 | 32 | 0 | 6 | 7: 5 / 7 |
@@ -65,7 +65,7 @@ Texture support is what ZLUDA's Q1/Q2 2026 post credits for Blender working.
 
 **cuSPARSE (0).** ZLUDA's 16 (`cusparseCreate`/`Destroy`, dense and COO descriptors, the legacy descriptor getters, and `cusparseSpMM` with bufferSize and preprocess, through rocSPARSE) are all implemented since the cuSPARSE shim. We also implement CSR/CSC descriptors, `cusparseSpMV`, `cusparseSDDMM`, `cusparse{S,D}bsr{mv,mm}`, `cusparseXcoo2csr`/`Xcsr2coo`, `cusparseCreateIdentityPermutation`, strided batches and pointer mode (81 in all; f32 and f64 only).
 
-**cuBLAS (4)**, **cuBLASLt (5)** and **cuDNN (3)**: version, status-string and vector-copy helpers only. These are trivial.
+**cuBLAS (1)**, **cuBLASLt (5)** and **cuDNN (3)**: version, status-string and vector-copy helpers only. These are trivial. The cuBLAS one is `cublasGetCudartVersion`, which we implement as a constant and the audit therefore counts as a stub.
 
 ### What we implement that ZLUDA does not (measured)
 
@@ -75,12 +75,12 @@ Texture support is what ZLUDA's Q1/Q2 2026 post credits for Blender working.
   - IPC (5), peer copies, `cuLaunchCooperativeKernel`, `cuLaunchHostFunc`, stream callbacks, and stream getters.
 - **cuDNN: 94 against 40.** These include the backend (graph) API and an explicit-GEMM conv that runs on our XMX cuBLAS. See `docs/cudnn-shim.md`.
 - **NVML: 33 against 15.**
-- **cuBLAS:** `Sgemv`, `Sdot`, `SgemmBatched`, `SgemmEx`, `StrsmBatched` and emulation-strategy getters. That gives 16 against 11 of torch's 55 cuBLAS imports.
+- **cuBLAS: 161 against 19.** Since item 10 these include the f64 and complex level 1-3 surface (`D/C/Z gemm` in every batching form, `GemmEx` on R_64F/C_32F/C_64F, gemv, dot/dotc, nrm2, axpy, scal, trsm, trsv, trmm, trmv, syrk/herk, syr2k/her2k, symm/hemm, symv/hemv, ger, geam, dgmm, copy, swap, i?amax/i?amin, `getrfBatched`/`getrsBatched`) and the host/device matrix and vector copies. That gives 47 against 11 of torch's 55 cuBLAS imports, and all 90 cuBLAS names NVIDIA's `cusolver64_11.dll` imports.
 - **Own NVRTC** (clang NVPTX) and **own cudart**. ZLUDA ships neither.
 
 ### Real PyTorch imports that neither project implements (measured, `--torch-gaps`)
 
-- **cuBLAS (39 of 55).** Every f64 and complex GEMM, GEMV and dot (`cublasDgemm_v2`, `cublasZgemm_v2`, `cublasDdot_v2` and similar). Also `S/D/C/Z trsm`, and batched `getrf`/`getrs`/`geqrf`/`gels`. In practice this means float64 matmul and `torch.linalg`.
+- **cuBLAS (8 of 55, 39 before item 10).** Only the batched QR and least-squares helpers `cublas{S,D,C,Z}geqrfBatched` and `cublas{S,D,C,Z}gelsBatched` remain. torch uses them for batched `linalg.qr` and `lstsq`.
 - **cuSOLVER (97 of 97).** All `torch.linalg` decompositions.
 - **cuSPARSE (62 of 98).** SpGEMM (sparse @ sparse), `csrgeam2` (sparse + sparse), SpSV/SpSM and `bsrsv2`/`bsrsm2` (triangular solves), `Xcsrsort`/`Xcoosort`, and the complex `C`/`Z` BSR products. We implement the other 36 (generic descriptors, SpMV, SpMM, SDDMM, S/D `bsrmv`/`bsrmm`, `Xcoo2csr`, legacy descriptors).
 - **cuFFT: none since item 9.** torch 2.x plans FFTs through `cufftXtMakePlanMany` and `cufftXtExec`, which ZLUDA does not implement (both names are absent from its implemented list); we implement both.
@@ -97,7 +97,7 @@ The effort column uses S for at most a day, M for a few days and L for more than
 | Texture, surface and arrays | Implemented (`zluda/src/impl/{tex,surf,array}.rs`); PTX `tex`/`suld`/`sust` in the parser | Rejected: "need bindless images". 24 ZLUDA tex fixtures fail in our corpus | `tests/ptx_corpus/expected_status.tsv` (`test_ptx__tex_*`), `docs/ptx-gap-report.md` §6 | Medium: Blender and image ops. Low for LLMs | L |
 | cuFFT | 32, via hipFFT | 38: ZLUDA's 32 plus torch's `cufftXt*` path, own Stockham PTX kernels (item 9 done) | §1, `hw-logs/cufft-2026-11-09.md` | Medium: `torch.fft`, audio models (STFT in Whisper preprocessing) | - |
 | cuSPARSE | 16 (SpMM) | 81: ZLUDA's 16 plus CSR/CSC/COO SpMV, SpMM, SDDMM, S/D BSR mv/mm, own PTX kernels | §1, `hw-logs/cusparse-2026-11-09.md` | Low to medium: sparse torch, GNNs. Missing: SpGEMM, csrgeam2, triangular solves | - |
-| cuSOLVER and f64/complex cuBLAS | none | none | §1 `--torch-gaps` | Medium for `torch.linalg` and float64 users; neither project covers it | M (f64 GEMM), L (solver) |
+| cuSOLVER and f64/complex cuBLAS | none | f64/complex cuBLAS done (item 10). No cuSOLVER of our own, but NVIDIA's `cusolver64_11.dll` from `torch\lib` runs on our cuBLAS and driver under `cfi-run` | §1 `--torch-gaps`, `hw-logs/cublas64-2026-11-09.md` | Medium for `torch.linalg`: solve, inv, det, cholesky, qr and lstsq work. eigh is wrong and svd fails inside cuSOLVER's own kernels | L (solver kernels on the translator) |
 | cuDNN | 40 (MIOpen) | 94, opt-in, explicit GEMM | §1, `docs/cudnn-shim.md`, `docs/compatibility.md` | We lead on count. Default-on decision is pending (`gpu-day-checklist.md` §3) | - |
 | PTX opcodes | 74 rule heads in `ptx_parser` (`derive_parser!`) | All 74 names handled or explicitly rejected. Extra: wmma, stmatrix, video SIMD, testp, slct, fns, szext, elect, red. Neither: wgmma, tcgen05, mbarrier, mapa, getctarank | `scripts/zluda_parity/ptx_ops.py` | We lead in breadth for sm_80-class code | - |
 | PTX on ZLUDA's own fixtures | Its test suite (passes in its CI, stated) | 195 pass, 31 unsupported, 4 error of 230 imported ZLUDA files after items 2, 7 and 8 (173/47/10 before). Fails on: tex (24), `extern_func` (a call into another module; precise unsupported error) and a few declaration forms | `tests/ptx_corpus/expected_status.tsv` rows under `zluda/` | Low to medium: fp8 and vector registers appear in sm_89+/CUTLASS PTX (estimate) | S-M |
@@ -137,6 +137,14 @@ Order is by real-app impact per day of work. The GPU column says whether accepta
 | 18 | **Hygiene: refresh and gate API coverage.** Regenerate `docs/api-coverage.md`, add `api_audit.py --check` and the parity table to CI (ZLUDA checkout pinned by hash, fetched in CI only) | no | `.github/workflows/ci.yml`, `docs/api-coverage.md`, `scripts/zluda_parity/*` | CI fails when coverage docs are stale. This page's §1 table is regenerated by one command |
 | 19 | **Owner decisions that unblock contributors**: licence dual MIT/Apache-2.0, ZLUDA copyright notice, Code of Conduct, branch pruning (`docs/OPEN-DECISIONS.md` items 1, 4, 6, and pre-public item 10) | no | `LICENSE*`, `Cargo.toml` files, `THIRD_PARTY_NOTICES.md`, `CODE_OF_CONDUCT.md` | The decisions are recorded in `OPEN-DECISIONS.md` and the files are consistent. This item cannot be done by an agent alone |
 
+Status of item 10 (branch `blas64`): done. `crates/cublas_shim` grows from 25 to 161 implemented names (all of ZLUDA's 19 but the constant `cublasGetCudartVersion`; 47 of torch's 55 imports, 16 before; the `--torch-gaps` "neither" list drops from 39 to 8).
+- Layout: the f64/complex code follows the cuFFT and cuSPARSE layout. `kernels/plan.rs` holds validation and launch lists, `kernels/ptxgen.rs` the generated PTX, and `blas_dcz.rs`/`blas_ext.rs` the C ABI. The f16/bf16/f32 GEMM and XMX paths are untouched: `gemm_common` hands R_64F/C_32F/C_64F operands to the new code before its own validation.
+- Kernels: one 16x16 tiled gemm per type (S/D/C/Z, strided or pointer-table batches). Element precision is used for accumulation. op() is reduced to strides plus conjugate flags, so N/T/C/CONJG need no extra variants. Operand modes (triangular, symmetric, Hermitian), triangle-only stores and a C row stride make the same kernel serve trmm, symm/hemm, syrk/herk, syr2k/her2k, symv/hemv, ger and trmv.
+- Other kernels: gemv with signed increments; single-block dot/dotc (also f16/bf16 for `DotEx`), scaled nrm2 and i?amax/i?amin reductions; axpy, scal, copy/swap and geam/dgmm elementwise kernels; per-vector trsm (trsv as the one-vector case); per-matrix LU with partial pivoting (`getrfBatched`) plus a row-swap kernel (`getrsBatched` = laswp + two trsm).
+- Scalars: device-pointer-mode scalars are read in the kernel, and dot/nrm2/amax write device results directly. In-place trmm and trmv multiply from a scratch copy.
+- Tests: `src/ptx/cublas64_tests.rs` (simulator, every op pair and side/uplo/diag case against an f64 complex reference) and `tests/gpu/hw_cublas64.rs` (about 1,240 cases on the B390, f64 worst 1e-15). `scripts/torch/blas64_check.py` passes 527 of 527 checks on torch 2.2.2+cu118 under `cfi-run`. See `hw-logs/cublas64-2026-11-09.md`.
+- Not done: `geqrfBatched`/`gelsBatched`, `_64` (ILP64) entry points, `gemm3m` as a real 3M algorithm (it runs the plain product), `CUDA_C_8I`/`CUDA_C_16F` GemmEx types, tbmv/gbmv/packed formats, and performance work (f64 gemm is a plain shared-memory tile with no register blocking).
+
 Status of item 9 (branch `cufft-shim`): done. `crates/cufft_shim` implements 38 of the 60 cuFFT names: ZLUDA's 32 plus `cufftXtMakePlanMany`, `cufftXtExec`, `cufftXtGetSizeMany` and `cufft{Get,Set,Reset}PlanProperty*`; all 7 torch imports are covered. Backend: generated PTX through our Driver API, like the cuBLAS shim (the box has no oneAPI and the repo ships no oneMKL dependency). Each transform is a gather into a dense complex work area (real input, or a Hermitian half expanded by symmetry), one mixed-radix Stockham pass per radix (4, 2, 3, 5, 7, other primes as one direct-DFT pass) with host-computed f64 twiddle tables, and a scatter to the cuFFT layout (basic, padded in-place real, or advanced `*embed`/stride/dist). Tests: `plan.rs` host model against a naive DFT; `src/ptx/cufft_tests.rs` runs the translated kernels in the SPIR-V simulator; `tests/gpu/hw_cufft.rs` (42 transforms, f32 and f64, sizes up to 4099, 1D/2D/3D, batched, in-place and out-of-place, the torch Xt path) passes on the B390; `scripts/torch/fft_check.py` (196 checks: `fft/ifft/rfft/irfft` for sizes 1-4096 incl. 97, 105 and 840, `fft2/fftn/rfftn/irfftn`, a non-last dim, `stft`) passes on torch 2.2.2+cu118 under `cfi-run` with an untouched `torch\lib`. Not done: callbacks, multi-GPU `cufftXt*` descriptors, guru plans, half/bfloat16, Bluestein for large primes (a prime length costs O(n^2)), and no performance tuning.
 
 Status of items 7 and 8 (branch `translator-fp8-indirect`, merged with item 2 on `translator-next`; translator only, no GPU needed):
@@ -149,7 +157,7 @@ Status of items 3 and 5 (branch `win-redirect`): implemented without a GPU. `cra
 Not on the list, on purpose:
 - SASS translation (see `docs/sass-support.md`).
 - 32-bit PhysX, D3D11 interop and OptiX. ZLUDA itself calls OptiX unlikely.
-- cuSOLVER. Large, and ZLUDA does not have it either. Revisit after item 10.
+- A cuSOLVER of our own. ZLUDA does not have one either. After item 10, NVIDIA's cuSOLVER from `torch\lib` runs on our cuBLAS, and its `eigh`/`svd` failures are translator or driver bugs to chase first.
 - A PTX→LLVM→`llvm-spirv` rewrite of the backend. That would copy ZLUDA's architecture, but it is weeks of work. Items 11-13 measure first whether codegen is the bottleneck, as opposed to launch overhead or memory traffic.
 
 ### Results for items 2 and 18
@@ -175,7 +183,7 @@ Item 18: `docs/api-coverage.md` is regenerated. The `coverage-docs` CI job fails
 - **Driver API.** 229 against 156 implemented. Our lead is the explicit graph API (51 calls), memory pools, VMM, IPC and cooperative launch. ZLUDA's graphs are 7 forwards to hipGraph.
 - **cuDNN.** 94 against 40 entry points, including the backend API.
 - **NVML.** 33 against 15.
-- **cuBLAS.** We implement 16 of torch's 55 cuBLAS imports; ZLUDA implements 11.
+- **cuBLAS.** We implement 47 of torch's 55 cuBLAS imports; ZLUDA implements 11. That includes all f64 and complex products and every cuBLAS name NVIDIA's cuSOLVER imports.
 - **NVRTC.** We ship our own, which needs no NVIDIA binary. ZLUDA requires NVIDIA's NVRTC and redirects it.
 - **cudart.** We ship our own minimal cudart. ZLUDA relies on NVIDIA's.
 - **PTX breadth.** All 74 ZLUDA parser opcodes are handled or explicitly rejected by name. We also lower wmma, stmatrix, video SIMD, carry chains, elect and testp.
