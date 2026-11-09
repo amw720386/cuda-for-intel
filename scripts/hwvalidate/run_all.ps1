@@ -231,7 +231,9 @@ function Invoke-Gen($S, [string]$Prompt, [int]$Predict, [int]$NumGpu = 99, [int]
 }
 function Get-Names { return @($Models -split '[,;]' | Where-Object { $_ -and (Test-Path $_) }) }
 function Mk-Words([int]$n) { return ((@('lorem') * $n) -join ' ') }
-function Long-Prompt([int]$words) { return ('1 ' + (Mk-Words $words) + "`nCount from 1 to 300 separated by commas: 1, 2, 3,") }
+# $V changes only the first token: every measured request needs a prompt the KV prefix cache has not seen, otherwise
+# Ollama skips most of the prefill and the reported prefill tok/s is meaningless.
+function Long-Prompt([int]$words, [int]$V = 1) { return ("$V " + (Mk-Words $words) + "`nCount from 1 to 300 separated by commas: 1, 2, 3,") }
 function First-Diff([string]$a, [string]$b) { $m = [math]::Min($a.Length, $b.Length); for ($k = 0; $k -lt $m; $k++) { if ($a[$k] -ne $b[$k]) { return $k } }; if ($a.Length -ne $b.Length) { return $m }; return -1 }
 function Err-Lines($S) { return @(Select-String -Path "$($S.wd)\e.txt" -Pattern 'CUDA error|device lost|ZE_RESULT|panic|LaunchFailed' -ErrorAction SilentlyContinue).Count }
 
@@ -461,7 +463,7 @@ try {
             try {
                 if (-not $S.up -or -not (Invoke-OllamaCreate $S $gg "hv-xmx-$($cfg[0])")) { Add-Result "ollama-$($cfg[0])" 'fail' 'server/create failed'; continue }
                 if (-not $n) { $c = (Invoke-Gen $S (Long-Prompt 600) 1).prompt_eval_count; $n = 600 + (631 - $c) } else { [void](Invoke-Gen $S (Long-Prompt $n) 1) }
-                $r = Invoke-Gen $S (Long-Prompt $n) 48
+                $r = Invoke-Gen $S (Long-Prompt $n 3) 48
                 $pp = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max([double]1, [double]$r.prompt_eval_duration), 1); $dd = [math]::Round($r.eval_count * 1e9 / [math]::Max([double]1, [double]$r.eval_duration), 1)
                 $texts[$cfg[0]] = $r.response
                 $x = ''; if ($cfg[0] -eq 'trace') { $x = " xmx_trace_lines=$(@(Select-String -Path "$($S.wd)\e.txt" -Pattern 'xmx' -ErrorAction SilentlyContinue).Count)" }
@@ -514,7 +516,7 @@ try {
             try {
                 if ($S.up -and (Invoke-OllamaCreate $S $m "hv-perf-$mn")) {
                     $c = (Invoke-Gen $S (Long-Prompt 600) 1 0).prompt_eval_count; $n = 600 + (631 - $c)
-                    $cpuText = (Invoke-Gen $S (Long-Prompt $n) 48 0).response
+                    $cpuText = (Invoke-Gen $S (Long-Prompt $n 3) 48 0).response   # same prompt as GPU run 1
                     Add-Result "perf-$mn-cpu-ref" 'info' "calibrated words=$n"
                 } else { Add-Result "perf-$mn-cpu-ref" 'fail' 'server/create failed' }
             } catch { Add-Result "perf-$mn-cpu-ref" 'fail' $_.Exception.Message } finally { Stop-Ollama $S }
@@ -523,14 +525,15 @@ try {
                 $S = Start-Ollama "perf_${mn}_$($cfg[0])" $tree @{ OLLAMA_FLASH_ATTENTION = $cfg[1]; CFI_OPT_LD16 = $cfg[2] }
                 try {
                     if (-not $S.up -or -not (Invoke-OllamaCreate $S $m "hv-perf-$mn")) { Add-Result "perf-$mn-$($cfg[0])" 'fail' 'server/create failed'; continue }
-                    [void](Invoke-Gen $S (Long-Prompt $n) 8)           # warm: compile all kernels for these shapes
+                    [void](Invoke-Gen $S (Long-Prompt $n 2) 8)         # warm: compile all kernels for these shapes
                     $best = $null
                     foreach ($i in 1..2) {
-                        $r = Invoke-Gen $S (Long-Prompt $n) 48
+                        $r = Invoke-Gen $S (Long-Prompt $n (2 + $i)) 48
                         $pp = [math]::Round($r.prompt_eval_count * 1e9 / [math]::Max([double]1, [double]$r.prompt_eval_duration), 1); $dd = [math]::Round($r.eval_count * 1e9 / [math]::Max([double]1, [double]$r.eval_duration), 1)
-                        if (-not $best -or $dd -gt $best.dd) { $best = @{ pp = $pp; dd = $dd; text = $r.response; pe = $r.prompt_eval_count; ev = $r.eval_count } }
+                        if ($i -eq 1) { $gpuText = $r.response }
+                        if (-not $best -or $dd -gt $best.dd) { $best = @{ pp = $pp; dd = $dd; pe = $r.prompt_eval_count; ev = $r.eval_count } }
                     }
-                    $d = First-Diff $cpuText $best.text
+                    $d = First-Diff $cpuText $gpuText
                     $st = if ($d -lt 0) { 'pass' } else { 'review' }
                     Add-Result "perf-$mn-$($cfg[0])" $st "prefill_tps=$($best.pp) decode_tps=$($best.dd) tokens=$($best.pe)+$($best.ev) text_eq_cpu=$($d -lt 0) first_diff=$d" -Blame $(if ($st -ne 'pass') { 'compare the 4 configs: only ld1 differs -> perf-depth LD16; only fa1 differs -> FA; all differ -> fix-divergence/xmx/translator' } else { '' }) -Isolate 'CFI_OPT_LD16=0, OLLAMA_FLASH_ATTENTION=0, CFI_XMX=0, CUDA_FOR_INTEL_FAST_DIV=1' -Data @{ prefill_tps = $best.pp; decode_tps = $best.dd; model = $mn; config = $cfg[0] }
                 } catch { Add-Result "perf-$mn-$($cfg[0])" 'fail' $_.Exception.Message -Blame 'any GPU path' }
