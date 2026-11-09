@@ -21,6 +21,7 @@ Remove-Item Env:CFI_FAKE_CPU -ErrorAction SilentlyContinue
 $n = ($Levels -split ',').Count
 $outer = $LevelTimeoutSec * ($n + 4) * 3 + 600
 $p = Start-Process -PassThru -NoNewWindow -FilePath $py -WorkingDirectory $Src -ArgumentList @((Join-Path $Src 'scripts\torch\progressive.py'), '--levels', $Levels, '--timeout', $LevelTimeoutSec, '--out', $out) -RedirectStandardOutput (Join-Path $out 'stdout.txt') -RedirectStandardError (Join-Path $out 'stderr.txt')
+$null = $p.Handle   # without touching the handle before exit, ExitCode reads back null and every run looked like rc=0
 if (-not $p.WaitForExit($outer * 1000)) { Write-Host 'outer timeout: harness still running, not killed'; exit 3 }
 $p.WaitForExit()
 exit $p.ExitCode
