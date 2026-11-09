@@ -33,6 +33,10 @@ mod cufft_plan;
 #[cfg(test)]
 #[path = "../crates/cufft_shim/src/ptxgen.rs"]
 mod cufft_ptxgen;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../crates/cusparse_shim/src/kernels/mod.rs"]
+mod cusparse_src;
 
 pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
     let tokens = parse::tokens(source)?;
@@ -1148,6 +1152,8 @@ mod sim;
 mod cudnn_tests;
 #[cfg(test)]
 mod cufft_tests;
+#[cfg(test)]
+mod cusparse_tests;
 #[cfg(test)]
 mod globals_tests;
 #[cfg(test)]

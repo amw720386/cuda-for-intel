@@ -130,6 +130,9 @@ version = "0.1.0"
 [[package]]
 name = "cusparse_shim"
 version = "0.1.0"
+dependencies = [
+ "libloading",
+]
 
 [[package]]
 name = "find-msvc-tools"

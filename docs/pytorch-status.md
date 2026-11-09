@@ -19,7 +19,8 @@ on this branch (the GPU gate was reserved for the release check); treat as unver
 | Hugging Face greedy generation vs CPU (GPT-2 / Qwen2.5-0.5B) | not re-run | not re-run | next step; expected to need math SDPA |
 | cuDNN-backed conv | n/a | n/a | optional; `cudnn-fast` branch stand-in not merged here |
 | torch.fft (fft/ifft/rfft/irfft/fftn/stft, f32 and f64) | works | not re-run | `cufft_shim` under `cfi-run`; 196 checks in `scripts/torch/fft_check.py` |
-| cuSOLVER, cuSPARSE, NCCL | fails | fails | no stand-ins |
+| torch.sparse matmul (CSR/COO/BSR @ dense, `mv`, `addmm`, `sparse.mm`, COO `bmm`, `sampled_addmm`; f32 and f64) | works | not re-run | `cusparse_shim` under `cfi-run`; 129 checks in `scripts/torch/sparse_check.py`. Sparse @ sparse, sparse + sparse, sparse triangular solves, complex and f16 sparse raise `CUSPARSE_STATUS_NOT_SUPPORTED` |
+| cuSOLVER, NCCL | fails | fails | no stand-ins |
 | cu126/cu128/cu121+ Windows wheels, Linux cu126/cu128 wheels | fails | n/a | SASS only; now reported by a one-time error naming the SASS architectures and pointing at `docs/sass-support.md` (CUDA_ERROR_NO_BINARY_FOR_GPU) |
 | PyTorch built with `TORCH_CUDA_ARCH_LIST=8.0+PTX` | untested | n/a | recipe in `docs/pytorch-build-ptx.md`; no build box yet |
 

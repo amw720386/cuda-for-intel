@@ -25,6 +25,7 @@ though the Level Zero loader code compiles there. macOS builds and runs library 
 | CUDA C programs with embedded PTX | Works for the bundled samples | [cuda-programs.md](cuda-programs.md) |
 | cuDNN | Opt-in, experimental | Not part of the default install. Convolutions use PyTorch's native kernels with `torch.backends.cudnn.enabled = False`. |
 | cuFFT | Implemented (38 entry points, ZLUDA's 32 plus torch's `cufftXt*` path) | C2C/R2C/C2R in f32 and f64, 1D-3D, batched, advanced layouts. `torch.fft` on cu118 matches CPU ([hw-logs/cufft-2026-11-09.md](hw-logs/cufft-2026-11-09.md)). No callbacks, multi-GPU or half precision; not performance-tuned |
+| cuSPARSE | Implemented (81 entry points, ZLUDA's 16 plus 36 of torch's 98 imports) | Generic API: CSR/CSC/COO and dense descriptors, `cusparseSpMV`, `cusparseSpMM`, `cusparseSDDMM` (op N/T, both dense orders, 32/64-bit indices, strided batches, host or device scalars); legacy `cusparse{S,D}bsr{mv,mm}`, `cusparseXcoo2csr`/`Xcsr2coo`. f32 and f64 only. torch sparse matmul on cu118 matches CPU ([hw-logs/cusparse-2026-11-09.md](hw-logs/cusparse-2026-11-09.md)). No SpGEMM, `csrgeam2`, triangular solves or sorts (`CUSPARSE_STATUS_NOT_SUPPORTED`); not performance-tuned |
 | NCCL, cuSOLVER | Not implemented | |
 
 ## Feature status
