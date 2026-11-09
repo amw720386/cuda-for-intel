@@ -97,6 +97,11 @@ mod hw_ggml_stock;
 mod hw_subst;
 #[path = "gpu/hw_cublas_batched.rs"]
 mod hw_cublas_batched;
+#[allow(dead_code)]
+#[path = "../crates/cublas_shim/src/kernels/mod.rs"]
+mod cublas64_src;
+#[path = "gpu/hw_cublas64.rs"]
+mod hw_cublas64;
 #[path = "gpu/hw_cudnn.rs"]
 mod hw_cudnn;
 #[path = "gpu/hw_cufft.rs"]

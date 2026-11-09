@@ -35,7 +35,7 @@ Behaviour notes for the entry points that are not plain forwards:
 |---|---|---|---|---|---|---|
 | CUDA driver API (cuda.h) | 728 | 228 | 240 | 260 | 0 | 0 (0/0/0) |
 | CUDA runtime API (cuda_runtime_api.h) | 330 | 87 | 242 | 1 | 1 | 69 (46/23/0) |
-| cuBLAS | 530 | 25 | 505 | 0 | 0 | 55 (16/39/0) |
+| cuBLAS | 530 | 161 | 369 | 0 | 0 | 55 (47/8/0) |
 | cuBLASLt | 45 | 17 | 28 | 0 | 0 | 11 (11/0/0) |
 | NVML | 398 | 33 | 365 | 0 | 0 | 0 (0/0/0) |
 | cuFFT | 60 | 38 | 22 | 0 | 0 | 7 (7/0/0) |
@@ -1124,60 +1124,60 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasAsumEx_64` | stub | core |  |
 | `cublasAxpyEx` | stub | core |  |
 | `cublasAxpyEx_64` | stub | core |  |
-| `cublasCaxpy_v2` | stub | core |  |
+| `cublasCaxpy_v2` | implemented | core |  |
 | `cublasCaxpy_v2_64` | stub | core |  |
-| `cublasCcopy_v2` | stub | core |  |
+| `cublasCcopy_v2` | implemented | core |  |
 | `cublasCcopy_v2_64` | stub | core |  |
-| `cublasCdgmm` | stub | core |  |
+| `cublasCdgmm` | implemented | core |  |
 | `cublasCdgmm_64` | stub | core |  |
-| `cublasCdotc_v2` | stub | core | yes |
+| `cublasCdotc_v2` | implemented | core | yes |
 | `cublasCdotc_v2_64` | stub | core |  |
-| `cublasCdotu_v2` | stub | core | yes |
+| `cublasCdotu_v2` | implemented | core | yes |
 | `cublasCdotu_v2_64` | stub | core |  |
 | `cublasCgbmv_v2` | stub | core |  |
 | `cublasCgbmv_v2_64` | stub | core |  |
-| `cublasCgeam` | stub | core |  |
+| `cublasCgeam` | implemented | core |  |
 | `cublasCgeam_64` | stub | core |  |
 | `cublasCgelsBatched` | stub | core | yes |
-| `cublasCgemm3m` | stub | core |  |
-| `cublasCgemm3mBatched` | stub | core |  |
+| `cublasCgemm3m` | implemented | core |  |
+| `cublasCgemm3mBatched` | implemented | core |  |
 | `cublasCgemm3mBatched_64` | stub | core |  |
 | `cublasCgemm3mEx` | stub | core |  |
 | `cublasCgemm3mEx_64` | stub | core |  |
-| `cublasCgemm3mStridedBatched` | stub | core |  |
+| `cublasCgemm3mStridedBatched` | implemented | core |  |
 | `cublasCgemm3mStridedBatched_64` | stub | core |  |
 | `cublasCgemm3m_64` | stub | core |  |
-| `cublasCgemmBatched` | stub | core |  |
+| `cublasCgemmBatched` | implemented | core |  |
 | `cublasCgemmBatched_64` | stub | core |  |
-| `cublasCgemmEx` | stub | core |  |
+| `cublasCgemmEx` | implemented | core |  |
 | `cublasCgemmEx_64` | stub | core |  |
-| `cublasCgemmStridedBatched` | stub | core | yes |
+| `cublasCgemmStridedBatched` | implemented | core | yes |
 | `cublasCgemmStridedBatched_64` | stub | core |  |
-| `cublasCgemm_v2` | stub | core | yes |
+| `cublasCgemm_v2` | implemented | core | yes |
 | `cublasCgemm_v2_64` | stub | core |  |
 | `cublasCgemvBatched` | stub | core |  |
 | `cublasCgemvBatched_64` | stub | core |  |
 | `cublasCgemvStridedBatched` | stub | core |  |
 | `cublasCgemvStridedBatched_64` | stub | core |  |
-| `cublasCgemv_v2` | stub | core | yes |
+| `cublasCgemv_v2` | implemented | core | yes |
 | `cublasCgemv_v2_64` | stub | core |  |
 | `cublasCgeqrfBatched` | stub | core | yes |
-| `cublasCgerc_v2` | stub | core |  |
+| `cublasCgerc_v2` | implemented | core |  |
 | `cublasCgerc_v2_64` | stub | core |  |
-| `cublasCgeru_v2` | stub | core |  |
+| `cublasCgeru_v2` | implemented | core |  |
 | `cublasCgeru_v2_64` | stub | core |  |
-| `cublasCgetrfBatched` | stub | core | yes |
+| `cublasCgetrfBatched` | implemented | core | yes |
 | `cublasCgetriBatched` | stub | core |  |
-| `cublasCgetrsBatched` | stub | core | yes |
+| `cublasCgetrsBatched` | implemented | core | yes |
 | `cublasChbmv_v2` | stub | core |  |
 | `cublasChbmv_v2_64` | stub | core |  |
-| `cublasChemm_v2` | stub | core |  |
+| `cublasChemm_v2` | implemented | core |  |
 | `cublasChemm_v2_64` | stub | core |  |
-| `cublasChemv_v2` | stub | core |  |
+| `cublasChemv_v2` | implemented | core |  |
 | `cublasChemv_v2_64` | stub | core |  |
 | `cublasCher2_v2` | stub | core |  |
 | `cublasCher2_v2_64` | stub | core |  |
-| `cublasCher2k_v2` | stub | core |  |
+| `cublasCher2k_v2` | implemented | core |  |
 | `cublasCher2k_v2_64` | stub | core |  |
 | `cublasCher_v2` | stub | core |  |
 | `cublasCher_v2_64` | stub | core |  |
@@ -1185,9 +1185,9 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasCherk3mEx_64` | stub | core |  |
 | `cublasCherkEx` | stub | core |  |
 | `cublasCherkEx_64` | stub | core |  |
-| `cublasCherk_v2` | stub | core |  |
+| `cublasCherk_v2` | implemented | core |  |
 | `cublasCherk_v2_64` | stub | core |  |
-| `cublasCherkx` | stub | core |  |
+| `cublasCherkx` | implemented | core |  |
 | `cublasCherkx_64` | stub | core |  |
 | `cublasChpmv_v2` | stub | core |  |
 | `cublasChpmv_v2_64` | stub | core |  |
@@ -1202,21 +1202,21 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasCrot_v2` | stub | core |  |
 | `cublasCrot_v2_64` | stub | core |  |
 | `cublasCrotg_v2` | stub | core |  |
-| `cublasCscal_v2` | stub | core |  |
+| `cublasCscal_v2` | implemented | core |  |
 | `cublasCscal_v2_64` | stub | core |  |
 | `cublasCsrot_v2` | stub | core |  |
 | `cublasCsrot_v2_64` | stub | core |  |
-| `cublasCsscal_v2` | stub | core |  |
+| `cublasCsscal_v2` | implemented | core |  |
 | `cublasCsscal_v2_64` | stub | core |  |
-| `cublasCswap_v2` | stub | core |  |
+| `cublasCswap_v2` | implemented | core |  |
 | `cublasCswap_v2_64` | stub | core |  |
-| `cublasCsymm_v2` | stub | core |  |
+| `cublasCsymm_v2` | implemented | core |  |
 | `cublasCsymm_v2_64` | stub | core |  |
-| `cublasCsymv_v2` | stub | core |  |
+| `cublasCsymv_v2` | implemented | core |  |
 | `cublasCsymv_v2_64` | stub | core |  |
 | `cublasCsyr2_v2` | stub | core |  |
 | `cublasCsyr2_v2_64` | stub | core |  |
-| `cublasCsyr2k_v2` | stub | core |  |
+| `cublasCsyr2k_v2` | implemented | core |  |
 | `cublasCsyr2k_v2_64` | stub | core |  |
 | `cublasCsyr_v2` | stub | core |  |
 | `cublasCsyr_v2_64` | stub | core |  |
@@ -1224,9 +1224,9 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasCsyrk3mEx_64` | stub | core |  |
 | `cublasCsyrkEx` | stub | core |  |
 | `cublasCsyrkEx_64` | stub | core |  |
-| `cublasCsyrk_v2` | stub | core |  |
+| `cublasCsyrk_v2` | implemented | core |  |
 | `cublasCsyrk_v2_64` | stub | core |  |
-| `cublasCsyrkx` | stub | core |  |
+| `cublasCsyrkx` | implemented | core |  |
 | `cublasCsyrkx_64` | stub | core |  |
 | `cublasCtbmv_v2` | stub | core |  |
 | `cublasCtbmv_v2_64` | stub | core |  |
@@ -1237,59 +1237,59 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasCtpsv_v2` | stub | core |  |
 | `cublasCtpsv_v2_64` | stub | core |  |
 | `cublasCtpttr` | stub | core |  |
-| `cublasCtrmm_v2` | stub | core |  |
+| `cublasCtrmm_v2` | implemented | core |  |
 | `cublasCtrmm_v2_64` | stub | core |  |
-| `cublasCtrmv_v2` | stub | core |  |
+| `cublasCtrmv_v2` | implemented | core |  |
 | `cublasCtrmv_v2_64` | stub | core |  |
-| `cublasCtrsmBatched` | stub | core | yes |
+| `cublasCtrsmBatched` | implemented | core | yes |
 | `cublasCtrsmBatched_64` | stub | core |  |
-| `cublasCtrsm_v2` | stub | core | yes |
+| `cublasCtrsm_v2` | implemented | core | yes |
 | `cublasCtrsm_v2_64` | stub | core |  |
-| `cublasCtrsv_v2` | stub | core |  |
+| `cublasCtrsv_v2` | implemented | core |  |
 | `cublasCtrsv_v2_64` | stub | core |  |
 | `cublasCtrttp` | stub | core |  |
 | `cublasDasum_v2` | stub | core |  |
 | `cublasDasum_v2_64` | stub | core |  |
-| `cublasDaxpy_v2` | stub | core |  |
+| `cublasDaxpy_v2` | implemented | core |  |
 | `cublasDaxpy_v2_64` | stub | core |  |
-| `cublasDcopy_v2` | stub | core |  |
+| `cublasDcopy_v2` | implemented | core |  |
 | `cublasDcopy_v2_64` | stub | core |  |
-| `cublasDdgmm` | stub | core |  |
+| `cublasDdgmm` | implemented | core |  |
 | `cublasDdgmm_64` | stub | core |  |
-| `cublasDdot_v2` | stub | core | yes |
+| `cublasDdot_v2` | implemented | core | yes |
 | `cublasDdot_v2_64` | stub | core |  |
 | `cublasDestroy_v2` | implemented | core | yes |
 | `cublasDgbmv_v2` | stub | core |  |
 | `cublasDgbmv_v2_64` | stub | core |  |
-| `cublasDgeam` | stub | core |  |
+| `cublasDgeam` | implemented | core |  |
 | `cublasDgeam_64` | stub | core |  |
 | `cublasDgelsBatched` | stub | core | yes |
-| `cublasDgemmBatched` | stub | core |  |
+| `cublasDgemmBatched` | implemented | core |  |
 | `cublasDgemmBatched_64` | stub | core |  |
 | `cublasDgemmGroupedBatched` | stub | core |  |
 | `cublasDgemmGroupedBatched_64` | stub | core |  |
-| `cublasDgemmStridedBatched` | stub | core | yes |
+| `cublasDgemmStridedBatched` | implemented | core | yes |
 | `cublasDgemmStridedBatched_64` | stub | core |  |
-| `cublasDgemm_v2` | stub | core | yes |
+| `cublasDgemm_v2` | implemented | core | yes |
 | `cublasDgemm_v2_64` | stub | core |  |
 | `cublasDgemvBatched` | stub | core |  |
 | `cublasDgemvBatched_64` | stub | core |  |
 | `cublasDgemvStridedBatched` | stub | core |  |
 | `cublasDgemvStridedBatched_64` | stub | core |  |
-| `cublasDgemv_v2` | stub | core | yes |
+| `cublasDgemv_v2` | implemented | core | yes |
 | `cublasDgemv_v2_64` | stub | core |  |
 | `cublasDgeqrfBatched` | stub | core | yes |
-| `cublasDger_v2` | stub | core |  |
+| `cublasDger_v2` | implemented | core |  |
 | `cublasDger_v2_64` | stub | core |  |
-| `cublasDgetrfBatched` | stub | core | yes |
+| `cublasDgetrfBatched` | implemented | core | yes |
 | `cublasDgetriBatched` | stub | core |  |
-| `cublasDgetrsBatched` | stub | core | yes |
+| `cublasDgetrsBatched` | implemented | core | yes |
 | `cublasDmatinvBatched` | stub | core |  |
-| `cublasDnrm2_v2` | stub | core |  |
+| `cublasDnrm2_v2` | implemented | core |  |
 | `cublasDnrm2_v2_64` | stub | core |  |
-| `cublasDotEx` | stub | core | yes |
+| `cublasDotEx` | implemented | core | yes |
 | `cublasDotEx_64` | stub | core |  |
-| `cublasDotcEx` | stub | core |  |
+| `cublasDotcEx` | implemented | core |  |
 | `cublasDotcEx_64` | stub | core |  |
 | `cublasDrot_v2` | stub | core |  |
 | `cublasDrot_v2_64` | stub | core |  |
@@ -1299,7 +1299,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasDrotmg_v2` | stub | core |  |
 | `cublasDsbmv_v2` | stub | core |  |
 | `cublasDsbmv_v2_64` | stub | core |  |
-| `cublasDscal_v2` | stub | core |  |
+| `cublasDscal_v2` | implemented | core |  |
 | `cublasDscal_v2_64` | stub | core |  |
 | `cublasDspmv_v2` | stub | core |  |
 | `cublasDspmv_v2_64` | stub | core |  |
@@ -1307,21 +1307,21 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasDspr2_v2_64` | stub | core |  |
 | `cublasDspr_v2` | stub | core |  |
 | `cublasDspr_v2_64` | stub | core |  |
-| `cublasDswap_v2` | stub | core |  |
+| `cublasDswap_v2` | implemented | core |  |
 | `cublasDswap_v2_64` | stub | core |  |
-| `cublasDsymm_v2` | stub | core |  |
+| `cublasDsymm_v2` | implemented | core |  |
 | `cublasDsymm_v2_64` | stub | core |  |
-| `cublasDsymv_v2` | stub | core |  |
+| `cublasDsymv_v2` | implemented | core |  |
 | `cublasDsymv_v2_64` | stub | core |  |
 | `cublasDsyr2_v2` | stub | core |  |
 | `cublasDsyr2_v2_64` | stub | core |  |
-| `cublasDsyr2k_v2` | stub | core |  |
+| `cublasDsyr2k_v2` | implemented | core |  |
 | `cublasDsyr2k_v2_64` | stub | core |  |
 | `cublasDsyr_v2` | stub | core |  |
 | `cublasDsyr_v2_64` | stub | core |  |
-| `cublasDsyrk_v2` | stub | core |  |
+| `cublasDsyrk_v2` | implemented | core |  |
 | `cublasDsyrk_v2_64` | stub | core |  |
-| `cublasDsyrkx` | stub | core |  |
+| `cublasDsyrkx` | implemented | core |  |
 | `cublasDsyrkx_64` | stub | core |  |
 | `cublasDtbmv_v2` | stub | core |  |
 | `cublasDtbmv_v2_64` | stub | core |  |
@@ -1332,20 +1332,20 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasDtpsv_v2` | stub | core |  |
 | `cublasDtpsv_v2_64` | stub | core |  |
 | `cublasDtpttr` | stub | core |  |
-| `cublasDtrmm_v2` | stub | core |  |
+| `cublasDtrmm_v2` | implemented | core |  |
 | `cublasDtrmm_v2_64` | stub | core |  |
-| `cublasDtrmv_v2` | stub | core |  |
+| `cublasDtrmv_v2` | implemented | core |  |
 | `cublasDtrmv_v2_64` | stub | core |  |
-| `cublasDtrsmBatched` | stub | core | yes |
+| `cublasDtrsmBatched` | implemented | core | yes |
 | `cublasDtrsmBatched_64` | stub | core |  |
-| `cublasDtrsm_v2` | stub | core | yes |
+| `cublasDtrsm_v2` | implemented | core | yes |
 | `cublasDtrsm_v2_64` | stub | core |  |
-| `cublasDtrsv_v2` | stub | core |  |
+| `cublasDtrsv_v2` | implemented | core |  |
 | `cublasDtrsv_v2_64` | stub | core |  |
 | `cublasDtrttp` | stub | core |  |
 | `cublasDzasum_v2` | stub | core |  |
 | `cublasDzasum_v2_64` | stub | core |  |
-| `cublasDznrm2_v2` | stub | core |  |
+| `cublasDznrm2_v2` | implemented | core |  |
 | `cublasDznrm2_v2_64` | stub | core |  |
 | `cublasGemmBatchedEx` | implemented | core |  |
 | `cublasGemmBatchedEx_64` | stub | core |  |
@@ -1360,18 +1360,18 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasGetEmulationStrategy` | implemented | core |  |
 | `cublasGetLoggerCallback` | stub | core |  |
 | `cublasGetMathMode` | implemented | core | yes |
-| `cublasGetMatrix` | stub | core |  |
-| `cublasGetMatrixAsync` | stub | core |  |
+| `cublasGetMatrix` | implemented | core |  |
+| `cublasGetMatrixAsync` | implemented | core |  |
 | `cublasGetMatrixAsync_64` | stub | core |  |
 | `cublasGetMatrix_64` | stub | core |  |
 | `cublasGetPointerMode_v2` | implemented | core | yes |
 | `cublasGetProperty` | stub | core |  |
-| `cublasGetSmCountTarget` | stub | core |  |
+| `cublasGetSmCountTarget` | implemented | core |  |
 | `cublasGetStatusName` | implemented | core |  |
 | `cublasGetStatusString` | implemented | core |  |
 | `cublasGetStream_v2` | implemented | core |  |
-| `cublasGetVector` | stub | core |  |
-| `cublasGetVectorAsync` | stub | core |  |
+| `cublasGetVector` | implemented | core |  |
+| `cublasGetVectorAsync` | implemented | core |  |
 | `cublasGetVectorAsync_64` | stub | core |  |
 | `cublasGetVector_64` | stub | core |  |
 | `cublasGetVersion_v2` | implemented | core |  |
@@ -1393,21 +1393,21 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasIamaxEx_64` | stub | core |  |
 | `cublasIaminEx` | stub | core |  |
 | `cublasIaminEx_64` | stub | core |  |
-| `cublasIcamax_v2` | stub | core |  |
+| `cublasIcamax_v2` | implemented | core |  |
 | `cublasIcamax_v2_64` | stub | core |  |
-| `cublasIcamin_v2` | stub | core |  |
+| `cublasIcamin_v2` | implemented | core |  |
 | `cublasIcamin_v2_64` | stub | core |  |
-| `cublasIdamax_v2` | stub | core |  |
+| `cublasIdamax_v2` | implemented | core |  |
 | `cublasIdamax_v2_64` | stub | core |  |
-| `cublasIdamin_v2` | stub | core |  |
+| `cublasIdamin_v2` | implemented | core |  |
 | `cublasIdamin_v2_64` | stub | core |  |
-| `cublasIsamax_v2` | stub | core |  |
+| `cublasIsamax_v2` | implemented | core |  |
 | `cublasIsamax_v2_64` | stub | core |  |
-| `cublasIsamin_v2` | stub | core |  |
+| `cublasIsamin_v2` | implemented | core |  |
 | `cublasIsamin_v2_64` | stub | core |  |
-| `cublasIzamax_v2` | stub | core |  |
+| `cublasIzamax_v2` | implemented | core |  |
 | `cublasIzamax_v2_64` | stub | core |  |
-| `cublasIzamin_v2` | stub | core |  |
+| `cublasIzamin_v2` | implemented | core |  |
 | `cublasIzamin_v2_64` | stub | core |  |
 | `cublasLoggerConfigure` | stub | core |  |
 | `cublasNrm2Ex` | stub | core |  |
@@ -1420,17 +1420,17 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasRotmgEx` | stub | core |  |
 | `cublasSasum_v2` | stub | core |  |
 | `cublasSasum_v2_64` | stub | core |  |
-| `cublasSaxpy_v2` | stub | core |  |
+| `cublasSaxpy_v2` | implemented | core |  |
 | `cublasSaxpy_v2_64` | stub | core |  |
 | `cublasScalEx` | stub | core |  |
 | `cublasScalEx_64` | stub | core |  |
 | `cublasScasum_v2` | stub | core |  |
 | `cublasScasum_v2_64` | stub | core |  |
-| `cublasScnrm2_v2` | stub | core |  |
+| `cublasScnrm2_v2` | implemented | core |  |
 | `cublasScnrm2_v2_64` | stub | core |  |
-| `cublasScopy_v2` | stub | core |  |
+| `cublasScopy_v2` | implemented | core |  |
 | `cublasScopy_v2_64` | stub | core |  |
-| `cublasSdgmm` | stub | core |  |
+| `cublasSdgmm` | implemented | core |  |
 | `cublasSdgmm_64` | stub | core |  |
 | `cublasSdot_v2` | implemented | core | yes |
 | `cublasSdot_v2_64` | stub | core |  |
@@ -1439,21 +1439,21 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasSetEnvironmentMode` | stub | core |  |
 | `cublasSetLoggerCallback` | stub | core |  |
 | `cublasSetMathMode` | implemented | core | yes |
-| `cublasSetMatrix` | stub | core |  |
-| `cublasSetMatrixAsync` | stub | core |  |
+| `cublasSetMatrix` | implemented | core |  |
+| `cublasSetMatrixAsync` | implemented | core |  |
 | `cublasSetMatrixAsync_64` | stub | core |  |
 | `cublasSetMatrix_64` | stub | core |  |
 | `cublasSetPointerMode_v2` | implemented | core | yes |
-| `cublasSetSmCountTarget` | stub | core | yes |
+| `cublasSetSmCountTarget` | implemented | core | yes |
 | `cublasSetStream_v2` | implemented | core | yes |
-| `cublasSetVector` | stub | core |  |
-| `cublasSetVectorAsync` | stub | core |  |
+| `cublasSetVector` | implemented | core |  |
+| `cublasSetVectorAsync` | implemented | core |  |
 | `cublasSetVectorAsync_64` | stub | core |  |
 | `cublasSetVector_64` | stub | core |  |
 | `cublasSetWorkspace_v2` | implemented | core | yes |
 | `cublasSgbmv_v2` | stub | core |  |
 | `cublasSgbmv_v2_64` | stub | core |  |
-| `cublasSgeam` | stub | core |  |
+| `cublasSgeam` | implemented | core |  |
 | `cublasSgeam_64` | stub | core |  |
 | `cublasSgelsBatched` | stub | core | yes |
 | `cublasSgemmBatched` | implemented | core |  |
@@ -1473,13 +1473,13 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasSgemv_v2` | implemented | core | yes |
 | `cublasSgemv_v2_64` | stub | core |  |
 | `cublasSgeqrfBatched` | stub | core | yes |
-| `cublasSger_v2` | stub | core |  |
+| `cublasSger_v2` | implemented | core |  |
 | `cublasSger_v2_64` | stub | core |  |
-| `cublasSgetrfBatched` | stub | core | yes |
+| `cublasSgetrfBatched` | implemented | core | yes |
 | `cublasSgetriBatched` | stub | core |  |
-| `cublasSgetrsBatched` | stub | core | yes |
+| `cublasSgetrsBatched` | implemented | core | yes |
 | `cublasSmatinvBatched` | stub | core |  |
-| `cublasSnrm2_v2` | stub | core |  |
+| `cublasSnrm2_v2` | implemented | core |  |
 | `cublasSnrm2_v2_64` | stub | core |  |
 | `cublasSrot_v2` | stub | core |  |
 | `cublasSrot_v2_64` | stub | core |  |
@@ -1489,7 +1489,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasSrotmg_v2` | stub | core |  |
 | `cublasSsbmv_v2` | stub | core |  |
 | `cublasSsbmv_v2_64` | stub | core |  |
-| `cublasSscal_v2` | stub | core |  |
+| `cublasSscal_v2` | implemented | core |  |
 | `cublasSscal_v2_64` | stub | core |  |
 | `cublasSspmv_v2` | stub | core |  |
 | `cublasSspmv_v2_64` | stub | core |  |
@@ -1497,21 +1497,21 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasSspr2_v2_64` | stub | core |  |
 | `cublasSspr_v2` | stub | core |  |
 | `cublasSspr_v2_64` | stub | core |  |
-| `cublasSswap_v2` | stub | core |  |
+| `cublasSswap_v2` | implemented | core |  |
 | `cublasSswap_v2_64` | stub | core |  |
-| `cublasSsymm_v2` | stub | core |  |
+| `cublasSsymm_v2` | implemented | core |  |
 | `cublasSsymm_v2_64` | stub | core |  |
-| `cublasSsymv_v2` | stub | core |  |
+| `cublasSsymv_v2` | implemented | core |  |
 | `cublasSsymv_v2_64` | stub | core |  |
 | `cublasSsyr2_v2` | stub | core |  |
 | `cublasSsyr2_v2_64` | stub | core |  |
-| `cublasSsyr2k_v2` | stub | core |  |
+| `cublasSsyr2k_v2` | implemented | core |  |
 | `cublasSsyr2k_v2_64` | stub | core |  |
 | `cublasSsyr_v2` | stub | core |  |
 | `cublasSsyr_v2_64` | stub | core |  |
-| `cublasSsyrk_v2` | stub | core |  |
+| `cublasSsyrk_v2` | implemented | core |  |
 | `cublasSsyrk_v2_64` | stub | core |  |
-| `cublasSsyrkx` | stub | core |  |
+| `cublasSsyrkx` | implemented | core |  |
 | `cublasSsyrkx_64` | stub | core |  |
 | `cublasStbmv_v2` | stub | core |  |
 | `cublasStbmv_v2_64` | stub | core |  |
@@ -1522,15 +1522,15 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasStpsv_v2` | stub | core |  |
 | `cublasStpsv_v2_64` | stub | core |  |
 | `cublasStpttr` | stub | core |  |
-| `cublasStrmm_v2` | stub | core |  |
+| `cublasStrmm_v2` | implemented | core |  |
 | `cublasStrmm_v2_64` | stub | core |  |
-| `cublasStrmv_v2` | stub | core |  |
+| `cublasStrmv_v2` | implemented | core |  |
 | `cublasStrmv_v2_64` | stub | core |  |
 | `cublasStrsmBatched` | implemented | core | yes |
 | `cublasStrsmBatched_64` | stub | core |  |
-| `cublasStrsm_v2` | stub | core | yes |
+| `cublasStrsm_v2` | implemented | core | yes |
 | `cublasStrsm_v2_64` | stub | core |  |
-| `cublasStrsv_v2` | stub | core |  |
+| `cublasStrsv_v2` | implemented | core |  |
 | `cublasStrsv_v2_64` | stub | core |  |
 | `cublasStrttp` | stub | core |  |
 | `cublasSwapEx` | stub | core |  |
@@ -1544,63 +1544,63 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasTSTgemvStridedBatched` | stub | core |  |
 | `cublasTSTgemvStridedBatched_64` | stub | core |  |
 | `cublasUint8gemmBias` | stub | core |  |
-| `cublasXerbla` | stub | core |  |
-| `cublasZaxpy_v2` | stub | core |  |
+| `cublasXerbla` | implemented | core |  |
+| `cublasZaxpy_v2` | implemented | core |  |
 | `cublasZaxpy_v2_64` | stub | core |  |
-| `cublasZcopy_v2` | stub | core |  |
+| `cublasZcopy_v2` | implemented | core |  |
 | `cublasZcopy_v2_64` | stub | core |  |
-| `cublasZdgmm` | stub | core |  |
+| `cublasZdgmm` | implemented | core |  |
 | `cublasZdgmm_64` | stub | core |  |
-| `cublasZdotc_v2` | stub | core | yes |
+| `cublasZdotc_v2` | implemented | core | yes |
 | `cublasZdotc_v2_64` | stub | core |  |
-| `cublasZdotu_v2` | stub | core | yes |
+| `cublasZdotu_v2` | implemented | core | yes |
 | `cublasZdotu_v2_64` | stub | core |  |
 | `cublasZdrot_v2` | stub | core |  |
 | `cublasZdrot_v2_64` | stub | core |  |
-| `cublasZdscal_v2` | stub | core |  |
+| `cublasZdscal_v2` | implemented | core |  |
 | `cublasZdscal_v2_64` | stub | core |  |
 | `cublasZgbmv_v2` | stub | core |  |
 | `cublasZgbmv_v2_64` | stub | core |  |
-| `cublasZgeam` | stub | core |  |
+| `cublasZgeam` | implemented | core |  |
 | `cublasZgeam_64` | stub | core |  |
 | `cublasZgelsBatched` | stub | core | yes |
-| `cublasZgemm3m` | stub | core |  |
+| `cublasZgemm3m` | implemented | core |  |
 | `cublasZgemm3m_64` | stub | core |  |
-| `cublasZgemmBatched` | stub | core |  |
+| `cublasZgemmBatched` | implemented | core |  |
 | `cublasZgemmBatched_64` | stub | core |  |
-| `cublasZgemmStridedBatched` | stub | core | yes |
+| `cublasZgemmStridedBatched` | implemented | core | yes |
 | `cublasZgemmStridedBatched_64` | stub | core |  |
-| `cublasZgemm_v2` | stub | core | yes |
+| `cublasZgemm_v2` | implemented | core | yes |
 | `cublasZgemm_v2_64` | stub | core |  |
 | `cublasZgemvBatched` | stub | core |  |
 | `cublasZgemvBatched_64` | stub | core |  |
 | `cublasZgemvStridedBatched` | stub | core |  |
 | `cublasZgemvStridedBatched_64` | stub | core |  |
-| `cublasZgemv_v2` | stub | core | yes |
+| `cublasZgemv_v2` | implemented | core | yes |
 | `cublasZgemv_v2_64` | stub | core |  |
 | `cublasZgeqrfBatched` | stub | core | yes |
-| `cublasZgerc_v2` | stub | core |  |
+| `cublasZgerc_v2` | implemented | core |  |
 | `cublasZgerc_v2_64` | stub | core |  |
-| `cublasZgeru_v2` | stub | core |  |
+| `cublasZgeru_v2` | implemented | core |  |
 | `cublasZgeru_v2_64` | stub | core |  |
-| `cublasZgetrfBatched` | stub | core | yes |
+| `cublasZgetrfBatched` | implemented | core | yes |
 | `cublasZgetriBatched` | stub | core |  |
-| `cublasZgetrsBatched` | stub | core | yes |
+| `cublasZgetrsBatched` | implemented | core | yes |
 | `cublasZhbmv_v2` | stub | core |  |
 | `cublasZhbmv_v2_64` | stub | core |  |
-| `cublasZhemm_v2` | stub | core |  |
+| `cublasZhemm_v2` | implemented | core |  |
 | `cublasZhemm_v2_64` | stub | core |  |
-| `cublasZhemv_v2` | stub | core |  |
+| `cublasZhemv_v2` | implemented | core |  |
 | `cublasZhemv_v2_64` | stub | core |  |
 | `cublasZher2_v2` | stub | core |  |
 | `cublasZher2_v2_64` | stub | core |  |
-| `cublasZher2k_v2` | stub | core |  |
+| `cublasZher2k_v2` | implemented | core |  |
 | `cublasZher2k_v2_64` | stub | core |  |
 | `cublasZher_v2` | stub | core |  |
 | `cublasZher_v2_64` | stub | core |  |
-| `cublasZherk_v2` | stub | core |  |
+| `cublasZherk_v2` | implemented | core |  |
 | `cublasZherk_v2_64` | stub | core |  |
-| `cublasZherkx` | stub | core |  |
+| `cublasZherkx` | implemented | core |  |
 | `cublasZherkx_64` | stub | core |  |
 | `cublasZhpmv_v2` | stub | core |  |
 | `cublasZhpmv_v2_64` | stub | core |  |
@@ -1612,23 +1612,23 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasZrot_v2` | stub | core |  |
 | `cublasZrot_v2_64` | stub | core |  |
 | `cublasZrotg_v2` | stub | core |  |
-| `cublasZscal_v2` | stub | core |  |
+| `cublasZscal_v2` | implemented | core |  |
 | `cublasZscal_v2_64` | stub | core |  |
-| `cublasZswap_v2` | stub | core |  |
+| `cublasZswap_v2` | implemented | core |  |
 | `cublasZswap_v2_64` | stub | core |  |
-| `cublasZsymm_v2` | stub | core |  |
+| `cublasZsymm_v2` | implemented | core |  |
 | `cublasZsymm_v2_64` | stub | core |  |
-| `cublasZsymv_v2` | stub | core |  |
+| `cublasZsymv_v2` | implemented | core |  |
 | `cublasZsymv_v2_64` | stub | core |  |
 | `cublasZsyr2_v2` | stub | core |  |
 | `cublasZsyr2_v2_64` | stub | core |  |
-| `cublasZsyr2k_v2` | stub | core |  |
+| `cublasZsyr2k_v2` | implemented | core |  |
 | `cublasZsyr2k_v2_64` | stub | core |  |
 | `cublasZsyr_v2` | stub | core |  |
 | `cublasZsyr_v2_64` | stub | core |  |
-| `cublasZsyrk_v2` | stub | core |  |
+| `cublasZsyrk_v2` | implemented | core |  |
 | `cublasZsyrk_v2_64` | stub | core |  |
-| `cublasZsyrkx` | stub | core |  |
+| `cublasZsyrkx` | implemented | core |  |
 | `cublasZsyrkx_64` | stub | core |  |
 | `cublasZtbmv_v2` | stub | core |  |
 | `cublasZtbmv_v2_64` | stub | core |  |
@@ -1639,15 +1639,15 @@ Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLa
 | `cublasZtpsv_v2` | stub | core |  |
 | `cublasZtpsv_v2_64` | stub | core |  |
 | `cublasZtpttr` | stub | core |  |
-| `cublasZtrmm_v2` | stub | core |  |
+| `cublasZtrmm_v2` | implemented | core |  |
 | `cublasZtrmm_v2_64` | stub | core |  |
-| `cublasZtrmv_v2` | stub | core |  |
+| `cublasZtrmv_v2` | implemented | core |  |
 | `cublasZtrmv_v2_64` | stub | core |  |
-| `cublasZtrsmBatched` | stub | core | yes |
+| `cublasZtrsmBatched` | implemented | core | yes |
 | `cublasZtrsmBatched_64` | stub | core |  |
-| `cublasZtrsm_v2` | stub | core | yes |
+| `cublasZtrsm_v2` | implemented | core | yes |
 | `cublasZtrsm_v2_64` | stub | core |  |
-| `cublasZtrsv_v2` | stub | core |  |
+| `cublasZtrsv_v2` | implemented | core |  |
 | `cublasZtrsv_v2_64` | stub | core |  |
 | `cublasZtrttp` | stub | core |  |
 

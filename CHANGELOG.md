@@ -6,10 +6,15 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 ## [Unreleased]
 
 ### Added
+- f64 and complex cuBLAS in `cublas_shim` (also served as `cublas64_11.dll` by `cfi-run`): `{D,C,Z}gemm`, `gemmStridedBatched`, `gemmBatched`, `Cgemm3m*`/`Zgemm3m`, `CgemmEx`, and `cublasGemmEx`/`GemmStridedBatchedEx`/`GemmBatchedEx` on `CUDA_R_64F`, `CUDA_C_32F` and `CUDA_C_64F`; level 2 `gemv`, `trsv`, `trmv`, `symv`/`hemv`, `ger`/`geru`/`gerc`; level 3 `trsm`, `trsmBatched`, `trmm`, `syrk`/`herk`, `syrkx`/`herkx`, `syr2k`/`her2k`, `symm`/`hemm`, `geam`, `dgmm`; level 1 `axpy`, `scal` (incl. `Csscal`/`Zdscal`), `nrm2`, `dot`/`dotu`/`dotc`, `cublasDotEx`/`DotcEx` (also f16/bf16), `copy`, `swap`, `i?amax`/`i?amin`; `getrfBatched`/`getrsBatched`; `cublasSet/GetMatrix(Async)`, `cublasSet/GetVector(Async)`, `cublasSet/GetSmCountTarget`, `cublasGetCudartVersion`, `cublasXerbla`. All S/D/C/Z where cuBLAS defines them, as generated PTX; host or device scalars and results. The f16/bf16/f32 GEMM and XMX paths are unchanged.
 - cuSPARSE shim (`cusparse64_12.dll`, also served as `cusparse64_11.dll` by `cfi-run`): handles, stream and pointer mode, the legacy matrix descriptor, generic CSR/CSC/COO and dense descriptors (const variants, getters, setters, strided batches, attributes), `cusparseSpMV`, `cusparseSpMM`, `cusparseSDDMM` (+ bufferSize and preprocess), `cusparse{S,D}bsr{mv,mm}`, `cusparseXcoo2csr`, `cusparseXcsr2coo` and `cusparseCreateIdentityPermutation`, as generated PTX (scalar and vector CSR kernels, atomic scatter for transposed and COO operands). f32 and f64; other value types return `CUSPARSE_STATUS_NOT_SUPPORTED`. Covers ZLUDA's 16 cuSPARSE entry points.
 - cuFFT shim (`cufft64_11.dll`, also served as `cufft64_10.dll` by `cfi-run`): plans (`cufftPlan*`, `cufftMakePlan*`, `cufftXtMakePlanMany`), size queries, work area, stream, and `cufftExec{C2C,R2C,C2R,Z2Z,D2Z,Z2D}`/`cufftXtExec` as mixed-radix Stockham kernels in generated PTX. Covers ZLUDA's 32 cuFFT entry points and torch's `cufftXt*` path.
 - PTX translator: fp8 pair conversions (`cvt.rn.satfinite[.relu].{e4m3x2,e5m2x2}.{f32,f16x2}`, `cvt.rn[.relu].f16x2.{e4m3x2,e5m2x2}`), `.reg .v2/.v4` vector registers, `mov.vN` and `ld/st .v8`.
 - PTX translator: function pointers and indirect calls (a switch over the address-taken `.func`s matching the call prototype), `.reg` parameters and return values of `.func`, and function-scope `.shared`/`.global`/`.const` variables. Calls that cannot be inlined (into another module, recursive) fail with `unsupported PTX call: <reason>`.
+
+### Fixed
+- `cublasSdot_v2` supports device-pointer results (as PyTorch calls it) and any increments; `cublasSgemv_v2` supports non-unit and negative increments.
+- `nvcuda.dll` no longer aborts the process when a context call (`cuCtxSetCurrent`, push/pop, create/destroy) arrives after thread-local storage teardown, as cuSOLVER's handle destructor does at exit.
 
 ## [0.1.0] - TBD (first release, not yet tagged)
 

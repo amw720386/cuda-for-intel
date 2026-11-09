@@ -378,7 +378,8 @@ pub unsafe extern "system" fn cuCtxCreate_v2(
                 return Err(NotSupported);
             }
             let key = state.create_context(ordinal)?;
-            CURRENT.with(|stack| stack.borrow_mut().push(key));
+            // try_with: a thread (or the process) may be past TLS teardown
+            let _ = CURRENT.try_with(|stack| stack.borrow_mut().push(key));
             unsafe { out.write(std::ptr::without_provenance_mut(key)) };
             Ok(())
         }))
@@ -401,7 +402,8 @@ pub extern "system" fn cuCtxDestroy_v2(handle: Opaque) -> CuResult {
             let teardown = state.destroy_context(key)?;
             if !state.contexts.contains_key(&key) {
                 state.graphs.drop_context(key);
-                CURRENT.with_borrow_mut(|stack| {
+                let _ = CURRENT.try_with(|stack| {
+                    let mut stack = stack.borrow_mut();
                     if stack.last() == Some(&key) {
                         stack.pop();
                     }
@@ -533,7 +535,9 @@ pub extern "system" fn cuCtxSetCurrent(handle: Opaque) -> CuResult {
                     .ok_or(InvalidContext)?
                     .check_live()?;
             }
-            CURRENT.with(|stack| current_stack::replace_top(&mut stack.borrow_mut(), key));
+            // At process exit (cuSOLVER's handle destructors run from atexit) the
+            // thread-local stack may already be gone; there is nothing left to switch.
+            let _ = CURRENT.try_with(|stack| current_stack::replace_top(&mut stack.borrow_mut(), key));
             Ok(())
         }))
     })

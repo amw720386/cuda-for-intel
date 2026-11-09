@@ -77,6 +77,12 @@ macro_rules! trace {
     };
 }
 
+// f64 and complex BLAS (declared after `trace!` so it can log).
+mod blas_dcz;
+mod blas_ext;
+#[allow(dead_code)]
+mod kernels;
+
 // Load the shim's driver dependency with the DLL on Windows. The NVIDIA
 // Runtime can then find the same driver during static CUDA registration.
 #[cfg(windows)]
@@ -308,6 +314,8 @@ pub(crate) struct Handle {
     math_mode: c_int,
     pointer_mode: c_int,
     workspace: (usize, usize),
+    /// `cublasSetSmCountTarget` value (recorded only).
+    sm_count_target: c_int,
 }
 
 fn handle_mut(handle: *mut c_void) -> Result<&'static mut Handle, c_int> {
@@ -333,6 +341,7 @@ pub unsafe extern "system" fn cublasCreate_v2(handle: *mut *mut c_void) -> c_int
         math_mode: 0,
         pointer_mode: POINTER_MODE_HOST,
         workspace: (0, 0),
+        sm_count_target: 0,
     })) as *mut c_void;
     unsafe { handle.write(ptr) };
     trace!("cublasCreate_v2 ok");
@@ -772,6 +781,19 @@ unsafe fn gemm_common(
     };
     if alpha.is_null() || beta.is_null() {
         return INVALID_VALUE;
+    }
+    // f64 and complex operands run on the kernels in `blas_dcz`; everything else keeps
+    // the f16/bf16/f32 path below unchanged.
+    let wide = match batching {
+        Batching::Strided { a, b, c, sa, sb, sc } => kernels::plan::Batch::Strided { a, b, c, sa, sb, sc },
+        Batching::Pointers { a, b, c } => kernels::plan::Batch::Tables { a, b, c },
+    };
+    if let Some(status) = unsafe {
+        blas_dcz::gemm_ex(
+            handle, transa, transb, m, n, k, alpha, a_type, lda, b_type, ldb, beta, c_type, ldc, compute_type, batch, wide,
+        )
+    } {
+        return status;
     }
     let d = match validate(
         transa, transb, m, n, k, lda, ldb, ldc, a_type, b_type, c_type, compute_type,
@@ -1291,6 +1313,7 @@ mod tests {
             math_mode: 0,
             pointer_mode: POINTER_MODE_HOST,
             workspace: (0, 0),
+            sm_count_target: 0,
         })) as *mut c_void
     }
 

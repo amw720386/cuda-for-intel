@@ -37,6 +37,10 @@ mod cufft_ptxgen;
 #[allow(dead_code)]
 #[path = "../crates/cusparse_shim/src/kernels/mod.rs"]
 mod cusparse_src;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../crates/cublas_shim/src/kernels/mod.rs"]
+mod cublas64_src;
 
 pub(crate) fn entry_names(source: &str) -> Result<Vec<&str>, Error> {
     let tokens = parse::tokens(source)?;
@@ -1154,6 +1158,8 @@ mod cudnn_tests;
 mod cufft_tests;
 #[cfg(test)]
 mod cusparse_tests;
+#[cfg(test)]
+mod cublas64_tests;
 #[cfg(test)]
 mod globals_tests;
 #[cfg(test)]
