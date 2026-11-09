@@ -134,7 +134,7 @@ function Invoke-Child([string]$Name, [string]$File, [string]$ArgLine, [int]$Time
 function Read-Out($r) { $t = ''; foreach ($e in '.out', '.err') { if (Test-Path "$($r.log)$e") { $t += (Get-Content "$($r.log)$e" -Raw -ErrorAction SilentlyContinue) + "`n" } }; return $t }
 
 # cargo integration test (tests/gpu.rs): returns passed/failed counts and the failed test names.
-# -Expect fail means the run MUST fail (used to prove a disable switch really changes behaviour).
+# -Expect fail means the run MUST fail (used to prove a disable switch really changes behaviour); -Expect info records the result without judging it.
 function Invoke-GpuTest([string]$Name, [string[]]$Filters, [int]$TimeoutMin, [hashtable]$TEnv = @{}, [string[]]$Skips = @(), [string]$Expect = 'pass', [string]$Blame = '', [string]$Isolate = '') {
     $a = "test --release -j 2 --test gpu -- --ignored --test-threads=1 --nocapture"
     foreach ($f in $Filters) { $a += " $f" }
@@ -149,6 +149,7 @@ function Invoke-GpuTest([string]$Name, [string[]]$Filters, [int]$TimeoutMin, [ha
     if ($names.Count) { $detail += ' failed_tests=' + ($names -join ',') }
     if ($r.timeout) { Add-Result $Name 'timeout' "$detail (limit ${TimeoutMin}m)" $null $r.secs $r.log $Blame $Isolate; return }
     if ($passed + $failed -eq 0 -and $r.rc -eq 0) { Add-Result $Name 'fail' 'no test matched the filter (typo or module not compiled)' $r.rc $r.secs $r.log $Blame $Isolate; return }
+    if ($Expect -eq 'info') { Add-Result $Name 'info' $detail $r.rc $r.secs $r.log $Blame $Isolate; return }
     if ($Expect -eq 'fail') {
         if ($r.rc -ne 0 -and $failed -ge 1) { Add-Result $Name 'pass' "failed as required ($detail)" $r.rc $r.secs $r.log $Blame $Isolate }
         else { Add-Result $Name 'fail' "expected the test to FAIL with this switch, but it did not ($detail)" $r.rc $r.secs $r.log $Blame $Isolate }
@@ -397,7 +398,9 @@ try {
         $ce = { param($tag) @{ CUDA_FOR_INTEL_CACHE_DIR = (Join-Path $hw "cache_div_$tag\kc"); CFI_CACHE_DIR = (Join-Path $hw "cache_div_$tag\spv") } }
         foreach ($t in 'fast', 'rn') { New-Item -ItemType Directory -Force (Join-Path $hw "cache_div_$t\kc"), (Join-Path $hw "cache_div_$t\spv") | Out-Null; Remove-Item (Join-Path $hw "cache_div_$t\*") -Recurse -Force -ErrorAction SilentlyContinue }
         $e1 = & $ce 'fast'; $e1.CUDA_FOR_INTEL_FAST_DIV = '1'
-        Invoke-GpuTest 'div_sqrt-FAST_DIV=1-must-fail' @('hw_div_sqrt_rn_f32_correctly_rounded') 15 $e1 -Expect 'fail' -Blame 'fix-divergence (opt-out switch not effective, or test cannot detect inexact div)'
+        # Info only: on the Arc B390 (driver 32.0.101.9033) translated div.rn/sqrt.rn are bit-exact even without the flag
+        # (0 of 262144 wrong); the flag's measured effect is on the native SUBST kernels (auto-vs-none scan, docs/qwen05b-divergence.md).
+        Invoke-GpuTest 'div_sqrt-FAST_DIV=1' @('hw_div_sqrt_rn_f32_correctly_rounded') 15 $e1 -Expect 'info' -Blame 'informational: a failure here means this driver lowers div.rn inexactly without the flag'
         $e2 = & $ce 'rn'
         Invoke-GpuTest 'div_sqrt-default-must-pass' @('hw_div_sqrt_rn_f32_correctly_rounded') 15 $e2 -Blame 'fix-divergence (correctly-rounded flag not honoured by the driver)' -Isolate 'CUDA_FOR_INTEL_FAST_DIV=1 (opts out); then rerun'
         # quantize fuzz: test asserts d/sum identical and quant byte mismatch < 3.2e-4 of blocks
