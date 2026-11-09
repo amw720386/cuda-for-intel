@@ -135,33 +135,9 @@ pub extern "system" fn cusparseCnnz_compress() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseConstBlockedEllGet() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstCooGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstCscGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstCsrGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstDnMatGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstDnMatGetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstDnVecGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstDnVecGetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseConstSpMatGetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseConstSpVecGet() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseConstSpVecGetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCooGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCooSetPointers() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCooSetStridedBatch() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreate() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateBlockedEll() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -181,25 +157,9 @@ pub extern "system" fn cusparseCreateConstBlockedEll() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateConstBsr() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateConstCoo() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateConstCsc() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateConstCsr() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateConstDnMat() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateConstDnVec() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateConstSlicedEll() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateConstSpVec() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateCoo() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateCsc() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateCsr() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateCsric02Info() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -207,33 +167,15 @@ pub extern "system" fn cusparseCreateCsrilu02Info() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateCsru2csrInfo() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateDnMat() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateDnVec() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateIdentityPermutation() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCreateMatDescr() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreatePruneInfo() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateSlicedEll() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCreateSpVec() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseCscGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCscSetPointers() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseCsr2cscEx2() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseCsr2cscEx2_bufferSize() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCsrGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCsrSetPointers() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseCsrSetStridedBatch() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDbsr2csr() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -254,10 +196,6 @@ pub extern "system" fn cusparseDbsrilu02_bufferSize() -> i32 { 10 }
 pub extern "system" fn cusparseDbsrilu02_bufferSizeExt() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDbsrilu02_numericBoost() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDbsrmm() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDbsrmv() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDbsrsm2_analysis() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -323,8 +261,6 @@ pub extern "system" fn cusparseDenseToSparse_bufferSize() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDenseToSparse_convert() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseDestroy() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseDestroyBsric02Info() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDestroyBsrilu02Info() -> i32 { 10 }
@@ -341,15 +277,7 @@ pub extern "system" fn cusparseDestroyCsrilu02Info() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDestroyCsru2csrInfo() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseDestroyDnMat() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDestroyDnVec() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDestroyMatDescr() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseDestroyPruneInfo() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDestroySpMat() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDestroySpVec() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -391,22 +319,6 @@ pub extern "system" fn cusparseDgtsvInterleavedBatch() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDgtsvInterleavedBatch_bufferSizeExt() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnMatGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnMatGetStridedBatch() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnMatGetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnMatSetStridedBatch() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnMatSetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnVecGet() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnVecGetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDnVecSetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseDnnz() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDnnz_compress() -> i32 { 10 }
@@ -437,18 +349,6 @@ pub extern "system" fn cusparseDpruneDense2csr_bufferSizeExt() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseGather() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseGetMatDiagType() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseGetMatFillMode() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseGetMatIndexBase() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseGetMatType() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseGetPointerMode() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseGetStream() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseLoggerForceDisable() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseLoggerOpenFile() -> i32 { 10 }
@@ -462,12 +362,6 @@ pub extern "system" fn cusparseLoggerSetLevel() -> i32 { 10 }
 pub extern "system" fn cusparseLoggerSetMask() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseRot() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSDDMM() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSDDMM_bufferSize() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSDDMM_preprocess() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSbsr2csr() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -488,10 +382,6 @@ pub extern "system" fn cusparseSbsrilu02_bufferSize() -> i32 { 10 }
 pub extern "system" fn cusparseSbsrilu02_bufferSizeExt() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSbsrilu02_numericBoost() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSbsrmm() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSbsrmv() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSbsrsm2_analysis() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -552,18 +442,6 @@ pub extern "system" fn cusparseScsrilu02_numericBoost() -> i32 { 10 }
 pub extern "system" fn cusparseScsru2csr() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseScsru2csr_bufferSizeExt() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSetMatDiagType() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSetMatFillMode() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSetMatIndexBase() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSetMatType() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSetPointerMode() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSetStream() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSgebsr2csr() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -629,39 +507,11 @@ pub extern "system" fn cusparseSpGEMMreuse_nnz() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSpGEMMreuse_workEstimation() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMM() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseSpMMOp() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSpMMOp_createPlan() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSpMMOp_destroyPlan() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMM_bufferSize() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMM_preprocess() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMV() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMV_bufferSize() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMV_preprocess() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatGetAttribute() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatGetFormat() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatGetIndexBase() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatGetSize() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatGetStridedBatch() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatGetValues() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatSetAttribute() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpMatSetValues() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSpSM_analysis() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -735,8 +585,6 @@ pub extern "system" fn cusparseXbsrsm2_zeroPivot() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseXbsrsv2_zeroPivot() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseXcoo2csr() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseXcoosortByColumn() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseXcoosortByRow() -> i32 { 10 }
@@ -748,8 +596,6 @@ pub extern "system" fn cusparseXcscsort() -> i32 { 10 }
 pub extern "system" fn cusparseXcscsort_bufferSizeExt() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseXcsr2bsrNnz() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseXcsr2coo() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseXcsr2gebsrNnz() -> i32 { 10 }
 #[unsafe(no_mangle)]

@@ -101,6 +101,8 @@ mod hw_cublas_batched;
 mod hw_cudnn;
 #[path = "gpu/hw_cufft.rs"]
 mod hw_cufft;
+#[path = "gpu/hw_cusparse.rs"]
+mod hw_cusparse;
 #[path = "gpu/hw_launch_stress.rs"]
 mod hw_launch_stress;
 #[path = "gpu/hw_xmx_gemm.rs"]

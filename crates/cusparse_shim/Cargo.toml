@@ -3,8 +3,11 @@ name = "cusparse_shim"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "cuSPARSE surface for cuda-for-intel: every entry point returns the library's NOT_SUPPORTED status instead of failing to load"
+description = "cuSPARSE shim for cuda-for-intel: CSR/CSC/COO SpMV, SpMM, SDDMM and BSR products as generated PTX over the Driver API"
 
 [lib]
 name = "cusparse64_12"
 crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libloading = "0.8"
