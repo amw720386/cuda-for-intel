@@ -471,12 +471,21 @@ fn carry(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
     let mut result = x0.clone();
     let mut cin = String::new();
     if carry_in {
-        cin = if bits == 64 {
-            let c = b.t64();
-            b.p(format!("cvt.u64.u32 {c} , %__cc ;"));
-            c
+        // The flag holds the carry out of `a + ~b + 1` for subtraction (as on NVIDIA hardware and
+        // in ZLUDA's subc_cc_s32 vector), so the borrow into `subc` is its complement.
+        let flag = if sub {
+            let nb = b.tn(32);
+            b.p(format!("xor.b32 {nb} , %__cc , 1 ;"));
+            nb
         } else {
             "%__cc".to_owned()
+        };
+        cin = if bits == 64 {
+            let c = b.t64();
+            b.p(format!("cvt.u64.u32 {c} , {flag} ;"));
+            c
+        } else {
+            flag
         };
         let x1 = b.tn(bits);
         b.p(format!("{}.{ut} {x1} , {x0} , {cin} ;", if sub { "sub" } else { "add" }));
@@ -498,7 +507,9 @@ fn carry(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
             }
             b.p(format!("or.pred {p0} , {p0} , {p1} ;"));
         }
-        b.p(render(&inst.guard, "selp.b32", &["%__cc".into(), "1".into(), "0".into(), p0]));
+        // Subtraction stores "no borrow" (see above).
+        let (set, clear) = if sub { ("0", "1") } else { ("1", "0") };
+        b.p(render(&inst.guard, "selp.b32", &["%__cc".into(), set.into(), clear.into(), p0]));
     }
     b.p(render(&inst.guard, &format!("mov.b{bits}"), &[dst, result]));
     Some(b.finish())

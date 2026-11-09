@@ -101,12 +101,11 @@ message); none is silently miscompiled.
 | `div.rz/rm/rp.f32`, `sqrt.rz/rm/rp.f32` | none in the corpus (only `.rn`, `.approx`, `.full` are used by compilers) |
 | `mad.hi.u64` | none in the corpus |
 | `atom.cas.b128`, `atom.global.cas` with vector operands | 1 |
-| fp8 / fp4 / packed conversions (`cvt.rn.satfinite.e4m3x2`, `e2m1x2`, `cvt.rs`, `cvt.rn.f16x2.e4m3x2`) | 7 (sm_89/sm_100 tests) |
+| fp4 / fp6 / packed conversions (`e2m1x2`, `cvt.rs`); the e4m3x2/e5m2x2 forms are supported | 2 (sm_100 tests) |
 | Hopper/Blackwell: `wgmma`, `tcgen05`, `mbarrier.*`, `cp.async.bulk(.tensor)`, `st.async`, `red.async`, `mapa`, `getctarank`, cluster `ld`/`barrier.cluster`, `multimem` | wgmma/tcgen05/mbarrier: 11 entries |
 | `mma.sync` int4/int1/m8n8k4/sparse forms, `ldmatrix` `.m16n16.b8` | 6 |
 | Partial-warp `membermask` (other than 0xffffffff) on shfl.sync (generic modes and bfly) | clear error; ggml and PyTorch use full masks |
-| Indirect calls, `call` to non-inlinable device functions, `.func` with `.param` aggregates | about 8 entries |
-| `.v8` / 256-bit vector `ld`/`st`, `.reg .v4` | 6 (ZLUDA tests) |
+| Calls into other modules (`.extern .func` without a definition), recursion, indirect calls with no matching address-taken `.func`: `unsupported PTX call: <reason>` | 1 (`extern_func`) |
 | `.local` symbols addressed as `[sym+reg]` in a few forms; address arithmetic on two pointers | 4 |
 | Kernels whose parameter aggregate is larger than the translator's limit | 2 |
 

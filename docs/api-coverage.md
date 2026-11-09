@@ -44,7 +44,7 @@ Behaviour notes for the entry points that are not plain forwards:
 
 ## CUDA driver API (cuda.h)
 
-Binary: `nvcuda`. Exported but not in the reference list: 1 (`cuGraphInstantiate_v1`).
+Binary: `nvcuda`. Exported but not in the reference list: 2 (`cfi_build_info`, `cuGraphInstantiate_v1`).
 
 | Symbol | Status | Class | Imported by real torch_cuda |
 |---|---|---|---|
@@ -1116,7 +1116,7 @@ Binary: `cudart64_12`. Exported but not in the reference list: 0.
 
 ## cuBLAS
 
-Binary: `cublas64_12`. Exported but not in the reference list: 509 (`cfiXmxLaunchCount`, `cfiXmxProbeStatus`, `cublasAlloc`, `cublasCaxpy`, `cublasCbdmm`, `cublasCcopy`, `cublasCdotc`, `cublasCdotu`, `cublasCgbmv`, `cublasCgemm`, `cublasCgemv`, `cublasCgerc`, `cublasCgeru`, `cublasChbmv`, `cublasChemm`, `cublasChemv`, `cublasCher`, `cublasCher2`, `cublasCher2k`, `cublasCherk`, `cublasChpmv`, `cublasChpr`, `cublasChpr2`, `cublasCrot`, `cublasCrotg`, `cublasCscal`, `cublasCsrot`, `cublasCsscal`, `cublasCswap`, `cublasCsymm`, `cublasCsyr2k`, `cublasCsyrk`, `cublasCtbmv`, `cublasCtbsv`, `cublasCtpmv`, `cublasCtpsv`, `cublasCtrmm`, `cublasCtrmv`, `cublasCtrsm`, `cublasCtrsv` ...).
+Binary: `cublas64_12`. Exported but not in the reference list: 510 (`cfiXmxBlkLaunchCount`, `cfiXmxLaunchCount`, `cfiXmxProbeStatus`, `cublasAlloc`, `cublasCaxpy`, `cublasCbdmm`, `cublasCcopy`, `cublasCdotc`, `cublasCdotu`, `cublasCgbmv`, `cublasCgemm`, `cublasCgemv`, `cublasCgerc`, `cublasCgeru`, `cublasChbmv`, `cublasChemm`, `cublasChemv`, `cublasCher`, `cublasCher2`, `cublasCher2k`, `cublasCherk`, `cublasChpmv`, `cublasChpr`, `cublasChpr2`, `cublasCrot`, `cublasCrotg`, `cublasCscal`, `cublasCsrot`, `cublasCsscal`, `cublasCswap`, `cublasCsymm`, `cublasCsyr2k`, `cublasCsyrk`, `cublasCtbmv`, `cublasCtbsv`, `cublasCtpmv`, `cublasCtpsv`, `cublasCtrmm`, `cublasCtrmv`, `cublasCtrsm` ...).
 
 | Symbol | Status | Class | Imported by real torch_cuda |
 |---|---|---|---|
@@ -1653,7 +1653,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 509 (`cfiXmxLaunc
 
 ## cuBLASLt
 
-Binary: `cublas64_12 (cublasLt*)`. Exported but not in the reference list: 994 (`cfiXmxLaunchCount`, `cfiXmxProbeStatus`, `cublasAlloc`, `cublasAsumEx`, `cublasAsumEx_64`, `cublasAxpyEx`, `cublasAxpyEx_64`, `cublasCaxpy`, `cublasCaxpy_v2`, `cublasCaxpy_v2_64`, `cublasCbdmm`, `cublasCcopy`, `cublasCcopy_v2`, `cublasCcopy_v2_64`, `cublasCdgmm`, `cublasCdgmm_64`, `cublasCdotc`, `cublasCdotc_v2`, `cublasCdotc_v2_64`, `cublasCdotu`, `cublasCdotu_v2`, `cublasCdotu_v2_64`, `cublasCgbmv`, `cublasCgbmv_v2`, `cublasCgbmv_v2_64`, `cublasCgeam`, `cublasCgeam_64`, `cublasCgelsBatched`, `cublasCgemm`, `cublasCgemm3m`, `cublasCgemm3mBatched`, `cublasCgemm3mBatched_64`, `cublasCgemm3mEx`, `cublasCgemm3mEx_64`, `cublasCgemm3mStridedBatched`, `cublasCgemm3mStridedBatched_64`, `cublasCgemm3m_64`, `cublasCgemmBatched`, `cublasCgemmBatched_64`, `cublasCgemmEx` ...).
+Binary: `cublas64_12 (cublasLt*)`. Exported but not in the reference list: 995 (`cfiXmxBlkLaunchCount`, `cfiXmxLaunchCount`, `cfiXmxProbeStatus`, `cublasAlloc`, `cublasAsumEx`, `cublasAsumEx_64`, `cublasAxpyEx`, `cublasAxpyEx_64`, `cublasCaxpy`, `cublasCaxpy_v2`, `cublasCaxpy_v2_64`, `cublasCbdmm`, `cublasCcopy`, `cublasCcopy_v2`, `cublasCcopy_v2_64`, `cublasCdgmm`, `cublasCdgmm_64`, `cublasCdotc`, `cublasCdotc_v2`, `cublasCdotc_v2_64`, `cublasCdotu`, `cublasCdotu_v2`, `cublasCdotu_v2_64`, `cublasCgbmv`, `cublasCgbmv_v2`, `cublasCgbmv_v2_64`, `cublasCgeam`, `cublasCgeam_64`, `cublasCgelsBatched`, `cublasCgemm`, `cublasCgemm3m`, `cublasCgemm3mBatched`, `cublasCgemm3mBatched_64`, `cublasCgemm3mEx`, `cublasCgemm3mEx_64`, `cublasCgemm3mStridedBatched`, `cublasCgemm3mStridedBatched_64`, `cublasCgemm3m_64`, `cublasCgemmBatched`, `cublasCgemmBatched_64` ...).
 
 | Symbol | Status | Class | Imported by real torch_cuda |
 |---|---|---|---|

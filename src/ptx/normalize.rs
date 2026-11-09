@@ -22,7 +22,7 @@ pub(super) type Stmt = Vec<String>;
 pub(super) fn run(source: &str) -> Result<String, Error> {
     let source = tier3::strip_debug(source);
     let tokens = merge_addresses(merge_double_colons(parse::tokens(&source)?));
-    let statements = split(tokens);
+    let statements = vector_regs::run(split(tokens));
     tier3::check_unsupported(&statements)?;
     let (statements, dynamic) = extract_dynamic_shared(statements);
     let statements = inline::expand(statements)?;
@@ -658,6 +658,9 @@ fn bit_type(part: &str) -> &str {
 
 #[path = "vec_small.rs"]
 mod vec_small;
+
+#[path = "vector_regs.rs"]
+mod vector_regs;
 
 #[path = "rewrites_cu128.rs"]
 mod rewrites_cu128;
