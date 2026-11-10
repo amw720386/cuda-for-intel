@@ -1,0 +1,80 @@
+CFIPROF	1
+K	94	512108900	223736700	288372200	_Z9mul_mat_qIL9ggml_type12ELi128ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii
+K	15	310669800	240165300	70504500	_Z9mul_mat_qIL9ggml_type14ELi128ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii
+K	482	107355300	72661100	34694200	_Z13mul_mat_vec_qIL9ggml_type12ELi1EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj
+K	87	97299600	75049100	22250500	_Z13mul_mat_vec_qIL9ggml_type14ELi1EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj
+K	94	86249800	354600	85895200	_Z9mul_mat_qIL9ggml_type12ELi112ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii
+K	80	53664900	210200	53454700	_Z9mul_mat_fI7__half2Li32ELi1ELi1ELb0EEvPKT_PKfPKiPfiiiiiiiiiiiiiiii
+K	569	43305000	40093300	3211700	_Z13quantize_q8_1PKfPvxxxxxj5uint3
+K	16	29368300	108200	29260100	_Z12soft_max_f32ILb1ELi512ELi512EfEvPKfPKT2_S1_Pf15soft_max_params
+K	15	27893700	114700	27779000	_Z9mul_mat_qIL9ggml_type14ELi112ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii
+K	80	16069000	285700	15783300	_Z13mul_mat_vec_fI6__halfS0_Li1ELi160EEvPKT_PKfPKiPfiiiiiiiiiiiii
+K	111	13229700	296700	12933000	_Z21unary_gated_op_kernelIXadL_ZN38_INTERNAL_5f3b6e47_8_unary_cu_eb6d53667op_siluEfEEfEvPKT0_S3_PS1_xxxx
+K	96	13015100	370400	12644700	_Z12soft_max_f32ILb1ELi0ELi0EfEvPKfPKT2_S1_Pf15soft_max_params
+K	32	12918100	85900	12832200	cfi_xmx_f16f32p_2x4_b0
+K	188	10894200	427000	10467200	_Z17quantize_mmq_q8_1IL18mmq_q8_1_ds_layout1EEvPKfPKiPvxxxxxii
+K	64	10347200	177600	10169600	_Z13convert_unaryIf6__halfEvPKvPT0_xxxxxx
+K	229	10027900	1241800	8786100	_Z12rms_norm_f32ILi1024ELb1ELb0EEvPKfPfixxxfS1_xxx5uint3S3_S3_S3_S1_xxxS3_S3_S3_S3_
+K	32	8292100	84700	8207400	cfi_xmx_f16f16p_2x4_b0
+K	224	7752300	634900	7117400	_Z9rope_normILb1ELb1EfEvPKT1_PS0_iiiiiPKifff14rope_corr_dimsfPKf
+K	222	6954500	846800	6107700	_Z11k_bin_bcastIXadL_ZN42_INTERNAL_bf62842d_11_binbcast_cu_6840010b6op_addEffEEfffJPKfEEvPKT0_PKT1_PT2_iii5uint3SB_SB_SB_SB_iiiiiiiiiDpT3_
+K	224	5679500	730000	4949500	_Z10k_set_rowsIfx6__halfEvPKT_PKT0_PT1_xxxxxxxxxxxxxxxxx
+K	112	5255200	310000	4945200	_Z7cpy_fltIXadL_ZN36_INTERNAL_5b1be78d_6_cpy_cu_843ac19f9cpy_1_fltIffEEvPKcPcEEEvS3_S4_iiiiiiiiiiiiiiiPS4_i
+K	30	3273900	78800	3195100	_Z17quantize_mmq_q8_1IL18mmq_q8_1_ds_layout0EEvPKfPKiPvxxxxxii
+K	32	1776800	73600	1703200	_Z13convert_unaryI6__halffEvPKvPT0_xxxxxx
+K	24	839600	837800	1800	_Z24mul_mat_q_stream_k_fixupIL9ggml_type12ELi128ELb0EEvPKiS2_PfPKfiiiiiiiii
+K	64	476200	172300	303900	_Z22k_compute_batched_ptrsPKvS0_PcPS0_PPvxxxyyyyyyxx
+K	8	261400	260500	900	_Z24mul_mat_q_stream_k_fixupIL9ggml_type14ELi128ELb0EEvPKiS2_PfPKfiiiiiiiii
+K	64	203200	200000	3200	_Z24mul_mat_q_stream_k_fixupIL9ggml_type12ELi112ELb0EEvPKiS2_PfPKfiiiiiiiii
+K	15	123600	122200	1400	_Z24mul_mat_q_stream_k_fixupIL9ggml_type14ELi112ELb0EEvPKiS2_PfPKfiiiiiiiii
+K	12	112000	41200	70800	_Z16k_get_rows_floatIffEvPKT_PKiPT0_xxxyyyyyyyyy
+K	1	43000	21600	21400	cfi_xmx_f16f32s_1x1_b0
+A	22	226527103800	cuKernelGetFunction
+A	4853	7965154600	cuLaunchKernel
+A	10	628825700	cuMemAlloc_v2
+A	3	272381300	cuModuleLoadData
+A	16	136465100	cuLibraryLoadData
+A	1180	105746100	cuGetProcAddress_v2
+A	1	19069600	cuInit
+A	1	4251800	cuDeviceGetLuid
+A	881	3780900	cuMemcpyHtoDAsync_v2
+A	172	3088400	cuStreamSynchronize
+A	844	1846300	cuEventSynchronize
+A	840	1225300	cuEventRecord
+A	6	1071000	cuMemHostAlloc
+A	2	884000	cuDevicePrimaryCtxRetain
+A	8	875900	cuGetExportTable
+A	3	466500	cuMemcpyHtoD_v2
+A	3	414100	cuGraphDestroy
+A	5330	256000	cuCtxGetDevice_v2
+A	112	231400	cuDeviceGetAttribute
+A	1	203300	cuGetProcAddress
+A	2	190500	cuStreamCreate
+A	4	100300	cuMemFreeHost
+A	33	97100	cuLibraryGetKernel
+A	3	68900	cuModuleGetFunction
+A	12	56700	cuMemcpyDtoHAsync_v2
+A	11	53500	cuKernelSetAttribute
+A	3	34300	cuStreamEndCapture
+A	1	26100	cuMemcpyDtoH_v2
+A	4	25800	cuEventDestroy_v2
+A	1	22200	cuStreamDestroy_v2
+A	3	21700	cuStreamBeginCapture_v2
+A	128	20200	cuStreamIsCapturing
+A	11	12600	cuFuncSetAttribute
+A	3	10800	cuMemFree_v2
+A	133	10000	cuCtxGetCurrent
+A	1	8500	cuMemsetD8Async
+A	4	5000	cuEventCreate
+A	1	4700	cuMemGetInfo_v2
+A	2	2100	cuCtxSetCurrent
+A	2	1600	cuDeviceGet
+A	1	1500	cuDeviceGetCount
+A	1	500	cuCtxGetApiVersion
+A	1	200	cuDeviceGetName
+A	1	200	cuDeviceTotalMem_v2
+A	1	200	cuDriverGetVersion
+A	1	0	cuDeviceGetUuid
+A	1	0	cuModuleGetLoadingMode
+M	884	809785926	HtoD
+M	13	3128136	DtoH
