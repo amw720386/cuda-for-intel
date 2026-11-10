@@ -11,6 +11,7 @@ use super::streams::events::*;
 use super::streams::extra::*;
 use super::streams::timing::*;
 use super::streams::{cuStreamCreate, cuStreamDestroy_v2, cuStreamQuery, cuStreamSynchronize};
+use super::texture::*;
 use super::vmm::*;
 use super::*;
 
@@ -308,6 +309,26 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuMemsetD8Async" => entry!(cuMemsetD8Async, 3020, DRIVER_ABI + 1, true),
         // Memory and copies. Entries that take a stream have PTDS variants.
         b"cuMemcpyDtoD" => entry!(cuMemcpyDtoD_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyHtoA" => entry!(cuMemcpyHtoA_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyAtoH" => entry!(cuMemcpyAtoH_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyHtoAAsync" => entry!(cuMemcpyHtoAAsync_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyAtoHAsync" => entry!(cuMemcpyAtoHAsync_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyDtoA" => entry!(cuMemcpyDtoA_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyAtoD" => entry!(cuMemcpyAtoD_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpyAtoA" => entry!(cuMemcpyAtoA_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuArrayCreate" => entry!(cuArrayCreate_v2, 3020),
+        b"cuArray3DCreate" => entry!(cuArray3DCreate_v2, 3020),
+        b"cuArrayDestroy" => entry!(cuArrayDestroy, 2000),
+        b"cuArrayGetDescriptor" => entry!(cuArrayGetDescriptor_v2, 3020),
+        b"cuArray3DGetDescriptor" => entry!(cuArray3DGetDescriptor_v2, 3020),
+        b"cuTexObjectCreate" => entry!(cuTexObjectCreate, 5000),
+        b"cuTexObjectDestroy" => entry!(cuTexObjectDestroy, 5000),
+        b"cuTexObjectGetResourceDesc" => entry!(cuTexObjectGetResourceDesc, 5000),
+        b"cuTexObjectGetTextureDesc" => entry!(cuTexObjectGetTextureDesc, 5000),
+        b"cuTexObjectGetResourceViewDesc" => entry!(cuTexObjectGetResourceViewDesc, 5000),
+        b"cuSurfObjectCreate" => entry!(cuSurfObjectCreate, 5000),
+        b"cuSurfObjectDestroy" => entry!(cuSurfObjectDestroy, 5000),
+        b"cuSurfObjectGetResourceDesc" => entry!(cuSurfObjectGetResourceDesc, 5000),
         b"cuMemcpyDtoDAsync" => entry!(cuMemcpyDtoDAsync_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemsetD16" => entry!(cuMemsetD16_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemsetD16Async" => entry!(cuMemsetD16Async, 3020, DRIVER_ABI + 1, true),
@@ -315,8 +336,9 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuMemsetD32Async" => entry!(cuMemsetD32Async, 3020, DRIVER_ABI + 1, true),
         b"cuMemcpy" => entry!(cuMemcpy, 7000, DRIVER_ABI + 1, true),
         b"cuMemcpyAsync" => entry!(cuMemcpyAsync, 7000, DRIVER_ABI + 1, true),
-        b"cuMemcpy2D" | b"cuMemcpy2DUnaligned" => {
-            entry!(cuMemcpy2D_v2, 3020, DRIVER_ABI + 1, true)
+        b"cuMemcpy2D" => entry!(cuMemcpy2D_v2, 3020, DRIVER_ABI + 1, true),
+        b"cuMemcpy2DUnaligned" => {
+            entry!(cuMemcpy2DUnaligned_v2, 3020, DRIVER_ABI + 1, true)
         }
         b"cuMemcpy2DAsync" => entry!(cuMemcpy2DAsync_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemcpy3D" => entry!(cuMemcpy3D_v2, 3020, DRIVER_ABI + 1, true),

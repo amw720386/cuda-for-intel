@@ -3,16 +3,6 @@
 #![allow(non_snake_case)]
 
 #[unsafe(no_mangle)]
-pub extern "system" fn cuArray3DCreate_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuArray3DGetDescriptor_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuArrayCreate_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuArrayDestroy() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuArrayGetDescriptor_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cuArrayGetMemoryRequirements() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuArrayGetPlane() -> i32 { 801 }
@@ -281,29 +271,13 @@ pub extern "system" fn cuMemRetainAllocationHandle() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemSetMemPool() -> i32 { 801 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpy2DUnaligned_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cuMemcpy3DBatchAsync_v2() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemcpy3DPeer() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemcpy3DPeerAsync() -> i32 { 801 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpyAtoA_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpyAtoD_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpyAtoHAsync_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpyAtoH_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cuMemcpyBatchAsync_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpyDtoA_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpyHtoAAsync_v2() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemcpyHtoA_v2() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMipmappedArrayCreate() -> i32 { 801 }
 #[unsafe(no_mangle)]
@@ -371,12 +345,6 @@ pub extern "system" fn cuStreamWriteValue32_v2() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuStreamWriteValue64_v2() -> i32 { 801 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cuSurfObjectCreate() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuSurfObjectDestroy() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuSurfObjectGetResourceDesc() -> i32 { 801 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cuSurfRefGetArray() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuSurfRefSetArray() -> i32 { 801 }
@@ -388,16 +356,6 @@ pub extern "system" fn cuTensorMapEncodeIm2colWide() -> i32 { 801 }
 pub extern "system" fn cuTensorMapEncodeTiled() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuTensorMapReplaceAddress() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuTexObjectCreate() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuTexObjectDestroy() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuTexObjectGetResourceDesc() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuTexObjectGetResourceViewDesc() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuTexObjectGetTextureDesc() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuTexRefCreate() -> i32 { 801 }
 #[unsafe(no_mangle)]

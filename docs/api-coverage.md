@@ -33,7 +33,7 @@ Behaviour notes for the entry points that are not plain forwards:
 
 | Library | Reference symbols | Implemented | Stub | Missing | of which core | Torch imports (impl/stub/missing) |
 |---|---|---|---|---|---|---|
-| CUDA driver API (cuda.h) | 728 | 228 | 240 | 260 | 0 | 0 (0/0/0) |
+| CUDA driver API (cuda.h) | 728 | 249 | 219 | 260 | 0 | 0 (0/0/0) |
 | CUDA runtime API (cuda_runtime_api.h) | 330 | 87 | 242 | 1 | 1 | 69 (46/23/0) |
 | cuBLAS | 530 | 161 | 369 | 0 | 0 | 55 (47/8/0) |
 | cuBLASLt | 45 | 17 | 28 | 0 | 0 | 11 (11/0/0) |
@@ -49,14 +49,14 @@ Binary: `nvcuda`. Exported but not in the reference list: 2 (`cfi_build_info`, `
 | Symbol | Status | Class | Imported by real torch_cuda |
 |---|---|---|---|
 | `cuArray3DCreate` | missing | legacy |  |
-| `cuArray3DCreate_v2` | stub | core |  |
+| `cuArray3DCreate_v2` | implemented | core |  |
 | `cuArray3DGetDescriptor` | missing | legacy |  |
-| `cuArray3DGetDescriptor_v2` | stub | core |  |
+| `cuArray3DGetDescriptor_v2` | implemented | core |  |
 | `cuArrayCreate` | missing | legacy |  |
-| `cuArrayCreate_v2` | stub | core |  |
-| `cuArrayDestroy` | stub | core |  |
+| `cuArrayCreate_v2` | implemented | core |  |
+| `cuArrayDestroy` | implemented | core |  |
 | `cuArrayGetDescriptor` | missing | legacy |  |
-| `cuArrayGetDescriptor_v2` | stub | core |  |
+| `cuArrayGetDescriptor_v2` | implemented | core |  |
 | `cuArrayGetMemoryRequirements` | stub | core |  |
 | `cuArrayGetPlane` | stub | core |  |
 | `cuArrayGetSparseProperties` | stub | core |  |
@@ -507,7 +507,7 @@ Binary: `nvcuda`. Exported but not in the reference list: 2 (`cfi_build_info`, `
 | `cuMemcpy2DAsync_v2` | implemented | core |  |
 | `cuMemcpy2DAsync_v2_ptsz` | missing | ptsz |  |
 | `cuMemcpy2DUnaligned` | missing | legacy |  |
-| `cuMemcpy2DUnaligned_v2` | stub | core |  |
+| `cuMemcpy2DUnaligned_v2` | implemented | core |  |
 | `cuMemcpy2DUnaligned_v2_ptds` | missing | ptsz |  |
 | `cuMemcpy2D_v2` | implemented | core |  |
 | `cuMemcpy2D_v2_ptds` | missing | ptsz |  |
@@ -528,23 +528,23 @@ Binary: `nvcuda`. Exported but not in the reference list: 2 (`cfi_build_info`, `
 | `cuMemcpyAsync` | implemented | core |  |
 | `cuMemcpyAsync_ptsz` | missing | ptsz |  |
 | `cuMemcpyAtoA` | missing | legacy |  |
-| `cuMemcpyAtoA_v2` | stub | core |  |
+| `cuMemcpyAtoA_v2` | implemented | core |  |
 | `cuMemcpyAtoA_v2_ptds` | missing | ptsz |  |
 | `cuMemcpyAtoD` | missing | legacy |  |
-| `cuMemcpyAtoD_v2` | stub | core |  |
+| `cuMemcpyAtoD_v2` | implemented | core |  |
 | `cuMemcpyAtoD_v2_ptds` | missing | ptsz |  |
 | `cuMemcpyAtoH` | missing | legacy |  |
 | `cuMemcpyAtoHAsync` | missing | legacy |  |
-| `cuMemcpyAtoHAsync_v2` | stub | core |  |
+| `cuMemcpyAtoHAsync_v2` | implemented | core |  |
 | `cuMemcpyAtoHAsync_v2_ptsz` | missing | ptsz |  |
-| `cuMemcpyAtoH_v2` | stub | core |  |
+| `cuMemcpyAtoH_v2` | implemented | core |  |
 | `cuMemcpyAtoH_v2_ptds` | missing | ptsz |  |
 | `cuMemcpyBatchAsync` | missing | legacy |  |
 | `cuMemcpyBatchAsync_ptsz` | missing | ptsz |  |
 | `cuMemcpyBatchAsync_v2` | stub | core |  |
 | `cuMemcpyBatchAsync_v2_ptsz` | missing | ptsz |  |
 | `cuMemcpyDtoA` | missing | legacy |  |
-| `cuMemcpyDtoA_v2` | stub | core |  |
+| `cuMemcpyDtoA_v2` | implemented | core |  |
 | `cuMemcpyDtoA_v2_ptds` | missing | ptsz |  |
 | `cuMemcpyDtoD` | missing | legacy |  |
 | `cuMemcpyDtoDAsync` | missing | legacy |  |
@@ -560,9 +560,9 @@ Binary: `nvcuda`. Exported but not in the reference list: 2 (`cfi_build_info`, `
 | `cuMemcpyDtoH_v2_ptds` | missing | ptsz |  |
 | `cuMemcpyHtoA` | missing | legacy |  |
 | `cuMemcpyHtoAAsync` | missing | legacy |  |
-| `cuMemcpyHtoAAsync_v2` | stub | core |  |
+| `cuMemcpyHtoAAsync_v2` | implemented | core |  |
 | `cuMemcpyHtoAAsync_v2_ptsz` | missing | ptsz |  |
-| `cuMemcpyHtoA_v2` | stub | core |  |
+| `cuMemcpyHtoA_v2` | implemented | core |  |
 | `cuMemcpyHtoA_v2_ptds` | missing | ptsz |  |
 | `cuMemcpyHtoD` | missing | legacy |  |
 | `cuMemcpyHtoDAsync` | missing | legacy |  |
@@ -722,20 +722,20 @@ Binary: `nvcuda`. Exported but not in the reference list: 2 (`cfi_build_info`, `
 | `cuStreamWriteValue64_ptsz` | missing | ptsz |  |
 | `cuStreamWriteValue64_v2` | stub | core |  |
 | `cuStreamWriteValue64_v2_ptsz` | missing | ptsz |  |
-| `cuSurfObjectCreate` | stub | core |  |
-| `cuSurfObjectDestroy` | stub | core |  |
-| `cuSurfObjectGetResourceDesc` | stub | core |  |
+| `cuSurfObjectCreate` | implemented | core |  |
+| `cuSurfObjectDestroy` | implemented | core |  |
+| `cuSurfObjectGetResourceDesc` | implemented | core |  |
 | `cuSurfRefGetArray` | stub | core |  |
 | `cuSurfRefSetArray` | stub | core |  |
 | `cuTensorMapEncodeIm2col` | stub | core |  |
 | `cuTensorMapEncodeIm2colWide` | stub | core |  |
 | `cuTensorMapEncodeTiled` | stub | core |  |
 | `cuTensorMapReplaceAddress` | stub | core |  |
-| `cuTexObjectCreate` | stub | core |  |
-| `cuTexObjectDestroy` | stub | core |  |
-| `cuTexObjectGetResourceDesc` | stub | core |  |
-| `cuTexObjectGetResourceViewDesc` | stub | core |  |
-| `cuTexObjectGetTextureDesc` | stub | core |  |
+| `cuTexObjectCreate` | implemented | core |  |
+| `cuTexObjectDestroy` | implemented | core |  |
+| `cuTexObjectGetResourceDesc` | implemented | core |  |
+| `cuTexObjectGetResourceViewDesc` | implemented | core |  |
+| `cuTexObjectGetTextureDesc` | implemented | core |  |
 | `cuTexRefCreate` | stub | core |  |
 | `cuTexRefDestroy` | stub | core |  |
 | `cuTexRefGetAddress` | missing | legacy |  |

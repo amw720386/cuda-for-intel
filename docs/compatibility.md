@@ -38,7 +38,8 @@ though the Level Zero loader code compiles there. macOS builds and runs library 
 | cuBLAS / cuBLASLt | Entry points for the names exercised by the tested apps |
 | XMX (DPAS) GEMM | Present, on by default only for large fp16/bf16 shapes. Kernel level up to 15x over the tiled path on large Qwen shapes; end to end no clear gain (Qwen2.5-0.5B prefill 7213 vs 6634 tok/s in one run, 6764 vs 6944 in another, i.e. within run-to-run noise); two small shapes are slower with it on ([hw-logs/xmx-2026-11-09.txt](hw-logs/xmx-2026-11-09.txt)). Switch off with `CFI_XMX=0` to compare |
 | Quantised ggml kernels substitution | `CUDA_FOR_INTEL_SUBST=auto` by default; `none` turns it off |
-| VMM, multi-GPU peer access, conditional graph nodes, texture/surface | Not implemented |
+| Texture and surface objects, CUDA arrays | Emulated on linear memory: 1D/2D/3D arrays and copies, texture objects over arrays, linear and pitched memory (every address mode, nearest/linear filtering, normalised coordinates), surface loads/stores. No texture references, gather, layered/cube or mipmapped textures; no hardware sampler speed ([textures.md](textures.md)) |
+| VMM, multi-GPU peer access, conditional graph nodes | Not implemented |
 
 ## Known issues (honest list)
 

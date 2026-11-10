@@ -293,9 +293,10 @@ fn debug_sections_and_texture_errors() {
         ".address_size 64\n.file 1 \"/tmp/a.cu\"\n.section .debug_abbrev\n{\n.b8 1, 17, 1\n}\n",
     );
     lower(&source);
-    let tex = kernel("    .reg .f32 %t<4>;", "    tex.1d.v4.f32.f32 {%t0, %t1, %t2, %t3}, [%rd15, {%f0}];");
+    // Texture objects are emulated (tex_tests.rs); gather (tld4) is not.
+    let tex = kernel("    .reg .f32 %t<4>;", "    tld4.r.2d.v4.f32.f32 {%t0, %t1, %t2, %t3}, [%rd15, {%f0, %f0}];");
     let err = translate(&tex).unwrap_err().to_string();
-    assert!(err.contains("unsupported") && err.contains("bindless"), "{err}");
+    assert!(err.contains("unsupported") && err.contains("not emulated"), "{err}");
 }
 
 fn run_stmatrix(trans: bool) -> Vec<u32> {

@@ -13,6 +13,14 @@ use gpu_device::ordinal as test_device;
 
 #[path = "gpu/api_coverage.rs"]
 mod api_coverage;
+#[path = "../src/ptx/texdesc.rs"]
+#[allow(dead_code)]
+mod texdesc;
+#[path = "../src/ptx/tex_model.rs"]
+#[allow(dead_code)]
+mod tex_model;
+#[path = "gpu/hw_texture.rs"]
+mod hw_texture;
 #[path = "gpu/discovery.rs"]
 mod discovery;
 #[path = "gpu/forge.rs"]

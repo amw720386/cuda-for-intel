@@ -28,6 +28,7 @@ mod primary;
 mod streams;
 mod stubs;
 mod subst_hook;
+mod texture;
 mod cfiprof;
 mod trace;
 
