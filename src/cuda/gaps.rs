@@ -736,6 +736,15 @@ pub(crate) struct Memcpy3D {
     depth: usize,
 }
 
+/// An array side becomes a device side with the array's dense layout (pitch and rows).
+fn array_side(memory: c_uint, array: Opaque, device: u64, pitch: usize, height: usize) -> Result<(c_uint, u64, usize, usize), CuResult> {
+    if memory != 3 {
+        return Ok((memory, device, pitch, height));
+    }
+    let a = super::texture::array(array).ok_or(InvalidHandle)?;
+    Ok((2, a.base, a.pitch(), a.rows()))
+}
+
 /// Base address of one side: the host pointer, or the device/unified address.
 fn side_base(memory: c_uint, host: usize, device: u64) -> Result<(MemoryType, usize), CuResult> {
     let memory = MemoryType::from_raw(memory).ok_or(InvalidValue)?;
@@ -799,9 +808,16 @@ unsafe fn copy_2d(copy: *const Memcpy2D, stream: Option<Opaque>) -> CuResult {
     let Some(copy) = (unsafe { copy.as_ref() }) else {
         return InvalidValue;
     };
-    let sides = side_base(copy.src_type, copy.src_host.addr(), copy.src_device).and_then(|src| {
-        side_base(copy.dst_type, copy.dst_host.addr(), copy.dst_device).map(|dst| (src, dst))
-    });
+    let (src_type, src_device, src_pitch, _) = match array_side(copy.src_type, copy.src_array, copy.src_device, copy.src_pitch, 0) {
+        Ok(side) => side,
+        Err(error) => return error,
+    };
+    let (dst_type, dst_device, dst_pitch, _) = match array_side(copy.dst_type, copy.dst_array, copy.dst_device, copy.dst_pitch, 0) {
+        Ok(side) => side,
+        Err(error) => return error,
+    };
+    let sides = side_base(src_type, copy.src_host.addr(), src_device)
+        .and_then(|src| side_base(dst_type, copy.dst_host.addr(), dst_device).map(|dst| (src, dst)));
     let (src, dst) = match sides {
         Ok(sides) => sides,
         Err(error) => return error,
@@ -814,8 +830,8 @@ unsafe fn copy_2d(copy: *const Memcpy2D, stream: Option<Opaque>) -> CuResult {
         height: 0,
     };
     let plan = math::Plan::new(
-        side(copy.src_x, copy.src_y, copy.src_pitch),
-        side(copy.dst_x, copy.dst_y, copy.dst_pitch),
+        side(copy.src_x, copy.src_y, src_pitch),
+        side(copy.dst_x, copy.dst_y, dst_pitch),
         copy.width,
         copy.height,
         1,
@@ -830,9 +846,18 @@ unsafe fn copy_3d(copy: *const Memcpy3D, stream: Option<Opaque>) -> CuResult {
     let Some(copy) = (unsafe { copy.as_ref() }) else {
         return InvalidValue;
     };
-    let sides = side_base(copy.src_type, copy.src_host.addr(), copy.src_device).and_then(|src| {
-        side_base(copy.dst_type, copy.dst_host.addr(), copy.dst_device).map(|dst| (src, dst))
-    });
+    let (src_type, src_device, src_pitch, src_height) =
+        match array_side(copy.src_type, copy.src_array, copy.src_device, copy.src_pitch, copy.src_height) {
+            Ok(side) => side,
+            Err(error) => return error,
+        };
+    let (dst_type, dst_device, dst_pitch, dst_height) =
+        match array_side(copy.dst_type, copy.dst_array, copy.dst_device, copy.dst_pitch, copy.dst_height) {
+            Ok(side) => side,
+            Err(error) => return error,
+        };
+    let sides = side_base(src_type, copy.src_host.addr(), src_device)
+        .and_then(|src| side_base(dst_type, copy.dst_host.addr(), dst_device).map(|dst| (src, dst)));
     let (src, dst) = match sides {
         Ok(sides) => sides,
         Err(error) => return error,
@@ -845,15 +870,15 @@ unsafe fn copy_3d(copy: *const Memcpy3D, stream: Option<Opaque>) -> CuResult {
             x_bytes: copy.src_x,
             y: copy.src_y,
             z: copy.src_z,
-            pitch: copy.src_pitch,
-            height: copy.src_height,
+            pitch: src_pitch,
+            height: src_height,
         },
         math::Side {
             x_bytes: copy.dst_x,
             y: copy.dst_y,
             z: copy.dst_z,
-            pitch: copy.dst_pitch,
-            height: copy.dst_height,
+            pitch: dst_pitch,
+            height: dst_height,
         },
         copy.width,
         copy.height,
@@ -909,6 +934,12 @@ pub unsafe extern "system" fn cuMemcpy2DAsync_v2(
     trace::call("cuMemcpy2DAsync_v2", || unsafe {
         copy_2d(copy, Some(stream))
     })
+}
+
+/// Same as cuMemcpy2D: copies here have no alignment requirement.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cuMemcpy2DUnaligned_v2(copy: *const Memcpy2D) -> CuResult {
+    trace::call("cuMemcpy2DUnaligned_v2", || unsafe { copy_2d(copy, None) })
 }
 
 #[unsafe(no_mangle)]

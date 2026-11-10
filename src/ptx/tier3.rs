@@ -11,6 +11,8 @@ use super::{Ctx, Inst, render};
 
 #[path = "tier3_int16.rs"]
 mod int16;
+#[path = "tier3_tex.rs"]
+mod tex;
 
 /// Per-entry state owned by this module (embedded in `Ctx`).
 #[derive(Default)]
@@ -233,6 +235,16 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     }
     if let Some(lines) = int16::rewrite(&mut ctx.t3, inst) {
         return Some(lines);
+    }
+    if matches!(family, "tex" | "txq" | "suld" | "sust" | "suq") {
+        let regs: Vec<(String, Option<u32>)> = inst
+            .operands
+            .iter()
+            .flat_map(|o| o.split(|c: char| !(c.is_ascii_alphanumeric() || c == '%' || c == '_' || c == '$' || c == '.')))
+            .filter(|t| t.starts_with('%'))
+            .map(|r| (r.to_owned(), ctx.width_of(r)))
+            .collect();
+        return tex::rewrite(&mut ctx.t3, inst, &|r| regs.iter().find(|x| x.0 == r).and_then(|x| x.1));
     }
     let st = &mut ctx.t3;
     match family {
@@ -1237,19 +1249,23 @@ pub(super) fn strip_debug(source: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// Texture, surface and sampler instructions need bindless image objects, which
-/// the OpenCL-environment SPIR-V target does not provide. Fail with a clear message.
+/// Texture-reference forms (`.texref`, `.surfref`, `.samplerref`) and the texture and surface
+/// instructions `tier3_tex.rs` does not emulate fail with a clear message.
 pub(super) fn check_unsupported(statements: &[super::Stmt]) -> Result<(), super::Error> {
     for stmt in statements {
         let first = stmt.first().map_or("", String::as_str);
         let op = if first == "@" { stmt.get(2).or(stmt.get(3)).map_or("", String::as_str) } else { first };
         let family = op.split('.').next().unwrap_or("");
+        // Texture/surface object forms are emulated on linear memory (tier3_tex.rs).
+        if matches!(family, "tex" | "txq" | "suld" | "sust" | "suq") && Inst::parse(stmt).is_some_and(|inst| tex::supported(&inst)) {
+            continue;
+        }
         if matches!(family, "tex" | "tld4" | "txq" | "suld" | "sust" | "sured" | "suq")
             || matches!(first, ".texref" | ".surfref" | ".samplerref")
             || stmt.iter().any(|t| matches!(t.as_str(), ".texref" | ".surfref" | ".samplerref"))
         {
             return Err(super::Error::new(format!(
-                "unsupported PTX instruction: {} (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)",
+                "unsupported PTX instruction: {} (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)",
                 stmt.join(" ")
             )));
         }
