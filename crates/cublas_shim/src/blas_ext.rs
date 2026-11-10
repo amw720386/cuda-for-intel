@@ -16,7 +16,10 @@ macro_rules! tri {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
-            Err(e) => return e,
+            Err(e) => {
+                trace!("{}:{} returns status {e}: {}", file!(), line!(), stringify!($e).split_whitespace().collect::<Vec<_>>().join(" "));
+                return e;
+            }
         }
     };
 }
@@ -488,7 +491,13 @@ unsafe fn geam(
 ) -> c_int {
     let h = tri!(handle(hd));
     let al = tri!(unsafe { scalar(h, alpha, ty) });
-    let be = tri!(unsafe { scalar(h, beta, ty) });
+    // cuSOLVER's gesvdj transposes a wide matrix with geam(alpha, A^T, beta = NULL, B),
+    // which NVIDIA's cuBLAS accepts as beta = 0 (B is then not read).
+    let be = if beta.is_null() {
+        kp::Scalar::host(ty, 0.0, 0.0)
+    } else {
+        tri!(unsafe { scalar(h, beta, ty) })
+    };
     let l = tri!(kp::geam(
         ty, transa, transb, m, n, a, lda, b, ldb, c, ldc, al, be
     ));

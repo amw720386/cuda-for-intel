@@ -144,7 +144,10 @@ macro_rules! tri {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
-            Err(e) => return e,
+            Err(e) => {
+                trace!("{}:{} returns status {e}: {}", file!(), line!(), stringify!($e).split_whitespace().collect::<Vec<_>>().join(" "));
+                return e;
+            }
         }
     };
 }

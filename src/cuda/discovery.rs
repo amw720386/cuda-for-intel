@@ -334,8 +334,8 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuMemsetD16Async" => entry!(cuMemsetD16Async, 3020, DRIVER_ABI + 1, true),
         b"cuMemsetD32" => entry!(cuMemsetD32_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemsetD32Async" => entry!(cuMemsetD32Async, 3020, DRIVER_ABI + 1, true),
-        b"cuMemcpy" => entry!(cuMemcpy, 7000, DRIVER_ABI + 1, true),
-        b"cuMemcpyAsync" => entry!(cuMemcpyAsync, 7000, DRIVER_ABI + 1, true),
+        b"cuMemcpy" => entry!(cuMemcpy, 4000, DRIVER_ABI + 1, true),
+        b"cuMemcpyAsync" => entry!(cuMemcpyAsync, 4000, DRIVER_ABI + 1, true),
         b"cuMemcpy2D" => entry!(cuMemcpy2D_v2, 3020, DRIVER_ABI + 1, true),
         b"cuMemcpy2DUnaligned" => {
             entry!(cuMemcpy2DUnaligned_v2, 3020, DRIVER_ABI + 1, true)
@@ -752,6 +752,11 @@ mod tests {
         assert_eq!(at(c"cuOccupancyMaxActiveBlocksPerMultiprocessor", 6040, false), Err(VERSION));
         // Stream-aware entries have no PTDS variant; others resolve for PTDS callers.
         assert_eq!(at(c"cuMemcpyAsync", 13000, true), Err(MISSING));
+        // cudart 11.8 resolves the unified-addressing copies (cudaMemcpyDefault) at ABI 4000;
+        // cuSOLVER's gesvdj needs them for wide matrices.
+        assert_eq!(at(c"cuMemcpy", 4000, false), Ok(cuMemcpy as Opaque));
+        assert_eq!(at(c"cuMemcpyAsync", 4000, false), Ok(cuMemcpyAsync as Opaque));
+        assert_eq!(at(c"cuMemcpy", 3020, false), Err(VERSION));
         assert_eq!(at(c"cuLaunchKernelEx", 13000, true), Err(MISSING));
         assert!(at(c"cuFuncGetAttribute", 13000, true).is_ok());
         assert!(at(c"cuPointerGetAttributes", 13000, true).is_ok());

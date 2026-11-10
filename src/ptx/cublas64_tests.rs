@@ -1174,6 +1174,30 @@ fn sim_rank_k_symm_trmm_ger_and_friends() {
             let err = max_err(&dec(ty, &gpu.download(dc, c0.len() * es)), &want);
             assert!(err < tol(ty), "{ty:?} geam ta={ta} tb={tb}: {err:e}");
         }
+        {
+            // Transpose only, as cuSOLVER's gesvdj does for a wide matrix: B is null with
+            // ldb 0 and beta 0, so B is neither validated nor read.
+            let a = rng.vec(ty, lda * m.max(n));
+            let c0 = vec![(f64::NAN, 0.0); lda * n];
+            let alpha = rng.cx(ty);
+            let mut want = c0.clone();
+            for j in 0..n {
+                for i in 0..m {
+                    want[i + j * lda] = plan::cmul(alpha, opx(&a, lda, plan::OP_T, i, j));
+                }
+            }
+            let (da, dc) = (gpu.upload(&enc(ty, &a)), gpu.upload(&enc(ty, &c0)));
+            let zero = scalar_of(ty, (0.0, 0.0));
+            let launches = plan::geam(
+                ty, plan::OP_T, plan::OP_N, m as i32, n as i32, da, lda as i32, 0, 0, dc, lda as i32,
+                scalar_of(ty, alpha), zero,
+            )
+            .unwrap();
+            run(&mut gpu, launches);
+            let err = max_err(&dec(ty, &gpu.download(dc, c0.len() * es)), &want);
+            assert!(err < tol(ty), "{ty:?} geam transpose with null B: {err:e}");
+            assert!(plan::geam(ty, plan::OP_T, plan::OP_N, m as i32, n as i32, da, lda as i32, 8, 0, dc, lda as i32, zero, zero).is_err());
+        }
         for side in [plan::SIDE_LEFT, plan::SIDE_RIGHT] {
             let len = if side == plan::SIDE_LEFT { m } else { n };
             let xv = rng.vec(ty, 2 * len);

@@ -16,6 +16,11 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 
 ### Fixed
 - The translation-cache key no longer includes `CFI_REDIRECT_*` and other launcher, dump and tracing variables, so `cfi-run` and a run without it share cache entries.
+- PTX translator: a branch on a `shfl.sync.idx` broadcast (lane and control independent of the thread), `vote` or `redux` result around `bar.sync` is no longer rejected as divergent. cuSOLVER's `laed4_par` (the divide-and-conquer merge of `syevd`/`heevd`) failed to translate, cuSOLVER ignored the failed `cuModuleGetFunction`, and `torch.linalg.eigh` returned the unmerged leaf eigenvalues.
+- PTX translator: `ld.volatile` and `ld.relaxed.{gpu,sys}` loads from global or generic memory are followed by a fence, so spin-waits on another block's flag (cuSOLVER `sytrd4_gpu`, `eigh` for n > 32 in float64) see the update instead of hanging the GPU. Translation cache version 7.
+- `nvcuda.dll` reports a kernel that fails lazy translation once on stderr, since some libraries continue without it.
+- `cublas?geam` accepts a null `beta` as zero and a null `B` (not read, `ldb` not checked), as NVIDIA's cuBLAS does; cuSOLVER's `gesvdj` transposes wide matrices this way. `CFI_CUBLAS_TRACE` also logs the call site of a failing status.
+- `cuMemcpy` and `cuMemcpyAsync` resolve through `cuGetProcAddress` from CUDA 4.0 (ABI 4000), where cudart 11.8 looks them up.
 - `cublasSdot_v2` supports device-pointer results (as PyTorch calls it) and any increments; `cublasSgemv_v2` supports non-unit and negative increments.
 - `nvcuda.dll` no longer aborts the process when a context call (`cuCtxSetCurrent`, push/pop, create/destroy) arrives after thread-local storage teardown, as cuSOLVER's handle destructor does at exit.
 

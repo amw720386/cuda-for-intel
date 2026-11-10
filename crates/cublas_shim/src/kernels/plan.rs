@@ -939,7 +939,8 @@ pub fn geam(
         return Err(INVALID_VALUE);
     }
     let (ra, rb) = (if ta { n } else { m }, if tb { n } else { m });
-    if lda < ra.max(1) || ldb < rb.max(1) || ldc < m.max(1) {
+    // B may be absent (null, any ldb) when it is not read.
+    if lda < ra.max(1) || (b != 0 && ldb < rb.max(1)) || ldc < m.max(1) {
         return Err(INVALID_VALUE);
     }
     let s = |t: bool, ld: i32| if t { (ld as u64, 1) } else { (1, ld as u64) };
