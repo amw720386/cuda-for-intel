@@ -7,8 +7,20 @@
 //! 1. `gather`: input (any cuFFT layout; complex, real, or Hermitian half) -> a dense complex
 //!    work buffer `[batch][n0][n1][n2]`. A Hermitian half is expanded by symmetry, so C2R
 //!    runs as a full complex inverse whose real part is the result.
-//! 2. one `stage` launch per radix of every transformed dimension, ping-ponging between the
-//!    two halves of the work area (mixed-radix Stockham autosort, one output per thread).
+//! 2. the passes of every transformed dimension (`Pass`), ping-ponging between the two
+//!    dense halves of the work area:
+//!    * `local`: a dimension of length <= `local_cap` whose factors are all <= 63 runs in
+//!      one launch, a work-group transforming whole lines in shared memory (every Stockham
+//!      stage between two barriers);
+//!    * four-step: a longer last dimension `n = n1 n2` with both factors local-sized runs as
+//!      two `local` passes (n1-point transforms with a fused `W_n^(j2 k1)` twiddle, then
+//!      n2-point transforms whose store transposes the result into place);
+//!    * Bluestein: a length with a prime factor > 63 becomes a chirp-z convolution of
+//!      power-of-two length `m >= 2n - 1` in two extra work buffers (`chirp` multiplies by
+//!      `exp(-i pi j^2 / n)`, a forward m-point FFT, a product with the FFT of the chirp, an
+//!      inverse m-point FFT and the output chirp with the 1/m scale);
+//!    * otherwise one global `stage` launch per radix (mixed-radix Stockham autosort, one
+//!      output per thread).
 //! 3. `scatter`: dense work buffer -> output layout (complex, the non-redundant half for
 //!    R2C, or the real part for C2R).
 //!
@@ -106,6 +118,286 @@ pub struct Stage {
     pub tw_offset: u32,
 }
 
+/// Elements a `local` work-group holds per shared-memory buffer (two buffers): the longest
+/// transform that runs in one pass.
+pub fn local_cap(double: bool) -> u32 {
+    if double { 1024 } else { 2048 }
+}
+
+/// Largest radix of a `local` stage; a larger prime factor takes Bluestein's algorithm.
+pub const MAX_LOCAL_RADIX: u32 = 63;
+
+/// Direction of a pass: the execution's, or fixed (Bluestein's inner transforms).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+    Exec,
+    Forward,
+    Inverse,
+}
+
+impl Dir {
+    pub fn inverse(self, exec_inverse: bool) -> bool {
+        match self {
+            Dir::Exec => exec_inverse,
+            Dir::Forward => false,
+            Dir::Inverse => true,
+        }
+    }
+}
+
+/// A table in the twiddle buffer (complex elements from `offset`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Table {
+    /// `W_n^t = exp(-2 pi i t / n)`, t < n.
+    Roots { n: u32 },
+    /// Bluestein input chirp `exp(-+ i pi j^2 / n)`, j < n (+ for the inverse).
+    ChirpIn { n: u32, inverse: bool },
+    /// The FFT of the conjugate chirp, wrapped to length m.
+    ChirpB { n: u32, m: u32, inverse: bool },
+    /// The output chirp divided by m, k < n.
+    ChirpOut { n: u32, m: u32, inverse: bool },
+}
+
+impl Table {
+    pub fn len(self) -> u32 {
+        match self {
+            Table::Roots { n } | Table::ChirpIn { n, .. } | Table::ChirpOut { n, .. } => n,
+            Table::ChirpB { m, .. } => m,
+        }
+    }
+}
+
+/// A `local` pass: `nl` lines of length `l`, line `t` = (a, b) = (t / ni, t % ni) read from
+/// `a sa + b sb + j sj` and written (output o) to `a da + b db + o dj` (elements of the
+/// dense buffers). `radices` packs the stage radices 6 bits each (first stage lowest);
+/// `tw` is the offset of the `W_l` table, `tw2` (four-step) of a `W_n` table applied to
+/// output o of line b as `W_n^(b o)`. A work-group holds `g` lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Local {
+    pub nl: u32,
+    pub l: u32,
+    pub ni: u32,
+    pub sa: u32,
+    pub sb: u32,
+    pub sj: u32,
+    pub da: u32,
+    pub db: u32,
+    pub dj: u32,
+    pub radices: u64,
+    pub g: u32,
+    pub tw: u32,
+    pub tw2: Option<u32>,
+}
+
+/// A `chirp` pass over a `[outer][nd][sd]` destination from a `[outer][ns][sd]` source:
+/// `dst(o, j, i) = (j < ns ? src(o, j, i) : 0) * table[j]`, the table at `tab[0]` (forward
+/// execution) or `tab[1]` (inverse).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chirp {
+    pub nd: u32,
+    pub ns: u32,
+    pub sd: u32,
+    pub tab: [u32; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    Stage(Stage),
+    Local(Local),
+    Chirp(Chirp),
+}
+
+/// One launch between work buffers 0 and 1 (dense, `total` elements each) and 2 and 3
+/// (Bluestein, `ybuf` elements each). `total` is the launch's element count (output
+/// elements; lines times length for `local`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pass {
+    pub op: Op,
+    pub src: u8,
+    pub dst: u8,
+    pub dir: Dir,
+    pub total: u64,
+}
+
+/// Stage radices of a `local` transform: 8s, then 4, 2, then the odd factors.
+pub fn local_factors(mut n: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    for r in [8, 4, 2] {
+        while n % r == 0 {
+            out.push(r);
+            n /= r;
+        }
+    }
+    out.extend(factorize(n).into_iter().filter(|&f| f > 1));
+    out
+}
+
+fn local_ok(n: u32, double: bool) -> bool {
+    n <= local_cap(double) && local_factors(n).iter().all(|&r| r <= MAX_LOCAL_RADIX) && local_factors(n).len() <= 10
+}
+
+fn pack(radices: &[u32]) -> u64 {
+    radices.iter().enumerate().fold(0u64, |acc, (i, &r)| acc | (u64::from(r) << (6 * i)))
+}
+
+/// Builds the pass list and twiddle tables of a plan.
+struct Builder {
+    double: bool,
+    tables: Vec<(Table, u32)>,
+    next: u32,
+    passes: Vec<Pass>,
+    ybuf: u64,
+}
+
+impl Builder {
+    fn table(&mut self, t: Table) -> u32 {
+        if let Some(&(_, off)) = self.tables.iter().find(|(x, _)| *x == t) {
+            return off;
+        }
+        let off = self.next;
+        self.tables.push((t, off));
+        self.next += t.len();
+        off
+    }
+
+    fn local(&mut self, l: u32, src: u8, dst: u8, dir: Dir, mut p: Local) {
+        let cap = local_cap(self.double);
+        p.l = l;
+        p.radices = pack(&local_factors(l));
+        // lines per work-group: a power of two (the kernel splits indices with shifts)
+        p.g = 1 << (cap / l).max(1).ilog2();
+        p.tw = self.table(Table::Roots { n: l });
+        self.passes.push(Pass { op: Op::Local(p), src, dst, dir, total: u64::from(p.nl) * u64::from(l) });
+    }
+
+    /// Transforms the dimension of length `len` (elements `sd` apart, `outer` blocks) of
+    /// buffer `cur` (scratch partner `other`); returns the buffer holding the result.
+    fn dim(&mut self, len: u32, sd: u32, outer: u32, cur: u8, other: u8, dir: Dir, bluestein: bool) -> u8 {
+        let cap = local_cap(self.double);
+        let total = u64::from(outer) * u64::from(len) * u64::from(sd);
+        let largest = factorize(len).into_iter().max().unwrap_or(1);
+        if bluestein && largest > MAX_LOCAL_RADIX {
+            return self.bluestein(len, sd, outer, cur, other, dir);
+        }
+        let plain = Local { nl: outer * sd, l: 0, ni: sd, sa: len * sd, sb: 1, sj: sd, da: len * sd, db: 1, dj: sd, radices: 0, g: 0, tw: 0, tw2: None };
+        if local_ok(len, self.double) {
+            self.local(len, cur, other, dir, plain);
+            return other;
+        }
+        if sd == 1 {
+            // four-step: the most balanced split n1 n2 with both factors local-sized
+            let split = (1..=cap).filter(|&n1| len % n1 == 0 && local_ok(n1, self.double) && local_ok(len / n1, self.double)).min_by_key(|&n1| n1.abs_diff(len / n1));
+            if let Some(n1) = split {
+                let n2 = len / n1;
+                let tw2 = Some(self.table(Table::Roots { n: len }));
+                self.local(n1, cur, other, dir, Local { nl: outer * n2, ni: n2, sa: len, sb: 1, sj: n2, da: len, db: 1, dj: n2, tw2, ..plain });
+                self.local(n2, other, cur, dir, Local { nl: outer * n1, ni: n1, sa: len, sb: n2, sj: 1, da: len, db: 1, dj: n1, ..plain });
+                return cur;
+            }
+        }
+        let tw_offset = self.table(Table::Roots { n: len });
+        let (mut a, mut b) = (cur, other);
+        let mut p = 1;
+        for r in factorize(len) {
+            let s = Stage { n: len, sd, r, p, twstep: len / (p * r), tw_offset };
+            self.passes.push(Pass { op: Op::Stage(s), src: a, dst: b, dir, total });
+            std::mem::swap(&mut a, &mut b);
+            p *= r;
+        }
+        a
+    }
+
+    fn bluestein(&mut self, len: u32, sd: u32, outer: u32, cur: u8, other: u8, dir: Dir) -> u8 {
+        let m = (2 * len - 1).next_power_of_two();
+        let ytot = u64::from(outer) * u64::from(m) * u64::from(sd);
+        self.ybuf = self.ybuf.max(ytot);
+        let pair = |b: &mut Builder, f: &dyn Fn(bool) -> Table| [b.table(f(false)), b.table(f(true))];
+        let tin = pair(self, &|inverse| Table::ChirpIn { n: len, inverse });
+        let tb = pair(self, &|inverse| Table::ChirpB { n: len, m, inverse });
+        let tout = pair(self, &|inverse| Table::ChirpOut { n: len, m, inverse });
+        assert_eq!(dir, Dir::Exec, "Bluestein inside Bluestein");
+        self.passes.push(Pass { op: Op::Chirp(Chirp { nd: m, ns: len, sd, tab: tin }), src: cur, dst: 2, dir, total: ytot });
+        let r = self.dim(m, sd, outer, 2, 3, Dir::Forward, false);
+        self.passes.push(Pass { op: Op::Chirp(Chirp { nd: m, ns: m, sd, tab: tb }), src: r, dst: r, dir, total: ytot });
+        let r2 = self.dim(m, sd, outer, r, 5 - r, Dir::Inverse, false);
+        let total = u64::from(outer) * u64::from(len) * u64::from(sd);
+        self.passes.push(Pass { op: Op::Chirp(Chirp { nd: len, ns: m, sd, tab: tout }), src: r2, dst: other, dir, total });
+        other
+    }
+}
+
+/// In-place iterative radix-2 FFT (forward, unnormalized) of a power-of-two length.
+fn fft_pow2(a: &mut [C]) {
+    let n = a.len();
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            a.swap(i, j);
+        }
+    }
+    let mut len = 2;
+    while len <= n {
+        let ang = -2.0 * std::f64::consts::PI / len as f64;
+        for start in (0..n).step_by(len) {
+            for k in 0..len / 2 {
+                let w = ((ang * k as f64).cos(), (ang * k as f64).sin());
+                let (u, v) = (a[start + k], a[start + k + len / 2]);
+                let t = (v.0 * w.0 - v.1 * w.1, v.0 * w.1 + v.1 * w.0);
+                a[start + k] = (u.0 + t.0, u.1 + t.1);
+                a[start + k + len / 2] = (u.0 - t.0, u.1 - t.1);
+            }
+        }
+        len <<= 1;
+    }
+}
+
+/// `exp(-+ i pi j^2 / n)` with `j^2` reduced modulo `2n` first.
+fn chirp(j: u32, n: u32, inverse: bool) -> C {
+    let r = (u64::from(j) * u64::from(j)) % (2 * u64::from(n));
+    let a = std::f64::consts::PI * r as f64 / f64::from(n) * if inverse { 1.0 } else { -1.0 };
+    (a.cos(), a.sin())
+}
+
+impl Table {
+    /// The table's values (f64).
+    pub fn values(self) -> Vec<C> {
+        match self {
+            Table::Roots { n } => (0..n)
+                .map(|t| {
+                    let a = -2.0 * std::f64::consts::PI * f64::from(t) / f64::from(n);
+                    (a.cos(), a.sin())
+                })
+                .collect(),
+            Table::ChirpIn { n, inverse } => (0..n).map(|j| chirp(j, n, inverse)).collect(),
+            Table::ChirpOut { n, m, inverse } => (0..n)
+                .map(|k| {
+                    let c = chirp(k, n, inverse);
+                    (c.0 / f64::from(m), c.1 / f64::from(m))
+                })
+                .collect(),
+            Table::ChirpB { n, m, inverse } => {
+                let mut b = vec![(0.0, 0.0); m as usize];
+                for j in 0..n {
+                    let c = chirp(j, n, inverse);
+                    let v = (c.0, -c.1);
+                    b[j as usize] = v;
+                    if j > 0 {
+                        b[(m - j) as usize] = v;
+                    }
+                }
+                fft_pow2(&mut b);
+                b
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Desc {
     pub ty: FftType,
@@ -118,9 +410,16 @@ pub struct Desc {
     /// Basic layout (no `inembed`/`onembed`): for an in-place real transform cuFFT pads the
     /// real side's last dimension to `2 * (n / 2 + 1)`; these strides replace the real side's.
     pub in_place_real: Option<Strides>,
-    pub stages: Vec<Stage>,
-    /// `(n, offset)` for each twiddle table in the twiddle buffer.
-    pub tw_tables: Vec<(u32, u32)>,
+    pub passes: Vec<Pass>,
+    /// The tables of the twiddle buffer with their offsets (complex elements).
+    pub tables: Vec<(Table, u32)>,
+    /// Elements of each Bluestein buffer (2 and 3), 0 without Bluestein.
+    pub ybuf: u64,
+    /// The work buffer holding the transform after the last pass (0 or 1).
+    pub result: u8,
+    /// C2C with dense input and output: the first pass reads the input (buffer 4) and the
+    /// last writes the output (buffer 5), with no gather or scatter launch.
+    pub direct: bool,
 }
 
 /// Radices for an `n`-point Stockham pass, largest-first for powers of two. A prime factor
@@ -238,30 +537,40 @@ pub fn describe(
     for (d, &x) in n.iter().enumerate() {
         dims[3 - rank + d] = x as u32;
     }
-    let mut stages = Vec::new();
-    let mut tw_tables: Vec<(u32, u32)> = Vec::new();
-    let mut tw_next = 0u32;
+    let mut b = Builder { double: ty.double, tables: Vec::new(), next: 0, passes: Vec::new(), ybuf: 0 };
+    let mut cur = 0u8;
     for d in 0..3 {
         let len = dims[d];
         if len == 1 {
             continue;
         }
-        let tw_offset = match tw_tables.iter().find(|t| t.0 == len) {
-            Some(t) => t.1,
-            None => {
-                tw_tables.push((len, tw_next));
-                tw_next += len;
-                tw_next - len
-            }
-        };
         let sd: u32 = dims[d + 1..].iter().product();
-        let mut p = 1;
-        for r in factorize(len) {
-            stages.push(Stage { n: len, sd, r, p, twstep: len / (p * r), tw_offset });
-            p *= r;
-        }
+        let outer: u32 = batch as u32 * dims[..d].iter().product::<u32>();
+        cur = b.dim(len, sd, outer, cur, 1 - cur, Dir::Exec, true);
     }
-    Ok(Desc { ty, rank, n: dims, batch: batch as u32, input, output, in_place_real, stages, tw_tables })
+    let total = batch as u64 * dims.iter().map(|&x| x as u64).product::<u64>();
+    if b.ybuf > MAX_ELEMS || total > MAX_ELEMS || b.next as u64 > MAX_ELEMS {
+        return Err(INVALID_SIZE);
+    }
+    let mut passes = b.passes;
+    let dense = |s: &Strides| {
+        let mut want = 1i64;
+        for d in (0..3).rev() {
+            if dims[d] > 1 && s[1 + d] != want {
+                return false;
+            }
+            want *= dims[d] as i64;
+        }
+        batch == 1 || s[0] == want
+    };
+    let direct = ty.kind == Kind::C2C && !passes.is_empty() && dense(&input) && dense(&output);
+    let mut result = cur;
+    if direct {
+        passes[0].src = 4;
+        passes.last_mut().unwrap().dst = 5;
+        result = 5;
+    }
+    Ok(Desc { ty, rank, n: dims, batch: batch as u32, input, output, in_place_real, passes, tables: b.tables, ybuf: b.ybuf, result, direct })
 }
 
 impl Desc {
@@ -270,26 +579,42 @@ impl Desc {
         self.batch as u64 * self.n.iter().map(|&x| x as u64).product::<u64>()
     }
 
-    /// Bytes of the work area: two dense complex buffers.
+    /// Bytes of the work area: two dense complex buffers, plus two Bluestein buffers.
     pub fn work_size(&self) -> u64 {
-        2 * self.total() * self.ty.complex_size()
+        (2 * self.total() + 2 * self.ybuf) * self.ty.complex_size()
+    }
+
+    /// Element offset of work buffer `i` (0..4) in the work area.
+    pub fn buf_offset(&self, i: u8) -> u64 {
+        match i {
+            0 => 0,
+            1 => self.total(),
+            2 => 2 * self.total(),
+            _ => 2 * self.total() + self.ybuf,
+        }
+    }
+
+    /// Device address of work buffer `i` (4 and 5: the user's input and output).
+    pub fn buf(&self, work: u64, i: u8, input: u64, output: u64) -> u64 {
+        match i {
+            4 => input,
+            5 => output,
+            _ => work + self.buf_offset(i) * self.ty.complex_size(),
+        }
     }
 
     /// Complex elements of the twiddle buffer.
     pub fn tw_len(&self) -> u32 {
-        self.tw_tables.iter().map(|t| t.0).sum()
+        self.tables.iter().map(|t| t.0.len()).sum()
     }
 
-    /// The twiddle tables `W_n^t = exp(-2 pi i t / n)`, computed in f64, as interleaved
-    /// (re, im) pairs.
+    /// The twiddle buffer (every table, computed in f64) as interleaved (re, im) pairs.
     pub fn twiddles(&self) -> Vec<f64> {
         let mut out = vec![0.0; 2 * self.tw_len() as usize];
-        for &(n, off) in &self.tw_tables {
-            for t in 0..n {
-                let a = -2.0 * std::f64::consts::PI * (t as f64) / (n as f64);
-                let i = 2 * (off + t) as usize;
-                out[i] = a.cos();
-                out[i + 1] = a.sin();
+        for &(t, off) in &self.tables {
+            for (i, v) in t.values().into_iter().enumerate() {
+                out[2 * (off as usize + i)] = v.0;
+                out[2 * (off as usize + i) + 1] = v.1;
             }
         }
         out
@@ -328,9 +653,30 @@ impl Desc {
         a
     }
 
-    pub fn stage_args(&self, s: &Stage, src: u64, dst: u64, tw: u64, inverse: bool) -> Vec<u64> {
+    pub fn stage_args(&self, s: &Stage, total: u64, src: u64, dst: u64, tw: u64, inverse: bool) -> Vec<u64> {
         let tw = tw + s.tw_offset as u64 * self.ty.complex_size();
-        vec![src, dst, tw, self.total(), s.n as u64, s.sd as u64, s.r as u64, s.p as u64, s.twstep as u64, inverse as u64]
+        vec![src, dst, tw, total, s.n as u64, s.sd as u64, s.r as u64, s.p as u64, s.twstep as u64, inverse as u64]
+    }
+
+    /// `local` launch parameters (see `ptxgen::local`).
+    pub fn local_args(&self, l: &Local, src: u64, dst: u64, tw: u64, inverse: bool) -> Vec<u64> {
+        let cs = self.ty.complex_size();
+        let tw2 = l.tw2.map_or(0, |o| tw + u64::from(o) * cs);
+        let mut a = vec![src, dst, tw + u64::from(l.tw) * cs, tw2];
+        a.extend([l.nl, l.l, l.ni, l.sa, l.sb, l.sj, l.da, l.db, l.dj].map(u64::from));
+        a.extend([l.radices, inverse as u64, u64::from(l.g), u64::from(l.g.trailing_zeros())]);
+        a
+    }
+
+    /// Work-groups of a `local` launch.
+    pub fn local_groups(l: &Local) -> u32 {
+        l.nl.div_ceil(l.g)
+    }
+
+    /// `chirp` launch parameters (see `ptxgen::chirp`).
+    pub fn chirp_args(&self, c: &Chirp, total: u64, src: u64, dst: u64, tw: u64, inverse: bool) -> Vec<u64> {
+        let tab = tw + u64::from(c.tab[inverse as usize]) * self.ty.complex_size();
+        vec![src, dst, tab, total, u64::from(c.nd), u64::from(c.ns), u64::from(c.sd)]
     }
 
     /// Output elements written by `scatter`.
@@ -365,7 +711,7 @@ pub fn execute_host(d: &Desc, input: &[f64], output: &mut [f64], inverse: bool, 
         (b as i64 * s[0] + x0 as i64 * s[1] + x1 as i64 * s[2] + x2 as i64 * s[3]) as usize
     };
     // gather
-    let mut a: Vec<C> = (0..total)
+    let a: Vec<C> = (0..total)
         .map(|g| {
             let (mut x2, t) = (g % n2, g / n2);
             let (mut x1, t) = (t % n1, t / n1);
@@ -389,13 +735,31 @@ pub fn execute_host(d: &Desc, input: &[f64], output: &mut [f64], inverse: bool, 
             }
         })
         .collect();
-    // stages
-    let tw = d.twiddles();
-    let mut b = vec![(0.0, 0.0); total];
-    for s in &d.stages {
-        stage_host(s, &a, &mut b, &tw, inverse);
-        std::mem::swap(&mut a, &mut b);
+    // passes over the four work buffers
+    let tw: Vec<C> = d.twiddles().chunks(2).map(|c| (c[0], c[1])).collect();
+    // a direct plan's buffers 4 and 5 (the user's) hold the dense input and output
+    let mut bufs = vec![a.clone(), vec![(0.0, 0.0); total], vec![(0.0, 0.0); d.ybuf as usize], vec![(0.0, 0.0); d.ybuf as usize], a, vec![(0.0, 0.0); total]];
+    for p in &d.passes {
+        let inv = p.dir.inverse(inverse);
+        let src = bufs[p.src as usize].clone();
+        let dst = &mut bufs[p.dst as usize];
+        match p.op {
+            Op::Stage(s) => {
+                let tw_flat: Vec<f64> = tw.iter().flat_map(|v| [v.0, v.1]).collect();
+                stage_host(&s, &src[..p.total as usize], &mut dst[..p.total as usize], &tw_flat, inv);
+            }
+            Op::Local(l) => local_host(&l, &src, dst, &tw, inv),
+            Op::Chirp(c) => {
+                let tab = &tw[c.tab[inverse as usize] as usize..];
+                for g in 0..p.total as usize {
+                    let (inner, t) = (g % c.sd as usize, g / c.sd as usize);
+                    let (j, o) = (t % c.nd as usize, t / c.nd as usize);
+                    dst[g] = if j < c.ns as usize { cmul(src[(o * c.ns as usize + j) * c.sd as usize + inner], tab[j]) } else { (0.0, 0.0) };
+                }
+            }
+        }
     }
+    let a = std::mem::take(&mut bufs[d.result as usize]);
     // scatter
     let m2 = if d.ty.kind == Kind::R2C { n2 / 2 + 1 } else { n2 };
     for g in 0..d.out_total() as usize {
@@ -409,6 +773,52 @@ pub fn execute_host(d: &Desc, input: &[f64], output: &mut [f64], inverse: bool, 
         } else {
             output[2 * o] = v.0;
             output[2 * o + 1] = v.1;
+        }
+    }
+}
+
+fn cmul(a: C, b: C) -> C {
+    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+}
+
+/// A `local` pass, as the kernel computes it: every Stockham stage of the `l`-point
+/// transform per line, then the optional four-step twiddle, then the strided store.
+pub fn local_host(l: &Local, src: &[C], dst: &mut [C], tw: &[C], inverse: bool) {
+    let n = l.l as usize;
+    let roots = &tw[l.tw as usize..];
+    let w = |t: usize| if inverse { (roots[t].0, -roots[t].1) } else { roots[t] };
+    for line in 0..l.nl as usize {
+        let (a, b) = (line / l.ni as usize, line % l.ni as usize);
+        let mut x: Vec<C> = (0..n).map(|j| src[a * l.sa as usize + b * l.sb as usize + j * l.sj as usize]).collect();
+        let mut y = vec![(0.0, 0.0); n];
+        let (mut rad, mut p) = (l.radices, 1usize);
+        while rad & 63 != 0 {
+            let r = (rad & 63) as usize;
+            rad >>= 6;
+            let (pr, m) = (p * r, n / r);
+            let twstep = n / pr;
+            for (o, out) in y.iter_mut().enumerate() {
+                let rem = o % pr;
+                let i = (o / pr) * p + rem % p;
+                let mut acc = (0.0, 0.0);
+                for q in 0..r {
+                    let v = cmul(x[i + q * m], w(((q * rem) % pr) * twstep));
+                    acc = (acc.0 + v.0, acc.1 + v.1);
+                }
+                *out = acc;
+            }
+            std::mem::swap(&mut x, &mut y);
+            p = pr;
+        }
+        for (o, &v) in x.iter().enumerate() {
+            let v = match l.tw2 {
+                Some(off) => {
+                    let t = tw[off as usize + b * o];
+                    cmul(v, if inverse { (t.0, -t.1) } else { t })
+                }
+                None => v,
+            };
+            dst[a * l.da as usize + b * l.db as usize + o * l.dj as usize] = v;
         }
     }
 }
@@ -488,6 +898,55 @@ mod tests {
     }
 
     #[test]
+    fn pass_selection() {
+        let z = |n: &[i64]| describe(n.len() as i64, n, None, 0, 0, None, 0, 0, t(0x69), 1).unwrap();
+        let kinds = |d: &Desc| d.passes.iter().map(|p| match p.op { Op::Stage(_) => 'S', Op::Local(_) => 'L', Op::Chirp(_) => 'C' }).collect::<String>();
+        assert_eq!(kinds(&z(&[1000])), "L");
+        // 4096 > 1024 (f64 cap): four-step 64 x 64
+        assert_eq!(kinds(&z(&[4096])), "LL");
+        // prime 4099: chirp, 16384-point FFT (four-step), product, inverse, chirp
+        assert_eq!(kinds(&z(&[4099])), "CLLCLLC");
+        let d = z(&[4099]);
+        assert_eq!(d.ybuf, 16384);
+        assert_eq!(d.work_size(), (2 * 4099 + 2 * 16384) * 16);
+        // f32 holds 2048 per pass
+        let c = describe(1, &[2048], None, 0, 0, None, 0, 0, t(0x29), 1).unwrap();
+        assert_eq!(kinds(&c), "L");
+        // a long non-last dimension falls back to global stages
+        assert_eq!(kinds(&z(&[2048, 2])), "SSSSSSL");
+        assert_eq!(local_factors(2048), vec![8, 8, 8, 4]);
+        assert_eq!(local_factors(1000), vec![8, 5, 5, 5]);
+    }
+
+    #[test]
+    fn bluestein_tables_reproduce_the_dft() {
+        // the chirp-z identity on the host with the tables' values
+        let (n, m) = (11u32, 32u32);
+        for inverse in [false, true] {
+            let x: Vec<C> = (0..n).map(|j| (f64::from(j) * 0.3 - 1.0, 0.5 - f64::from(j % 3))).collect();
+            let cin = Table::ChirpIn { n, inverse }.values();
+            let bf = Table::ChirpB { n, m, inverse }.values();
+            let cout = Table::ChirpOut { n, m, inverse }.values();
+            let mut a = vec![(0.0, 0.0); m as usize];
+            for j in 0..n as usize {
+                a[j] = cmul(x[j], cin[j]);
+            }
+            fft_pow2(&mut a);
+            for (v, b) in a.iter_mut().zip(&bf) {
+                *v = cmul(*v, *b);
+            }
+            // inverse FFT = conj(FFT(conj))
+            for v in a.iter_mut() {
+                v.1 = -v.1;
+            }
+            fft_pow2(&mut a);
+            let got: Vec<C> = (0..n as usize).map(|k| cmul((a[k].0, -a[k].1), cout[k])).collect();
+            let want = naive_dft([1, 1, n as usize], 1, &x, inverse);
+            assert!(max_err(&got, &want) < 1e-12, "inverse {inverse}");
+        }
+    }
+
+    #[test]
     fn types_decode() {
         assert_eq!(t(0x2a), FftType { kind: Kind::R2C, double: false });
         assert_eq!(t(0x6c), FftType { kind: Kind::C2R, double: true });
@@ -520,8 +979,13 @@ mod tests {
         let z = describe(3, &[2, 3, 4], None, 0, 0, None, 0, 0, t(0x69), 1).unwrap();
         assert_eq!(z.input, [24, 12, 4, 1]);
         assert_eq!(z.work_size(), 2 * 24 * 16);
-        assert_eq!(z.tw_tables, vec![(2, 0), (3, 2), (4, 5)]);
-        assert_eq!(z.stages.iter().map(|s| (s.n, s.sd, s.r, s.p)).collect::<Vec<_>>(), vec![(2, 12, 2, 1), (3, 4, 3, 1), (4, 1, 4, 1)]);
+        assert_eq!(z.tables, vec![(Table::Roots { n: 2 }, 0), (Table::Roots { n: 3 }, 2), (Table::Roots { n: 4 }, 5)]);
+        // every dimension fits one shared-memory pass
+        assert_eq!(z.passes.len(), 3);
+        assert!(z.passes.iter().all(|p| matches!(p.op, Op::Local(_))));
+        assert!(z.direct);
+        assert_eq!((z.passes[0].src, z.result), (4, 5));
+        assert!(!d.direct);
         // advanced layout: interleaved batches (stride = batch, dist = 1), as torch emits
         let a = describe(1, &[8], Some(&[8]), 4, 1, Some(&[5]), 1, 5, t(0x2a), 4).unwrap();
         assert_eq!(a.input, [1, 0, 0, 4]);
@@ -549,8 +1013,27 @@ mod tests {
     /// C2C through the host model of the kernels against the naive DFT, both directions.
     #[test]
     fn host_pipeline_c2c_matches_naive() {
-        let shapes: &[(&[i64], i64)] =
-            &[(&[1], 2), (&[2], 1), (&[8], 3), (&[12], 2), (&[105], 1), (&[97], 2), (&[64], 1), (&[6, 10], 2), (&[4, 3, 5], 1), (&[16, 9], 1)];
+        // local, Bluestein (127, 2 * 131, 4099 and a non-last 67), four-step (4096 > the f64
+        // local cap of 1024), and mixed
+        let shapes: &[(&[i64], i64)] = &[
+            (&[1], 2),
+            (&[2], 1),
+            (&[8], 3),
+            (&[12], 2),
+            (&[105], 1),
+            (&[97], 2),
+            (&[64], 1),
+            (&[6, 10], 2),
+            (&[4, 3, 5], 1),
+            (&[16, 9], 1),
+            (&[127], 2),
+            (&[262], 1),
+            (&[67, 6], 1),
+            (&[5, 71], 1),
+            (&[4096], 1),
+            (&[3000], 1),
+            (&[4099], 1),
+        ];
         for &(n, batch) in shapes {
             let d = describe(n.len() as i64, n, None, 0, 0, None, 0, 0, t(0x69), batch).unwrap();
             let total = d.total() as usize;

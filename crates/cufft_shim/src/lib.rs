@@ -150,6 +150,8 @@ struct Kernels {
     gather: usize,
     stage: usize,
     scatter: usize,
+    local: usize,
+    chirp: usize,
 }
 
 fn kernels(drv: &Driver, ctx: usize, double: bool) -> Result<Kernels, i32> {
@@ -171,7 +173,13 @@ fn kernels(drv: &Driver, ctx: usize, double: bool) -> Result<Kernels, i32> {
         let err = unsafe { (drv.cuModuleGetFunction)(&mut f, module, c.as_ptr()) };
         if err != 0 || f.is_null() { Err(INTERNAL_ERROR) } else { Ok(f as usize) }
     };
-    let k = Kernels { gather: get(ptxgen::gather_name(double))?, stage: get(ptxgen::stage_name(double))?, scatter: get(ptxgen::scatter_name(double))? };
+    let k = Kernels {
+        gather: get(ptxgen::gather_name(double))?,
+        stage: get(ptxgen::stage_name(double))?,
+        scatter: get(ptxgen::scatter_name(double))?,
+        local: get(ptxgen::local_name(double))?,
+        chirp: get(ptxgen::chirp_name(double))?,
+    };
     cache.insert((ctx, double), k);
     Ok(k)
 }
@@ -179,10 +187,13 @@ fn kernels(drv: &Driver, ctx: usize, double: bool) -> Result<Kernels, i32> {
 const BLOCK: u32 = 256;
 
 fn launch(drv: &Driver, f: usize, total: u64, stream: usize, args: &[u64]) -> Result<(), i32> {
+    launch_groups(drv, f, total.div_ceil(BLOCK as u64) as u32, stream, args)
+}
+
+fn launch_groups(drv: &Driver, f: usize, grid: u32, stream: usize, args: &[u64]) -> Result<(), i32> {
     // Every parameter slot is 8 bytes; 32-bit parameters read the low half (little endian).
     let mut slots: Vec<u64> = args.to_vec();
     let mut ptrs: Vec<*mut c_void> = slots.iter_mut().map(|v| (v as *mut u64).cast()).collect();
-    let grid = total.div_ceil(BLOCK as u64) as u32;
     let err = unsafe {
         (drv.cuLaunchKernel)(f as CUfunction, grid, 1, 1, BLOCK, 1, 1, 0, stream as CUstream, ptrs.as_mut_ptr(), std::ptr::null_mut())
     };
@@ -354,7 +365,7 @@ fn make_plan(h: c_int, m: &Many, ty: Result<FftType, i32>, work: *mut usize) -> 
                 }
                 write_size(work, desc.work_size());
             }
-            trace!("plan {h}: {:?} n={:?} batch={} in={:?} out={:?} stages={} work={}", desc.ty, desc.n, desc.batch, desc.input, desc.output, desc.stages.len(), desc.work_size());
+            trace!("plan {h}: {:?} n={:?} batch={} in={:?} out={:?} passes={} work={}", desc.ty, desc.n, desc.batch, desc.input, desc.output, desc.passes.len(), desc.work_size());
             p.ctx = ctx;
             p.desc = Some(desc);
             Ok(())
@@ -702,14 +713,22 @@ fn exec(h: c_int, want: Option<FftType>, idata: *mut c_void, odata: *mut c_void,
         let in_place = idata == odata;
         let (is, os) = desc.exec_strides(in_place);
         trace!("exec plan {h}: {:?} inverse={inverse} in_place={in_place} stream={stream:#x}", desc.ty);
-        let half = desc.total() * desc.ty.complex_size();
-        launch(drv, k.gather, desc.total(), stream, &desc.gather_args(idata as u64, work, &is))?;
-        let (mut a, mut b) = (work, work + half);
-        for s in &desc.stages {
-            launch(drv, k.stage, desc.total(), stream, &desc.stage_args(s, a, b, tw, inverse))?;
-            std::mem::swap(&mut a, &mut b);
+        if !desc.direct {
+            launch(drv, k.gather, desc.total(), stream, &desc.gather_args(idata as u64, work, &is))?;
         }
-        launch(drv, k.scatter, desc.out_total(), stream, &desc.scatter_args(a, odata as u64, &os))
+        for p in &desc.passes {
+            let buf = |i| desc.buf(work, i, idata as u64, odata as u64);
+            let (src, dst, inv) = (buf(p.src), buf(p.dst), p.dir.inverse(inverse));
+            match &p.op {
+                Op::Stage(s) => launch(drv, k.stage, p.total, stream, &desc.stage_args(s, p.total, src, dst, tw, inv))?,
+                Op::Local(l) => launch_groups(drv, k.local, Desc::local_groups(l), stream, &desc.local_args(l, src, dst, tw, inv))?,
+                Op::Chirp(c) => launch(drv, k.chirp, p.total, stream, &desc.chirp_args(c, p.total, src, dst, tw, inverse))?,
+            }
+        }
+        if desc.direct {
+            return Ok(());
+        }
+        launch(drv, k.scatter, desc.out_total(), stream, &desc.scatter_args(desc.buf(work, desc.result, 0, 0), odata as u64, &os))
     })();
     status(r)
 }

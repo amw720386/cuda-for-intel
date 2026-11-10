@@ -29,7 +29,7 @@ fn cufft_kernels_translate_and_validate() {
     // the three-entry module the shim loads
     for double in [false, true] {
         let t = translate(&pg::module(double)).unwrap();
-        assert_eq!(t.kernels.len(), 3);
+        assert_eq!(t.kernels.len(), 5);
     }
 }
 
@@ -51,9 +51,11 @@ impl Kernels {
         Kernels { sims }
     }
     fn run(&mut self, idx: usize, gpu: &mut Gpu, total: u64, args: Vec<u64>) {
+        self.run_groups(idx, gpu, (total as u32).div_ceil(64), 64, args);
+    }
+    fn run_groups(&mut self, idx: usize, gpu: &mut Gpu, grid: u32, block: u32, args: Vec<u64>) {
         let (name, sim) = &mut self.sims[idx];
-        let grid = (total as u32).div_ceil(64);
-        sim.run(gpu, &Launch::new([grid, 1, 1], [64, 1, 1], args)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        sim.run(gpu, &Launch::new([grid, 1, 1], [block, 1, 1], args)).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(gpu.violations.borrow().is_empty(), "{name}: {:?}", gpu.violations.borrow());
     }
 }
@@ -84,16 +86,22 @@ fn run_sim(d: &Desc, input: &[f64], out_scalars: usize, inverse: bool, in_place:
     let src = gpu.upload(&ibytes);
     let dst = if in_place { src } else { gpu.alloc(out_scalars * rs) };
     let tw = gpu.upload(&d.twiddle_bytes());
-    let half = d.total() * d.ty.complex_size();
-    let work = gpu.alloc(2 * half as usize);
+    let work = gpu.alloc(d.work_size() as usize);
     let (is, os) = d.exec_strides(in_place);
-    k.run(0, &mut gpu, d.total(), d.gather_args(src, work, &is));
-    let (mut a, mut b) = (work, work + half);
-    for s in &d.stages {
-        k.run(1, &mut gpu, d.total(), d.stage_args(s, a, b, tw, inverse));
-        std::mem::swap(&mut a, &mut b);
+    if !d.direct {
+        k.run(0, &mut gpu, d.total(), d.gather_args(src, work, &is));
     }
-    k.run(2, &mut gpu, d.out_total(), d.scatter_args(a, dst, &os));
+    for p in &d.passes {
+        let (a, b, inv) = (d.buf(work, p.src, src, dst), d.buf(work, p.dst, src, dst), p.dir.inverse(inverse));
+        match &p.op {
+            plan::Op::Stage(s) => k.run(1, &mut gpu, p.total, d.stage_args(s, p.total, a, b, tw, inv)),
+            plan::Op::Local(l) => k.run_groups(3, &mut gpu, Desc::local_groups(l), pg::LOCAL_BLOCK, d.local_args(l, a, b, tw, inv)),
+            plan::Op::Chirp(c) => k.run(4, &mut gpu, p.total, d.chirp_args(c, p.total, a, b, tw, inverse)),
+        }
+    }
+    if !d.direct {
+        k.run(2, &mut gpu, d.out_total(), d.scatter_args(d.buf(work, d.result, 0, 0), dst, &os));
+    }
     dec(dbl, &gpu.download(dst, out_scalars * rs))
 }
 
@@ -134,6 +142,10 @@ fn sim_c2c_z2z_sizes_and_batches() {
         (&[32], 2, 0x69, 1e-13),
         (&[45], 1, 0x69, 1e-13),
         (&[4, 5, 3], 1, 0x69, 1e-13),
+        // Bluestein (prime 67 > 63, also along a non-last dimension) and four-step (f64 cap 1024)
+        (&[67], 2, 0x29, 1e-5),
+        (&[67, 3], 1, 0x69, 1e-12),
+        (&[2048], 1, 0x69, 1e-12),
     ];
     for &(n, batch, code, tol) in cases {
         let d = plan::describe(n.len() as i64, n, None, 0, 0, None, 0, 0, ty(code), batch).unwrap();

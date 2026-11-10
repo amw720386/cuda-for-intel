@@ -174,6 +174,15 @@ fn hw_cufft_transforms_match_host_dft() {
         (&[4099], 1, true, false),
         (&[30, 14], 2, true, false),
         (&[6, 10, 9], 1, true, false),
+        // Bluestein (prime factor > 63; chirp-z convolution of a power-of-two length)
+        (&[10007], 1, false, false),
+        (&[4099], 2, false, true),
+        (&[2062], 1, true, false),
+        (&[131, 6], 1, false, false),
+        // four-step (longer than one shared-memory pass: 2048 f32, 1024 f64)
+        (&[16384], 1, false, false),
+        (&[8192], 1, true, true),
+        (&[3, 6000], 1, false, false),
     ];
     for &(n, batch, double, in_place) in c2c {
         let nu: Vec<usize> = n.iter().map(|&v| v as usize).collect();
@@ -188,7 +197,7 @@ fn hw_cufft_transforms_match_host_dft() {
         for dir in [-1, 1] {
             let got = device_run(double, &x, 2 * total, in_place, &|i, o| unsafe { exec(plan, i as *mut c_void, o as *mut c_void, dir) });
             let e = rel_err(&pairs(&got), &dft(&nu, batch as usize, &pairs(&x), dir == 1));
-            let tol = if double { 1e-12 } else { 1e-5 };
+            let tol = if double { 1e-12 } else if total > 4096 { 2e-5 } else { 1e-5 };
             println!("  C2C {n:?} batch {batch} {} dir {dir} in_place {in_place}: rel err {e:.2e}", if double { "f64" } else { "f32" });
             assert!(e < tol, "C2C {n:?} double={double} dir={dir}: {e}");
             cases += 1;
