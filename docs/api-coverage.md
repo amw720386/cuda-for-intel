@@ -39,7 +39,7 @@ Behaviour notes for the entry points that are not plain forwards:
 | cuBLASLt | 45 | 17 | 28 | 0 | 0 | 11 (11/0/0) |
 | NVML | 398 | 33 | 365 | 0 | 0 | 0 (0/0/0) |
 | cuFFT | 60 | 38 | 22 | 0 | 0 | 7 (7/0/0) |
-| cuSPARSE | 448 | 81 | 367 | 0 | 0 | 98 (36/62/0) |
+| cuSPARSE | 448 | 92 | 356 | 0 | 0 | 98 (46/52/0) |
 | cuSOLVER | 97 | 0 | 97 | 0 | 0 | 97 (0/97/0) |
 
 ## CUDA driver API (cuda.h)
@@ -2325,8 +2325,8 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseDcsr2gebsr_bufferSize` | stub | core |  |
 | `cusparseDcsr2gebsr_bufferSizeExt` | stub | core |  |
 | `cusparseDcsrcolor` | stub | core |  |
-| `cusparseDcsrgeam2` | stub | core | yes |
-| `cusparseDcsrgeam2_bufferSizeExt` | stub | core | yes |
+| `cusparseDcsrgeam2` | implemented | core | yes |
+| `cusparseDcsrgeam2_bufferSizeExt` | implemented | core | yes |
 | `cusparseDcsric02` | stub | core |  |
 | `cusparseDcsric02_analysis` | stub | core |  |
 | `cusparseDcsric02_bufferSize` | stub | core |  |
@@ -2447,8 +2447,8 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseScsr2gebsr_bufferSize` | stub | core |  |
 | `cusparseScsr2gebsr_bufferSizeExt` | stub | core |  |
 | `cusparseScsrcolor` | stub | core |  |
-| `cusparseScsrgeam2` | stub | core | yes |
-| `cusparseScsrgeam2_bufferSizeExt` | stub | core | yes |
+| `cusparseScsrgeam2` | implemented | core | yes |
+| `cusparseScsrgeam2_bufferSizeExt` | implemented | core | yes |
 | `cusparseScsric02` | stub | core |  |
 | `cusparseScsric02_analysis` | stub | core |  |
 | `cusparseScsric02_bufferSize` | stub | core |  |
@@ -2487,13 +2487,13 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseSgtsvInterleavedBatch_bufferSizeExt` | stub | core |  |
 | `cusparseSnnz` | stub | core |  |
 | `cusparseSnnz_compress` | stub | core |  |
-| `cusparseSpGEMM_compute` | stub | core | yes |
-| `cusparseSpGEMM_copy` | stub | core | yes |
-| `cusparseSpGEMM_createDescr` | stub | core | yes |
-| `cusparseSpGEMM_destroyDescr` | stub | core | yes |
+| `cusparseSpGEMM_compute` | implemented | core | yes |
+| `cusparseSpGEMM_copy` | implemented | core | yes |
+| `cusparseSpGEMM_createDescr` | implemented | core | yes |
+| `cusparseSpGEMM_destroyDescr` | implemented | core | yes |
 | `cusparseSpGEMM_estimateMemory` | stub | core |  |
-| `cusparseSpGEMM_getNumProducts` | stub | core |  |
-| `cusparseSpGEMM_workEstimation` | stub | core | yes |
+| `cusparseSpGEMM_getNumProducts` | implemented | core |  |
+| `cusparseSpGEMM_workEstimation` | implemented | core | yes |
 | `cusparseSpGEMMreuse_compute` | stub | core |  |
 | `cusparseSpGEMMreuse_copy` | stub | core |  |
 | `cusparseSpGEMMreuse_nnz` | stub | core |  |
@@ -2560,7 +2560,7 @@ Binary: `cusparse64_12`. Exported but not in the reference list: 0.
 | `cusparseXcsr2bsrNnz` | stub | core |  |
 | `cusparseXcsr2coo` | implemented | core |  |
 | `cusparseXcsr2gebsrNnz` | stub | core |  |
-| `cusparseXcsrgeam2Nnz` | stub | core | yes |
+| `cusparseXcsrgeam2Nnz` | implemented | core | yes |
 | `cusparseXcsric02_zeroPivot` | stub | core |  |
 | `cusparseXcsrilu02_zeroPivot` | stub | core |  |
 | `cusparseXcsrsort` | stub | core | yes |

@@ -42,7 +42,7 @@ Caveats (measured):
 | cuBLASLt | 45 | 18 | 17 | 13 | 5 | 4 | 11: 11 / 11 |
 | cuDNN 9 | 220 | 40 | 94 | 37 | 3 | 57 | not in the import list (torch loads cuDNN lazily) |
 | cuFFT | 60 | 32 | 38 | 32 | 0 | 6 | 7: 5 / 7 |
-| cuSPARSE | 448 | 16 | 81 | 16 | 0 | 65 | 98: 8 / 36 |
+| cuSPARSE | 448 | 16 | 92 | 16 | 0 | 76 | 98: 8 / 46 |
 | NVML | 398 | 15 | 33 | 13 | 2 | 20 | 0 |
 | cuSOLVER | no crate | 0 | 2 (version getters) | 0 | 0 | 2 | 97: 0 / 0 |
 | cuRAND | no crate | 0 | no crate | - | - | - | torch does not import it (it uses Philox in ATen) |
@@ -62,7 +62,7 @@ Texture support is what ZLUDA's Q1/Q2 2026 post credits for Blender working.
 
 **cuFFT (0).** ZLUDA's 32 (plan creation 1d/2d/3d/many/many64, size estimates, `Exec{C2C,R2C,C2R,Z2Z,D2Z,Z2D}`, `SetStream`, `SetWorkArea`, `SetAutoAllocation`, through hipFFT) are all implemented since item 9. We also implement `cufftXtMakePlanMany`, `cufftXtExec`, `cufftXtGetSizeMany` and the three plan-property calls.
 
-**cuSPARSE (0).** ZLUDA's 16 (`cusparseCreate`/`Destroy`, dense and COO descriptors, the legacy descriptor getters, and `cusparseSpMM` with bufferSize and preprocess, through rocSPARSE) are all implemented since the cuSPARSE shim. We also implement CSR/CSC descriptors, `cusparseSpMV`, `cusparseSDDMM`, `cusparse{S,D}bsr{mv,mm}`, `cusparseXcoo2csr`/`Xcsr2coo`, `cusparseCreateIdentityPermutation`, strided batches and pointer mode (81 in all; f32 and f64 only).
+**cuSPARSE (0).** ZLUDA's 16 (`cusparseCreate`/`Destroy`, dense and COO descriptors, the legacy descriptor getters, and `cusparseSpMM` with bufferSize and preprocess, through rocSPARSE) are all implemented since the cuSPARSE shim. We also implement CSR/CSC descriptors, `cusparseSpMV`, `cusparseSDDMM`, `cusparse{S,D}bsr{mv,mm}`, `cusparseXcoo2csr`/`Xcsr2coo`, `cusparseCreateIdentityPermutation`, SpGEMM and S/D `csrgeam2`, strided batches and pointer mode (92 in all; f32 and f64 only).
 
 **cuBLAS (1)**, **cuBLASLt (5)** and **cuDNN (3)**: version, status-string and vector-copy helpers only. These are trivial. The cuBLAS one is `cublasGetCudartVersion`, which we implement as a constant and the audit therefore counts as a stub.
 
@@ -81,7 +81,7 @@ Texture support is what ZLUDA's Q1/Q2 2026 post credits for Blender working.
 
 - **cuBLAS (none; 39 before item 10).** The last 8, the batched QR and least-squares helpers `cublas{S,D,C,Z}geqrfBatched` and `cublas{S,D,C,Z}gelsBatched` (torch's batched `linalg.qr` and `lstsq`), are implemented since 2026-11-09 (`hw-logs/cublas-qr-perf-2026-11-09.md`).
 - **cuSOLVER (97 of 97).** All `torch.linalg` decompositions.
-- **cuSPARSE (62 of 98).** SpGEMM (sparse @ sparse), `csrgeam2` (sparse + sparse), SpSV/SpSM and `bsrsv2`/`bsrsm2` (triangular solves), `Xcsrsort`/`Xcoosort`, and the complex `C`/`Z` BSR products. We implement the other 36 (generic descriptors, SpMV, SpMM, SDDMM, S/D `bsrmv`/`bsrmm`, `Xcoo2csr`, legacy descriptors).
+- **cuSPARSE (52 of 98).** SpSV/SpSM and `bsrsv2`/`bsrsm2` (triangular solves), `Xcsrsort`/`Xcoosort`, and the complex `C`/`Z` BSR products. We implement the other 46 (generic descriptors, SpMV, SpMM, SDDMM, SpGEMM, S/D `csrgeam2`, S/D `bsrmv`/`bsrmm`, `Xcoo2csr`, legacy descriptors); the remaining ones also include the complex `csrgeam2` and `SpGEMMreuse`.
 - **cuFFT: none since item 9.** torch 2.x plans FFTs through `cufftXtMakePlanMany` and `cufftXtExec`, which ZLUDA does not implement (both names are absent from its implemented list); we implement both.
 
 ## 2. Gap table
@@ -95,7 +95,7 @@ The effort column uses S for at most a day, M for a few days and L for more than
 | Driver API core | 156 implemented | 229 implemented | §1 | We lead (graphs, pools, IPC) | - |
 | Texture, surface and arrays | Implemented (`zluda/src/impl/{tex,surf,array}.rs`); PTX `tex`/`suld`/`sust` in the parser | Emulated on linear memory (items 16, 17): arrays and 2D/3D copies, texture objects (array, linear, pitch-2D; all address and filter modes) and surface objects; `tex`/`txq`/`suld.b`/`sust.b`/`suq` on handles. The 12 ZLUDA texobj fixtures pass on the B390. Texture references, `tld4`, layered/cube and mipmaps are not done | `docs/textures.md`, `tests/gpu/hw_texture.rs`, `hw-logs/textures-2026-11-09.md` | Medium: Blender and image ops. Low for LLMs | - (texrefs: M) |
 | cuFFT | 32, via hipFFT | 38: ZLUDA's 32 plus torch's `cufftXt*` path, own Stockham PTX kernels (item 9 done) | §1, `hw-logs/cufft-2026-11-09.md` | Medium: `torch.fft`, audio models (STFT in Whisper preprocessing) | - |
-| cuSPARSE | 16 (SpMM) | 81: ZLUDA's 16 plus CSR/CSC/COO SpMV, SpMM, SDDMM, S/D BSR mv/mm, own PTX kernels | §1, `hw-logs/cusparse-2026-11-09.md` | Low to medium: sparse torch, GNNs. Missing: SpGEMM, csrgeam2, triangular solves | - |
+| cuSPARSE | 16 (SpMM) | 92: ZLUDA's 16 plus CSR/CSC/COO SpMV, SpMM, SDDMM, SpGEMM, S/D csrgeam2, S/D BSR mv/mm, own PTX kernels | §1, `hw-logs/cusparse-2026-11-09.md` | Low to medium: sparse torch, GNNs. Missing: triangular solves, complex values | - |
 | cuSOLVER and f64/complex cuBLAS | none | f64/complex cuBLAS done (item 10). No cuSOLVER of our own, but NVIDIA's `cusolver64_11.dll` from `torch\lib` runs on our cuBLAS and driver under `cfi-run` | §1 `--torch-gaps`, `hw-logs/cublas64-2026-11-09.md` | Medium for `torch.linalg`: solve, inv, det, cholesky, qr and lstsq work. eigh is wrong and svd fails inside cuSOLVER's own kernels | L (solver kernels on the translator) |
 | cuDNN | 40 (MIOpen) | 94, opt-in, explicit GEMM | §1, `docs/cudnn-shim.md`, `docs/compatibility.md` | We lead on count. Default-on decision is pending (`gpu-day-checklist.md` §3) | - |
 | PTX opcodes | 74 rule heads in `ptx_parser` (`derive_parser!`) | All 74 names handled or explicitly rejected. Extra: wmma, stmatrix, video SIMD, testp, slct, fns, szext, elect, red. Neither: wgmma, tcgen05, mbarrier, mapa, getctarank | `scripts/zluda_parity/ptx_ops.py` | We lead in breadth for sm_80-class code | - |

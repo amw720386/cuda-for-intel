@@ -23,7 +23,7 @@ fn spirv_val(words: &[u32], name: &str) {
 #[test]
 fn cusparse_kernels_translate_and_validate() {
     let entries = pg::all_entries();
-    assert_eq!(entries.len(), 8 * 6 + 3);
+    assert_eq!(entries.len(), 8 * 6 + 3 + 2 * pg::PRODUCT_KERNELS.len());
     for (name, src, n) in entries {
         let t = translate(&src).unwrap_or_else(|e| panic!("{name}: {e}\n{src}"));
         assert_eq!(t.kernels[0].name, name);
@@ -34,6 +34,9 @@ fn cusparse_kernels_translate_and_validate() {
         assert_eq!(translate(&pg::module(v)).unwrap().kernels.len(), 6);
     }
     assert_eq!(translate(&pg::index_module()).unwrap().kernels.len(), 3);
+    for double in [false, true] {
+        assert_eq!(translate(&pg::product_module(double)).unwrap().kernels.len(), 5);
+    }
 }
 
 #[derive(Default)]
@@ -402,4 +405,119 @@ fn sim_index_kernels() {
     sims.run_named(&mut gpu, pg::IDENTITY, [1, 1, 1], plan::BLOCK, vec![p, 37, 0, 0, 0]);
     let got: Vec<i32> = gpu.download(p, 37 * 4).chunks(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
     assert_eq!(got, (0..37).collect::<Vec<_>>());
+}
+
+/// CSR to dense row-major.
+fn csr_dense(rows: usize, cols: usize, ptr: &[i64], idx: &[i64], val: &[f64]) -> Vec<f64> {
+    let mut d = vec![0.0; rows * cols];
+    for r in 0..rows {
+        for e in ptr[r] as usize..ptr[r + 1] as usize {
+            d[r * cols + idx[e] as usize] += val[e];
+        }
+    }
+    d
+}
+
+fn dec_idx(b: &[u8], wide: bool, base: i64) -> Vec<i64> {
+    if wide { b.chunks(8).map(|c| i64::from_le_bytes(c.try_into().unwrap()) - base).collect() } else { b.chunks(4).map(|c| i64::from(i32::from_le_bytes(c.try_into().unwrap())) - base).collect() }
+}
+
+fn scan(counts: &[u64], base: i64) -> Vec<i64> {
+    let mut out = vec![base];
+    for &c in counts {
+        out.push(out.last().unwrap() + c as i64);
+    }
+    out
+}
+
+#[test]
+fn sim_spgemm_and_csrgeam2() {
+    let mut sims = Sims::new();
+    let mut rng = Rng(0x5eed_5a5e);
+    let run1 = |sims: &mut Sims, gpu: &mut Gpu, name: String, rows: u64, args: Vec<u64>| {
+        sims.run_named(gpu, &name, [rows.div_ceil(64).max(1) as u32, 1, 1], 64, args);
+    };
+    for double in [false, true] {
+        for (m, k, n, wa, wb, wc, base) in [(23usize, 17usize, 19usize, false, false, false, 0i64), (31, 40, 9, true, false, true, 1), (8, 8, 8, true, true, false, 0)] {
+            let (ap, ai, av) = random_csr(&mut rng, m, k, 0.25, double);
+            let (bp, bi, bv) = random_csr(&mut rng, k, n, 0.3, double);
+            let mut gpu = Gpu::default();
+            let alpha = if double { 0.75 } else { f64::from(0.75f32) };
+            // device inputs (index base `base`, widths per operand)
+            let d_ap = upload(&mut gpu, &enc_idx(&ap, wa, base));
+            let d_ai = upload(&mut gpu, &enc_idx(&ai, wa, base));
+            let d_av = upload(&mut gpu, &enc(double, &av));
+            let d_bp = upload(&mut gpu, &enc_idx(&bp, wb, base));
+            let d_bi = upload(&mut gpu, &enc_idx(&bi, wb, base));
+            let d_bv = upload(&mut gpu, &enc(double, &bv));
+            // rowbound, host scan, expand, host scan, compact (the shim's three phases)
+            let bound = gpu.alloc((m + 1) * 8);
+            let fa = u64::from(wa) | u64::from(wa) << 1 | u64::from(wb) << 2;
+            run1(&mut sims, &mut gpu, pg::product_name(pg::ROWBOUND, double), m as u64, vec![d_ap, d_ai, d_bp, bound, m as u64, fa, base as u64, base as u64]);
+            let b: Vec<u64> = gpu.download(bound, m * 8).chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+            let off = scan(&b, 0);
+            let total = *off.last().unwrap() as usize;
+            let d_off = gpu.upload(&off.iter().flat_map(|x| (*x as u64).to_le_bytes()).collect::<Vec<u8>>());
+            let es = if double { 8 } else { 4 };
+            let (tcol, tval, cnt) = (gpu.alloc(total.max(1) * 8), gpu.alloc(total.max(1) * es), gpu.alloc(m * 8));
+            let fe = fa | u64::from(wb) << 3;
+            let abits = if double { alpha.to_bits() } else { u64::from((alpha as f32).to_bits()) };
+            run1(&mut sims, &mut gpu, pg::product_name(pg::EXPAND, double), m as u64, vec![d_ap, d_ai, d_av, d_bp, d_bi, d_bv, d_off, tcol, tval, cnt, m as u64, fe, base as u64, base as u64, abits, 0]);
+            let c: Vec<u64> = gpu.download(cnt, m * 8).chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+            let cp = scan(&c, base);
+            let nnz = (*cp.last().unwrap() - base) as usize;
+            let d_cp = gpu.upload(&enc_idx(&cp.iter().map(|x| x - base).collect::<Vec<_>>(), wc, base));
+            let (d_ci, d_cv) = (gpu.alloc(nnz.max(1) * if wc { 8 } else { 4 }), gpu.alloc(nnz.max(1) * es));
+            run1(&mut sims, &mut gpu, pg::product_name(pg::COMPACT, double), m as u64, vec![d_off, tcol, tval, cnt, d_cp, d_ci, d_cv, m as u64, u64::from(wc) | u64::from(wc) << 1, base as u64]);
+            let ci = dec_idx(&gpu.download(d_ci, nnz * if wc { 8 } else { 4 }), wc, base);
+            let cv = dec(double, &gpu.download(d_cv, nnz * es));
+            let cpz: Vec<i64> = cp.iter().map(|x| x - base).collect();
+            // sorted, duplicate-free rows, and the dense product
+            for r in 0..m {
+                let row = &ci[cpz[r] as usize..cpz[r + 1] as usize];
+                assert!(row.windows(2).all(|w| w[0] < w[1]), "row {r} not sorted/unique");
+            }
+            let (da, db) = (csr_dense(m, k, &ap, &ai, &av), csr_dense(k, n, &bp, &bi, &bv));
+            let mut want = vec![0.0; m * n];
+            for i in 0..m {
+                for l in 0..k {
+                    for j in 0..n {
+                        want[i * n + j] += alpha * da[i * k + l] * db[l * n + j];
+                    }
+                }
+            }
+            let got = csr_dense(m, n, &cpz, &ci, &cv);
+            let e = max_rel(&got, &want);
+            assert!(e < if double { 1e-13 } else { 1e-5 }, "spgemm {m}x{k}x{n} double={double}: {e}");
+
+            // csrgeam2 (32-bit indices): C = alpha A + beta B, A and B both m x k
+            let (bp2, bi2, bv2) = random_csr(&mut rng, m, k, 0.3, double);
+            let beta = -0.5;
+            let a32 = (upload(&mut gpu, &enc_idx(&ap, false, base)), upload(&mut gpu, &enc_idx(&ai, false, base)));
+            let b32 = (upload(&mut gpu, &enc_idx(&bp2, false, base)), upload(&mut gpu, &enc_idx(&bi2, false, base)), upload(&mut gpu, &enc(double, &bv2)));
+            let counts = gpu.alloc(m * 8);
+            run1(&mut sims, &mut gpu, pg::product_name(pg::GEAMCOUNT, double), m as u64, vec![a32.0, a32.1, b32.0, b32.1, counts, m as u64, base as u64, base as u64]);
+            let c: Vec<u64> = gpu.download(counts, m * 8).chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+            let gp = scan(&c, base);
+            let gnnz = (*gp.last().unwrap() - base) as usize;
+            let d_gp = gpu.upload(&enc_idx(&gp.iter().map(|x| x - base).collect::<Vec<_>>(), false, base));
+            let (d_gi, d_gv) = (gpu.alloc(gnnz.max(1) * 4), gpu.alloc(gnnz.max(1) * es));
+            let bits = |v: f64| if double { v.to_bits() } else { u64::from((v as f32).to_bits()) };
+            run1(&mut sims, &mut gpu, pg::product_name(pg::GEAM, double), m as u64, vec![a32.0, a32.1, d_av, b32.0, b32.1, b32.2, d_gp, d_gi, d_gv, m as u64, base as u64, base as u64, base as u64, bits(alpha), 0, bits(beta), 0]);
+            let gi = dec_idx(&gpu.download(d_gi, gnnz * 4), false, base);
+            let gv = dec(double, &gpu.download(d_gv, gnnz * es));
+            let gpz: Vec<i64> = gp.iter().map(|x| x - base).collect();
+            let db2 = csr_dense(m, k, &bp2, &bi2, &bv2);
+            let want: Vec<f64> = da.iter().zip(&db2).map(|(x, y)| alpha * x + beta * y).collect();
+            let e = max_rel(&csr_dense(m, k, &gpz, &gi, &gv), &want);
+            assert!(e < if double { 1e-14 } else { 1e-6 }, "csrgeam2 {m}x{k} double={double}: {e}");
+            // the union pattern: every stored entry of A or B appears once
+            for r in 0..m {
+                let mut u: Vec<i64> = ai[ap[r] as usize..ap[r + 1] as usize].iter().chain(&bi2[bp2[r] as usize..bp2[r + 1] as usize]).copied().collect();
+                u.sort();
+                u.dedup();
+                assert_eq!(&gi[gpz[r] as usize..gpz[r + 1] as usize], &u[..], "csrgeam2 row {r} pattern");
+            }
+        }
+    }
 }
