@@ -382,6 +382,53 @@ unsafe extern "system" fn append_copy(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn append_copy_region(
+    list: Raw,
+    dst: Raw,
+    dst_region: *const CopyRegion,
+    dst_pitch: u32,
+    dst_slice_pitch: u32,
+    src: *const c_void,
+    src_region: *const CopyRegion,
+    src_pitch: u32,
+    src_slice_pitch: u32,
+    signal: Raw,
+    count: u32,
+    waits: *mut Raw,
+) -> Status {
+    call_driver(|driver| {
+        let (d, r) = unsafe { (*dst_region, *src_region) };
+        if d.depth != 0 || r.depth != 0 || dst_slice_pitch != 0 || src_slice_pitch != 0 {
+            return Err("zeCommandListAppendMemoryCopyRegion: expected a 2-D copy");
+        }
+        if (d.width, d.height) != (r.width, r.height) || d.width == 0 || d.height == 0 {
+            return Err("zeCommandListAppendMemoryCopyRegion: mismatched or empty extents");
+        }
+        if d.width > dst_pitch || r.width > src_pitch {
+            return Err("zeCommandListAppendMemoryCopyRegion: pitch narrower than a row");
+        }
+        let origin = |base: usize, g: CopyRegion, pitch: u32| {
+            base + g.origin_y as usize * pitch as usize + g.origin_x as usize
+        };
+        driver.regions.push(RegionCopy {
+            dst: origin(dst.addr(), d, dst_pitch),
+            src: origin(src.addr(), r, src_pitch),
+            width: d.width as usize,
+            height: d.height as usize,
+            dst_pitch: dst_pitch as usize,
+            src_pitch: src_pitch as usize,
+        });
+        let mut command = marker(signal, count, waits);
+        command.resources.extend(
+            [dst.addr(), src.addr()]
+                .into_iter()
+                .filter_map(|ptr| driver.allocation(ptr)),
+        );
+        driver.append(list.addr(), command)
+    })
+}
+
 unsafe extern "system" fn group_size(kernel: Raw, _: u32, _: u32, _: u32) -> Status {
     call_driver(|driver| {
         driver.get(kernel.addr(), Kind::Kernel)?;
@@ -557,6 +604,7 @@ pub(super) fn api() -> Api {
         zeKernelSetGroupSize: group_size,
         zeKernelSetArgumentValue: kernel_arg,
         zeCommandListAppendLaunchKernel: append_kernel,
+        copy_region: Some(append_copy_region),
         ..Api::stub()
     }
 }

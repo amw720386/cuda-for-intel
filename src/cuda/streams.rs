@@ -32,6 +32,8 @@ mod globals_tests;
 #[cfg(test)]
 mod graph_tests;
 #[cfg(test)]
+mod memcpy2d_tests;
+#[cfg(test)]
 mod timing_tests;
 #[cfg(test)]
 mod subst_tests;
@@ -508,6 +510,20 @@ impl Streams {
     ) -> Result<(), CuResult> {
         self.record_ordered(api, context, key, |list, signal, waits| unsafe {
             list.copy(api, pointers, size, signal, waits)
+        })
+    }
+
+    /// One pitched device-to-device copy (see `CommandList::copy_region`).
+    pub(super) unsafe fn copy_region(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        pointers: (Opaque, *const std::ffi::c_void),
+        shape: crate::level_zero::RegionShape,
+    ) -> Result<(), CuResult> {
+        self.record_ordered(api, context, key, |list, signal, waits| unsafe {
+            list.copy_region(api, pointers, shape, signal, waits)
         })
     }
 

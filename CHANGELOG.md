@@ -22,6 +22,7 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 - PTX translator: `CFI_EXACT_FTZ=1` lowers `.ftz` exactly (subnormal f32 sources and results, and f16/f16x2 lanes of the half forms, become signed zeros). Off by default, where `.ftz` is still ignored.
 - PTX translator: `set.CMP.{and,or,xor}` on f32 sources, `{add,sub,mul,fma}.{rz,rm,rp}.sat.f32`, `{div,sqrt,rcp}.{rz,rm,rp}.f32`, `mad.hi.{u16,s16}`, `sad.{u16,s16}`, `mad.hi.sat.s32`, `cvt.u64.s32`, `cvt.s64.u32` and `cvt.rn.ftz.f32.<int>`.
 ### Changed
+- Asynchronous pitched device-to-device `cuMemcpy2DAsync` (stock GGML's `ggml_cuda_cpy_tensor_2d`) is one `zeCommandListAppendMemoryCopyRegion` instead of one copy and one ranges barrier per row. 3-D, single-row, captured, host-side and peer copies keep the per-row path; `CFI_COPY_REGION=0` forces it.
 - cuFFT: a dimension of up to 2048 (f32) or 1024 (f64) points with factors up to 63 runs as one shared-memory pass per line; a longer last dimension runs as a four-step pair of such passes; dense C2C plans skip the gather and scatter copies.
 - f64/complex gemm (and the syrk/symm/trmm family built on it) uses a register-blocked kernel (4 x 4 outputs per thread for D and C, 2 x 2 for Z) when C holds enough of its tiles (128 for D, 32 for Z, 16 for C); `CFI_CUBLAS_GEMM_TILE=small|big` forces a kernel.
 - `dot`, `nrm2` and `i?amax`/`i?amin` reduce over up to 256 blocks into per-handle scratch, then one block combines the partials (`nrm2` keeps its scaled two-pass form as the fallback for sums that could over- or underflow).

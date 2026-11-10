@@ -65,6 +65,22 @@ impl Context {
     }
 }
 
+/// Shape of a pitched 2-D copy (`CommandList::copy_region`), already range-checked to u32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RegionShape {
+    pub(crate) width: u32,
+    pub(crate) rows: u32,
+    pub(crate) dst_pitch: u32,
+    pub(crate) src_pitch: u32,
+}
+
+impl RegionShape {
+    /// Bytes from the first destination byte to the end of the last destination row.
+    pub(crate) fn dst_span(self) -> usize {
+        (self.rows as usize - 1) * self.dst_pitch as usize + self.width as usize
+    }
+}
+
 impl CommandList {
     #[cfg(all(test, windows))]
     pub(crate) unsafe fn append_timestamp(
@@ -113,6 +129,59 @@ impl CommandList {
                 events.ptr(),
             )
         })?;
+        let range = dst.cast_const();
+        call("zeCommandListAppendMemoryRangesBarrier", || unsafe {
+            (api.zeCommandListAppendMemoryRangesBarrier)(
+                self.0.0,
+                1,
+                &size,
+                &range,
+                signal,
+                0,
+                null_mut(),
+            )
+        })
+    }
+
+    /// One pitched 2-D copy of `rows` rows of `width` bytes (`zeCommandListAppendMemoryCopyRegion`).
+    /// `dst` and `src` point at the first byte of the first row. Like `copy`, the completion
+    /// signal moves onto a ranges barrier over the destination span on compute lists.
+    pub(crate) unsafe fn copy_region(
+        &self,
+        api: &Api,
+        (dst, src): (Raw, *const std::ffi::c_void),
+        shape: RegionShape,
+        signal: Option<&Fence>,
+        waits: &[Arc<Fence>],
+    ) -> Result<(), Error> {
+        let append = api
+            .copy_region
+            .ok_or(Error::Driver("zeCommandListAppendMemoryCopyRegion", 0x78000001))?;
+        let mut events = WaitEvents::new(waits)?;
+        let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+        // Both sides start at their first row (origin 0); depth 0 selects a 2-D copy.
+        let region = super::CopyRegion { width: shape.width, height: shape.rows, ..Default::default() };
+        let own_signal = if self.1 { signal } else { null_mut() };
+        call("zeCommandListAppendMemoryCopyRegion", || unsafe {
+            append(
+                self.0.0,
+                dst,
+                &region,
+                shape.dst_pitch,
+                0,
+                src,
+                &region,
+                shape.src_pitch,
+                0,
+                own_signal,
+                events.count,
+                events.ptr(),
+            )
+        })?;
+        if self.1 {
+            return Ok(());
+        }
+        let size = shape.dst_span();
         let range = dst.cast_const();
         call("zeCommandListAppendMemoryRangesBarrier", || unsafe {
             (api.zeCommandListAppendMemoryRangesBarrier)(

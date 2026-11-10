@@ -17,7 +17,7 @@ pub(crate) use regular::{Queue, QueueFence};
 mod streams;
 pub(crate) use streams::WaitFn;
 pub(crate) use streams::KernelArg;
-pub(crate) use streams::{CommandList, Fence, Fences};
+pub(crate) use streams::{CommandList, Fence, Fences, RegionShape};
 #[cfg(test)]
 pub(crate) mod profiling;
 
@@ -292,11 +292,42 @@ type GetPci = unsafe extern "system" fn(Raw, *mut PciProperties) -> Status;
 /// `zeDeviceCanAccessPeer(device, peer, *mut ze_bool_t)`
 type CanAccessPeer = unsafe extern "system" fn(Raw, Raw, *mut u8) -> Status;
 
+/// `ze_copy_region_t`: origins and extent in bytes (x), rows (y) and slices (z); depth 0 is 2D.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CopyRegion {
+    pub(crate) origin_x: u32,
+    pub(crate) origin_y: u32,
+    pub(crate) origin_z: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) depth: u32,
+}
+
+/// `zeCommandListAppendMemoryCopyRegion(list, dst, dstRegion, dstPitch, dstSlicePitch, src,
+/// srcRegion, srcPitch, srcSlicePitch, signal, numWaits, waits)`
+pub(crate) type CopyRegionFn = unsafe extern "system" fn(
+    Raw,
+    Raw,
+    *const CopyRegion,
+    u32,
+    u32,
+    *const c_void,
+    *const CopyRegion,
+    u32,
+    u32,
+    Raw,
+    u32,
+    *mut Raw,
+) -> Status;
+
 macro_rules! loader_api {
     ($( $name:ident($($arg:ty),*) ),+ $(,)?) => {
         #[allow(non_snake_case)]
         pub(crate) struct Api {
             $( $name: unsafe extern "system" fn($($arg),*) -> Status, )+
+            /// `zeCommandListAppendMemoryCopyRegion`, when the loader exports it.
+            pub(crate) copy_region: Option<CopyRegionFn>,
             get_pci: Option<GetPci>,
             can_access_peer: Option<CanAccessPeer>,
             #[cfg(not(test))]
@@ -323,6 +354,8 @@ macro_rules! loader_api {
                 Ok(Self {
                     $( $name: unsafe { library.get(concat!(stringify!($name), "\0").as_bytes()) }
                         .map(|symbol| *symbol).map_err(Error::Loader)?, )+
+                    copy_region: unsafe { library.get::<CopyRegionFn>(b"zeCommandListAppendMemoryCopyRegion\0") }
+                        .ok().map(|symbol| *symbol),
                     get_pci: unsafe { library.get::<GetPci>(b"zeDevicePciGetPropertiesExt\0") }
                         .ok().map(|symbol| *symbol),
                     can_access_peer: unsafe { library.get::<CanAccessPeer>(b"zeDeviceCanAccessPeer\0") }
@@ -343,6 +376,7 @@ macro_rules! loader_api {
                         }
                         unsupported
                     }, )+
+                    copy_region: None,
                     get_pci: None,
                     can_access_peer: None,
                     _library: None,

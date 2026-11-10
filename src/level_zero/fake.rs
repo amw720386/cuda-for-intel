@@ -156,8 +156,21 @@ struct Driver {
     peers: Vec<(Id, Id)>,
     /// Every memory copy appended: (device handle, destination, source, bytes).
     copies: Vec<(Id, usize, usize, usize)>,
+    /// Every region copy appended (`zeCommandListAppendMemoryCopyRegion`).
+    regions: Vec<RegionCopy>,
     /// Device each command list was created for.
     list_device: BTreeMap<Id, Id>,
+}
+
+/// One `zeCommandListAppendMemoryCopyRegion`, with origins folded into the addresses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegionCopy {
+    pub dst: usize,
+    pub src: usize,
+    pub width: usize,
+    pub height: usize,
+    pub dst_pitch: usize,
+    pub src_pitch: usize,
 }
 
 impl Driver {
@@ -467,6 +480,11 @@ pub(crate) fn device_handle(index: usize) -> usize {
 /// Memory copies appended so far: (device handle, destination, source, bytes).
 pub(crate) fn copy_log() -> Vec<(usize, usize, usize, usize)> {
     lock().as_ref().map(|d| d.copies.clone()).unwrap_or_default()
+}
+
+/// Region copies appended so far.
+pub(crate) fn region_log() -> Vec<RegionCopy> {
+    lock().as_ref().map(|d| d.regions.clone()).unwrap_or_default()
 }
 
 pub(crate) fn finish() {

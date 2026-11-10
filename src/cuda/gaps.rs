@@ -689,22 +689,22 @@ pub unsafe extern "system" fn cuMemcpyAsync(
 
 #[repr(C)]
 pub(crate) struct Memcpy2D {
-    src_x: usize,
-    src_y: usize,
-    src_type: c_uint,
-    src_host: *const c_void,
-    src_device: u64,
-    src_array: Opaque,
-    src_pitch: usize,
-    dst_x: usize,
-    dst_y: usize,
-    dst_type: c_uint,
-    dst_host: *mut c_void,
-    dst_device: u64,
-    dst_array: Opaque,
-    dst_pitch: usize,
-    width: usize,
-    height: usize,
+    pub(crate) src_x: usize,
+    pub(crate) src_y: usize,
+    pub(crate) src_type: c_uint,
+    pub(crate) src_host: *const c_void,
+    pub(crate) src_device: u64,
+    pub(crate) src_array: Opaque,
+    pub(crate) src_pitch: usize,
+    pub(crate) dst_x: usize,
+    pub(crate) dst_y: usize,
+    pub(crate) dst_type: c_uint,
+    pub(crate) dst_host: *mut c_void,
+    pub(crate) dst_device: u64,
+    pub(crate) dst_array: Opaque,
+    pub(crate) dst_pitch: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
 }
 
 #[repr(C)]
@@ -784,6 +784,11 @@ unsafe fn run_plan(
         Ok(places) => places,
         Err(error) => return error,
     };
+    if let (Place::Device, Place::Device, Some(stream)) = (dst_place, src_place, stream)
+        && let Some(result) = region_copy(&plan, (dst_first, dst_len), (src_first, src_len), stream)
+    {
+        return result;
+    }
     for plane in 0..plan.planes {
         for row in 0..plan.rows {
             let Some((src_offset, dst_offset)) = plan.row(row, plane) else {
@@ -802,6 +807,61 @@ unsafe fn run_plan(
         }
     }
     Success
+}
+
+/// A pitched device-to-device copy as one Level Zero region copy instead of one copy (and
+/// barrier) per row. `None` leaves it to the per-row path: 3-D or single-row copies, extents
+/// beyond u32, ranges outside this context's allocations (peer memory, or errors the per-row
+/// path reports), stream capture (graph nodes are per row), a loader without the entry point,
+/// or `CFI_COPY_REGION=0`.
+fn region_copy(
+    plan: &math::Plan,
+    (dst, dst_len): (usize, usize),
+    (src, src_len): (usize, usize),
+    stream: Opaque,
+) -> Option<CuResult> {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // CFI_COPY_REGION=0 keeps the per-row path (A/B and fallback switch).
+    let enabled = *ENABLED.get_or_init(|| std::env::var("CFI_COPY_REGION").map_or(true, |v| v != "0"));
+    if !enabled || plan.planes != 1 || plan.rows < 2 || plan.width == 0 {
+        return None;
+    }
+    let shape = crate::level_zero::RegionShape {
+        width: u32::try_from(plan.width).ok()?,
+        rows: u32::try_from(plan.rows).ok()?,
+        dst_pitch: u32::try_from(plan.dst.pitch).ok()?,
+        src_pitch: u32::try_from(plan.src.pitch).ok()?,
+    };
+    let result = with_context(|runtime, context| {
+        if runtime.api.copy_region.is_none()
+            || !contains_range(&context.allocations, dst, dst_len)
+            || !contains_range(&context.allocations, src, src_len)
+        {
+            return Ok(None);
+        }
+        let key = context.streams.launch_key(stream)?;
+        if context.streams.capture(key)?.is_some() {
+            return Ok(None);
+        }
+        let pointers = (
+            std::ptr::with_exposed_provenance_mut(dst),
+            std::ptr::with_exposed_provenance(src),
+        );
+        unsafe {
+            context
+                .streams
+                .copy_region(&runtime.api, &context.backend, key, pointers, shape)
+        }?;
+        Ok(Some(()))
+    });
+    match result {
+        Ok(Some(())) => {
+            super::cfiprof::record_copy("DtoD", plan.width * plan.rows);
+            Some(Success)
+        }
+        Ok(None) => None,
+        Err(error) => Some(error),
+    }
 }
 
 unsafe fn copy_2d(copy: *const Memcpy2D, stream: Option<Opaque>) -> CuResult {
