@@ -56,6 +56,15 @@ for dt, tol in [(torch.float32, 1e-4), (torch.float64, 1e-10)]:
         q = torch.randn(n, k, dtype=dt, generator=g)
         check(f"sampled_addmm {tag}", lambda: torch.sparse.sampled_addmm(csr.cuda(), p.cuda(), q.cuda(), beta=0.5, alpha=2.0),
               lambda: (0.5 * a + 2.0 * (p @ q) * (a != 0)), tol)
+    # sparse x sparse (cusparseSpGEMM) and sparse + sparse (csrgeam2)
+    for (m, k, n, dens) in [(30, 30, 30, 0.2), (200, 150, 120, 0.05), (64, 300, 80, 0.1), (1000, 1000, 1000, 0.003)]:
+        a, b = rand_sparse(m, k, dens, dt), rand_sparse(k, n, dens, dt)
+        c = rand_sparse(m, k, dens, dt)
+        tag = f"{m}x{k}x{n} {dt}"
+        check(f"csr @ csr {tag}", lambda: (a.to_sparse_csr().cuda() @ b.to_sparse_csr().cuda()).to_dense(), lambda: a @ b, tol)
+        check(f"sparse.mm csr csr {tag}", lambda: torch.sparse.mm(a.to_sparse_csr().cuda(), b.to_sparse_csr().cuda()).to_dense(), lambda: a @ b, tol)
+        check(f"csr + csr {tag}", lambda: (a.to_sparse_csr().cuda() + c.to_sparse_csr().cuda()).to_dense(), lambda: a + c, tol)
+        check(f"csr add alpha {tag}", lambda: torch.add(a.to_sparse_csr().cuda(), c.to_sparse_csr().cuda(), alpha=-0.5).to_dense(), lambda: a - 0.5 * c, tol)
     # batched: COO bmm and batched CSR @ dense
     a3 = torch.stack([rand_sparse(20, 15, 0.3, dt) for _ in range(3)])
     b3 = torch.randn(3, 15, 6, dtype=dt, generator=g)
@@ -76,8 +85,8 @@ for f in fails: print("FAIL", f)
 a = rand_sparse(30, 30, 0.2, torch.float32) + torch.eye(30)
 csr = a.to_sparse_csr().cuda()
 gaps = {
-    "csr+csr (csrgeam2)": lambda: (csr + 2 * csr).to_dense(),
-    "csr@csr (SpGEMM)": lambda: (csr @ csr).to_dense(),
+    # torch's cu118 COO x COO path checks for compute capability >= 5.3 before calling cuSPARSE
+    "coo@coo (torch cc check)": lambda: torch.sparse.mm(csr.to_sparse_coo(), csr.to_sparse_coo()).to_dense(),
     "triangular_solve (SpSM)": lambda: torch.triangular_solve(torch.randn(30, 2).cuda(), csr, upper=False)[0],
     "complex64 csr@dense": lambda: a.to(torch.complex64).to_sparse_csr().cuda() @ torch.randn(30, 2, dtype=torch.complex64).cuda(),
     "float16 csr@dense": lambda: a.half().to_sparse_csr().cuda() @ torch.randn(30, 2).half().cuda(),
@@ -85,8 +94,7 @@ gaps = {
 for name, fn in gaps.items():
     try:
         r = fn(); torch.cuda.synchronize()
-        ok = name.startswith("csr+csr") and torch.allclose(r.cpu(), 3 * a, atol=1e-5)
-        print("GAP", name, "-> ran", "(matches CPU)" if ok else "(not checked)" if not name.startswith("csr+csr") else "(WRONG)")
+        print("GAP", name, "-> ran (not checked)")
     except Exception as e:
         print("GAP", name, "->", type(e).__name__, str(e).splitlines()[0][:120])
 sys.exit(1 if fails else 0)

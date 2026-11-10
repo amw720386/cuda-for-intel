@@ -457,6 +457,138 @@ fn hw_cusparse_matches_host_reference() {
         println!("  bsr, coo2csr, csr2coo, identity: ok");
     }
 
+    // --- SpGEMM (C = alpha A B) through the three-phase generic API, and csrgeam2
+    {
+        type Work = unsafe extern "system" fn(P, i32, i32, *const c_void, P, P, *const c_void, P, i32, i32, P, *mut usize, P) -> i32;
+        type Copy = unsafe extern "system" fn(P, i32, i32, *const c_void, P, P, *const c_void, P, i32, i32, P) -> i32;
+        let gcreate: unsafe extern "system" fn(*mut P) -> i32 = api.f("cusparseSpGEMM_createDescr");
+        let gdestroy: Destroy = api.f("cusparseSpGEMM_destroyDescr");
+        let work: Work = api.f("cusparseSpGEMM_workEstimation");
+        let compute: Work = api.f("cusparseSpGEMM_compute");
+        let copy: Copy = api.f("cusparseSpGEMM_copy");
+        let get_size: unsafe extern "system" fn(P, *mut i64, *mut i64, *mut i64) -> i32 = api.f("cusparseSpMatGetSize");
+        let set_ptrs: unsafe extern "system" fn(P, P, P, P) -> i32 = api.f("cusparseCsrSetPointers");
+        let dense = |rows: usize, cols: usize, ptr: &[i64], idx: &[i64], val: &[f64]| {
+            let mut d = vec![0.0; rows * cols];
+            for r in 0..rows {
+                for e in ptr[r] as usize..ptr[r + 1] as usize {
+                    d[r * cols + idx[e] as usize] += val[e];
+                }
+            }
+            d
+        };
+        let dec_idx = |b: &[u8], wide: bool, base: i64| -> Vec<i64> {
+            if wide { b.chunks(8).map(|c| i64::from_le_bytes(c.try_into().unwrap()) - base).collect() } else { b.chunks(4).map(|c| i64::from(i32::from_le_bytes(c.try_into().unwrap())) - base).collect() }
+        };
+        for double in [false, true] {
+            for (m, k, n, per_row, wide, base) in [(200usize, 150usize, 120usize, 6usize, false, 0i64), (64, 300, 80, 20, true, 1), (1000, 1000, 1000, 3, true, 0), (37, 29, 41, 4, false, 1)] {
+                let vt = if double { 1 } else { 0 };
+                let it = if wide { 3 } else { 2 };
+                let (ap, ai, av) = random_csr(&mut rng, m, k, per_row, m < 100);
+                let (bp, bi, bv) = random_csr(&mut rng, k, n, per_row, false);
+                let (av, bv) = (round(double, &av), round(double, &bv));
+                let (mut a, mut b, mut c, mut g) = (null_mut(), null_mut(), null_mut(), null_mut());
+                assert_eq!(unsafe { create_csr(&mut a, m as i64, k as i64, ai.len() as i64, up(&enc_idx(&ap, wide, base)) as P, up(&enc_idx(&ai, wide, base)) as P, up(&enc(double, &av)) as P, it, it, base as i32, vt) }, 0);
+                assert_eq!(unsafe { create_csr(&mut b, k as i64, n as i64, bi.len() as i64, up(&enc_idx(&bp, wide, base)) as P, up(&enc_idx(&bi, wide, base)) as P, up(&enc(double, &bv)) as P, it, it, base as i32, vt) }, 0);
+                assert_eq!(unsafe { create_csr(&mut c, m as i64, n as i64, 0, null_mut(), null_mut(), null_mut(), it, it, base as i32, vt) }, 0);
+                assert_eq!(unsafe { gcreate(&mut g) }, 0);
+                let (alpha, beta) = (1.25f64, 0.0f64);
+                let (a32, b32) = (alpha as f32, beta as f32);
+                let (pa, pb): (*const c_void, *const c_void) = if double { ((&alpha as *const f64).cast(), (&beta as *const f64).cast()) } else { ((&a32 as *const f32).cast(), (&b32 as *const f32).cast()) };
+                let (mut s1, mut s2) = (0usize, 0usize);
+                assert_eq!(unsafe { work(h, 0, 0, pa, a, b, pb, c, vt, 0, g, &mut s1, null_mut()) }, 0);
+                assert_eq!(s1, (m + 1) * 8, "buffer 1 size");
+                let b1 = up(&vec![0u8; s1]);
+                assert_eq!(unsafe { work(h, 0, 0, pa, a, b, pb, c, vt, 0, g, &mut s1, b1 as P) }, 0);
+                assert_eq!(unsafe { compute(h, 0, 0, pa, a, b, pb, c, vt, 0, g, &mut s2, null_mut()) }, 0);
+                assert!(s2 >= m * 8);
+                let b2 = up(&vec![0u8; s2]);
+                assert_eq!(unsafe { compute(h, 0, 0, pa, a, b, pb, c, vt, 0, g, &mut s2, b2 as P) }, 0);
+                let (mut rows, mut cols, mut nnz) = (0i64, 0i64, 0i64);
+                assert_eq!(unsafe { get_size(c, &mut rows, &mut cols, &mut nnz) }, 0);
+                assert_eq!((rows, cols), (m as i64, n as i64));
+                let iw = if wide { 8 } else { 4 };
+                let es = if double { 8 } else { 4 };
+                let (cp, ci, cv) = (up(&vec![0u8; (m + 1) * iw]), up(&vec![0u8; nnz.max(1) as usize * iw]), up(&vec![0u8; nnz.max(1) as usize * es]));
+                assert_eq!(unsafe { set_ptrs(c, cp as P, ci as P, cv as P) }, 0);
+                assert_eq!(unsafe { copy(h, 0, 0, pa, a, b, pb, c, vt, 0, g) }, 0);
+                ok!(cuStreamSynchronize(stream));
+                let cpv = dec_idx(&down(cp, (m + 1) * iw), wide, base);
+                let civ = dec_idx(&down(ci, nnz as usize * iw), wide, base);
+                let cvv = dec(double, &down(cv, nnz as usize * es));
+                assert_eq!(cpv[m], nnz);
+                for r in 0..m {
+                    assert!(civ[cpv[r] as usize..cpv[r + 1] as usize].windows(2).all(|w| w[0] < w[1]), "C row {r} sorted");
+                }
+                let (da, db) = (dense(m, k, &ap, &ai, &av), dense(k, n, &bp, &bi, &bv));
+                let mut want = vec![0.0; m * n];
+                for i in 0..m {
+                    for l in 0..k {
+                        let x = da[i * k + l];
+                        if x != 0.0 {
+                            for j in 0..n {
+                                want[i * n + j] += alpha * x * db[l * n + j];
+                            }
+                        }
+                    }
+                }
+                let e = max_rel(&dense(m, n, &cpv, &civ, &cvv), &want);
+                let tol = if double { 1e-13 } else { 1e-5 };
+                println!("  SpGEMM {m}x{k}x{n} f{} idx{} base {base}: nnz(C) {nnz}, rel err {e:.2e}", if double { 64 } else { 32 }, if wide { 64 } else { 32 });
+                assert!(e < tol, "SpGEMM {m}x{k}x{n} double={double}: {e}");
+                cases += 1;
+                unsafe {
+                    gdestroy(g);
+                    destroy_sp(a);
+                    destroy_sp(b);
+                    destroy_sp(c);
+                }
+            }
+            // csrgeam2 (32-bit legacy API): C = alpha A + beta B, sizes from bufferSizeExt
+            let t = if double { "D" } else { "S" };
+            type GeamSize = unsafe extern "system" fn(P, i32, i32, *const c_void, P, i32, P, P, P, *const c_void, P, i32, P, P, P, P, P, P, P, *mut usize) -> i32;
+            type GeamNnz = unsafe extern "system" fn(P, i32, i32, P, i32, P, P, P, i32, P, P, P, P, *mut i32, P) -> i32;
+            type Geam = unsafe extern "system" fn(P, i32, i32, *const c_void, P, i32, P, P, P, *const c_void, P, i32, P, P, P, P, P, P, P, P) -> i32;
+            let gsize: GeamSize = api.f(&format!("cusparse{t}csrgeam2_bufferSizeExt"));
+            let gnnz: GeamNnz = api.f("cusparseXcsrgeam2Nnz");
+            let geam: Geam = api.f(&format!("cusparse{t}csrgeam2"));
+            let create_descr: unsafe extern "system" fn(*mut P) -> i32 = api.f("cusparseCreateMatDescr");
+            let set_base: unsafe extern "system" fn(P, i32) -> i32 = api.f("cusparseSetMatIndexBase");
+            for (m, n, base) in [(300usize, 200usize, 0i64), (50, 70, 1)] {
+                let (ap, ai, av) = random_csr(&mut rng, m, n, 8, false);
+                let (bp, bi, bv) = random_csr(&mut rng, m, n, 5, true);
+                let (av, bv) = (round(double, &av), round(double, &bv));
+                let mut descr = null_mut();
+                assert_eq!(unsafe { create_descr(&mut descr) }, 0);
+                assert_eq!(unsafe { set_base(descr, base as i32) }, 0);
+                let (dap, dai, dav) = (up(&enc_idx(&ap, false, base)) as P, up(&enc_idx(&ai, false, base)) as P, up(&enc(double, &av)) as P);
+                let (dbp, dbi, dbv) = (up(&enc_idx(&bp, false, base)) as P, up(&enc_idx(&bi, false, base)) as P, up(&enc(double, &bv)) as P);
+                let (alpha, beta) = (0.75f64, -1.5f64);
+                let (a32, b32) = (alpha as f32, beta as f32);
+                let (pa, pb): (*const c_void, *const c_void) = if double { ((&alpha as *const f64).cast(), (&beta as *const f64).cast()) } else { ((&a32 as *const f32).cast(), (&b32 as *const f32).cast()) };
+                let dcp = up(&vec![0u8; (m + 1) * 4]) as P;
+                let mut size = 0usize;
+                assert_eq!(unsafe { gsize(h, m as i32, n as i32, pa, descr, ai.len() as i32, dav, dap, dai, pb, descr, bi.len() as i32, dbv, dbp, dbi, descr, null_mut(), dcp, null_mut(), &mut size) }, 0);
+                assert_eq!(size, m * 8, "csrgeam2 buffer size");
+                let buf = up(&vec![0u8; size]) as P;
+                let mut nnz = 0i32;
+                assert_eq!(unsafe { gnnz(h, m as i32, n as i32, descr, ai.len() as i32, dap, dai, descr, bi.len() as i32, dbp, dbi, descr, dcp, &mut nnz, buf) }, 0);
+                let es = if double { 8 } else { 4 };
+                let (dci, dcv) = (up(&vec![0u8; nnz.max(1) as usize * 4]) as P, up(&vec![0u8; nnz.max(1) as usize * es]) as P);
+                assert_eq!(unsafe { geam(h, m as i32, n as i32, pa, descr, ai.len() as i32, dav, dap, dai, pb, descr, bi.len() as i32, dbv, dbp, dbi, descr, dcv, dcp, dci, buf) }, 0);
+                ok!(cuStreamSynchronize(stream));
+                let cpv = dec_idx(&down(dcp as u64, (m + 1) * 4), false, base);
+                let civ = dec_idx(&down(dci as u64, nnz as usize * 4), false, base);
+                let cvv = dec(double, &down(dcv as u64, nnz as usize * es));
+                let want: Vec<f64> = dense(m, n, &ap, &ai, &av).iter().zip(dense(m, n, &bp, &bi, &bv)).map(|(x, y)| alpha * x + beta * y).collect();
+                let e = max_rel(&dense(m, n, &cpv, &civ, &cvv), &want);
+                println!("  {t}csrgeam2 {m}x{n} base {base}: nnz(C) {nnz}, rel err {e:.2e}");
+                assert!(e < if double { 1e-14 } else { 1e-6 }, "{t}csrgeam2: {e}");
+                cases += 1;
+            }
+        }
+    }
+
     // --- f16 values: NOT_SUPPORTED, not a crash
     {
         let mut a = null_mut();
