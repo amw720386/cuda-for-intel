@@ -85,7 +85,7 @@ What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a transl
 - **PTX only.** Programs and libraries must embed PTX. SASS/cubin images cannot run. Build with `-arch=compute_75 -code=compute_75`.
 - **Third-party companion DLL.** Programs that use the genuine NVIDIA CUDA Runtime (stock Ollama, CUDA 12/13 samples, PyTorch) need NVIDIA's signed
   `nvcudart_hybrid64.dll` in `CUDA_FOR_INTEL_HYBRID_DIR`. It is proprietary, not distributed here, and you obtain it yourself ([docs/ollama.md](docs/ollama.md)).
-- **First run is slow.** Large kernels (quantised matrix multiplication in ggml, big ATen modules) take minutes to compile; later runs use the caches.
+- **First run is slow.** Large kernels (quantised matrix multiplication in ggml, big ATen modules) take minutes to compile; later runs use the caches. `cfi-precompile` (`scripts\cfi.ps1 precompile`) fills both caches ahead of time ([docs/precompile.md](docs/precompile.md)).
 - **Speed.** Correctness first: the GPU path is currently slower than the CPU backend for the Qwen2.5-0.5B decode measured in the logs
   (logging off: 30 to 46 tok/s decode on the GPU vs 119 tok/s on the CPU backend, see [docs/hw-logs/perf-matrix.md](docs/hw-logs/perf-matrix.md); llama-bench tg128 18.3 tok/s with large variance). Do not expect native-Vulkan speed.
 - **Flash attention** kernels (`flash_attn_ext_*`) do not all translate (87 entries in the stock Ollama scan); disable flash attention.
@@ -198,7 +198,7 @@ unless the description says otherwise. Defaults are taken from the source at thi
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CFI_NO_CACHE` | off | Set: disable the PTX-to-SPIR-V translation cache. |
-| `CFI_CACHE_DIR` | `%LOCALAPPDATA%\cuda-for-intel\spvcache` (Linux: `$XDG_CACHE_HOME` or `~/.cache`) | Location of the translation cache. Keyed by PTX hash, entry, versions and the `CFI_*` switches. |
+| `CFI_CACHE_DIR` | `%LOCALAPPDATA%\cuda-for-intel\spvcache` (Linux: `$XDG_CACHE_HOME` or `~/.cache`) | Location of the translation cache. Keyed by PTX hash, entry, versions and the `CFI_*` translator switches (not by cache, dump, tracing or `CFI_REDIRECT_*` launcher variables). Fill it ahead of time with `cfi-precompile` ([docs/precompile.md](docs/precompile.md)). |
 | `CFI_CUDNN` | on | Read by `scripts/torch/cfi_torch.py` (`cfi_torch.install()`): `0` sets `torch.backends.cudnn.enabled = False`, so ATen's own kernels run every convolution. |
 | `CFI_CUDNN_DIRECT` | off | `1`: the cuDNN shim skips the im2col + cuBLAS GEMM engine and uses its slower direct kernels. |
 | `CFI_CUDNN_WS_MB` | 256 | Column-buffer workspace budget of the cuDNN shim's GEMM engine, in MB. |

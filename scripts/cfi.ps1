@@ -14,6 +14,11 @@
                the install's bin directory, also for absolute-path loads and in child processes.
                Nothing in the program's directory is changed. Example:
                  pwsh -File scripts\cfi.ps1 run -- python -c "import torch; print(torch.cuda.is_available())"
+    precompile Translate and compile every kernel of the given programs/DLLs ahead of time with
+               cfi-precompile.exe, so the first run does not pay for it. Fills the SPIR-V cache
+               and the native-binary cache that the installed nvcuda.dll reads. Run it in the same
+               environment as the program (dot-source cfi-env.ps1 first if you use it). Example:
+                 pwsh -File scripts\cfi.ps1 precompile -- "$env:LOCALAPPDATA\Programs\Ollama\lib\ollama\cuda_v13"
     uninstall  Remove what install placed and restore anything it backed up.
 
   Safety model: install writes ONLY inside -InstallDir (default %LOCALAPPDATA%\cuda-for-intel\install).
@@ -35,7 +40,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)] [ValidateSet('check', 'install', 'selftest', 'doctor', 'env', 'uninstall', 'run')] [string]$Command = 'check',
+    [Parameter(Position = 0)] [ValidateSet('check', 'install', 'selftest', 'doctor', 'env', 'uninstall', 'run', 'precompile')] [string]$Command = 'check',
     [string]$InstallDir,
     [string]$BinDir,
     [string]$ZipPath,
@@ -52,8 +57,9 @@ if (-not $InstallDir) { $InstallDir = Get-CfiDefaultInstallDir }
 $repo = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $InstallDir 'manifest.json'
 $shimNames = @('nvcuda.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')
-# Placed when the source has them (cargo build -p cfi_redirect -p cfi_launcher); needed by `run`.
-$launcherNames = @('cfi_redirect.dll', 'cfi-run.exe')
+# Placed when the source has them (cargo build -p cfi_redirect -p cfi_launcher -p cfi_precompile);
+# needed by `run` and `precompile`.
+$launcherNames = @('cfi_redirect.dll', 'cfi-run.exe', 'cfi-precompile.exe')
 
 function Invoke-Prereqs {
     $problems = 0
@@ -230,6 +236,18 @@ function Invoke-Run {
     exit $LASTEXITCODE
 }
 
+function Invoke-Precompile {
+    $bin = Join-Path $InstallDir 'bin'
+    $exe = Join-Path $bin 'cfi-precompile.exe'
+    $rest = @($RunArgs)
+    if ($rest.Count -gt 0 -and $rest[0] -eq '--') { $rest = @($rest | Select-Object -Skip 1) }
+    if ($rest.Count -eq 0) { throw 'usage: cfi.ps1 precompile [-InstallDir DIR] -- [cfi-precompile options] FILE-OR-DIR...' }
+    if ($DryRun) { Write-Safe "[dry-run] would run: $exe --install-dir $bin $($rest -join ' ')"; return }
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "cfi-precompile.exe not found in $bin; rerun 'cfi.ps1 install' from a build that includes cfi_precompile." }
+    & $exe --install-dir $bin @rest
+    exit $LASTEXITCODE
+}
+
 switch ($Command) {
     'check'     { $p = Invoke-Prereqs; if ($p -gt 0) { exit 2 } }
     'install'   { Install-Cfi }
@@ -238,4 +256,5 @@ switch ($Command) {
     'env'       { Write-Safe ". `"$(Join-Path $InstallDir 'cfi-env.ps1')`"" }
     'uninstall' { Uninstall-Cfi }
     'run'       { Invoke-Run }
+    'precompile' { Invoke-Precompile }
 }

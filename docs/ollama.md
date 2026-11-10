@@ -123,6 +123,12 @@ reuse them; the verified run took 12.1 s to load and 1.06 s for 8 tokens. With l
 decode on the GPU against 119 tok/s on the CPU backend (`docs/hw-logs/perf-matrix.md`). The GPU path is not currently faster than the CPU
 for this model; see "Performance guidance" in the README.
 
+To skip the first-use compile, precompile the plug-in once for the models you use (about 3.5 minutes on the B390). The cold first request then drops from about 115 s to about 2.4 s ([precompile.md](precompile.md)):
+
+```
+scripts\cfi.ps1 precompile -- --gguf "$env:USERPROFILE\.ollama\models\blobs" --native-skip flash_attn "<ollama>\lib\ollama\cuda_v13"
+```
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

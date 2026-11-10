@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/cudart_shim", "crates/cublas_shim", "crates/cudnn_shim", "crates/fatbin", "crates/nvrtc_shim", "crates/nvml_shim", "crates/cufft_shim", "crates/cusparse_shim", "crates/cusolver_shim", "crates/detours_sys", "crates/cfi_redirect", "crates/cfi_launcher", "crates/redirect_test/dummy", "crates/redirect_test/consumer", "crates/redirect_test/probe"]
+members = [".", "crates/cudart_shim", "crates/cublas_shim", "crates/cudnn_shim", "crates/fatbin", "crates/nvrtc_shim", "crates/nvml_shim", "crates/cufft_shim", "crates/cusparse_shim", "crates/cusolver_shim", "crates/detours_sys", "crates/cfi_redirect", "crates/cfi_launcher", "crates/cfi_precompile", "crates/redirect_test/dummy", "crates/redirect_test/consumer", "crates/redirect_test/probe"]
 resolver = "2"
 
 [package]

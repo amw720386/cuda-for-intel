@@ -95,17 +95,28 @@ pub(crate) fn key_for_hash(module: u64, entry: &str) -> u64 {
     crate::ptx::load16_merge_enabled().hash(&mut h);
     crate::ptx::xor_shuffle_enabled().hash(&mut h);
     let mut env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| {
-            k.starts_with("CFI_")
-                && !matches!(
-                    k.as_str(),
-                    "CFI_NO_CACHE" | "CFI_CACHE_DIR" | "CFI_PTX_DUMP_DIR" | "CFI_CUBLAS_TRACE" | "CFI_ALLOW_EMPTY_KERNELS" | "CFI_REPORT_CC" | "CFI_NO_ALLOC_TOUCH"
-                )
-        })
+        .filter(|(k, _)| k.starts_with("CFI_") && !key_neutral(k))
         .collect();
     env.sort();
     env.hash(&mut h);
     h.finish()
+}
+
+/// The SPIR-V cache directory, `None` when the cache is off.
+pub(crate) fn dir_for_display() -> Option<PathBuf> {
+    if enabled() { dir() } else { None }
+}
+
+/// `CFI_*` variables that never change the translator's output: cache and dump locations,
+/// tracing, and launcher settings (`cfi-run` sets `CFI_REDIRECT_DIR` for the application but
+/// not for a precompile run, so hashing it would make every precompiled entry a miss).
+fn key_neutral(name: &str) -> bool {
+    matches!(
+        name,
+        "CFI_NO_CACHE" | "CFI_CACHE_DIR" | "CFI_PTX_DUMP_DIR" | "CFI_CUBLAS_TRACE" | "CFI_ALLOW_EMPTY_KERNELS" | "CFI_REPORT_CC" | "CFI_NO_ALLOC_TOUCH"
+            | "CFI_TRANSLATE_THREADS" | "CFI_WARN_UNDEFINED" | "CFI_DUMP_ENTRY" | "CFI_DUMP_PTX_DIR"
+    ) || name.starts_with("CFI_REDIRECT_")
+        || name.starts_with("CFI_PRECOMPILE_")
 }
 
 fn path(key: u64) -> Option<PathBuf> {
@@ -264,12 +275,17 @@ pub(crate) fn put(key: u64, t: &Translation) {
     }
 }
 
+/// Serialises tests that point `CFI_CACHE_DIR` somewhere.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn roundtrip_and_corruption() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("cfi-xcache-test-{}", std::process::id()));
         // SAFETY: tests in this module run single-threaded with respect to this variable.
         unsafe { std::env::set_var("CFI_CACHE_DIR", &dir) };
@@ -302,5 +318,11 @@ mod tests {
         std::fs::write(&p, bytes).unwrap();
         assert!(get(k).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launcher_and_cache_variables_do_not_change_keys() {
+        assert!(key_neutral("CFI_REDIRECT_DIR") && key_neutral("CFI_REDIRECT_LOG") && key_neutral("CFI_CACHE_DIR"));
+        assert!(!key_neutral("CFI_OPT_LD16") && !key_neutral("CFI_DP4A_MODE"));
     }
 }
