@@ -7,6 +7,7 @@ pub(crate) mod globals;
 mod inline;
 mod normalize;
 pub(crate) mod passthrough;
+pub(crate) mod texdesc;
 mod param_space;
 mod parse;
 mod probe;
@@ -1160,6 +1161,10 @@ mod cufft_tests;
 mod cusparse_tests;
 #[cfg(test)]
 mod cublas64_tests;
+#[cfg(test)]
+mod tex_model;
+#[cfg(test)]
+mod tex_tests;
 #[cfg(test)]
 mod globals_tests;
 #[cfg(test)]

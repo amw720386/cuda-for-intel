@@ -370,15 +370,15 @@ handwritten/sreg/sreg_tid_x.ptx	pass	strict-pass
 handwritten/sreg/sreg_tid_y.ptx	pass	strict-pass	
 handwritten/sreg/sreg_total_smem_size.ptx	pass	strict-pass	
 handwritten/sreg/sreg_warpid.ptx	pass	strict-pass	
-handwritten/tex/suld_b_1d_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: suld.b.1d.b32.trap %r1 , [ %rd3 , { %r2 } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/sured_b_1d_add_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: sured.b.add.1d.u32.trap [ %rd3 , { %r1 } ] , %r2 ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/sust_b_2d_v4_b32.ptx	unsupported	strict-fail	unsupported PTX instruction: sust.b.2d.v4.b32.trap [ %rd3 , { %r1 , %r2 } ] , { %r3 , %r4 , %r5 , %r6 } ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/tex_1d_v4_f32_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref t ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/tex_2d_v4_f32_f32_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.f32.f32 { %f1 , %f2 , %f3 , %f4 } , [ %rd3 , { %f5 , %f6 } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/tex_3d_v4_s32_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.s32.s32 { %r1 , %r2 , %r3 , %r4 } , [ %rd3 , { %r5 , %r6 , %r7 , %r8 } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/tex_level_2d.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.level.2d.v4.f32.f32 { %f1 , %f2 , %f3 , %f4 } , [ %rd3 , { %f5 , %f6 } ] , %f7 ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/tld4_r_2d.ptx	unsupported	strict-fail	unsupported PTX instruction: tld4.r.2d.v4.f32.f32 { %f1 , %f2 , %f3 , %f4 } , [ %rd3 , { %f5 , %f6 } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-handwritten/tex/txq_width.ptx	unsupported	strict-fail	unsupported PTX instruction: txq.width.b32 %r1 , [ %rd3 ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
+handwritten/tex/suld_b_1d_b32.ptx	pass	strict-pass	
+handwritten/tex/sured_b_1d_add_u32.ptx	unsupported	strict-fail	unsupported PTX instruction: sured.b.add.1d.u32.trap [ %rd3 , { %r1 } ] , %r2 ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+handwritten/tex/sust_b_2d_v4_b32.ptx	pass	strict-pass	
+handwritten/tex/tex_1d_v4_f32_s32.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref t ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+handwritten/tex/tex_2d_v4_f32_f32_texobj.ptx	pass	strict-pass	
+handwritten/tex/tex_3d_v4_s32_s32.ptx	pass	strict-pass	
+handwritten/tex/tex_level_2d.ptx	pass	strict-pass	
+handwritten/tex/tld4_r_2d.ptx	unsupported	strict-fail	unsupported PTX instruction: tld4.r.2d.v4.f32.f32 { %f1 , %f2 , %f3 , %f4 } , [ %rd3 , { %f5 , %f6 } ] ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+handwritten/tex/txq_width.ptx	pass	strict-pass	
 handwritten/torch/bar_red_uniform_branch.ptx	pass	strict-pass	
 handwritten/torch/movmatrix_trans.ptx	pass	strict-pass	
 handwritten/torch/param_space_array.ptx	pass	strict-pass	
@@ -589,30 +589,30 @@ zluda/shfl/shfl_sync_idx_dynamic_delta_b32_pred.ptx	pass	strict-fail
 zluda/shfl/shfl_sync_mode_b32.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_up_b32_pred.ptx	pass	strict-fail	
 zluda/shfl/shfl_sync_up_dynamic_delta_b32_pred.ptx	pass	strict-fail	
-zluda/tex/test_ptx__tex_read_1d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_1d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_1d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %ix } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_1d_float_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %fx } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_1d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_1d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_1d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %ix } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_1d_int_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.1d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %fx } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %ix , %iy } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_float_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %fx , %fy } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %ix , %iy } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_2d_int_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.2d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %fx , %fy } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_float_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.f32.s32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %ix , %iy , %iz , %iz } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_float_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.f32.f32 { %f0 , %f1 , %f2 , %f3 } , [ %rd2 , { %fx , %fy , %fz , %fz } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_int_s32coord_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.s32.s32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %ix , %iy , %iz , %iz } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
-zluda/tex/test_ptx__tex_read_3d_int_texobj.ptx	unsupported	strict-fail	unsupported PTX instruction: tex.3d.v4.s32.f32 { %r0 , %r1 , %r2 , %r3 } , [ %rd2 , { %fx , %fy , %fz , %fz } ] ; (texture and surface objects need bindless images, which the OpenCL-environment SPIR-V target does not expose)
+zluda/tex/test_ptx__tex_read_1d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_1d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_1d_float_s32coord_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_1d_float_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_1d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_1d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_1d_int_s32coord_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_1d_int_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_2d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_2d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_2d_float_s32coord_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_2d_float_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_2d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_2d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_2d_int_s32coord_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_2d_int_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_3d_float.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_3d_float_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_3d_float_s32coord_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_3d_float_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_3d_int.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_3d_int_s32coord.ptx	unsupported	strict-fail	unsupported PTX instruction: .global .texref tex ; (texture references, layered/cube geometries, tld4, tex.grad, sust.p and sured are not emulated; texture and surface objects are, see docs/textures.md)
+zluda/tex/test_ptx__tex_read_3d_int_s32coord_texobj.ptx	pass	strict-fail	
+zluda/tex/test_ptx__tex_read_3d_int_texobj.ptx	pass	strict-fail	
 zluda/vote_match_redux/activemask.ptx	pass	strict-fail	
 zluda/vote_match_redux/lanemask_lt.ptx	pass	strict-fail	
 zluda/vote_match_redux/match_sync.ptx	pass	strict-fail	
