@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 mod current_stack;
 mod prefetch;
+mod precompile;
 mod xcache;
 mod discovery;
 pub(crate) mod devices;

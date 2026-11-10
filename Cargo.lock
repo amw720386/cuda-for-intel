@@ -56,6 +56,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfi_precompile"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "cfi_redirect"
 version = "0.1.0"
 dependencies = [

@@ -527,6 +527,46 @@ fn probed_blk(drv: &Driver, input: Input, flags: Flags) -> bool {
     })
 }
 
+/// Builds the XMX kernels an f16 GEMM workload such as ggml's usually needs (the operand-spelling
+/// self-tests, then strided and pointer-table variants with f16 and f32 output, with and without
+/// beta), so `cfi-precompile` leaves them in the native-binary cache. Needs a current context.
+/// Returns the number of kernels the driver built (or found cached).
+#[unsafe(no_mangle)]
+pub extern "system" fn cfiXmxPrecompile() -> u32 {
+    let Ok(drv) = crate::driver() else { return 0 };
+    if mode() == Mode::Off {
+        return 0;
+    }
+    let Some(flags) = probed_flags(drv, Input::F16) else { return 0 };
+    let _ = probed_blk(drv, Input::F16, flags);
+    let (ib, jb) = tile();
+    let mut built = 0;
+    for out in [Ty::F16, Ty::F32] {
+        for ptrs in [false, true] {
+            for beta0 in [true, false] {
+                let cfg = Cfg {
+                    input: Input::F16,
+                    out,
+                    ptrs,
+                    beta0,
+                    act: Act::None,
+                    bias: None,
+                    ib,
+                    jb,
+                    pair_a: false,
+                    vec_b: false,
+                    blk: false,
+                    blk_ta: false,
+                    ku: 1,
+                    flags,
+                };
+                built += u32::from(kernel(drv, &cfg).is_some());
+            }
+        }
+    }
+    built
+}
+
 /// Fast path entry. `Some(status)` = handled (status is the cuBLAS result before
 /// the shim's stream synchronisation); `None` = not eligible or unsupported, use
 /// the PTX kernels.
