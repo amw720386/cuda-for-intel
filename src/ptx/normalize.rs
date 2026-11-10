@@ -937,6 +937,14 @@ fn rewrite_ldst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     }
     let mut acquire = false;
     let mut release = false;
+    // `ld.volatile` / `ld.relaxed.{gpu,sys}` from global memory: another thread or block may
+    // write the location while this one reads it (cuSOLVER's sytrd4_gpu spins on a per-tile
+    // flag with `ld.volatile.global` and only fences after the loop). A plain SPIR-V load may
+    // be hoisted out of such a loop or served from the non-coherent L1, so the load is
+    // followed by a fence like an acquire load.
+    let shared_like = parts[1..].iter().any(|p| matches!(*p, "shared" | "shared::cta" | "local" | "param" | "const"));
+    let mut coherent = false;
+    let mut relaxed = false;
     let mut cache_hint = false;
     let mut after_order = false;
     let mut vector = 1u32;
@@ -953,14 +961,26 @@ fn rewrite_ldst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             continue;
         }
         match part {
-            "weak" | "volatile" | "mmio" | "cg" | "ca" | "cs" | "lu" | "lc" | "wb" | "wt" | "cv" => {
+            "volatile" | "mmio" => {
+                changed = true;
+                coherent = true;
+                after_order = false;
+                continue;
+            }
+            "weak" | "cg" | "ca" | "cs" | "lu" | "lc" | "wb" | "wt" | "cv" => {
                 changed = true;
                 after_order = false;
                 continue;
             }
             "relaxed" => {
                 changed = true;
+                relaxed = true;
                 after_order = true;
+                continue;
+            }
+            "gpu" | "sys" if after_order && relaxed => {
+                changed = true;
+                coherent = true;
                 continue;
             }
             "acquire" => {
@@ -1030,7 +1050,7 @@ fn rewrite_ldst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     } else {
         return None;
     }
-    if acquire {
+    if acquire || (coherent && !is_store && !shared_like) {
         lines.push(FENCE.to_owned());
     }
     let _ = ctx;

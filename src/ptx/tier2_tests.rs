@@ -1072,3 +1072,39 @@ fn wmma_with_half_accumulators_translates_and_validates() {
     wmma.store.d.sync.aligned.row.m16n16k16.global.f16 [%rd15], {%wd0, %wd1, %wd2, %wd3}, 16;"#;
     lower(&super::coverage_tests::kernel_with_shared(regs, "", body));
 }
+
+fn memory_barriers(body: &str) -> usize {
+    let module = lower(&super::coverage_tests::kernel_with_shared("", ".shared .align 4 .b8 sm[16];", body));
+    module.all_inst_iter().filter(|inst| inst.class.opcode == Op::MemoryBarrier).count()
+}
+
+/// cuSOLVER's `sytrd4_gpu` (behind `eigh` for n > 32) spins on another block's flag with
+/// `ld.volatile.global` and fences only after the loop. A plain load could be hoisted out of
+/// the loop or read a stale L1 line, hanging the GPU, so such loads are followed by a fence.
+#[test]
+fn volatile_and_relaxed_device_global_loads_are_fenced() {
+    let load = |q: &str| format!("    ld.{q}.u32 %r1, [%rd15];\n    st.global.u32 [%rd15+4], %r1;");
+    assert_eq!(memory_barriers(&load("global")), 0);
+    assert_eq!(memory_barriers(&load("global.ca")), 0);
+    assert_eq!(memory_barriers(&load("relaxed.cta.global")), 0);
+    for q in ["volatile.global", "volatile", "relaxed.gpu.global", "relaxed.sys.global", "acquire.gpu.global"] {
+        assert_eq!(memory_barriers(&load(q)), 1, "{q}");
+    }
+    // Shared-memory volatile accesses (warp reductions) and stores stay unfenced.
+    assert_eq!(memory_barriers("    mov.u32 %r2, sm;\n    ld.volatile.shared.u32 %r1, [%r2];\n    st.global.u32 [%rd15], %r1;"), 0);
+    assert_eq!(memory_barriers("    st.volatile.global.u32 [%rd15], %r0;"), 0);
+    // The flag-wait loop itself translates and still reads the flag.
+    let out = eval(
+        "",
+        r#"    mov.u32 %r1, 5;
+    st.global.u32 [%rd15], %r1;
+$L_spin:
+    ld.volatile.global.u32 %r2, [%rd15];
+    setp.ne.s32 %p1, %r2, 5;
+    @%p1 bra $L_spin;
+    membar.gl;
+    st.global.u32 [%rd15+4], %r2;"#,
+        2,
+    );
+    assert_eq!(out, [5, 5]);
+}

@@ -14,7 +14,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Bump when the translator's output for the same PTX can change.
-const TRANSLATOR_VERSION: u32 = 6;
+const TRANSLATOR_VERSION: u32 = 7;
 
 /// NUL-terminated build description read by `scripts/cfi-doctor.ps1`. The translator number is
 /// spelled out literally; `build_info_matches_translator_version` keeps it in sync.

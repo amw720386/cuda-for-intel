@@ -11,6 +11,7 @@ print("torch", torch.__version__, torch.version.cuda, torch.cuda.get_device_name
 fails, n_ok = [], 0
 g = torch.Generator().manual_seed(0)
 TOL = {torch.float32: 2e-4, torch.float64: 1e-10, torch.complex64: 2e-4, torch.complex128: 1e-10}
+VERBOSE = "-v" in sys.argv
 DTYPES = [torch.float32, torch.float64, torch.complex64, torch.complex128]
 
 
@@ -23,6 +24,8 @@ def rel(got, want):
 def check(name, fn, tol):
     """fn() returns (error, ok_shape) or raises."""
     global n_ok
+    if VERBOSE:
+        print("..", name, flush=True)
     try:
         err = fn()
         torch.cuda.synchronize()
