@@ -2,6 +2,8 @@
 //! under `cfi-run`) and torch's MAGMA call besides gemm and trsm: `copy`, `swap`,
 //! `i?amax`/`i?amin`, `syrk`/`herk`, `syrkx`/`herkx`, `syr2k`/`her2k`, `symm`/`hemm`,
 //! `trmm`, `trmv`, `trsv`, `symv`/`hemv`, `ger`/`geru`/`gerc`, `geam`, `dgmm`,
+//! `geqrfBatched`/`gelsBatched` (batched Householder QR and least squares, torch's batched
+//! `linalg.qr` and `linalg.lstsq`),
 //! `getrfBatched`/`getrsBatched` (small batched LU, which torch uses for `linalg.solve`,
 //! `inv`, `det` and `lu_factor`), and the host/device matrix and vector copies.
 //!
@@ -126,7 +128,7 @@ unsafe fn amax(
             hd,
             result.cast(),
             4,
-            |out| kp::amax(ty, n, x, incx, out, min),
+            |out, parts| kp::amax(ty, n, x, incx, out, min, parts),
             live,
         )
     }
@@ -576,6 +578,75 @@ unsafe fn getrs_batched(
     }
     trace!(
         "{}getrsBatched trans={trans} n={n} nrhs={nrhs} batch={batch}",
+        ty.tag()
+    );
+    run(h, Ok(l))
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn geqrf_batched(
+    hd: *mut c_void,
+    ty: Ty,
+    m: c_int,
+    n: c_int,
+    a: u64,
+    lda: c_int,
+    tau: u64,
+    info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    let h = tri!(handle(hd));
+    if info.is_null() {
+        return INVALID_VALUE;
+    }
+    let l = match kp::geqrf(ty, m, n, a, lda, tau, batch) {
+        Ok(l) => l,
+        Err(i) => {
+            unsafe { info.write(i) };
+            return INVALID_VALUE;
+        }
+    };
+    unsafe { info.write(0) };
+    if !l.is_empty() && (a == 0 || tau == 0) {
+        return INVALID_VALUE;
+    }
+    trace!("{}geqrfBatched m={m} n={n} lda={lda} batch={batch}", ty.tag());
+    run(h, Ok(l))
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn gels_batched(
+    hd: *mut c_void,
+    ty: Ty,
+    trans: c_int,
+    m: c_int,
+    n: c_int,
+    nrhs: c_int,
+    a: u64,
+    lda: c_int,
+    c: u64,
+    ldc: c_int,
+    info: *mut c_int,
+    dev_info: u64,
+    batch: c_int,
+) -> c_int {
+    let h = tri!(handle(hd));
+    if info.is_null() {
+        return INVALID_VALUE;
+    }
+    let l = match kp::gels(ty, trans, m, n, nrhs, a, lda, c, ldc, dev_info, batch) {
+        Ok(l) => l,
+        Err(i) => {
+            unsafe { info.write(i) };
+            return if i == -2 { NOT_SUPPORTED } else { INVALID_VALUE };
+        }
+    };
+    unsafe { info.write(0) };
+    if !l.is_empty() && (a == 0 || c == 0) {
+        return INVALID_VALUE;
+    }
+    trace!(
+        "{}gelsBatched m={m} n={n} nrhs={nrhs} lda={lda} ldc={ldc} batch={batch}",
         ty.tag()
     );
     run(h, Ok(l))
@@ -3183,6 +3254,198 @@ pub unsafe extern "system" fn cublasZgetrsBatched(
             b as u64,
             ldb,
             info,
+            batch,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasSgeqrfBatched(
+    handle: *mut c_void,
+    m: c_int,
+    n: c_int,
+    a: *const *mut f32,
+    lda: c_int,
+    tau: *const *mut f32,
+    info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe { geqrf_batched(handle, Ty::S, m, n, a as u64, lda, tau as u64, info, batch) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasSgelsBatched(
+    handle: *mut c_void,
+    trans: c_int,
+    m: c_int,
+    n: c_int,
+    nrhs: c_int,
+    a: *const *mut f32,
+    lda: c_int,
+    c: *const *mut f32,
+    ldc: c_int,
+    info: *mut c_int,
+    dev_info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe {
+        gels_batched(
+            handle,
+            Ty::S,
+            trans,
+            m,
+            n,
+            nrhs,
+            a as u64,
+            lda,
+            c as u64,
+            ldc,
+            info,
+            dev_info as u64,
+            batch,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasDgeqrfBatched(
+    handle: *mut c_void,
+    m: c_int,
+    n: c_int,
+    a: *const *mut f64,
+    lda: c_int,
+    tau: *const *mut f64,
+    info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe { geqrf_batched(handle, Ty::D, m, n, a as u64, lda, tau as u64, info, batch) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasDgelsBatched(
+    handle: *mut c_void,
+    trans: c_int,
+    m: c_int,
+    n: c_int,
+    nrhs: c_int,
+    a: *const *mut f64,
+    lda: c_int,
+    c: *const *mut f64,
+    ldc: c_int,
+    info: *mut c_int,
+    dev_info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe {
+        gels_batched(
+            handle,
+            Ty::D,
+            trans,
+            m,
+            n,
+            nrhs,
+            a as u64,
+            lda,
+            c as u64,
+            ldc,
+            info,
+            dev_info as u64,
+            batch,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasCgeqrfBatched(
+    handle: *mut c_void,
+    m: c_int,
+    n: c_int,
+    a: *const *mut Complex32,
+    lda: c_int,
+    tau: *const *mut Complex32,
+    info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe { geqrf_batched(handle, Ty::C, m, n, a as u64, lda, tau as u64, info, batch) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasCgelsBatched(
+    handle: *mut c_void,
+    trans: c_int,
+    m: c_int,
+    n: c_int,
+    nrhs: c_int,
+    a: *const *mut Complex32,
+    lda: c_int,
+    c: *const *mut Complex32,
+    ldc: c_int,
+    info: *mut c_int,
+    dev_info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe {
+        gels_batched(
+            handle,
+            Ty::C,
+            trans,
+            m,
+            n,
+            nrhs,
+            a as u64,
+            lda,
+            c as u64,
+            ldc,
+            info,
+            dev_info as u64,
+            batch,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasZgeqrfBatched(
+    handle: *mut c_void,
+    m: c_int,
+    n: c_int,
+    a: *const *mut Complex64,
+    lda: c_int,
+    tau: *const *mut Complex64,
+    info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe { geqrf_batched(handle, Ty::Z, m, n, a as u64, lda, tau as u64, info, batch) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cublasZgelsBatched(
+    handle: *mut c_void,
+    trans: c_int,
+    m: c_int,
+    n: c_int,
+    nrhs: c_int,
+    a: *const *mut Complex64,
+    lda: c_int,
+    c: *const *mut Complex64,
+    ldc: c_int,
+    info: *mut c_int,
+    dev_info: *mut c_int,
+    batch: c_int,
+) -> c_int {
+    unsafe {
+        gels_batched(
+            handle,
+            Ty::Z,
+            trans,
+            m,
+            n,
+            nrhs,
+            a as u64,
+            lda,
+            c as u64,
+            ldc,
+            info,
+            dev_info as u64,
             batch,
         )
     }

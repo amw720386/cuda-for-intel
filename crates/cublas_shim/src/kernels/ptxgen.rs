@@ -117,6 +117,11 @@ pub enum Kernel {
     Geam,
     Getrf,
     Laswp,
+    GemmBS,
+    GemmBP,
+    Nrm2P,
+    Geqrf,
+    GetrfT,
 }
 
 /// Threads of the one-dimensional kernels (`gemv`, `dot`, `nrm2`, `axpy`, `scal`).
@@ -125,9 +130,27 @@ pub const BLOCK: u32 = 256;
 pub const TRSM_BLOCK: u32 = 64;
 /// GEMM tile edge (blocks are TILE x TILE).
 pub const TILE: u32 = 16;
+/// Threads of the one-work-group-per-matrix factorizations (`getrf`, `geqrf`).
+pub const LU_BLOCK: u32 = 64;
+
+/// Register block of the `gemmb*` kernels: each of the 16 x 16 threads computes
+/// `rb x rb` outputs, so a work-group covers a `16 rb` square of C.
+pub fn gemm_rb(ty: Ty) -> u32 {
+    let o = GEMM_RB.load(std::sync::atomic::Ordering::Relaxed);
+    if o != 0 {
+        return o;
+    }
+    match ty {
+        Ty::Z => 2,
+        _ => 4,
+    }
+}
+
+/// Override of [`gemm_rb`] for every type (0: the defaults); set before the kernels load.
+pub static GEMM_RB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl Kernel {
-    pub const BLAS: [Kernel; 14] = [
+    pub const BLAS: [Kernel; 19] = [
         Kernel::GemmS,
         Kernel::GemmP,
         Kernel::Gemv,
@@ -142,6 +165,11 @@ impl Kernel {
         Kernel::Geam,
         Kernel::Getrf,
         Kernel::Laswp,
+        Kernel::GemmBS,
+        Kernel::GemmBP,
+        Kernel::Nrm2P,
+        Kernel::Geqrf,
+        Kernel::GetrfT,
     ];
 
     pub fn tag(self) -> &'static str {
@@ -160,29 +188,37 @@ impl Kernel {
             Kernel::Geam => "geam",
             Kernel::Getrf => "getrf",
             Kernel::Laswp => "laswp",
+            Kernel::GemmBS => "gemmbs",
+            Kernel::GemmBP => "gemmbp",
+            Kernel::Nrm2P => "nrm2p",
+            Kernel::Geqrf => "geqrf",
+            Kernel::GetrfT => "getrft",
         }
     }
 
     pub fn params(self) -> usize {
         match self {
-            Kernel::GemmS | Kernel::GemmP => 31,
+            Kernel::GemmS | Kernel::GemmP | Kernel::GemmBS | Kernel::GemmBP => 31,
             Kernel::Gemv | Kernel::TrsmS | Kernel::TrsmP => 16,
             Kernel::Dot | Kernel::Scal => 7,
-            Kernel::Nrm2 => 4,
+            Kernel::Nrm2 => 6,
+            Kernel::Nrm2P => 4,
             Kernel::Axpy => 8,
             Kernel::Copy => 6,
-            Kernel::Amax => 5,
+            Kernel::Amax => 6,
             Kernel::Geam => 21,
-            Kernel::Getrf => 7,
+            Kernel::Getrf | Kernel::GetrfT => 7,
             Kernel::Laswp => 6,
+            Kernel::Geqrf => 10,
         }
     }
 
     /// Block shape of a launch.
     pub fn block(self) -> [u32; 3] {
         match self {
-            Kernel::GemmS | Kernel::GemmP => [TILE, TILE, 1],
-            Kernel::TrsmS | Kernel::TrsmP | Kernel::Getrf | Kernel::Laswp => [TRSM_BLOCK, 1, 1],
+            Kernel::GemmS | Kernel::GemmP | Kernel::GemmBS | Kernel::GemmBP => [TILE, TILE, 1],
+            Kernel::TrsmS | Kernel::TrsmP | Kernel::Laswp | Kernel::GetrfT => [TRSM_BLOCK, 1, 1],
+            Kernel::Getrf | Kernel::Geqrf => [LU_BLOCK, 1, 1],
             _ => [BLOCK, 1, 1],
         }
     }
@@ -244,6 +280,11 @@ fn body(k: Kernel, ty: Ty) -> String {
         Kernel::Geam => geam(ty),
         Kernel::Getrf => getrf(ty),
         Kernel::Laswp => laswp(ty),
+        Kernel::GemmBS => gemm_blocked(ty, false),
+        Kernel::GemmBP => gemm_blocked(ty, true),
+        Kernel::Nrm2P => nrm2_partial(ty),
+        Kernel::Geqrf => geqrf(ty),
+        Kernel::GetrfT => getrf_thread(ty),
     }
 }
 
@@ -267,7 +308,7 @@ impl K {
         let t = ty.ft();
         let _ = writeln!(
             s,
-            ".reg .pred %p<24>;\n.reg .b16 %rs<4>;\n.reg .b32 %r<64>;\n.reg .b64 %rd<128>;\n.reg .{t} %f<64>;"
+            ".reg .pred %p<24>;\n.reg .b16 %rs<4>;\n.reg .b32 %r<64>;\n.reg .b64 %rd<128>;\n.reg .{t} %f<128>;"
         );
         if shared > 0 {
             let _ = writeln!(s, ".shared .align 16 .b8 smem[{shared}];");
@@ -578,6 +619,80 @@ impl K {
         }
     }
 
+    /// Shared-memory load of `v` at `%r<addr> + off` bytes.
+    fn lds_off(&mut self, addr: u32, off: u32, v: V) {
+        let (t, c) = (self.t(), self.ty.comp());
+        let at = |o: u32| {
+            if o == 0 {
+                format!("[%r{addr}]")
+            } else {
+                format!("[%r{addr}+{o}]")
+            }
+        };
+        self.l(&format!("ld.shared.{t} %f{}, {};", v.0, at(off)));
+        if self.cx() {
+            self.l(&format!("ld.shared.{t} %f{}, {};", v.0 + 1, at(off + c)));
+        }
+    }
+
+    /// `v = conj(v)` (no-op for reals).
+    fn conj(&mut self, v: V) {
+        if self.cx() {
+            let t = self.t();
+            self.l(&format!("neg.{t} %f{0}, %f{0};", v.0 + 1));
+        }
+    }
+
+    /// Shared tree sum of the real `%f<r>` over `nt` threads (`%r2` = tid, `%r11` = own
+    /// slot of one real component); thread 0 ends with the total in `%f<r>` and slot 0.
+    /// Scratch `%f<s>`, `%r12`. Ends with a barrier.
+    fn real_sum_tree(&mut self, r: u32, s: u32, nt: u32, stem: &str) {
+        let (t, c) = (self.t(), self.ty.comp());
+        self.l(&format!("st.shared.{t} [%r11], %f{r};\nbar.sync 0;"));
+        let mut h = nt / 2;
+        while h >= 1 {
+            self.l(&format!(
+                "setp.ge.u32 %p19, %r2, {h};\n@%p19 bra $L_{stem}_{h};\nadd.u32 %r12, %r11, {};\nld.shared.{t} %f{s}, [%r12];\nadd.rn.{t} %f{r}, %f{r}, %f{s};\nst.shared.{t} [%r11], %f{r};\n$L_{stem}_{h}:\nbar.sync 0;",
+                h * c
+            ));
+            h /= 2;
+        }
+    }
+
+    /// Replace the best (`%f0`, index `%rd40`) by the candidate (`%f<cf>`, `%rd<ci>`) when
+    /// the best is none (`%rd42`), or the candidate is valid and larger (smaller when
+    /// `%p7`; `%p8` = !`%p7`), or equal with a smaller index. Scratch `%p4..%p6`, `%p9..%p11`.
+    fn pick(&mut self, cf: u32, ci: u32) {
+        let t = self.t();
+        self.l(&format!(
+            "setp.eq.u64 %p4, %rd40, %rd42;\nsetp.ne.u64 %p9, %rd{ci}, %rd42;\nsetp.gt.{t} %p5, %f{cf}, %f0;\nsetp.lt.{t} %p6, %f{cf}, %f0;\nand.pred %p5, %p5, %p8;\nand.pred %p6, %p6, %p7;\nor.pred %p5, %p5, %p6;\nsetp.eq.{t} %p10, %f{cf}, %f0;\nsetp.lt.u64 %p11, %rd{ci}, %rd40;\nand.pred %p10, %p10, %p11;\nor.pred %p5, %p5, %p10;\nand.pred %p5, %p5, %p9;\nor.pred %p5, %p5, %p4;\nselp.{t} %f0, %f{cf}, %f0, %p5;\nselp.u64 %rd40, %rd{ci}, %rd40, %p5;"
+        ));
+    }
+
+    /// Shared arg-best tree of (`%f0`, `%rd40`) over `nt` threads with [`K::pick`]: values
+    /// at `%r11` (one real component per thread), indices at `%r13` (8 bytes per thread).
+    /// Slot 0 ends with the block's best. Scratch `%f6`, `%rd41`, `%r12`, `%r14`. Ends with
+    /// a barrier.
+    fn argbest_tree(&mut self, nt: u32, stem: &str) {
+        let (t, c) = (self.t(), self.ty.comp());
+        self.l(&format!(
+            "st.shared.{t} [%r11], %f0;\nst.shared.u64 [%r13], %rd40;\nbar.sync 0;"
+        ));
+        let mut h = nt / 2;
+        while h >= 1 {
+            self.l(&format!(
+                "setp.ge.u32 %p19, %r2, {h};\n@%p19 bra $L_{stem}_{h};\nadd.u32 %r12, %r11, {};\nadd.u32 %r14, %r13, {};\nld.shared.{t} %f6, [%r12];\nld.shared.u64 %rd41, [%r14];",
+                h * c,
+                h * 8
+            ));
+            self.pick(6, 41);
+            self.l(&format!(
+                "st.shared.{t} [%r11], %f0;\nst.shared.u64 [%r13], %rd40;\n$L_{stem}_{h}:\nbar.sync 0;"
+            ));
+            h /= 2;
+        }
+    }
+
     fn done(mut self) -> String {
         self.l("$L_out:\nret;\n}");
         self.s
@@ -796,14 +911,17 @@ fn gemv(ty: Ty) -> String {
     k.done()
 }
 
-/// Parameters: 0 x, 1 y, 2 out (device), 3 n, 4 incx, 5 incy, 6 conj.
-/// `*out = sum_e conj?(x[e*incx]) * y[e*incy]`. Launch: one block of 256.
+/// Parameters: 0 x, 1 y (0: all ones), 2 out (device), 3 n, 4 incx, 5 incy, 6 conj.
+/// Block `b` writes `sum conj?(x[e*incx]) * y[e*incy]` over its grid-stride share of `e` to
+/// `out[b]`: one block gives the dot product; several give partial sums that a one-block
+/// launch with `y = 0` adds up. Launch: grid G, block 256.
 fn dot(ty: Ty) -> String {
     let name = entry_name(Kernel::Dot, ty);
     let mut k = K::new(&name, Kernel::Dot.params(), ty, BLOCK * ty.slot());
-    k.l("mov.u32 %r2, %tid.x;\ncvt.u64.u32 %rd34, %r2;");
+    k.gid(34, BLOCK);
+    k.l(&format!("mov.u32 %r3, %nctaid.x;\nmul.wide.u32 %rd39, %r3, {BLOCK};"));
     k.l("cvta.to.global.u64 %rd31, %rd0;\ncvta.to.global.u64 %rd32, %rd1;\ncvta.to.global.u64 %rd33, %rd2;");
-    k.l("setp.ne.u64 %p2, %rd6, 0;");
+    k.l("setp.ne.u64 %p2, %rd6, 0;\nsetp.eq.u64 %p3, %rd1, 0;");
     let acc = V(0);
     k.zero(acc);
     k.l("$L_e:\nsetp.ge.u64 %p1, %rd34, %rd3;\n@%p1 bra $L_red;");
@@ -811,11 +929,13 @@ fn dot(ty: Ty) -> String {
     k.elem(36, 31, 35);
     k.ld(36, V(2));
     k.conj_if(V(2), 2);
-    k.l("mul.lo.u64 %rd37, %rd34, %rd5;");
+    k.l("@%p3 bra $L_one;\nmul.lo.u64 %rd37, %rd34, %rd5;");
     k.elem(38, 32, 37);
     k.ld(38, V(4));
     k.fma(acc, V(2), V(4));
-    k.l(&format!("add.u64 %rd34, %rd34, {BLOCK};\nbra $L_e;"));
+    k.l("bra $L_next;\n$L_one:");
+    k.add(acc, V(2));
+    k.l("$L_next:\nadd.u64 %rd34, %rd34, %rd39;\nbra $L_e;");
     k.l("$L_red:");
     k.l(&format!(
         "mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {}, %r10;",
@@ -824,22 +944,46 @@ fn dot(ty: Ty) -> String {
     k.tree(acc, V(2), false, "sum");
     k.l("setp.ne.u32 %p4, %r2, 0;\n@%p4 bra $L_out;");
     k.lds(10, acc);
-    k.st(33, acc);
+    k.l("cvt.u64.u32 %rd40, %r1;");
+    k.elem(41, 33, 40);
+    k.st(41, acc);
     k.done()
 }
 
-/// Parameters: 0 x, 1 out (device, real), 2 n, 3 incx. `*out = ||x||_2` as
+/// Parameters: 0 x, 1 out (device, real), 2 n, 3 incx, 4 part, 5 nparts. `*out = ||x||_2`.
+/// With `nparts > 0`, `part` holds the `nrm2p` pairs of a first launch: the result is
+/// `sqrt(sum)` unless the sum overflowed or the largest component is small enough for
+/// squares to underflow; then (and with `nparts == 0`) this block recomputes it from x as
 /// `scale * sqrt(sum (x/scale)^2)` with `scale = max |component|`. One block of 256.
 fn nrm2(ty: Ty) -> String {
     let name = entry_name(Kernel::Nrm2, ty);
     let t = ty.ft();
-    let mut k = K::new(&name, Kernel::Nrm2.params(), ty, BLOCK * ty.comp());
+    let c = ty.comp();
+    let mut k = K::new(&name, Kernel::Nrm2.params(), ty, BLOCK * c);
     k.l("mov.u32 %r2, %tid.x;\ncvt.u64.u32 %rd30, %r2;");
     k.l("cvta.to.global.u64 %rd31, %rd0;\ncvta.to.global.u64 %rd33, %rd1;");
+    k.l(&format!("mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {c}, %r10;"));
+    // combine the partials
+    k.l("setp.eq.u64 %p1, %rd5, 0;\n@%p1 bra $L_full;\ncvta.to.global.u64 %rd37, %rd4;");
     k.l(&format!(
-        "mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {}, %r10;",
-        ty.comp()
+        "mov.{t} %f0, %f60;\nmov.{t} %f8, %f60;\nmov.u64 %rd34, %rd30;\n$L_p:\nsetp.ge.u64 %p1, %rd34, %rd5;\n@%p1 bra $L_pred;\nmad.lo.u64 %rd38, %rd34, {}, %rd37;\nld.global.{t} %f2, [%rd38];\nld.global.{t} %f3, [%rd38+{c}];\nmax.{t} %f0, %f0, %f2;\nadd.rn.{t} %f8, %f8, %f3;\nadd.u64 %rd34, %rd34, {BLOCK};\nbra $L_p;\n$L_pred:",
+        2 * c
     ));
+    k.tree(V(0), V(4), true, "pmax");
+    k.l(&format!("ld.shared.{t} %f6, [%r10];\nbar.sync 0;"));
+    k.real_sum_tree(8, 9, BLOCK, "psum");
+    k.l(&format!("ld.shared.{t} %f8, [%r10];\nbar.sync 0;"));
+    // usable: finite sum, and max == 0 or max^2 far above the underflow range
+    let small = if ty.double() {
+        "0d26F0000000000000" // 2^-400
+    } else {
+        "0f2B800000" // 2^-40
+    };
+    k.l(&format!(
+        "setp.lt.{t} %p2, %f8, {inf};\nsetp.ge.{t} %p3, %f6, {small};\nsetp.eq.{t} %p4, %f6, %f60;\nor.pred %p3, %p3, %p4;\nand.pred %p2, %p2, %p3;\n@!%p2 bra $L_full;\nsetp.ne.u32 %p4, %r2, 0;\n@%p4 bra $L_out;\nsqrt.rn.{t} %f10, %f8;\nst.global.{t} [%rd33], %f10;\nbra $L_out;",
+        inf = ty.inf()
+    ));
+    k.l("$L_full:");
     // pass 1: max |component|
     k.l("mov.u64 %rd34, %rd30;");
     k.l(&format!("mov.{t} %f0, %f60;"));
@@ -876,19 +1020,10 @@ fn nrm2(ty: Ty) -> String {
     k.l(&format!(
         "add.u64 %rd34, %rd34, {BLOCK};\nbra $L_s;\n$L_sred:"
     ));
-    // reduce the real sums: reuse the max tree's shape with addition on one component
-    k.l(&format!("st.shared.{t} [%r11], %f8;\nbar.sync 0;"));
-    let mut s = BLOCK / 2;
-    while s >= 1 {
-        k.l(&format!(
-            "setp.ge.u32 %p19, %r2, {s};\n@%p19 bra $L_sum_{s};\nld.shared.{t} %f8, [%r11];\nadd.u32 %r12, %r11, {};\nld.shared.{t} %f9, [%r12];\nadd.rn.{t} %f8, %f8, %f9;\nst.shared.{t} [%r11], %f8;\n$L_sum_{s}:\nbar.sync 0;",
-            s * ty.comp()
-        ));
-        s /= 2;
-    }
+    k.real_sum_tree(8, 9, BLOCK, "sum");
     k.l("setp.ne.u32 %p4, %r2, 0;\n@%p4 bra $L_out;");
     k.l(&format!(
-        "ld.shared.{t} %f8, [%r10];\nsqrt.rn.{t} %f10, %f8;\nmul.rn.{t} %f10, %f10, %f6;\nsetp.eq.{t} %p6, %f6, {};\nselp.{t} %f10, %f6, %f10, %p6;\nst.global.{t} [%rd33], %f10;",
+        "sqrt.rn.{t} %f10, %f8;\nmul.rn.{t} %f10, %f10, %f6;\nsetp.eq.{t} %p6, %f6, {};\nselp.{t} %f10, %f6, %f10, %p6;\nst.global.{t} [%rd33], %f10;",
         ty.inf()
     ));
     k.done()
@@ -1022,53 +1157,47 @@ fn copy(ty: Ty) -> String {
     k.done()
 }
 
-/// Parameters: 0 x, 1 out (device i32), 2 n, 3 incx, 4 min. `*out` = 1-based index of the
-/// first element with the largest (smallest when `min`) `|re| + |im|`, 0 when `n == 0`.
-/// One block of 256: per-thread best, then a shared tree on (value, index).
+/// Parameters: 0 x, 1 out (device), 2 n, 3 incx, 4 min, 5 mode. The first element with the
+/// largest (smallest when `min`) `|re| + |im|`. Mode 0: one block over x, `*out` = its
+/// 1-based index (i32), 0 when `n == 0`. Mode 1: block `b` covers its grid-stride share
+/// and writes (value, 0-based u64 index) to `out + 16 b`. Mode 2: one block over the `n`
+/// pairs at x from mode 1, `*out` as in mode 0. Ties go to the smaller index throughout.
 fn amax(ty: Ty) -> String {
     let name = entry_name(Kernel::Amax, ty);
     let t = ty.ft();
     let c = ty.comp();
     let mut k = K::new(&name, Kernel::Amax.params(), ty, BLOCK * (c + 8));
-    k.l("mov.u32 %r2, %tid.x;\ncvt.u64.u32 %rd30, %r2;");
+    k.gid(34, BLOCK);
     k.l("cvta.to.global.u64 %rd31, %rd0;\ncvta.to.global.u64 %rd33, %rd1;");
-    k.l("setp.ne.u64 %p3, %rd4, 0;");
-    // best value %f0, best index %rd40 (u64 max = none)
-    k.l(&format!("mov.{t} %f0, %f60;\nmov.u64 %rd42, 0;\nnot.b64 %rd42, %rd42;\nmov.u64 %rd40, %rd42;\nmov.u64 %rd34, %rd30;"));
-    k.l("$L_e:\nsetp.ge.u64 %p1, %rd34, %rd2;\n@%p1 bra $L_red;\nmul.lo.u64 %rd35, %rd34, %rd3;");
+    k.l("setp.eq.u64 %p12, %rd5, 1;\nsetp.eq.u64 %p13, %rd5, 2;\nsetp.ne.u64 %p7, %rd4, 0;\nnot.pred %p8, %p7;");
+    k.l(&format!(
+        "cvt.u64.u32 %rd30, %r2;\nselp.u64 %rd34, %rd34, %rd30, %p12;\nmov.u32 %r3, %nctaid.x;\nmul.wide.u32 %rd39, %r3, {BLOCK};\nmov.u64 %rd38, {BLOCK};\nselp.u64 %rd39, %rd39, %rd38, %p12;"
+    ));
+    // best value %f0, best index %rd40 (%rd42 = u64 max = none)
+    k.l(&format!(
+        "mov.{t} %f0, %f60;\nmov.u64 %rd42, 0;\nnot.b64 %rd42, %rd42;\nmov.u64 %rd40, %rd42;"
+    ));
+    k.l("$L_e:\nsetp.ge.u64 %p1, %rd34, %rd2;\n@%p1 bra $L_red;\n@%p13 bra $L_pair;\nmul.lo.u64 %rd35, %rd34, %rd3;");
     k.elem(36, 31, 35);
     k.ld(36, V(2));
-    k.l(&format!("abs.{t} %f4, %f2;"));
-    if ty.complex() {
-        k.l(&format!("abs.{t} %f5, %f3;\nadd.rn.{t} %f4, %f4, %f5;"));
-    }
-    // take it if no best yet, or strictly better (indices only grow per thread)
+    k.abs1(4, V(2));
+    k.l("mov.u64 %rd43, %rd34;\nbra $L_cmp;");
     k.l(&format!(
-        "setp.eq.u64 %p4, %rd40, %rd42;\nsetp.gt.{t} %p5, %f4, %f0;\nsetp.lt.{t} %p6, %f4, %f0;\nselp.u32 %r20, 1, 0, %p3;\nsetp.ne.u32 %p7, %r20, 0;\nnot.pred %p8, %p7;\nand.pred %p5, %p5, %p8;\nand.pred %p6, %p6, %p7;\nor.pred %p5, %p5, %p6;\nor.pred %p5, %p5, %p4;\nselp.{t} %f0, %f4, %f0, %p5;\nselp.u64 %rd40, %rd34, %rd40, %p5;"
+        "$L_pair:\nmad.lo.u64 %rd36, %rd34, 16, %rd31;\nld.global.{t} %f4, [%rd36];\nld.global.u64 %rd43, [%rd36+8];\n$L_cmp:"
     ));
-    k.l(&format!(
-        "add.u64 %rd34, %rd34, {BLOCK};\nbra $L_e;\n$L_red:"
-    ));
+    k.pick(4, 43);
+    k.l("add.u64 %rd34, %rd34, %rd39;\nbra $L_e;\n$L_red:");
     // shared: values at smem[tid*c], indices at smem[BLOCK*c + tid*8]
-    k.l(&format!("mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {c}, %r10;\nmad.lo.u32 %r13, %r2, 8, %r10;\nadd.u32 %r13, %r13, {};", BLOCK * c));
     k.l(&format!(
-        "st.shared.{t} [%r11], %f0;\nst.shared.u64 [%r13], %rd40;\nbar.sync 0;"
+        "mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {c}, %r10;\nmad.lo.u32 %r13, %r2, 8, %r10;\nadd.u32 %r13, %r13, {};",
+        BLOCK * c
     ));
-    let mut st = BLOCK / 2;
-    while st >= 1 {
-        k.l(&format!(
-            "setp.ge.u32 %p19, %r2, {st};\n@%p19 bra $L_a_{st};\nadd.u32 %r12, %r11, {};\nadd.u32 %r14, %r13, {};\nld.shared.{t} %f6, [%r12];\nld.shared.u64 %rd41, [%r14];",
-            st * c,
-            st * 8
-        ));
-        // other wins if mine is none, or other valid and (better, or equal with smaller index)
-        k.l(&format!(
-            "setp.eq.u64 %p4, %rd40, %rd42;\nsetp.ne.u64 %p9, %rd41, %rd42;\nsetp.gt.{t} %p5, %f6, %f0;\nsetp.lt.{t} %p6, %f6, %f0;\nnot.pred %p8, %p7;\nand.pred %p5, %p5, %p8;\nand.pred %p6, %p6, %p7;\nor.pred %p5, %p5, %p6;\nsetp.eq.{t} %p10, %f6, %f0;\nsetp.lt.u64 %p11, %rd41, %rd40;\nand.pred %p10, %p10, %p11;\nor.pred %p5, %p5, %p10;\nor.pred %p5, %p5, %p4;\nand.pred %p5, %p5, %p9;\nselp.{t} %f0, %f6, %f0, %p5;\nselp.u64 %rd40, %rd41, %rd40, %p5;\nst.shared.{t} [%r11], %f0;\nst.shared.u64 [%r13], %rd40;\n$L_a_{st}:\nbar.sync 0;"
-        ));
-        st /= 2;
-    }
+    k.argbest_tree(BLOCK, "a");
     k.l("setp.ne.u32 %p4, %r2, 0;\n@%p4 bra $L_out;");
-    k.l("ld.shared.u64 %rd40, [%r13];\nadd.u64 %rd40, %rd40, 1;\ncvt.u32.u64 %r21, %rd40;\nst.global.u32 [%rd33], %r21;");
+    k.l(&format!(
+        "@!%p12 bra $L_index;\ncvt.u64.u32 %rd44, %r1;\nmad.lo.u64 %rd45, %rd44, 16, %rd33;\nst.global.{t} [%rd45], %f0;\nst.global.u64 [%rd45+8], %rd40;\nbra $L_out;"
+    ));
+    k.l("$L_index:\nadd.u64 %rd40, %rd40, 1;\ncvt.u32.u64 %r21, %rd40;\nst.global.u32 [%rd33], %r21;");
     k.done()
 }
 
@@ -1123,14 +1252,192 @@ fn geam(ty: Ty) -> String {
 
 /// Parameters: 0 A table, 1 P (device i32, n per matrix; 0 = no pivoting), 2 info (device
 /// i32 per matrix), 3 n, 4 lda, 5 batch, 6 pivot. In-place LU with partial pivoting
-/// (LAPACK `getf2` order: pivot on max |re| + |im|, swap whole rows, scale the column
-/// unless the pivot is zero, rank-1 update), one thread per matrix. `info` = first zero
-/// pivot (1-based) or 0. Launch: grid ceil(batch/64), block 64; `A`, `P`, `info` pre-offset
-/// per launch.
+/// (LAPACK `getf2` order: pivot on max |re| + |im|, first index on ties, swap whole rows,
+/// scale the column unless the pivot is zero, rank-1 update). One work-group of
+/// `LU_BLOCK` threads per matrix: a shared arg-max finds the pivot, threads split the
+/// columns of the swap and the rows of the scaling and update. `info` = first zero pivot
+/// (1-based) or 0. Launch: grid batch, block `LU_BLOCK`.
 fn getrf(ty: Ty) -> String {
     let name = entry_name(Kernel::Getrf, ty);
+    let c = ty.comp();
+    let nt = LU_BLOCK;
+    let mut k = K::new(&name, Kernel::Getrf.params(), ty, nt * (c + 8));
+    let t = k.t();
+    k.l("mov.u32 %r1, %ctaid.x;\nmov.u32 %r2, %tid.x;\ncvt.u64.u32 %rd30, %r1;\ncvt.u64.u32 %rd29, %r2;");
+    k.l("setp.ge.u64 %p1, %rd30, %rd5;\n@%p1 bra $L_out;");
+    k.l("cvta.to.global.u64 %rd40, %rd0;\nmad.lo.u64 %rd40, %rd30, 8, %rd40;\nld.global.u64 %rd31, [%rd40];\ncvta.to.global.u64 %rd31, %rd31;");
+    k.l("cvta.to.global.u64 %rd32, %rd1;\nmul.lo.u64 %rd41, %rd30, %rd3;\nmad.lo.u64 %rd32, %rd41, 4, %rd32;");
+    k.l("cvta.to.global.u64 %rd33, %rd2;\nmad.lo.u64 %rd33, %rd30, 4, %rd33;");
+    k.l(&format!(
+        "mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {c}, %r10;\nadd.u32 %r16, %r10, {};\nmad.lo.u32 %r13, %r2, 8, %r16;",
+        nt * c
+    ));
+    k.l("setp.ne.u64 %p2, %rd6, 0;\nmov.u32 %r20, 0;\nmov.u64 %rd34, 0;\nmov.u64 %rd42, 0;\nnot.b64 %rd42, %rd42;\nsetp.eq.u64 %p7, %rd42, 0;\nnot.pred %p8, %p7;");
+    k.l("setp.eq.u64 %p3, %rd3, 0;\n@%p3 bra $L_done;");
+    k.l("$L_k:\nmul.lo.u64 %rd35, %rd34, %rd4;\n@!%p2 bra $L_nopiv;");
+    // per-thread best of rows k + tid + nt q, then the block's
+    k.l(&format!(
+        "mov.{t} %f0, %f60;\nmov.u64 %rd40, %rd42;\nadd.u64 %rd37, %rd34, %rd29;\n$L_ps:\nsetp.ge.u64 %p4, %rd37, %rd3;\n@%p4 bra $L_pe;\nadd.u64 %rd43, %rd35, %rd37;"
+    ));
+    k.elem(44, 31, 43);
+    k.ld(44, V(2));
+    k.abs1(4, V(2));
+    k.pick(4, 37);
+    k.l(&format!("add.u64 %rd37, %rd37, {nt};\nbra $L_ps;\n$L_pe:"));
+    k.argbest_tree(nt, "piv");
+    k.l("ld.shared.u64 %rd36, [%r16];");
+    k.l("setp.ne.u32 %p6, %r2, 0;\n@%p6 bra $L_pw;\nadd.u64 %rd44, %rd36, 1;\ncvt.u32.u64 %r21, %rd44;\nmad.lo.u64 %rd45, %rd34, 4, %rd32;\nst.global.u32 [%rd45], %r21;\n$L_pw:");
+    // swap rows k and p, threads over columns
+    k.l("setp.eq.u64 %p6, %rd36, %rd34;\n@%p6 bra $L_nopiv;\nmov.u64 %rd38, %rd29;\n$L_sw:\nsetp.ge.u64 %p9, %rd38, %rd3;\n@%p9 bra $L_swd;\nmul.lo.u64 %rd46, %rd38, %rd4;\nadd.u64 %rd47, %rd46, %rd34;\nadd.u64 %rd48, %rd46, %rd36;");
+    k.elem(49, 31, 47);
+    k.elem(50, 31, 48);
+    k.ld(49, V(2));
+    k.ld(50, V(4));
+    k.st(49, V(4));
+    k.st(50, V(2));
+    k.l(&format!("add.u64 %rd38, %rd38, {nt};\nbra $L_sw;\n$L_swd:\nbar.sync 0;"));
+    k.l("$L_nopiv:\nadd.u64 %rd43, %rd35, %rd34;");
+    k.elem(44, 31, 43);
+    let d = V(14);
+    k.ld(44, d);
+    k.is_zero(10, d);
+    k.l("@!%p10 bra $L_nz;\nsetp.eq.u32 %p11, %r20, 0;\nadd.u64 %rd44, %rd34, 1;\ncvt.u32.u64 %r22, %rd44;\nselp.u32 %r20, %r22, %r20, %p11;\n$L_nz:");
+    // rows below the pivot: scale l(i,k), then a(i,j) -= l(i,k) a(k,j)
+    k.l("add.u64 %rd37, %rd34, 1;\nadd.u64 %rd37, %rd37, %rd29;\n$L_r:\nsetp.ge.u64 %p4, %rd37, %rd3;\n@%p4 bra $L_rd;\nadd.u64 %rd43, %rd35, %rd37;");
+    k.elem(44, 31, 43);
+    k.ld(44, V(2));
+    k.l("@%p10 bra $L_ns;");
+    k.div(V(2), d);
+    k.st(44, V(2));
+    k.l("$L_ns:");
+    k.neg(V(2));
+    k.l("add.u64 %rd38, %rd34, 1;\n$L_j:\nsetp.ge.u64 %p5, %rd38, %rd3;\n@%p5 bra $L_jd;\nmul.lo.u64 %rd46, %rd38, %rd4;\nadd.u64 %rd47, %rd46, %rd34;\nadd.u64 %rd48, %rd46, %rd37;");
+    k.elem(49, 31, 47);
+    k.elem(50, 31, 48);
+    k.ld(49, V(4));
+    k.ld(50, V(6));
+    k.fma(V(6), V(2), V(4));
+    k.st(50, V(6));
+    k.l(&format!("add.u64 %rd38, %rd38, 1;\nbra $L_j;\n$L_jd:\nadd.u64 %rd37, %rd37, {nt};\nbra $L_r;\n$L_rd:\nbar.sync 0;"));
+    k.l("add.u64 %rd34, %rd34, 1;\nsetp.lt.u64 %p3, %rd34, %rd3;\n@%p3 bra $L_k;");
+    k.l("$L_done:\nsetp.ne.u32 %p6, %r2, 0;\n@%p6 bra $L_out;\nsetp.eq.u64 %p3, %rd2, 0;\n@%p3 bra $L_out;\nst.global.u32 [%rd33], %r20;");
+    k.done()
+}
+
+/// Parameters: 0 B table, 1 P (device i32, n per matrix), 2 n, 3 nrhs, 4 ldb, 5 reverse.
+/// Applies the row interchanges of `getrf` to every column of B (`laswp`), in order or
+/// (`reverse`) backwards. Launch: grid (ceil(nrhs/64), batch), block 64; tables and P
+/// pre-offset per launch.
+fn laswp(ty: Ty) -> String {
+    let name = entry_name(Kernel::Laswp, ty);
+    let mut k = K::new(&name, Kernel::Laswp.params(), ty, 0);
+    k.gid(30, TRSM_BLOCK);
+    k.l("setp.ge.u64 %p1, %rd30, %rd3;\n@%p1 bra $L_out;");
+    k.l("mov.u32 %r3, %ctaid.y;\ncvt.u64.u32 %rd29, %r3;");
+    k.l("cvta.to.global.u64 %rd40, %rd0;\nmad.lo.u64 %rd40, %rd29, 8, %rd40;\nld.global.u64 %rd31, [%rd40];\ncvta.to.global.u64 %rd31, %rd31;");
+    k.l("cvta.to.global.u64 %rd32, %rd1;\nmul.lo.u64 %rd41, %rd29, %rd2;\nmad.lo.u64 %rd32, %rd41, 4, %rd32;");
+    k.l("mul.lo.u64 %rd35, %rd30, %rd4;\nsetp.ne.u64 %p2, %rd5, 0;\nmov.u64 %rd34, 0;\nsetp.eq.u64 %p3, %rd2, 0;\n@%p3 bra $L_out;");
+    k.l("$L_k:\nsub.u64 %rd36, %rd2, 1;\nsub.u64 %rd36, %rd36, %rd34;\nselp.u64 %rd37, %rd36, %rd34, %p2;");
+    k.l("mad.lo.u64 %rd45, %rd37, 4, %rd32;\nld.global.u32 %r21, [%rd45];\ncvt.u64.u32 %rd38, %r21;\nsub.u64 %rd38, %rd38, 1;");
+    k.l("setp.eq.u64 %p4, %rd38, %rd37;\n@%p4 bra $L_n;\nadd.u64 %rd46, %rd35, %rd37;\nadd.u64 %rd47, %rd35, %rd38;");
+    k.elem(48, 31, 46);
+    k.elem(49, 31, 47);
+    k.ld(48, V(2));
+    k.ld(49, V(4));
+    k.st(48, V(4));
+    k.st(49, V(2));
+    k.l("$L_n:\nadd.u64 %rd34, %rd34, 1;\nsetp.lt.u64 %p3, %rd34, %rd2;\n@%p3 bra $L_k;");
+    k.done()
+}
+
+/// Parameters: 0 x, 1 part (device, real), 2 n, 3 incx. Block `b` writes the largest
+/// |component| and the unscaled sum of squares of its grid-stride share of x to
+/// `part[2b]` and `part[2b+1]`. Launch: grid G, block 256.
+fn nrm2_partial(ty: Ty) -> String {
+    let name = entry_name(Kernel::Nrm2P, ty);
     let t = ty.ft();
-    let mut k = K::new(&name, Kernel::Getrf.params(), ty, 0);
+    let c = ty.comp();
+    let mut k = K::new(&name, Kernel::Nrm2P.params(), ty, BLOCK * c);
+    k.gid(34, BLOCK);
+    k.l(&format!("mov.u32 %r3, %nctaid.x;\nmul.wide.u32 %rd39, %r3, {BLOCK};"));
+    k.l("cvta.to.global.u64 %rd31, %rd0;\ncvta.to.global.u64 %rd33, %rd1;");
+    k.l(&format!("mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {c}, %r10;"));
+    k.l(&format!("mov.{t} %f0, %f60;\nmov.{t} %f8, %f60;"));
+    k.l("$L_e:\nsetp.ge.u64 %p1, %rd34, %rd2;\n@%p1 bra $L_red;\nmul.lo.u64 %rd35, %rd34, %rd3;");
+    k.elem(36, 31, 35);
+    k.ld(36, V(2));
+    k.l(&format!(
+        "abs.{t} %f4, %f2;\nmax.{t} %f0, %f0, %f4;\nfma.rn.{t} %f8, %f2, %f2, %f8;"
+    ));
+    if ty.complex() {
+        k.l(&format!(
+            "abs.{t} %f5, %f3;\nmax.{t} %f0, %f0, %f5;\nfma.rn.{t} %f8, %f3, %f3, %f8;"
+        ));
+    }
+    k.l("add.u64 %rd34, %rd34, %rd39;\nbra $L_e;\n$L_red:");
+    k.tree(V(0), V(4), true, "max");
+    k.real_sum_tree(8, 9, BLOCK, "sum");
+    k.l("setp.ne.u32 %p4, %r2, 0;\n@%p4 bra $L_out;");
+    k.l(&format!(
+        "cvt.u64.u32 %rd40, %r1;\nmad.lo.u64 %rd41, %rd40, {}, %rd33;\nst.global.{t} [%rd41], %f0;\nst.global.{t} [%rd41+{c}], %f8;",
+        2 * c
+    ));
+    k.done()
+}
+
+/// Householder update of the columns `%rd38, %rd38 + nt, ... < %rd<count>` of the matrix at
+/// `%rd<base>` (leading dimension `%rd<ld>`) by the reflector in column j of A (`%rd34` = j,
+/// `%rd35` = j lda, v(j) = 1 implicit, v(i) = A(i, j) below), with `-conj(tau)` folded in:
+/// `x -= conj(tau) v (v^H x)`. Uses `%f2..%f5`, `%f36..%f39`, `%rd37`, `%rd39`, `%rd43..%rd48`.
+fn qr_apply(k: &mut K, base: u32, ld: u32, count: u32, stem: &str) {
+    let nt = LU_BLOCK;
+    k.l(&format!(
+        "$L_{stem}:\nsetp.ge.u64 %p5, %rd38, %rd{count};\n@%p5 bra $L_{stem}_d;\nmul.lo.u64 %rd39, %rd38, %rd{ld};\nadd.u64 %rd43, %rd39, %rd34;"
+    ));
+    k.elem(44, base, 43);
+    let w = V(36);
+    k.ld(44, w);
+    k.l(&format!(
+        "add.u64 %rd37, %rd34, 1;\n$L_{stem}_a:\nsetp.ge.u64 %p6, %rd37, %rd4;\n@%p6 bra $L_{stem}_ad;\nadd.u64 %rd45, %rd35, %rd37;"
+    ));
+    k.elem(46, 31, 45);
+    k.ld(46, V(2));
+    k.conj(V(2));
+    k.l("add.u64 %rd47, %rd39, %rd37;");
+    k.elem(48, base, 47);
+    k.ld(48, V(4));
+    k.fma(w, V(2), V(4));
+    k.l(&format!(
+        "add.u64 %rd37, %rd37, 1;\nbra $L_{stem}_a;\n$L_{stem}_ad:"
+    ));
+    let nw = V(38);
+    k.mul(nw, V(34), w);
+    k.neg(nw);
+    k.ld(44, V(4));
+    k.add(V(4), nw);
+    k.st(44, V(4));
+    k.l(&format!(
+        "add.u64 %rd37, %rd34, 1;\n$L_{stem}_b:\nsetp.ge.u64 %p6, %rd37, %rd4;\n@%p6 bra $L_{stem}_bd;\nadd.u64 %rd45, %rd35, %rd37;"
+    ));
+    k.elem(46, 31, 45);
+    k.ld(46, V(2));
+    k.l("add.u64 %rd47, %rd39, %rd37;");
+    k.elem(48, base, 47);
+    k.ld(48, V(4));
+    k.fma(V(4), V(2), nw);
+    k.st(48, V(4));
+    k.l(&format!(
+        "add.u64 %rd37, %rd37, 1;\nbra $L_{stem}_b;\n$L_{stem}_bd:\nadd.u64 %rd38, %rd38, {nt};\nbra $L_{stem};\n$L_{stem}_d:"
+    ));
+}
+
+/// One thread per matrix variant of [`getrf`] (same parameters) for small orders, where a
+/// work-group per matrix would leave most threads idle: LAPACK `getf2` order, serially.
+/// Launch: grid ceil(batch/64), block 64.
+fn getrf_thread(ty: Ty) -> String {
+    let name = entry_name(Kernel::GetrfT, ty);
+    let t = ty.ft();
+    let mut k = K::new(&name, Kernel::GetrfT.params(), ty, 0);
     k.gid(30, TRSM_BLOCK);
     k.l("setp.ge.u64 %p1, %rd30, %rd5;\n@%p1 bra $L_out;");
     k.l("cvta.to.global.u64 %rd40, %rd0;\nmad.lo.u64 %rd40, %rd30, 8, %rd40;\nld.global.u64 %rd31, [%rd40];\ncvta.to.global.u64 %rd31, %rd31;");
@@ -1193,29 +1500,275 @@ fn getrf(ty: Ty) -> String {
     k.done()
 }
 
-/// Parameters: 0 B table, 1 P (device i32, n per matrix), 2 n, 3 nrhs, 4 ldb, 5 reverse.
-/// Applies the row interchanges of `getrf` to every column of B (`laswp`), in order or
-/// (`reverse`) backwards. Launch: grid (ceil(nrhs/64), batch), block 64; tables and P
-/// pre-offset per launch.
-fn laswp(ty: Ty) -> String {
-    let name = entry_name(Kernel::Laswp, ty);
-    let mut k = K::new(&name, Kernel::Laswp.params(), ty, 0);
-    k.gid(30, TRSM_BLOCK);
-    k.l("setp.ge.u64 %p1, %rd30, %rd3;\n@%p1 bra $L_out;");
-    k.l("mov.u32 %r3, %ctaid.y;\ncvt.u64.u32 %rd29, %r3;");
-    k.l("cvta.to.global.u64 %rd40, %rd0;\nmad.lo.u64 %rd40, %rd29, 8, %rd40;\nld.global.u64 %rd31, [%rd40];\ncvta.to.global.u64 %rd31, %rd31;");
-    k.l("cvta.to.global.u64 %rd32, %rd1;\nmul.lo.u64 %rd41, %rd29, %rd2;\nmad.lo.u64 %rd32, %rd41, 4, %rd32;");
-    k.l("mul.lo.u64 %rd35, %rd30, %rd4;\nsetp.ne.u64 %p2, %rd5, 0;\nmov.u64 %rd34, 0;\nsetp.eq.u64 %p3, %rd2, 0;\n@%p3 bra $L_out;");
-    k.l("$L_k:\nsub.u64 %rd36, %rd2, 1;\nsub.u64 %rd36, %rd36, %rd34;\nselp.u64 %rd37, %rd36, %rd34, %p2;");
-    k.l("mad.lo.u64 %rd45, %rd37, 4, %rd32;\nld.global.u32 %r21, [%rd45];\ncvt.u64.u32 %rd38, %r21;\nsub.u64 %rd38, %rd38, 1;");
-    k.l("setp.eq.u64 %p4, %rd38, %rd37;\n@%p4 bra $L_n;\nadd.u64 %rd46, %rd35, %rd37;\nadd.u64 %rd47, %rd35, %rd38;");
-    k.elem(48, 31, 46);
-    k.elem(49, 31, 47);
-    k.ld(48, V(2));
-    k.ld(49, V(4));
-    k.st(48, V(4));
-    k.st(49, V(2));
-    k.l("$L_n:\nadd.u64 %rd34, %rd34, 1;\nsetp.lt.u64 %p3, %rd34, %rd2;\n@%p3 bra $L_k;");
+/// Parameters: 0 A table, 1 Tau table (0: none), 2 C table (0: none), 3 info (device i32
+/// per matrix, 0: none), 4 m, 5 n, 6 nrhs, 7 lda, 8 ldc, 9 batch. Householder QR in place
+/// (LAPACK `geqr2`/`larfg`: `A = H_1 ... H_k`, `H_j = I - tau_j v_j v_j^H`, R in the upper
+/// triangle, v below the diagonal, tau to the Tau table). With a C table the reflectors
+/// are also applied to C (`C = Q^H C`, m x nrhs) and `R X = C(0:n, :)` is solved in place
+/// (`gelsBatched`, m >= n): `info` = first zero diagonal of R (1-based, then no solve).
+/// One work-group of `LU_BLOCK` threads per matrix: a shared sum for the column norm,
+/// thread 0 forms the reflector, threads split rows (scaling) and columns (update, solve).
+/// Launch: grid batch, block `LU_BLOCK`.
+fn geqrf(ty: Ty) -> String {
+    let name = entry_name(Kernel::Geqrf, ty);
+    let c = ty.comp();
+    let nt = LU_BLOCK;
+    let mut k = K::new(&name, Kernel::Geqrf.params(), ty, nt * c + 4 * c);
+    let t = k.t();
+    let cx = ty.complex();
+    k.l("mov.u32 %r1, %ctaid.x;\nmov.u32 %r2, %tid.x;\ncvt.u64.u32 %rd30, %r1;\ncvt.u64.u32 %rd29, %r2;");
+    k.l("setp.ge.u64 %p1, %rd30, %rd9;\n@%p1 bra $L_out;");
+    k.l("cvta.to.global.u64 %rd40, %rd0;\nmad.lo.u64 %rd40, %rd30, 8, %rd40;\nld.global.u64 %rd31, [%rd40];\ncvta.to.global.u64 %rd31, %rd31;");
+    k.l("setp.ne.u64 %p2, %rd1, 0;\nsetp.ne.u64 %p3, %rd2, 0;");
+    k.l("@!%p2 bra $L_t1;\ncvta.to.global.u64 %rd40, %rd1;\nmad.lo.u64 %rd40, %rd30, 8, %rd40;\nld.global.u64 %rd32, [%rd40];\ncvta.to.global.u64 %rd32, %rd32;\n$L_t1:");
+    k.l("@!%p3 bra $L_t2;\ncvta.to.global.u64 %rd40, %rd2;\nmad.lo.u64 %rd40, %rd30, 8, %rd40;\nld.global.u64 %rd33, [%rd40];\ncvta.to.global.u64 %rd33, %rd33;\n$L_t2:");
+    k.l(&format!(
+        "mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r2, {c}, %r10;\nadd.u32 %r14, %r10, {};",
+        nt * c
+    ));
+    k.l("min.u64 %rd36, %rd4, %rd5;\nmov.u64 %rd34, 0;\nsetp.eq.u64 %p4, %rd36, 0;\n@%p4 bra $L_solve;");
+    k.l("$L_j:\nmul.lo.u64 %rd35, %rd34, %rd7;");
+    // squared norm of A(j+1:m, j)
+    k.l(&format!(
+        "mov.{t} %f0, %f60;\nadd.u64 %rd37, %rd34, 1;\nadd.u64 %rd37, %rd37, %rd29;\n$L_q:\nsetp.ge.u64 %p5, %rd37, %rd4;\n@%p5 bra $L_qd;\nadd.u64 %rd43, %rd35, %rd37;"
+    ));
+    k.elem(44, 31, 43);
+    k.ld(44, V(2));
+    k.l(&format!("fma.rn.{t} %f0, %f2, %f2, %f0;"));
+    if cx {
+        k.l(&format!("fma.rn.{t} %f0, %f3, %f3, %f0;"));
+    }
+    k.l(&format!("add.u64 %rd37, %rd37, {nt};\nbra $L_q;\n$L_qd:"));
+    k.real_sum_tree(0, 1, nt, "ssq");
+    // thread 0: reflector of (alpha, x) = A(j:m, j); tau %f30/31, 1/(alpha - beta) %f32/33
+    k.l("setp.ne.u32 %p6, %r2, 0;\n@%p6 bra $L_hb;\nadd.u64 %rd43, %rd35, %rd34;");
+    k.elem(44, 31, 43);
+    let alpha = V(4);
+    k.ld(44, alpha);
+    let (tau, s) = (V(30), V(32));
+    k.zero(tau);
+    k.zero(s);
+    k.l(&format!("mov.{t} %f32, {};\nsetp.eq.{t} %p7, %f0, %f60;", ty.one()));
+    if cx {
+        k.l(&format!("setp.eq.{t} %p8, %f5, %f60;\nand.pred %p7, %p7, %p8;"));
+    }
+    k.l("@%p7 bra $L_hw;");
+    // beta = -sign(alpha_re) sqrt(|alpha|^2 + ||x||^2)
+    k.l(&format!(
+        "fma.rn.{t} %f12, %f4, %f4, %f0;"
+    ));
+    if cx {
+        k.l(&format!("fma.rn.{t} %f12, %f5, %f5, %f12;"));
+    }
+    k.l(&format!(
+        "sqrt.rn.{t} %f12, %f12;\nneg.{t} %f13, %f12;\nsetp.ge.{t} %p8, %f4, %f60;\nselp.{t} %f12, %f13, %f12, %p8;\nsub.rn.{t} %f30, %f12, %f4;\ndiv.rn.{t} %f30, %f30, %f12;\nsub.rn.{t} %f16, %f4, %f12;"
+    ));
+    if cx {
+        k.l(&format!(
+            "neg.{t} %f31, %f5;\ndiv.rn.{t} %f31, %f31, %f12;\nmul.rn.{t} %f18, %f16, %f16;\nfma.rn.{t} %f18, %f5, %f5, %f18;\ndiv.rn.{t} %f32, %f16, %f18;\nneg.{t} %f33, %f5;\ndiv.rn.{t} %f33, %f33, %f18;"
+        ));
+    } else {
+        k.l(&format!("div.rn.{t} %f32, %f32, %f16;"));
+    }
+    k.l(&format!("mov.{t} %f4, %f12;"));
+    if cx {
+        k.l(&format!("mov.{t} %f5, %f60;"));
+    }
+    k.st(44, alpha);
+    k.l("$L_hw:\n@!%p2 bra $L_ht;");
+    k.elem(45, 32, 34);
+    k.st(45, tau);
+    k.l("$L_ht:");
+    k.l(&format!(
+        "st.shared.{t} [%r14], %f30;\nst.shared.{t} [%r14+{}], %f32;",
+        2 * c
+    ));
+    if cx {
+        k.l(&format!(
+            "st.shared.{t} [%r14+{c}], %f31;\nst.shared.{t} [%r14+{}], %f33;",
+            3 * c
+        ));
+    }
+    k.l("$L_hb:\nbar.sync 0;");
+    k.l(&format!(
+        "ld.shared.{t} %f30, [%r14];\nld.shared.{t} %f32, [%r14+{}];",
+        2 * c
+    ));
+    if cx {
+        k.l(&format!(
+            "ld.shared.{t} %f31, [%r14+{c}];\nld.shared.{t} %f33, [%r14+{}];",
+            3 * c
+        ));
+    }
+    // v = x / (alpha - beta)
+    k.l("add.u64 %rd37, %rd34, 1;\nadd.u64 %rd37, %rd37, %rd29;\n$L_v:\nsetp.ge.u64 %p5, %rd37, %rd4;\n@%p5 bra $L_vd;\nadd.u64 %rd43, %rd35, %rd37;");
+    k.elem(44, 31, 43);
+    k.ld(44, V(2));
+    k.mul(V(6), V(2), s);
+    k.st(44, V(6));
+    k.l(&format!("add.u64 %rd37, %rd37, {nt};\nbra $L_v;\n$L_vd:\nbar.sync 0;"));
+    // apply H^H = I - conj(tau) v v^H to the trailing columns of A and to C
+    k.mov(V(34), tau);
+    k.conj(V(34));
+    k.l("add.u64 %rd38, %rd34, 1;\nadd.u64 %rd38, %rd38, %rd29;");
+    qr_apply(&mut k, 31, 7, 5, "ua");
+    k.l("@!%p3 bra $L_cskip;\nmov.u64 %rd38, %rd29;");
+    qr_apply(&mut k, 33, 8, 6, "uc");
+    k.l("$L_cskip:\nbar.sync 0;");
+    k.l("add.u64 %rd34, %rd34, 1;\nsetp.lt.u64 %p4, %rd34, %rd36;\n@%p4 bra $L_j;");
+    k.l("$L_solve:\n@!%p3 bra $L_out;");
+    // info: first zero diagonal entry of R
+    k.l("mov.u32 %r20, 0;\nmov.u64 %rd37, 0;\n$L_z:\nsetp.ge.u64 %p5, %rd37, %rd5;\n@%p5 bra $L_zd;\nmad.lo.u64 %rd43, %rd37, %rd7, %rd37;");
+    k.elem(44, 31, 43);
+    k.ld(44, V(2));
+    k.is_zero(9, V(2));
+    k.l("@%p9 bra $L_zf;\nadd.u64 %rd37, %rd37, 1;\nbra $L_z;\n$L_zf:\nadd.u64 %rd38, %rd37, 1;\ncvt.u32.u64 %r20, %rd38;\n$L_zd:");
+    k.l("setp.ne.u32 %p6, %r2, 0;\nsetp.eq.u64 %p5, %rd3, 0;\nor.pred %p6, %p6, %p5;\n@%p6 bra $L_iw;\ncvta.to.global.u64 %rd45, %rd3;\nmad.lo.u64 %rd45, %rd30, 4, %rd45;\nst.global.u32 [%rd45], %r20;\n$L_iw:");
+    k.l("setp.ne.u32 %p5, %r20, 0;\n@%p5 bra $L_out;");
+    // back substitution R x = c for the right-hand sides tid, tid + nt, ...
+    k.l("mov.u64 %rd38, %rd29;\n$L_r:\nsetp.ge.u64 %p5, %rd38, %rd6;\n@%p5 bra $L_out;\nmul.lo.u64 %rd39, %rd38, %rd8;\nmov.u64 %rd37, %rd5;");
+    k.l("$L_i:\nsetp.eq.u64 %p6, %rd37, 0;\n@%p6 bra $L_rn;\nsub.u64 %rd37, %rd37, 1;\nadd.u64 %rd43, %rd39, %rd37;");
+    k.elem(44, 33, 43);
+    k.ld(44, V(2));
+    k.l("add.u64 %rd40, %rd37, 1;\n$L_l:\nsetp.ge.u64 %p7, %rd40, %rd5;\n@%p7 bra $L_ld;\nmad.lo.u64 %rd46, %rd40, %rd7, %rd37;");
+    k.elem(47, 31, 46);
+    k.ld(47, V(4));
+    k.neg(V(4));
+    k.l("add.u64 %rd48, %rd39, %rd40;");
+    k.elem(49, 33, 48);
+    k.ld(49, V(6));
+    k.fma(V(2), V(4), V(6));
+    k.l("add.u64 %rd40, %rd40, 1;\nbra $L_l;\n$L_ld:\nmad.lo.u64 %rd46, %rd37, %rd7, %rd37;");
+    k.elem(47, 31, 46);
+    k.ld(47, V(4));
+    k.div(V(2), V(4));
+    k.st(44, V(2));
+    k.l(&format!("bra $L_i;\n$L_rn:\nadd.u64 %rd38, %rd38, {nt};\nbra $L_r;"));
+    k.done()
+}
+
+/// Register-blocked variant of [`gemm`] (same parameters and operand modes): the 16 x 16
+/// threads of a work-group compute a `16 rb` square of C (`rb` = [`gemm_rb`]), thread
+/// (tx, ty) the outputs `(i0 + tx + 16 r, j0 + ty + 16 c)`, from 16-deep shared tiles of
+/// op(A) and op(B) (each thread loads `rb` elements of each). Launch: block (16,16), grid
+/// (ceil(m/(16 rb)), ceil(n/(16 rb)), batch).
+fn gemm_blocked(ty: Ty, tables: bool) -> String {
+    let k_ = if tables { Kernel::GemmBP } else { Kernel::GemmBS };
+    let name = entry_name(k_, ty);
+    let slot = ty.slot();
+    let rb = gemm_rb(ty);
+    let bm = TILE * rb;
+    let half = TILE * bm * slot;
+    let lg = bm.trailing_zeros();
+    let mut k = K::new(&name, k_.params(), ty, 2 * half);
+    k.l("mov.u32 %r1, %ctaid.z;\ncvt.u64.u32 %rd59, %r1;");
+    k.batch_base(31, 0, 17, 59, tables);
+    k.batch_base(32, 1, 18, 59, tables);
+    k.batch_base(33, 2, 19, 59, tables);
+    k.l("mov.u32 %r2, %tid.x;\nmov.u32 %r3, %tid.y;\nmov.u32 %r4, %ctaid.x;\nmov.u32 %r5, %ctaid.y;");
+    k.l(&format!(
+        "mul.wide.u32 %rd34, %r4, {bm};\nmul.wide.u32 %rd35, %r5, {bm};\ncvt.u64.u32 %rd36, %r2;\ncvt.u64.u32 %rd37, %r3;"
+    ));
+    k.l("setp.ne.u64 %p1, %rd20, 0;\nsetp.ne.u64 %p2, %rd21, 0;");
+    k.l(&format!(
+        "mov.u32 %r10, smem;\nmad.lo.u32 %r11, %r3, 16, %r2;\nadd.u32 %r13, %r10, {half};\nmad.lo.u32 %r14, %r2, {slot}, %r10;\nmad.lo.u32 %r15, %r3, {slot}, %r13;"
+    ));
+    let acc = |r: u32, c: u32| V(64 + 2 * (r * rb + c));
+    for r in 0..rb {
+        for c in 0..rb {
+            k.zero(acc(r, c));
+        }
+    }
+    k.l("mov.u64 %rd41, 0;\nsetp.eq.u64 %p3, %rd11, 0;\n@%p3 bra $L_epi;");
+    k.l("sub.u64 %rd38, %rd9, 1;\nsub.u64 %rd39, %rd10, 1;\nsub.u64 %rd40, %rd11, 1;");
+    k.l("$L_k:");
+    for q in 0..rb {
+        // op(A) tile element e = tid + 256 q: row e % bm, depth e / bm, stored at slot e
+        k.l(&format!(
+            "add.u32 %r20, %r11, {};\nand.b32 %r21, %r20, {};\nshr.u32 %r22, %r20, {lg};\ncvt.u64.u32 %rd42, %r21;\nadd.u64 %rd42, %rd34, %rd42;\ncvt.u64.u32 %rd43, %r22;\nadd.u64 %rd43, %rd41, %rd43;",
+            256 * q,
+            bm - 1
+        ));
+        k.l("setp.lt.u64 %p4, %rd42, %rd9;\nsetp.lt.u64 %p5, %rd43, %rd11;\nselp.u64 %rd44, %rd42, %rd38, %p4;\nselp.u64 %rd45, %rd43, %rd40, %p5;");
+        operand(&mut k, 31, 46, 44, 45, 12, 13, 25, 26, 27, V(2), &format!("a{q}"));
+        k.l("and.pred %p6, %p4, %p5;");
+        k.keep_if(V(2), 6);
+        k.conj_if(V(2), 1);
+        k.l(&format!("mad.lo.u32 %r23, %r20, {slot}, %r10;"));
+        k.sts(23, V(2));
+    }
+    for q in 0..rb {
+        // op(B) tile element e: depth e % 16, column e / 16, stored at depth * bm + column
+        k.l(&format!(
+            "add.u32 %r20, %r11, {};\nand.b32 %r21, %r20, 15;\nshr.u32 %r22, %r20, 4;\ncvt.u64.u32 %rd42, %r21;\nadd.u64 %rd42, %rd41, %rd42;\ncvt.u64.u32 %rd43, %r22;\nadd.u64 %rd43, %rd35, %rd43;",
+            256 * q
+        ));
+        k.l("setp.lt.u64 %p7, %rd42, %rd11;\nsetp.lt.u64 %p8, %rd43, %rd10;\nselp.u64 %rd48, %rd42, %rd40, %p7;\nselp.u64 %rd49, %rd43, %rd39, %p8;");
+        operand(&mut k, 32, 51, 48, 49, 14, 15, 28, 29, 30, V(2), &format!("b{q}"));
+        k.l("and.pred %p9, %p7, %p8;");
+        k.keep_if(V(2), 9);
+        k.conj_if(V(2), 2);
+        k.l(&format!(
+            "mad.lo.u32 %r23, %r21, {bm}, %r22;\nmad.lo.u32 %r23, %r23, {slot}, %r13;"
+        ));
+        k.sts(23, V(2));
+    }
+    k.l("bar.sync 0;");
+    for l in 0..TILE {
+        for r in 0..rb {
+            k.lds_off(14, (l * bm + 16 * r) * slot, V(96 + 2 * r));
+        }
+        for c in 0..rb {
+            k.lds_off(15, (l * bm + 16 * c) * slot, V(104 + 2 * c));
+        }
+        for r in 0..rb {
+            for c in 0..rb {
+                k.fma(acc(r, c), V(96 + 2 * r), V(104 + 2 * c));
+            }
+        }
+    }
+    k.l("bar.sync 0;");
+    k.l("add.u64 %rd41, %rd41, 16;\nsetp.lt.u64 %p3, %rd41, %rd11;\n@%p3 bra $L_k;");
+    k.l("$L_epi:");
+    let (alpha, beta, v, cv) = (V(20), V(22), V(24), V(26));
+    k.scalar(alpha, 3, 4, 7, None, "alpha");
+    k.scalar(beta, 5, 6, 8, None, "beta");
+    k.is_zero(12, alpha);
+    k.l("not.pred %p12, %p12;");
+    k.is_zero(13, beta);
+    for r in 0..rb {
+        for c in 0..rb {
+            let skip = format!("$L_e{r}_{c}");
+            k.l(&format!(
+                "add.u64 %rd70, %rd34, %rd36;\nadd.u64 %rd70, %rd70, {};\nadd.u64 %rd71, %rd35, %rd37;\nadd.u64 %rd71, %rd71, {};",
+                16 * r,
+                16 * c
+            ));
+            k.l(&format!(
+                "setp.ge.u64 %p10, %rd70, %rd9;\nsetp.ge.u64 %p11, %rd71, %rd10;\nor.pred %p10, %p10, %p11;\n@%p10 bra {skip};"
+            ));
+            // triangle-only store (syrk, herk, syr2k, ...)
+            k.l(&format!(
+                "setp.eq.u64 %p14, %rd23, 1;\nsetp.lt.u64 %p15, %rd70, %rd71;\nand.pred %p14, %p14, %p15;\n@%p14 bra {skip};\nsetp.eq.u64 %p14, %rd23, 2;\nsetp.gt.u64 %p15, %rd70, %rd71;\nand.pred %p14, %p14, %p15;\n@%p14 bra {skip};"
+            ));
+            k.mul(v, alpha, acc(r, c));
+            k.keep_if(v, 12);
+            k.l("mul.lo.u64 %rd52, %rd70, %rd22;\nmad.lo.u64 %rd52, %rd71, %rd16, %rd52;");
+            k.elem(53, 33, 52);
+            k.l(&format!("@%p13 bra {skip}_st;"));
+            k.ld(53, cv);
+            k.fma(v, beta, cv);
+            k.l(&format!("{skip}_st:"));
+            if ty.complex() {
+                let t = ty.ft();
+                k.l(&format!(
+                    "setp.ne.u64 %p14, %rd24, 0;\nsetp.eq.u64 %p15, %rd70, %rd71;\nand.pred %p14, %p14, %p15;\nselp.{t} %f25, %f60, %f25, %p14;"
+                ));
+            }
+            k.st(53, v);
+            k.l(&format!("{skip}:"));
+        }
+    }
     k.done()
 }
 
@@ -1226,7 +1779,7 @@ mod tests {
     #[test]
     fn entries_have_declared_params_and_unique_names() {
         let e = all_entries();
-        assert_eq!(e.len(), 4 * 14 + 2);
+        assert_eq!(e.len(), 4 * 19 + 2);
         let mut names: Vec<&String> = e.iter().map(|(n, _, _)| n).collect();
         names.sort();
         names.dedup();
@@ -1241,11 +1794,14 @@ mod tests {
     #[test]
     fn gemm_barriers_precede_every_exit() {
         for ty in Ty::BLAS {
-            for k in [Kernel::GemmS, Kernel::GemmP] {
+            for k in [Kernel::GemmS, Kernel::GemmP, Kernel::GemmBS, Kernel::GemmBP] {
                 let s = single(k, ty);
                 assert_eq!(s.matches("bar.sync 0;").count(), 2);
-                assert!(s.find("bra $L_out").unwrap() > s.rfind("bar.sync").unwrap());
-                assert_eq!(s.contains("ld.global.u64 %rd31"), k == Kernel::GemmP);
+                assert!(s.find("bra $L_out").map_or(true, |o| o > s.rfind("bar.sync").unwrap()));
+                assert_eq!(
+                    s.contains("ld.global.u64 %rd31"),
+                    matches!(k, Kernel::GemmP | Kernel::GemmBP)
+                );
                 assert_eq!(s.contains(".shared .align 16 .b8 smem["), true);
             }
         }
@@ -1263,8 +1819,11 @@ mod tests {
             assert!(s.find("bra $L_out").unwrap() > s.rfind("bar.sync").unwrap());
         }
         for ty in Ty::BLAS {
+            // partials: max tree 9 + 1, sum tree 9 + 1; fallback: 9 + 1 + 9
             let s = single(Kernel::Nrm2, ty);
-            assert_eq!(s.matches("bar.sync 0;").count(), 19);
+            assert_eq!(s.matches("bar.sync 0;").count(), 20 + 19);
+            let s = single(Kernel::Nrm2P, ty);
+            assert_eq!(s.matches("bar.sync 0;").count(), 18);
             assert!(s.find("bra $L_out").unwrap() > s.rfind("bar.sync").unwrap());
         }
     }

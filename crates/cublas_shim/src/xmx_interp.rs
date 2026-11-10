@@ -900,6 +900,7 @@ mod tests {
                 pointer_mode: POINTER_MODE_HOST,
                 workspace: (0, 0),
                 sm_count_target: 0,
+                scratch: 0,
             };
             let mut seed = 31;
             let mut n_cases = 0;

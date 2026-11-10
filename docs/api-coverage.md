@@ -35,7 +35,7 @@ Behaviour notes for the entry points that are not plain forwards:
 |---|---|---|---|---|---|---|
 | CUDA driver API (cuda.h) | 728 | 249 | 219 | 260 | 0 | 0 (0/0/0) |
 | CUDA runtime API (cuda_runtime_api.h) | 330 | 87 | 242 | 1 | 1 | 69 (46/23/0) |
-| cuBLAS | 530 | 161 | 369 | 0 | 0 | 55 (47/8/0) |
+| cuBLAS | 530 | 169 | 361 | 0 | 0 | 55 (55/0/0) |
 | cuBLASLt | 45 | 17 | 28 | 0 | 0 | 11 (11/0/0) |
 | NVML | 398 | 33 | 365 | 0 | 0 | 0 (0/0/0) |
 | cuFFT | 60 | 38 | 22 | 0 | 0 | 7 (7/0/0) |
@@ -1138,7 +1138,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasCgbmv_v2_64` | stub | core |  |
 | `cublasCgeam` | implemented | core |  |
 | `cublasCgeam_64` | stub | core |  |
-| `cublasCgelsBatched` | stub | core | yes |
+| `cublasCgelsBatched` | implemented | core | yes |
 | `cublasCgemm3m` | implemented | core |  |
 | `cublasCgemm3mBatched` | implemented | core |  |
 | `cublasCgemm3mBatched_64` | stub | core |  |
@@ -1161,7 +1161,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasCgemvStridedBatched_64` | stub | core |  |
 | `cublasCgemv_v2` | implemented | core | yes |
 | `cublasCgemv_v2_64` | stub | core |  |
-| `cublasCgeqrfBatched` | stub | core | yes |
+| `cublasCgeqrfBatched` | implemented | core | yes |
 | `cublasCgerc_v2` | implemented | core |  |
 | `cublasCgerc_v2_64` | stub | core |  |
 | `cublasCgeru_v2` | implemented | core |  |
@@ -1263,7 +1263,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasDgbmv_v2_64` | stub | core |  |
 | `cublasDgeam` | implemented | core |  |
 | `cublasDgeam_64` | stub | core |  |
-| `cublasDgelsBatched` | stub | core | yes |
+| `cublasDgelsBatched` | implemented | core | yes |
 | `cublasDgemmBatched` | implemented | core |  |
 | `cublasDgemmBatched_64` | stub | core |  |
 | `cublasDgemmGroupedBatched` | stub | core |  |
@@ -1278,7 +1278,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasDgemvStridedBatched_64` | stub | core |  |
 | `cublasDgemv_v2` | implemented | core | yes |
 | `cublasDgemv_v2_64` | stub | core |  |
-| `cublasDgeqrfBatched` | stub | core | yes |
+| `cublasDgeqrfBatched` | implemented | core | yes |
 | `cublasDger_v2` | implemented | core |  |
 | `cublasDger_v2_64` | stub | core |  |
 | `cublasDgetrfBatched` | implemented | core | yes |
@@ -1455,7 +1455,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasSgbmv_v2_64` | stub | core |  |
 | `cublasSgeam` | implemented | core |  |
 | `cublasSgeam_64` | stub | core |  |
-| `cublasSgelsBatched` | stub | core | yes |
+| `cublasSgelsBatched` | implemented | core | yes |
 | `cublasSgemmBatched` | implemented | core |  |
 | `cublasSgemmBatched_64` | stub | core |  |
 | `cublasSgemmEx` | implemented | core | yes |
@@ -1472,7 +1472,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasSgemvStridedBatched_64` | stub | core |  |
 | `cublasSgemv_v2` | implemented | core | yes |
 | `cublasSgemv_v2_64` | stub | core |  |
-| `cublasSgeqrfBatched` | stub | core | yes |
+| `cublasSgeqrfBatched` | implemented | core | yes |
 | `cublasSger_v2` | implemented | core |  |
 | `cublasSger_v2_64` | stub | core |  |
 | `cublasSgetrfBatched` | implemented | core | yes |
@@ -1563,7 +1563,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasZgbmv_v2_64` | stub | core |  |
 | `cublasZgeam` | implemented | core |  |
 | `cublasZgeam_64` | stub | core |  |
-| `cublasZgelsBatched` | stub | core | yes |
+| `cublasZgelsBatched` | implemented | core | yes |
 | `cublasZgemm3m` | implemented | core |  |
 | `cublasZgemm3m_64` | stub | core |  |
 | `cublasZgemmBatched` | implemented | core |  |
@@ -1578,7 +1578,7 @@ Binary: `cublas64_12`. Exported but not in the reference list: 511 (`cfiXmxBlkLa
 | `cublasZgemvStridedBatched_64` | stub | core |  |
 | `cublasZgemv_v2` | implemented | core | yes |
 | `cublasZgemv_v2_64` | stub | core |  |
-| `cublasZgeqrfBatched` | stub | core | yes |
+| `cublasZgeqrfBatched` | implemented | core | yes |
 | `cublasZgerc_v2` | implemented | core |  |
 | `cublasZgerc_v2_64` | stub | core |  |
 | `cublasZgeru_v2` | implemented | core |  |

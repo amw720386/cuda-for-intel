@@ -316,6 +316,42 @@ pub(crate) struct Handle {
     workspace: (usize, usize),
     /// `cublasSetSmCountTarget` value (recorded only).
     sm_count_target: c_int,
+    /// Device scratch of the reductions ([`SCRATCH_BYTES`], allocated on first use, freed
+    /// by `cublasDestroy`): host-mode results at offset 0, multi-block partials at
+    /// [`SCRATCH_PARTS`].
+    scratch: u64,
+}
+
+pub(crate) const SCRATCH_PARTS: u64 = 256;
+pub(crate) const SCRATCH_BYTES: usize = 256 + kernels::plan::PART_BYTES as usize;
+
+impl Handle {
+    /// The handle's reduction scratch (allocated on first use).
+    pub(crate) fn scratch(&mut self, drv: &Driver) -> Result<u64, c_int> {
+        if self.scratch == 0 {
+            let mut d = 0u64;
+            if unsafe { (drv.cuMemAlloc_v2)(&mut d, SCRATCH_BYTES) } != SUCCESS {
+                return Err(ALLOC_FAILED);
+            }
+            self.scratch = d;
+        }
+        Ok(self.scratch)
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlDllShutdownInProgress() -> u8;
+}
+
+/// The process is exiting: the driver cannot be entered any more (handles destroyed from
+/// exit handlers keep their device memory).
+fn shutting_down() -> bool {
+    #[cfg(windows)]
+    return unsafe { RtlDllShutdownInProgress() } != 0;
+    #[cfg(not(windows))]
+    false
 }
 
 fn handle_mut(handle: *mut c_void) -> Result<&'static mut Handle, c_int> {
@@ -342,6 +378,7 @@ pub unsafe extern "system" fn cublasCreate_v2(handle: *mut *mut c_void) -> c_int
         pointer_mode: POINTER_MODE_HOST,
         workspace: (0, 0),
         sm_count_target: 0,
+        scratch: 0,
     })) as *mut c_void;
     unsafe { handle.write(ptr) };
     trace!("cublasCreate_v2 ok");
@@ -353,8 +390,12 @@ pub unsafe extern "system" fn cublasDestroy_v2(handle: *mut c_void) -> c_int {
     if handle.is_null() {
         return NOT_INITIALIZED;
     }
-    unsafe {
-        drop(Box::from_raw(handle as *mut Handle));
+    let h = unsafe { Box::from_raw(handle as *mut Handle) };
+    if h.scratch != 0 && !shutting_down() {
+        if let Ok(drv) = driver() {
+            let _ = sync_stream(drv, h.stream);
+            unsafe { (drv.cuMemFree_v2)(h.scratch) };
+        }
     }
     SUCCESS
 }
@@ -1314,6 +1355,7 @@ mod tests {
             pointer_mode: POINTER_MODE_HOST,
             workspace: (0, 0),
             sm_count_target: 0,
+            scratch: 0,
         })) as *mut c_void
     }
 

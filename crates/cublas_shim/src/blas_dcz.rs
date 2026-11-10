@@ -137,6 +137,20 @@ pub(crate) unsafe fn scalar(h: &Handle, ptr: *const c_void, ty: Ty) -> Result<Sc
 }
 
 pub(crate) fn handle(handle: *mut c_void) -> Result<&'static mut Handle, c_int> {
+    static ENV: OnceLock<()> = OnceLock::new();
+    ENV.get_or_init(|| {
+        // CFI_CUBLAS_GEMM_TILE=small|big forces one of the f64/complex gemm kernels
+        let tile = match std::env::var("CFI_CUBLAS_GEMM_TILE").as_deref() {
+            Ok("small") => 1,
+            Ok("big") => 2,
+            _ => 0,
+        };
+        plan::GEMM_TILE.store(tile, std::sync::atomic::Ordering::Relaxed);
+        // CFI_CUBLAS_GEMM_RB=2|4 overrides the register block of the blocked gemm (tuning)
+        if let Some(rb) = std::env::var("CFI_CUBLAS_GEMM_RB").ok().and_then(|v| v.parse::<u32>().ok()).filter(|r| matches!(r, 1 | 2 | 4)) {
+            ptxgen::GEMM_RB.store(rb, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
     handle_mut(handle).map_err(|_| NOT_INITIALIZED)
 }
 
@@ -1278,13 +1292,14 @@ pub unsafe extern "system" fn cublasZgemv_v2(
 // Level 1
 // ---------------------------------------------------------------------------
 
-/// Run a reduction whose kernel writes `bytes` at a device address: straight into `result`
-/// in device pointer mode, or through scratch memory copied to the host pointer.
+/// Run a reduction whose launches write `bytes` at a device address: straight into
+/// `result` in device pointer mode, or into the handle's scratch, copied to the host
+/// pointer. `launch(out, parts)` gets the partials scratch of multi-block passes too.
 pub(crate) unsafe fn reduce(
     hd: *mut c_void,
     result: *mut c_void,
     bytes: usize,
-    launch: impl FnOnce(u64) -> Launch,
+    launch: impl FnOnce(u64, u64) -> Vec<Launch>,
     n: c_int,
 ) -> c_int {
     if result.is_null() {
@@ -1298,22 +1313,19 @@ pub(crate) unsafe fn reduce(
     let Ok(drv) = driver() else {
         return NOT_INITIALIZED;
     };
+    let scratch = tri!(h.scratch(drv));
+    let parts = scratch + SCRATCH_PARTS;
     if h.pointer_mode == POINTER_MODE_DEVICE {
-        let st = enqueue(drv, h, &[launch(result as u64)]);
+        let st = enqueue(drv, h, &launch(result as u64, parts));
         return if st == SUCCESS { finish(drv, h) } else { st };
     }
-    let mut scratch = 0u64;
-    if unsafe { (drv.cuMemAlloc_v2)(&mut scratch, bytes.max(16)) } != SUCCESS {
-        return ALLOC_FAILED;
-    }
-    let mut st = enqueue(drv, h, &[launch(scratch)]);
+    let mut st = enqueue(drv, h, &launch(scratch, parts));
     if st == SUCCESS {
         st = sync_stream(drv, h.stream);
     }
     if st == SUCCESS && unsafe { (drv.cuMemcpyDtoH_v2)(result, scratch, bytes) } != SUCCESS {
         st = EXECUTION_FAILED;
     }
-    unsafe { (drv.cuMemFree_v2)(scratch) };
     st
 }
 
@@ -1348,7 +1360,7 @@ pub(crate) unsafe fn dot(
             hd,
             result,
             ty.size() as usize,
-            |out| plan::dot(ty, n, x, incx, y, incy, out, conj),
+            |out, parts| plan::dot(ty, n, x, incx, y, incy, out, conj, parts),
             n,
         )
     }
@@ -1591,7 +1603,7 @@ pub unsafe extern "system" fn cublasSnrm2_v2(
             handle,
             result.cast(),
             ty.comp() as usize,
-            |out| plan::nrm2(ty, n, x as u64, incx, out),
+            |out, parts| plan::nrm2(ty, n, x as u64, incx, out, parts),
             if incx > 0 { n } else { 0 },
         )
     }
@@ -1614,7 +1626,7 @@ pub unsafe extern "system" fn cublasDnrm2_v2(
             handle,
             result.cast(),
             ty.comp() as usize,
-            |out| plan::nrm2(ty, n, x as u64, incx, out),
+            |out, parts| plan::nrm2(ty, n, x as u64, incx, out, parts),
             if incx > 0 { n } else { 0 },
         )
     }
@@ -1637,7 +1649,7 @@ pub unsafe extern "system" fn cublasScnrm2_v2(
             handle,
             result.cast(),
             ty.comp() as usize,
-            |out| plan::nrm2(ty, n, x as u64, incx, out),
+            |out, parts| plan::nrm2(ty, n, x as u64, incx, out, parts),
             if incx > 0 { n } else { 0 },
         )
     }
@@ -1660,7 +1672,7 @@ pub unsafe extern "system" fn cublasDznrm2_v2(
             handle,
             result.cast(),
             ty.comp() as usize,
-            |out| plan::nrm2(ty, n, x as u64, incx, out),
+            |out, parts| plan::nrm2(ty, n, x as u64, incx, out, parts),
             if incx > 0 { n } else { 0 },
         )
     }
@@ -1908,6 +1920,7 @@ mod tests {
             pointer_mode: POINTER_MODE_HOST,
             workspace: (0, 0),
             sm_count_target: 0,
+            scratch: 0,
         }))
         .cast()
     }
