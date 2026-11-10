@@ -25,6 +25,8 @@ mod hw_texture;
 mod discovery;
 #[path = "gpu/forge.rs"]
 mod forge;
+#[path = "gpu/memcpy2d.rs"]
+mod memcpy2d;
 #[path = "gpu/graph_capture.rs"]
 mod graph_capture;
 #[path = "gpu/ggml.rs"]
