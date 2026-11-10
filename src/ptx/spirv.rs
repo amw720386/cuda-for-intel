@@ -3183,6 +3183,63 @@ impl<'a> Emitter<'a> {
     }
 }
 
+/// Keeps one `OpConstant` per (result type, literal bits) and points every reference to a
+/// duplicate at the first declaration.
+///
+/// rspirv's `constant_bit32/64` do not deduplicate, and the emitter creates small constants
+/// (shift amounts, masks, the subgroup scope) per lowered instruction: the largest stock
+/// flash-attention kernel declared 224,032 `OpConstant`s with 223 distinct values, 11.6% of its
+/// words. Equal constants are interchangeable, and the kept declaration is the earliest, so it
+/// precedes every use of the ones it replaces. Emission itself is unchanged; this only rewrites
+/// the finished module before it is assembled.
+fn dedup_constants(module: &mut rspirv::dr::Module) {
+    let mut first: HashMap<(Word, u64, bool), Word> = HashMap::new();
+    // Ids are dense below the module bound: a flat table keeps the rewrite of every operand of
+    // a multi-million-instruction module to an array read (a hash map lookup per IdRef cost more
+    // than the smaller module saved).
+    let bound = module.header.as_ref().map_or(0, |h| h.bound) as usize;
+    let mut remap: Vec<Word> = Vec::new();
+    let mut duplicates = 0usize;
+    module.types_global_values.retain(|inst| {
+        if inst.class.opcode != Op::Constant || inst.operands.len() != 1 {
+            return true;
+        }
+        let (Some(ty), Some(id)) = (inst.result_type, inst.result_id) else { return true };
+        let key = match inst.operands[0] {
+            Operand::LiteralBit32(v) => (ty, u64::from(v), false),
+            Operand::LiteralBit64(v) => (ty, v, true),
+            _ => return true,
+        };
+        match first.get(&key) {
+            Some(&kept) if (id as usize) < bound => {
+                if remap.is_empty() {
+                    remap = (0..bound as Word).collect();
+                }
+                remap[id as usize] = kept;
+                duplicates += 1;
+                false
+            }
+            Some(_) => true,
+            None => {
+                first.insert(key, id);
+                true
+            }
+        }
+    });
+    if duplicates == 0 {
+        return;
+    }
+    for inst in module.all_inst_iter_mut() {
+        for operand in &mut inst.operands {
+            if let Operand::IdRef(id) = operand
+                && let Some(&kept) = remap.get(*id as usize)
+            {
+                *id = kept;
+            }
+        }
+    }
+}
+
 pub(super) fn emit(
     entries: Vec<Entry<'_>>,
     globals: Vec<GlobalVar>,
@@ -3227,8 +3284,10 @@ pub(super) fn emit(
                 if fresh {
                     continue;
                 }
+                let mut module = emitter.builder.module();
+                dedup_constants(&mut module);
                 return Ok(Translation {
-                    words: emitter.builder.module().assemble(),
+                    words: module.assemble(),
                     kernels,
                     globals,
                 });

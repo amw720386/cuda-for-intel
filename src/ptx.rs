@@ -1342,6 +1342,27 @@ mod tests {
     }
 
     #[test]
+    fn constants_are_declared_once_and_every_reference_resolves() {
+        for source in [VECTOR_ADD, BLOCK_REDUCE, ATOMIC_TICKETS, RMSNORM, GGML_MODERN, GGML_ADD, include_str!("../examples/dp4a_const_operand.ptx")] {
+            let translated = translate(source).unwrap();
+            let module = rspirv::dr::load_words(&translated.words).unwrap();
+            let mut seen = std::collections::HashSet::new();
+            for inst in module.types_global_values.iter().filter(|inst| inst.class.opcode == Op::Constant) {
+                let key = (inst.result_type, format!("{:?}", inst.operands));
+                assert!(seen.insert(key.clone()), "duplicate OpConstant {key:?}");
+            }
+            let defined: std::collections::HashSet<u32> = module.all_inst_iter().filter_map(|inst| inst.result_id).collect();
+            for inst in module.all_inst_iter() {
+                for operand in &inst.operands {
+                    if let rspirv::dr::Operand::IdRef(id) = operand {
+                        assert!(defined.contains(id), "{:?} references undefined %{id}", inst.class.opcode);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ignores_trailing_control_characters_after_the_last_entry() {
         let source = format!("{}\u{1a}\0", include_str!("../examples/rope_neox_f32_dump.ptx").trim_end_matches(['\u{1a}', '\0']));
         translate(&source).unwrap();
