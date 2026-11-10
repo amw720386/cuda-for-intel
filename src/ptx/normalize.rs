@@ -709,7 +709,9 @@ fn rewrite_inst(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
                     "div.rn.f32",
                     vec![inst.operands[0].clone(), "0f3F800000".into(), inst.operands[1].clone()],
                 ),
-                "div" if has("full") => ("div.approx.f32", inst.operands.clone()),
+                // div.full is the precise quotient within 2 ulp over the full range; div.approx
+                // differs for |b| > 2^126 (tier3 `div_approx_range`).
+                "div" if has("full") => ("div.rn.f32", inst.operands.clone()),
                 "div" if has("rn") && has("ftz") => ("div.rn.f32", inst.operands.clone()),
                 "sqrt" if has("rn") && has("ftz") => ("sqrt.rn.f32", inst.operands.clone()),
                 _ => return None,

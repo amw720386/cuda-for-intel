@@ -1,8 +1,10 @@
 //! Source normalisation for ZLUDA's test kernels, shared by the corpus harness
-//! (tests/ptx_corpus/harness) and `zluda_vector_tests`.
+//! (tests/ptx_corpus/harness) and `zluda_vector_tests`. The translator itself uses
+//! [`has_bare_regs`] and [`prefix_regs`] (see `prepare` in src/ptx.rs).
 
 /// The translator accepts only `.version` 4.1/8.8/9.0; ZLUDA's files use older versions.
 /// Rewrites the first `.version` line to 8.8 and prefixes bare register names.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn normalize(raw: &str) -> String {
     let mut out = String::new();
     let mut done = false;
@@ -16,6 +18,26 @@ pub(crate) fn normalize(raw: &str) -> String {
         }
     }
     prefix_regs(&out)
+}
+
+/// True when a `.reg` declaration (statement or `.func` parameter) names a register without the
+/// `%` prefix. Only lines that mention `.reg` are looked at, so nvcc output costs one scan.
+pub(crate) fn has_bare_regs(src: &str) -> bool {
+    src.lines().filter(|l| l.contains(".reg")).any(|l| {
+        let code = l.split("//").next().unwrap_or(l);
+        let spaced = code.replace(['(', ')', ';', '{', '}', '=', ','], " ; ");
+        let mut in_reg = false;
+        for tok in spaced.split_whitespace() {
+            if tok == ".reg" || tok.starts_with(".reg.") {
+                in_reg = true;
+            } else if tok == ";" || tok == ".param" || tok.starts_with(".param.") {
+                in_reg = false;
+            } else if in_reg && !tok.starts_with('.') && !tok.starts_with('%') {
+                return true;
+            }
+        }
+        false
+    })
 }
 
 /// ZLUDA's kernels use bare register names (`.reg .u64 temp;`). nvcc always emits

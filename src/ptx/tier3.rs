@@ -25,6 +25,10 @@ pub(super) struct State {
     pub(super) m32: u32,
     pub(super) m64: u32,
     pub(super) mp: u32,
+    /// Scratch registers of the exact `.ftz` lowering (`CFI_EXACT_FTZ=1`), which keep values
+    /// across a nested rewrite and so cannot share the `%__x32_` pool.
+    fz32: u32,
+    fzp: u32,
     pub(super) addr_seq: u32,
     pub(super) addr_max: u32,
     /// The condition-code carry flag `CC.CF` is used by the entry.
@@ -61,6 +65,12 @@ impl State {
         }
         if self.xp > 0 {
             decls.push(format!(".reg .pred %__xp_<{}> ;", self.xp));
+        }
+        if self.fz32 > 0 {
+            decls.push(format!(".reg .b32 %__fz_<{}> ;", self.fz32));
+        }
+        if self.fzp > 0 {
+            decls.push(format!(".reg .pred %__fzp_<{}> ;", self.fzp));
         }
         if self.m32 > 0 {
             decls.push(format!(".reg .b32 %__m32_<{}> ;", self.m32));
@@ -187,6 +197,97 @@ fn is_imm(text: &str) -> bool {
 }
 
 /// Runs the rest of the rewrite pipeline on `inst` (used after renaming).
+/// `.ftz` with `CFI_EXACT_FTZ=1`: subnormal sources are replaced by a zero of the same sign,
+/// the instruction runs without `.ftz` (through every other rewrite), and a subnormal result is
+/// flushed the same way. f32 values everywhere; f16/f16x2 lanes for the half arithmetic forms
+/// (`min.ftz.f16`); `cvt` flushes only its f32 side. Without the switch `.ftz` is ignored
+/// (docs/translator-coverage.md); the lowering costs five integer operations per operand.
+fn exact_ftz(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    if !parts.contains(&"ftz") || !super::super::exact_ftz_enabled() || inst.operands.len() < 2 {
+        return None;
+    }
+    // (exponent mask, magnitude mask) of each lane of a register of type `ty`.
+    fn lanes(ty: &str, half: bool) -> &'static [(u32, u32)] {
+        match ty {
+            "f32" => &[(0x7f80_0000, 0x7fff_ffff)],
+            "f16" if half => &[(0x7c00, 0x7fff)],
+            "f16x2" if half => &[(0x7c00, 0x7fff), (0x7c00_0000, 0x7fff_0000)],
+            _ => &[],
+        }
+    }
+    let family = parts[0];
+    let last = *parts.last()?;
+    let (src, dst) = match family {
+        "cvt" if parts.len() >= 3 => (lanes(last, false), lanes(parts[parts.len() - 2], false)),
+        "set" if parts.len() >= 3 => (lanes(last, true), lanes("", false)),
+        "setp" => (lanes(last, true), lanes("", false)),
+        "add" | "sub" | "mul" | "fma" | "min" | "max" | "abs" | "neg" => (lanes(last, true), lanes(last, true)),
+        "mad" | "div" | "sqrt" | "rcp" | "rsqrt" | "ex2" | "lg2" | "sin" | "cos" | "tanh" => {
+            (lanes(last, false), lanes(last, false))
+        }
+        _ => return None,
+    };
+    if src.is_empty() && dst.is_empty() {
+        return None;
+    }
+    let sources: Vec<usize> = match family {
+        "set" | "setp" => vec![1, 2],
+        _ => (1..inst.operands.len()).collect(),
+    };
+    let mut n32 = 0u32;
+    let mut np = 0u32;
+    let reg = |n: &mut u32| {
+        *n += 1;
+        format!("%__fz_{}", *n - 1)
+    };
+    let mut lines = Vec::new();
+    let flush = |n32: &mut u32, np: &mut u32, lines: &mut Vec<String>, spec: &[(u32, u32)], guard: &str, dst: &str, value: &str| {
+        let clear = format!("%__fz_{}", *n32);
+        let e = format!("%__fz_{}", *n32 + 1);
+        let m = format!("%__fz_{}", *n32 + 2);
+        *n32 += 3;
+        lines.push(format!("mov.b32 {clear} , 0 ;"));
+        for &(exp, mag) in spec {
+            let p = format!("%__fzp_{}", *np);
+            *np += 1;
+            lines.push(format!("and.b32 {e} , {value} , {exp} ;"));
+            lines.push(format!("setp.eq.u32 {p} , {e} , 0 ;"));
+            lines.push(format!("selp.b32 {m} , {mag} , 0 , {p} ;"));
+            lines.push(format!("or.b32 {clear} , {clear} , {m} ;"));
+        }
+        lines.push(format!("not.b32 {clear} , {clear} ;"));
+        lines.push(render(guard, "and.b32", &[dst.to_owned(), value.to_owned(), clear]));
+    };
+    let mut core = with_op(inst, parts.iter().copied().filter(|p| *p != "ftz").collect::<Vec<_>>().join("."));
+    if !src.is_empty() {
+        for &i in &sources {
+            let operand = inst.operand(i);
+            if !operand.starts_with('%') || operand.contains('|') {
+                continue;
+            }
+            let t = reg(&mut n32);
+            flush(&mut n32, &mut np, &mut lines, src, "", &t, operand);
+            core.operands[i] = t;
+        }
+    }
+    let out = (!dst.is_empty()).then(|| {
+        let t = reg(&mut n32);
+        core.operands[0] = t.clone();
+        core.guard = String::new();
+        t
+    });
+    ctx.t3.fz32 = ctx.t3.fz32.max(n32 + 3);
+    ctx.t3.fzp = ctx.t3.fzp.max(np + 2);
+    lines.extend(again(ctx, &core));
+    if let Some(t) = out {
+        flush(&mut n32, &mut np, &mut lines, dst, &inst.guard, inst.operand(0), &t);
+    }
+    ctx.t3.fz32 = ctx.t3.fz32.max(n32);
+    ctx.t3.fzp = ctx.t3.fzp.max(np);
+    Some(lines)
+}
+
 fn again(ctx: &mut Ctx, inst: &Inst) -> Vec<String> {
     super::rewrite_inst(ctx, inst).unwrap_or_else(|| vec![inst.render()])
 }
@@ -222,6 +323,9 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             }
         }
         return Some(again(ctx, &copy));
+    }
+    if let Some(lines) = exact_ftz(ctx, inst) {
+        return Some(lines);
     }
     if let Some(lines) = sinks_and_special_registers(ctx, inst) {
         return Some(lines);
@@ -310,6 +414,27 @@ pub(super) fn rewrite(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             if inst.op.ends_with(".f64") && inst.op.split('.').any(|p| matches!(p, "rz" | "rm" | "rp")) =>
         {
             f64_directed(st, inst)
+        }
+        "add" | "sub" | "mul" | "fma"
+            if inst.op.ends_with(".f32")
+                && inst.op.split('.').any(|p| p == "sat")
+                && inst.op.split('.').any(|p| matches!(p, "rz" | "rm" | "rp")) =>
+        {
+            f32_directed_sat(st, inst)
+        }
+        "div" | "sqrt" | "rcp" if inst.op.ends_with(".f32") && inst.op.split('.').any(|p| matches!(p, "rz" | "rm" | "rp")) => {
+            f32_directed_via_f64(st, inst)
+        }
+        "div" if matches!(inst.op.as_str(), "div.approx.f32" | "div.approx.ftz.f32") && inst.operands.len() == 3 => {
+            div_approx_range(st, inst)
+        }
+        "mad" if inst.op == "mad.hi.sat.s32" && inst.operands.len() == 4 => {
+            // d = saturate((a * b)[63:32] + c)
+            let mut b = B::new(st);
+            let t = b.t32();
+            b.p(format!("mul.hi.s32 {t} , {} , {} ;", inst.operand(1), inst.operand(2)));
+            b.p(render(&inst.guard, "add.sat.s32", &[inst.operand(0).to_owned(), t, inst.operand(3).to_owned()]));
+            Some(b.finish())
         }
         "add" | "sub" | "addc" | "subc" | "madc" | "mad" => carry(st, inst),
         "vadd" | "vsub" | "vabsdiff" | "vmin" | "vmax" | "vset" | "vshl" | "vshr" | "vmad" | "vavrg" => {
@@ -825,7 +950,62 @@ fn video_simd(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
 // ---- small predicate forms ----------------------------------------------
 
 /// `setp.lt.u32 p|q, a, b` writes `p = cmp` and `q = !cmp`.
+/// `set.CMP.BOOL[.ftz].{f32,u32,s32}.FT d, a, b, [!]c` and `setp.CMP.BOOL[.ftz].FT p, a, b, [!]c`
+/// on a float type `FT`: compare into a scratch predicate, combine with `c`, and for `set` select
+/// 1.0 (float destination) or all ones (integer destination).
+fn float_compare_combine(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    let set = parts[0] == "set";
+    let stype = *parts.last()?;
+    if !matches!(stype, "f32" | "f64") || inst.operands.len() != 4 || inst.operand(0).contains('|') {
+        return None;
+    }
+    let comb = parts.iter().copied().find(|p| matches!(*p, "and" | "or" | "xor"))?;
+    let one = if set {
+        match parts[parts.len() - 2] {
+            "f32" => "1065353216",
+            "u32" | "s32" => "-1",
+            _ => return None,
+        }
+    } else {
+        ""
+    };
+    let modifiers = &parts[1..parts.len() - if set { 2 } else { 1 }];
+    let compare: Vec<&str> = std::iter::once("setp").chain(modifiers.iter().copied().filter(|p| *p != comb)).chain([stype]).collect();
+    let mut b = B::new(st);
+    let cmp = b.tp();
+    b.p(render("", &compare.join("."), &[cmp.clone(), inst.operand(1).to_owned(), inst.operand(2).to_owned()]));
+    let c = inst.operand(3);
+    let c = match c.strip_prefix('!') {
+        Some(name) => {
+            let t = b.tp();
+            b.p(format!("not.pred {t} , {} ;", name.trim()));
+            t
+        }
+        None => c.to_owned(),
+    };
+    let result = if set { b.tp() } else { inst.operand(0).to_owned() };
+    let guard = if set { "" } else { inst.guard.as_str() };
+    match comb {
+        "and" | "or" => b.p(render(guard, &format!("{comb}.pred"), &[result.clone(), cmp, c])),
+        _ => {
+            let (x, y) = (b.t32(), b.t32());
+            b.p(format!("selp.b32 {x} , 1 , 0 , {cmp} ;"));
+            b.p(format!("selp.b32 {y} , 1 , 0 , {c} ;"));
+            b.p(format!("xor.b32 {x} , {x} , {y} ;"));
+            b.p(render(guard, "setp.ne.u32", &[result.clone(), x, "0".into()]));
+        }
+    }
+    if set {
+        b.p(render(&inst.guard, "selp.b32", &[inst.operand(0).to_owned(), one.into(), "0".into(), result]));
+    }
+    Some(b.finish())
+}
+
 fn setp_pair(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+    if let Some(lines) = float_compare_combine(st, inst) {
+        return Some(lines);
+    }
     if !inst.op.starts_with("setp.") {
         return None;
     }
@@ -1354,6 +1534,68 @@ fn atomic_forms(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
 /// `add/sub/mul/fma/div/sqrt/rcp.{rz,rm,rp}.f64`: compute the round-to-nearest result and
 /// the sign of its exact error (error-free transformations), then step one ulp when the
 /// requested direction disagrees with the nearest result.
+/// `{add,sub,mul,fma}.{rz,rm,rp}[.ftz].sat.f32`: the directed operation, then the clamp to
+/// [0, 1] (NaN to 0). Clamping is monotonic and 0 and 1 are exact, so the order is safe.
+fn f32_directed_sat(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+    let want = if inst.op.starts_with("fma") { 4 } else { 3 };
+    if inst.operands.len() != want {
+        return None;
+    }
+    let op: Vec<&str> = inst.op.split('.').filter(|p| *p != "sat").collect();
+    let ftz = if inst.op.split('.').any(|p| p == "ftz") { ".ftz" } else { "" };
+    let mut b = B::new(st);
+    let t = b.t32();
+    let mut operands = inst.operands.clone();
+    operands[0] = t.clone();
+    b.p(render("", &op.join("."), &operands));
+    b.p(render(&inst.guard, &format!("cvt{ftz}.sat.f32.f32"), &[inst.operand(0).to_owned(), t]));
+    Some(b.finish())
+}
+
+/// `div.approx.f32 d, a, b` returns zero (NaN for an infinite `a`) when 2^126 < |b|, where
+/// `1/b` is subnormal (PTX ISA, div; vosen/ptx_tests `div_approx_f32`). `a * 0` gives both.
+fn div_approx_range(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+    let mut b = B::new(st);
+    let (abs, q, z) = (b.t32(), b.t32(), b.t32());
+    let p = b.tp();
+    let (a, d) = (inst.operand(1), inst.operand(2));
+    b.p(format!("abs.f32 {abs} , {d} ;"));
+    b.p(format!("setp.gt.f32 {p} , {abs} , 0f7E800000 ;"));
+    b.p(format!("{} {q} , {a} , {d} ;", inst.op));
+    b.p(format!("mul.rn.f32 {z} , {a} , 0f00000000 ;"));
+    b.p(render(&inst.guard, "selp.b32", &[inst.operand(0).to_owned(), z, q, p]));
+    Some(b.finish())
+}
+
+/// `{div,sqrt,rcp}.{rz,rm,rp}.f32` through f64: the f64 result rounded to nearest is never an
+/// f32 value unless the exact result is one (quotients and roots of 24-bit significands lie at
+/// least 2^-49 relative from every f32 they do not equal, far beyond f64's 2^-53 rounding
+/// error), so narrowing it with the directed mode rounds the exact result correctly.
+fn f32_directed_via_f64(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inst.op.split('.').collect();
+    let name = parts[0];
+    let mode = *parts.iter().find(|p| matches!(**p, "rz" | "rm" | "rp"))?;
+    let want = if name == "div" { 3 } else { 2 };
+    if inst.operands.len() != want {
+        return None;
+    }
+    let mut b = B::new(st);
+    let mut wide = Vec::new();
+    for i in 1..want {
+        let w = b.t64();
+        b.p(format!("cvt.f64.f32 {w} , {} ;", inst.operand(i)));
+        wide.push(w);
+    }
+    let r = b.t64();
+    match name {
+        "div" => b.p(format!("div.rn.f64 {r} , {} , {} ;", wide[0], wide[1])),
+        "sqrt" => b.p(format!("sqrt.rn.f64 {r} , {} ;", wide[0])),
+        _ => b.p(format!("rcp.rn.f64 {r} , {} ;", wide[0])),
+    }
+    b.p(render(&inst.guard, &format!("cvt.{mode}.f32.f64"), &[inst.operand(0).to_owned(), r]));
+    Some(b.finish())
+}
+
 fn f64_directed(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
     let parts: Vec<&str> = inst.op.split('.').collect();
     let name = parts[0];

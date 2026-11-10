@@ -892,6 +892,22 @@ impl Sim {
                         let h = if back.abs() > x.abs() && !x.is_nan() { h.wrapping_sub(1) } else { h };
                         u64::from(h)
                     }
+                    (16, Some(m @ (rspirv::spirv::FPRoundingMode::RTN | rspirv::spirv::FPRoundingMode::RTP))) => {
+                        // Directed: round to nearest, then step one half ulp toward the mode.
+                        let h = super::coverage_tests::interp::f32_to_f16_bits(x as f32);
+                        let back = f64::from(f16_to_f32(u32::from(h)));
+                        let negative = h & 0x8000 != 0;
+                        let h = if x.is_nan() {
+                            h
+                        } else if m == rspirv::spirv::FPRoundingMode::RTN && back > x {
+                            if negative { h + 1 } else if h == 0 { 0x8001 } else { h - 1 }
+                        } else if m == rspirv::spirv::FPRoundingMode::RTP && back < x {
+                            if !negative { h + 1 } else if h == 0x8000 { 0x0001 } else { h - 1 }
+                        } else {
+                            h
+                        };
+                        u64::from(h)
+                    }
                     (_, None) | (_, Some(rspirv::spirv::FPRoundingMode::RTE)) => fb(to, x),
                     (32, Some(m)) if from == 64 && x.is_finite() => {
                         let r = x as f32;
