@@ -2,7 +2,8 @@
 //! cuBLAS's statuses, op() and increment reduction to element strides, batch chunking, and
 //! launch lists. No driver calls, so `src/ptx/cublas64_tests.rs` runs the same launch lists
 //! in the SPIR-V simulator. Also the host reference used by the simulator and GPU tests.
-use super::ptxgen::{BLOCK, Kernel, Mode, TILE, TRSM_BLOCK, Ty};
+use super::ptxgen::{BLOCK, Kernel, Mode, TILE, TRSM_BLOCK, Ty, gemm_rb};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const SUCCESS: i32 = 0;
 pub const INVALID_VALUE: i32 = 7;
@@ -266,6 +267,41 @@ impl Mm {
     }
 }
 
+/// Gemm kernel choice: 0 automatic, 1 always the 16 x 16 one-output-per-thread kernel,
+/// 2 always the register-blocked one (`CFI_CUBLAS_GEMM_TILE=small|big` in the shim).
+pub static GEMM_TILE: AtomicU8 = AtomicU8::new(0);
+
+thread_local! {
+    /// Per-thread override of [`GEMM_TILE`] (tests run both kernels).
+    pub static GEMM_TILE_LOCAL: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether an m x n product takes the register-blocked kernel: when C holds at least
+/// [`gemm_blocked_tiles`] of its tiles (smaller products keep more work-groups with the 16 x 16
+/// kernel).
+pub fn gemm_blocked(ty: Ty, m: u64, n: u64) -> bool {
+    let local = GEMM_TILE_LOCAL.with(|c| c.get());
+    let choice = if local != 0 { local } else { GEMM_TILE.load(Ordering::Relaxed) };
+    match choice {
+        1 => false,
+        2 => true,
+        _ => {
+            let bm = u64::from(TILE * gemm_rb(ty));
+            m.div_ceil(bm) * n.div_ceil(bm) >= gemm_blocked_tiles(ty) && m >= bm / 2 && n >= bm / 2
+        }
+    }
+}
+
+/// Fewest blocked tiles of C for the blocked kernel (measured on the B390: f64 gains from
+/// about 1024^2, complex double from 256^2, complex single from 256^2).
+pub fn gemm_blocked_tiles(ty: Ty) -> u64 {
+    match ty {
+        Ty::D | Ty::S => 128,
+        Ty::Z => 32,
+        _ => 16,
+    }
+}
+
 /// Launches of the gemm kernel for `mm` over `batch` matrices.
 pub fn mm(
     ty: Ty,
@@ -281,15 +317,19 @@ pub fn mm(
     if mm.m == 0 || mm.n == 0 || batch == 0 {
         return Ok(Vec::new());
     }
-    let gx = mm.m.div_ceil(u64::from(TILE));
-    let gy = mm.n.div_ceil(u64::from(TILE));
+    let big = gemm_blocked(ty, mm.m, mm.n);
+    let edge = u64::from(if big { TILE * gemm_rb(ty) } else { TILE });
+    let gx = mm.m.div_ceil(edge);
+    let gy = mm.n.div_ceil(edge);
     if gx > MAX_GRID_X || gy > u64::from(MAX_GRID_YZ) {
         return Err(NOT_SUPPORTED);
     }
-    let kernel = if matches!(layout, Batch::Tables { .. }) {
-        Kernel::GemmP
-    } else {
-        Kernel::GemmS
+    let tables = matches!(layout, Batch::Tables { .. });
+    let kernel = match (big, tables) {
+        (false, false) => Kernel::GemmS,
+        (false, true) => Kernel::GemmP,
+        (true, false) => Kernel::GemmBS,
+        (true, true) => Kernel::GemmBP,
     };
     let mut out = Vec::new();
     for (start, count) in chunks(batch as u32) {
@@ -849,17 +889,42 @@ pub fn copy(
     }])
 }
 
+/// Most blocks a multi-block reduction (`dot`, `nrm2`, `amax`) uses; its partials need
+/// [`PART_BYTES`] of device scratch.
+pub const PARTS: u32 = 256;
+/// Scratch bytes of the partials of a multi-block reduction (16 bytes per block).
+pub const PART_BYTES: u64 = PARTS as u64 * 16;
+
+/// Blocks of a reduction over `n` elements: one per 2048 elements, at most [`PARTS`];
+/// 1 (a single launch, no scratch) without scratch or for short vectors.
+fn parts(n: i64, scratch: u64) -> u32 {
+    if scratch == 0 {
+        return 1;
+    }
+    (n / (i64::from(BLOCK) * 8)).clamp(1, i64::from(PARTS)) as u32
+}
+
 /// 1-based index of the largest (`min`: smallest) `|re| + |im|` into the device i32 `out`
-/// (`i?amax`, `i?amin`); `n <= 0` or `incx <= 0` gives 0.
-pub fn amax(ty: Ty, n: i32, x: u64, incx: i32, out: u64, min: bool) -> Launch {
+/// (`i?amax`, `i?amin`); `n <= 0` or `incx <= 0` gives 0. `scratch` ([`PART_BYTES`], or 0)
+/// allows a multi-block first pass.
+pub fn amax(ty: Ty, n: i32, x: u64, incx: i32, out: u64, min: bool, scratch: u64) -> Vec<Launch> {
     let n = if incx <= 0 { 0 } else { n.max(0) };
-    Launch {
+    let g = parts(i64::from(n), scratch);
+    let one = |grid: u32, args: Vec<u64>| Launch {
         kernel: Kernel::Amax,
         ty,
-        grid: [1, 1, 1],
+        grid: [grid, 1, 1],
         block: Kernel::Amax.block(),
-        args: vec![x, out, n as u64, i64::from(incx) as u64, min as u64],
+        args,
+    };
+    let inc = i64::from(incx) as u64;
+    if g == 1 {
+        return vec![one(1, vec![x, out, n as u64, inc, min as u64, 0])];
     }
+    vec![
+        one(g, vec![x, scratch, n as u64, inc, min as u64, 1]),
+        one(1, vec![scratch, out, u64::from(g), 0, min as u64, 2]),
+    ]
 }
 
 /// Elementwise kernel launch over an m x n C (`geam` and `dgmm`).
@@ -1058,39 +1123,82 @@ pub fn gemv(
     }])
 }
 
-/// `*out = sum conj?(x) y` into the device address `out` (always one launch, so `n <= 0`
-/// writes zero).
+/// `*out = sum conj?(x) y` into the device address `out` (`n <= 0` writes zero). With
+/// `scratch` ([`PART_BYTES`], or 0) long vectors take a multi-block pass of partial sums
+/// (not for f16/bf16, whose partials would be rounded) and a one-block sum of them.
 #[allow(clippy::too_many_arguments)]
-pub fn dot(ty: Ty, n: i32, x: u64, incx: i32, y: u64, incy: i32, out: u64, conj: bool) -> Launch {
+pub fn dot(
+    ty: Ty,
+    n: i32,
+    x: u64,
+    incx: i32,
+    y: u64,
+    incy: i32,
+    out: u64,
+    conj: bool,
+    scratch: u64,
+) -> Vec<Launch> {
     let n = i64::from(n.max(0));
     let (incx, incy) = (i64::from(incx), i64::from(incy));
-    Launch {
+    let g = if matches!(ty, Ty::H | Ty::B) { 1 } else { parts(n, scratch) };
+    let first = Launch {
         kernel: Kernel::Dot,
         ty,
-        grid: [1, 1, 1],
+        grid: [g, 1, 1],
         block: Kernel::Dot.block(),
         args: vec![
             vec_base(x, n, incx, ty),
             vec_base(y, n, incy, ty),
-            out,
+            if g == 1 { out } else { scratch },
             n as u64,
             incx as u64,
             incy as u64,
             (conj && ty.complex()) as u64,
         ],
+    };
+    if g == 1 {
+        return vec![first];
     }
+    vec![
+        first,
+        Launch {
+            kernel: Kernel::Dot,
+            ty,
+            grid: [1, 1, 1],
+            block: Kernel::Dot.block(),
+            args: vec![scratch, 0, out, u64::from(g), 1, 0, 0],
+        },
+    ]
 }
 
 /// `*out = ||x||_2` (real) into the device address `out`; `n <= 0` or `incx <= 0` gives 0.
-pub fn nrm2(ty: Ty, n: i32, x: u64, incx: i32, out: u64) -> Launch {
+/// With `scratch` ([`PART_BYTES`], or 0) long vectors take a multi-block pass of (max,
+/// sum of squares) partials; the one-block final launch falls back to the scaled two-pass
+/// form when the unscaled sum could have overflowed or underflowed.
+pub fn nrm2(ty: Ty, n: i32, x: u64, incx: i32, out: u64, scratch: u64) -> Vec<Launch> {
     let n = if incx <= 0 { 0 } else { n.max(0) };
-    Launch {
+    let g = parts(i64::from(n), scratch);
+    let inc = i64::from(incx) as u64;
+    let fin = |part: u64, nparts: u32| Launch {
         kernel: Kernel::Nrm2,
         ty,
         grid: [1, 1, 1],
         block: Kernel::Nrm2.block(),
-        args: vec![x, out, n as u64, i64::from(incx) as u64],
+        args: vec![x, out, n as u64, inc, part, u64::from(nparts)],
+    };
+    if g == 1 {
+        return vec![fin(0, 0)];
     }
+    vec![
+        Launch {
+            kernel: Kernel::Nrm2P,
+            ty,
+            grid: [g, 1, 1],
+            block: Kernel::Nrm2P.block(),
+            args: vec![x, scratch, n as u64, inc],
+        },
+        fin(scratch, g),
+    ]
 }
 
 /// `y += alpha x` (cuBLAS `?axpy`).
@@ -1249,6 +1357,98 @@ pub fn trsm(
     if p.len == 0 || p.nvec == 0 || batch == 0 {
         return Ok(Vec::new());
     }
+    if !tables && batch == 1 && p.len > 2 * TRSM_NB {
+        return trsm_blocked(ty, p, alpha, a, b);
+    }
+    trsm_vectors(ty, p, alpha, a, b, batch, tables)
+}
+
+/// Order of the diagonal blocks of [`trsm_blocked`].
+pub const TRSM_NB: u32 = 64;
+
+/// Blocked single-matrix trsm: the diagonal blocks of order [`TRSM_NB`] are solved in turn
+/// by the per-vector kernel, and after each one the unsolved rows of every vector are
+/// updated at once by a gemm, `X(rest) = beta X(rest) - T(rest, blk) X(blk)` (beta = alpha
+/// after the first block, which applies alpha, else 1). Nearly all flops run in the gemm
+/// kernel.
+fn trsm_blocked(ty: Ty, p: &Tri, alpha: Scalar, a: u64, b: u64) -> Result<Vec<Launch>, i32> {
+    let (nb, len) = (TRSM_NB, p.len);
+    let one = Scalar::host(ty, 1.0, 0.0);
+    let minus = Scalar::host(ty, -1.0, 0.0);
+    let at = |base: u64, elems: u64| offset(base, elems as i64, ty);
+    let mut out = Vec::new();
+    for q in 0..len.div_ceil(nb) {
+        let (r0, r1) = if p.lower {
+            (q * nb, ((q + 1) * nb).min(len))
+        } else {
+            (len.saturating_sub((q + 1) * nb), len - q * nb)
+        };
+        let (r0l, r1l) = (u64::from(r0), u64::from(r1));
+        let first = if q == 0 { alpha } else { one };
+        let diag = Tri { len: r1 - r0, ..*p };
+        let blk = at(b, r0l * p.b_es);
+        out.extend(trsm_vectors(
+            ty,
+            &diag,
+            first,
+            at(a, r0l * (p.a_rs + p.a_cs)),
+            blk,
+            1,
+            false,
+        )?);
+        let (s0, s1) = if p.lower { (r1l, u64::from(len)) } else { (0, r0l) };
+        if s1 > s0 {
+            let pm = Mm {
+                m: s1 - s0,
+                n: u64::from(p.nvec),
+                k: r1l - r0l,
+                a_si: p.a_rs,
+                a_sl: p.a_cs,
+                b_sl: p.b_es,
+                b_sj: p.b_vs,
+                ldc: p.b_vs,
+                c_si: p.b_es,
+                conj_a: p.conj,
+                conj_b: false,
+                tri_c: 0,
+                herm_c: false,
+                mode_a: Mode::Plain,
+                unit_a: false,
+                tr_a: false,
+                mode_b: Mode::Plain,
+                unit_b: false,
+                tr_b: false,
+            };
+            out.extend(mm(
+                ty,
+                &pm,
+                minus,
+                first,
+                1,
+                Batch::Strided {
+                    a: at(a, s0 * p.a_rs + r0l * p.a_cs),
+                    b: blk,
+                    c: at(b, s0 * p.b_es),
+                    sa: 0,
+                    sb: 0,
+                    sc: 0,
+                },
+            )?);
+        }
+    }
+    Ok(out)
+}
+
+/// The per-vector trsm kernel: one thread per right-hand-side vector.
+fn trsm_vectors(
+    ty: Ty,
+    p: &Tri,
+    alpha: Scalar,
+    a: u64,
+    b: u64,
+    batch: i32,
+    tables: bool,
+) -> Result<Vec<Launch>, i32> {
     let kernel = if tables { Kernel::TrsmP } else { Kernel::TrsmS };
     let gx = grid_1d(u64::from(p.nvec), TRSM_BLOCK)?;
     let mut out = Vec::new();
@@ -1301,11 +1501,20 @@ pub fn getrf(
     if batch == 0 {
         return Ok(Vec::new());
     }
+    if batch as u64 > MAX_GRID_X {
+        return Err(NOT_SUPPORTED);
+    }
+    // small orders: one thread per matrix; larger: one work-group per matrix
+    let (kernel, grid) = if n <= GETRF_THREAD_MAX {
+        (Kernel::GetrfT, grid_1d(batch as u64, TRSM_BLOCK)?)
+    } else {
+        (Kernel::Getrf, batch as u32)
+    };
     Ok(vec![Launch {
-        kernel: Kernel::Getrf,
+        kernel,
         ty,
-        grid: [grid_1d(batch as u64, TRSM_BLOCK)?, 1, 1],
-        block: Kernel::Getrf.block(),
+        grid: [grid, 1, 1],
+        block: kernel.block(),
         args: vec![
             a,
             p,
@@ -1314,6 +1523,112 @@ pub fn getrf(
             lda as u64,
             batch as u64,
             (p != 0) as u64,
+        ],
+    }])
+}
+
+/// Largest order `getrfBatched` factors with one thread per matrix.
+pub const GETRF_THREAD_MAX: i32 = 16;
+
+/// Batched Householder QR (`geqrfBatched`): `a` and `tau` are device tables of matrix and
+/// tau-vector pointers (min(m, n) elements each). `Err(-i)`: parameter `i` (cuBLAS
+/// numbering, handle = 1) is invalid.
+pub fn geqrf(ty: Ty, m: i32, n: i32, a: u64, lda: i32, tau: u64, batch: i32) -> Result<Vec<Launch>, i32> {
+    if m < 0 {
+        return Err(-2);
+    }
+    if n < 0 {
+        return Err(-3);
+    }
+    if lda < m.max(1) {
+        return Err(-5);
+    }
+    if batch < 0 {
+        return Err(-8);
+    }
+    if m == 0 || n == 0 || batch == 0 {
+        return Ok(Vec::new());
+    }
+    qr_launch(ty, m, n, 0, a, lda, tau, 0, 1, 0, batch)
+}
+
+/// Batched least squares `min ||A X - C||` for full-rank m x n A with m >= n (`gelsBatched`,
+/// op N only): QR of A in place, `C = Q^H C`, then `R X = C(0:n, :)` in place. `info` is a
+/// device i32 per matrix (first zero diagonal of R, 1-based). `Err(-i)` as in [`geqrf`].
+#[allow(clippy::too_many_arguments)]
+pub fn gels(
+    ty: Ty,
+    trans: i32,
+    m: i32,
+    n: i32,
+    nrhs: i32,
+    a: u64,
+    lda: i32,
+    c: u64,
+    ldc: i32,
+    info: u64,
+    batch: i32,
+) -> Result<Vec<Launch>, i32> {
+    if trans != OP_N {
+        return Err(-2);
+    }
+    if m < 0 {
+        return Err(-3);
+    }
+    if n < 0 || n > m {
+        return Err(-4);
+    }
+    if nrhs < 0 {
+        return Err(-5);
+    }
+    if lda < m.max(1) {
+        return Err(-7);
+    }
+    if ldc < m.max(1) {
+        return Err(-9);
+    }
+    if batch < 0 {
+        return Err(-12);
+    }
+    if batch == 0 || (m == 0 && n == 0) {
+        return Ok(Vec::new());
+    }
+    qr_launch(ty, m, n, nrhs, a, lda, 0, c, ldc, info, batch)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qr_launch(
+    ty: Ty,
+    m: i32,
+    n: i32,
+    nrhs: i32,
+    a: u64,
+    lda: i32,
+    tau: u64,
+    c: u64,
+    ldc: i32,
+    info: u64,
+    batch: i32,
+) -> Result<Vec<Launch>, i32> {
+    if batch as u64 > MAX_GRID_X {
+        return Err(NOT_SUPPORTED);
+    }
+    Ok(vec![Launch {
+        kernel: Kernel::Geqrf,
+        ty,
+        grid: [batch as u32, 1, 1],
+        block: Kernel::Geqrf.block(),
+        args: vec![
+            a,
+            tau,
+            c,
+            info,
+            m as u64,
+            n as u64,
+            nrhs as u64,
+            lda as u64,
+            ldc.max(1) as u64,
+            batch as u64,
         ],
     }])
 }
@@ -1565,6 +1880,76 @@ pub fn ref_trsm(
     }
 }
 
+fn cconj(v: Cx) -> Cx {
+    (v.0, -v.1)
+}
+
+/// `H_0 H_1 ... H_{k-1} R` from the packed `geqrf` output (`H_j = I - tau_j v_j v_j^H`,
+/// v_j(j) = 1, v_j below the diagonal), m x n column-major with leading dimension `ld`.
+pub fn qr_product(m: usize, n: usize, qr: &[Cx], ld: usize, tau: &[Cx]) -> Vec<Cx> {
+    let mut x = vec![(0.0, 0.0); m * n];
+    for j in 0..n {
+        for i in 0..=j.min(m - 1) {
+            x[i + j * m] = qr[i + j * ld];
+        }
+    }
+    for j in (0..m.min(n)).rev() {
+        let v = |i: usize| if i == j { (1.0, 0.0) } else { qr[i + j * ld] };
+        for c in 0..n {
+            let mut w = (0.0, 0.0);
+            for i in j..m {
+                w = cadd(w, cmul(cconj(v(i)), x[i + c * m]));
+            }
+            let tw = cmul(tau[j], w);
+            for i in j..m {
+                x[i + c * m] = cadd(x[i + c * m], cmul((-v(i).0, -v(i).1), tw));
+            }
+        }
+    }
+    x
+}
+
+/// Least-squares solution of `A x = b` (m x n, full column rank) by the normal equations
+/// in f64 with partial pivoting.
+pub fn lstsq(m: usize, n: usize, a: &[Cx], lda: usize, b: &[Cx]) -> Vec<Cx> {
+    let mut g = vec![(0.0, 0.0); n * (n + 1)];
+    for r in 0..n {
+        for c in 0..n {
+            let mut acc = (0.0, 0.0);
+            for i in 0..m {
+                acc = cadd(acc, cmul(cconj(a[i + r * lda]), a[i + c * lda]));
+            }
+            g[r * (n + 1) + c] = acc;
+        }
+        let mut acc = (0.0, 0.0);
+        for i in 0..m {
+            acc = cadd(acc, cmul(cconj(a[i + r * lda]), b[i]));
+        }
+        g[r * (n + 1) + n] = acc;
+    }
+    let abs = |v: Cx| v.0.hypot(v.1);
+    for k in 0..n {
+        let p = (k..n).max_by(|&x, &y| abs(g[x * (n + 1) + k]).total_cmp(&abs(g[y * (n + 1) + k]))).unwrap();
+        for c in 0..=n {
+            g.swap(k * (n + 1) + c, p * (n + 1) + c);
+        }
+        let d = g[k * (n + 1) + k];
+        let dn = d.0 * d.0 + d.1 * d.1;
+        let inv = (d.0 / dn, -d.1 / dn);
+        for r in 0..n {
+            if r == k {
+                continue;
+            }
+            let f = cmul(g[r * (n + 1) + k], inv);
+            for c in 0..=n {
+                let t = cmul(f, g[k * (n + 1) + c]);
+                g[r * (n + 1) + c] = (g[r * (n + 1) + c].0 - t.0, g[r * (n + 1) + c].1 - t.1);
+            }
+        }
+    }
+    (0..n).map(|r| { let d = g[r * (n + 1) + r]; let dn = d.0 * d.0 + d.1 * d.1; cmul(g[r * (n + 1) + n], (d.0 / dn, -d.1 / dn)) }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1691,7 +2076,9 @@ mod tests {
             Err(INVALID_VALUE)
         );
         assert_eq!(gemv(Ty::D, 0, 3, 0, 0, 3, 0, 1, 0, 1, s(), s()), Ok(vec![]));
-        assert_eq!(nrm2(Ty::D, 5, 0, -1, 0).args[2], 0);
+        assert_eq!(nrm2(Ty::D, 5, 0, -1, 0, 0)[0].args[2], 0);
+        assert_eq!(nrm2(Ty::D, 1 << 20, 0, 1, 0, 64).len(), 2);
+        assert_eq!(nrm2(Ty::D, 1 << 20, 0, 1, 0, 64)[0].grid[0], PARTS);
         assert_eq!(scal(Ty::Z, 5, s(), 0, 0, false), Ok(vec![]));
         assert_eq!(axpy(Ty::Z, 0, s(), 0, 1, 0, 1), Ok(vec![]));
     }

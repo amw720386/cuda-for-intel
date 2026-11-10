@@ -11,7 +11,7 @@ use std::collections::HashMap;
 #[test]
 fn cublas64_kernels_translate() {
     let entries = pg::all_entries();
-    assert_eq!(entries.len(), 58);
+    assert_eq!(entries.len(), 4 * 19 + 2);
     for (name, src, n) in entries {
         let t = translate(&src).unwrap_or_else(|e| panic!("{name}: {e}\n{src}"));
         assert_eq!(t.kernels[0].name, name);
@@ -175,6 +175,15 @@ const OPS: [i32; 4] = [plan::OP_N, plan::OP_T, plan::OP_C, plan::OP_CONJG];
 
 #[test]
 fn sim_gemm_ops_padding_scalars_and_batches() {
+    // both gemm kernels: 16 x 16 and register-blocked
+    for tile in [1, 2] {
+        plan::GEMM_TILE_LOCAL.with(|c| c.set(tile));
+        sim_gemm_ops_padding_scalars_and_batches_cases();
+    }
+    plan::GEMM_TILE_LOCAL.with(|c| c.set(0));
+}
+
+fn sim_gemm_ops_padding_scalars_and_batches_cases() {
     let mut sims = Sims::default();
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let mut cases = 0;
@@ -416,6 +425,9 @@ fn sim_level1_dot_nrm2_axpy_scal() {
             (700, 1, 1),
             (257, -2, 3),
             (33, 3, -1),
+            // multi-block partials (two blocks) with a one-block final pass
+            (5000, 1, 1),
+            (4500, -1, 2),
         ] {
             let (lx, ly) = (
                 (n.max(1) as usize) * incx.unsigned_abs() as usize,
@@ -445,7 +457,10 @@ fn sim_level1_dot_nrm2_axpy_scal() {
                     gpu.upload(&enc(ty, &y)),
                     gpu.upload(&enc(ty, &[(9.0, 9.0)])),
                 );
-                sims.run(&mut gpu, &[plan::dot(ty, n, dx, incx, dy, incy, out, conj)]);
+                let scratch = gpu.alloc(plan::PART_BYTES as usize);
+                let l = plan::dot(ty, n, dx, incx, dy, incy, out, conj, scratch);
+                assert_eq!(l.len(), if n >= 4096 && Ty::BLAS.contains(&ty) { 2 } else { 1 });
+                sims.run(&mut gpu, &l);
                 let got = dec(ty, &gpu.download(out, ty.size() as usize));
                 let t = match ty {
                     Ty::H => 2e-3 * f64::from(n.max(1)),
@@ -483,7 +498,8 @@ fn sim_level1_dot_nrm2_axpy_scal() {
                 };
                 let mut gpu = Gpu::default();
                 let (dx, out) = (gpu.upload(&enc(ty, &xs)), gpu.alloc(16));
-                sims.run(&mut gpu, &[plan::nrm2(ty, n, dx, incx, out)]);
+                let scratch = gpu.alloc(plan::PART_BYTES as usize);
+                sims.run(&mut gpu, &plan::nrm2(ty, n, dx, incx, out, scratch));
                 let rt = if ty.double() { Ty::D } else { Ty::S };
                 let got = dec(rt, &gpu.download(out, ty.comp() as usize))[0].0;
                 assert!(
@@ -650,6 +666,114 @@ fn sim_trsm_every_side_uplo_trans_diag() {
     assert_eq!(cases, 2 * (2 * 2 * 2 * 2) * 2 + 2 * (2 * 2 * 3 * 2) * 2);
 }
 
+#[test]
+fn sim_trsm_blocked_single_matrix() {
+    // order 150 > 2 * TRSM_NB: three diagonal blocks (the last partial) with gemm updates
+    let mut sims = Sims::default();
+    let mut rng = Rng(0xb10c_7e5d);
+    for ty in [Ty::D, Ty::Z] {
+        let transes: &[i32] = if ty.complex() { &[plan::OP_N, plan::OP_C] } else { &[plan::OP_N, plan::OP_T] };
+        for side in [plan::SIDE_LEFT, plan::SIDE_RIGHT] {
+            for uplo in [plan::FILL_LOWER, plan::FILL_UPPER] {
+                for &trans in transes {
+                    let diag = if uplo == plan::FILL_UPPER { plan::DIAG_UNIT } else { plan::DIAG_NON_UNIT };
+                    let (m, n) = if side == plan::SIDE_LEFT { (150usize, 3usize) } else { (4, 150) };
+                    let order = if side == plan::SIDE_LEFT { m } else { n };
+                    let (lda, ldb) = (order + 1, m + 2);
+                    let alpha = rng.cx(ty);
+                    let mut a = rng.vec(ty, lda * order);
+                    for v in a.iter_mut() {
+                        *v = (v.0 * 0.05, v.1 * 0.05);
+                    }
+                    for d in 0..order {
+                        a[d + d * lda].0 += 2.0;
+                    }
+                    let b = rng.vec(ty, ldb * n);
+                    let mut want = b.clone();
+                    plan::ref_trsm(side, uplo, trans, diag, m, n, alpha, &a, lda, &mut want, ldb);
+                    let p = plan::tri(ty, side, uplo, trans, diag, m as i32, n as i32, lda as i32, ldb as i32).unwrap();
+                    let mut gpu = Gpu::default();
+                    let (da, db) = (gpu.upload(&enc(ty, &a)), gpu.upload(&enc(ty, &b)));
+                    let l = plan::trsm(ty, &p, scalar_of(ty, alpha), da, db, 1, false).unwrap();
+                    assert!(l.iter().any(|l| matches!(l.kernel, Kernel::GemmS | Kernel::GemmBS)));
+                    sims.run(&mut gpu, &l);
+                    let got = dec(ty, &gpu.download(db, b.len() * ty.size() as usize));
+                    let err = max_err(&got, &want);
+                    assert!(err < tol(ty) * 10.0, "{ty:?} blocked trsm side={side} uplo={uplo} trans={trans}: {err:e}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sim_geqrf_gels_batched() {
+    let mut sims = Sims::default();
+    let mut rng = Rng(0x9e9f_0001);
+    for ty in Ty::BLAS {
+        let es = ty.size() as usize;
+        for (m, n, nrhs) in [(9usize, 5usize, 2usize), (5, 5, 1), (70, 6, 3), (4, 7, 0)] {
+            let (lda, ldc, batch) = (m + 2, m + 1, 3usize);
+            let mut a = rng.vec(ty, lda * n * batch);
+            // matrix 2 has a zero column 1: rank deficient (gels reports R(2,2) = 0)
+            for i in 0..lda {
+                a[2 * lda * n + lda + i] = (0.0, 0.0);
+            }
+            let k = m.min(n);
+            let mut gpu = Gpu::default();
+            let tab = |base: u64, s: usize, gpu: &mut Gpu| {
+                gpu.upload(&(0..batch).flat_map(|z| (base + (z * s * es) as u64).to_le_bytes()).collect::<Vec<u8>>())
+            };
+            // geqrf
+            let da = gpu.upload(&enc(ty, &a));
+            let dt = gpu.upload(&enc(ty, &vec![(7.0, 7.0); k * batch]));
+            let (ta, tt) = (tab(da, lda * n, &mut gpu), tab(dt, k, &mut gpu));
+            sims.run(&mut gpu, &plan::geqrf(ty, m as i32, n as i32, ta, lda as i32, tt, batch as i32).unwrap());
+            let qr = dec(ty, &gpu.download(da, a.len() * es));
+            let tau = dec(ty, &gpu.download(dt, k * batch * es));
+            for z in 0..batch {
+                let got = plan::qr_product(m, n, &qr[z * lda * n..], lda, &tau[z * k..]);
+                let want: Vec<Cx> = (0..n).flat_map(|j| (0..m).map(move |i| (i, j))).map(|(i, j)| a[z * lda * n + i + j * lda]).collect();
+                let err = max_err(&got, &want);
+                assert!(err < tol(ty) * 20.0, "{ty:?} geqrf {m}x{n} matrix {z}: H R vs A {err:e}");
+                // padding rows are untouched
+                for j in 0..n {
+                    for i in m..lda {
+                        assert_eq!(qr[z * lda * n + i + j * lda], a[z * lda * n + i + j * lda]);
+                    }
+                }
+            }
+            if n > m {
+                assert_eq!(plan::gels(ty, plan::OP_N, m as i32, n as i32, 1, 0, lda as i32, 0, ldc as i32, 0, 1), Err(-4));
+                continue;
+            }
+            // gels
+            let c = rng.vec(ty, ldc * nrhs.max(1) * batch);
+            let da = gpu.upload(&enc(ty, &a));
+            let dc = gpu.upload(&enc(ty, &c));
+            let info = gpu.upload(&[0xffu8; 64]);
+            let (ta, tc) = (tab(da, lda * n, &mut gpu), tab(dc, ldc * nrhs.max(1), &mut gpu));
+            sims.run(
+                &mut gpu,
+                &plan::gels(ty, plan::OP_N, m as i32, n as i32, nrhs as i32, ta, lda as i32, tc, ldc as i32, info, batch as i32).unwrap(),
+            );
+            let infos: Vec<u32> = gpu.download(info, batch * 4).chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            assert_eq!(infos, vec![0, 0, if n > 1 { 2 } else { 0 }], "{ty:?} gels info {m}x{n}");
+            let x = dec(ty, &gpu.download(dc, c.len() * es));
+            for z in 0..2 {
+                for r in 0..nrhs {
+                    let cb = z * ldc * nrhs + r * ldc;
+                    let want = plan::lstsq(m, n, &a[z * lda * n..], lda, &c[cb..cb + m]);
+                    let err = max_err(&x[cb..cb + n], &want);
+                    assert!(err < tol(ty) * 200.0, "{ty:?} gels {m}x{n} matrix {z} rhs {r}: {err:e}");
+                }
+            }
+        }
+        assert_eq!(plan::geqrf(ty, 3, 2, 0, 2, 0, 1), Err(-5));
+        assert_eq!(plan::gels(ty, plan::OP_T, 3, 2, 1, 0, 3, 0, 3, 0, 1), Err(-2));
+    }
+}
+
 /// Column-major `rows x cols` matrix with leading dimension `ld`.
 fn at(m: &[Cx], ld: usize, r: usize, c: usize) -> Cx {
     m[r + c * ld]
@@ -666,6 +790,15 @@ fn opx(x: &[Cx], ld: usize, op: i32, r: usize, c: usize) -> Cx {
 
 #[test]
 fn sim_rank_k_symm_trmm_ger_and_friends() {
+    // both gemm kernels: 16 x 16 and register-blocked
+    for tile in [1, 2] {
+        plan::GEMM_TILE_LOCAL.with(|c| c.set(tile));
+        sim_rank_k_symm_trmm_ger_and_friends_cases();
+    }
+    plan::GEMM_TILE_LOCAL.with(|c| c.set(0));
+}
+
+fn sim_rank_k_symm_trmm_ger_and_friends_cases() {
     let mut sims = Sims::default();
     let mut rng = Rng(0xfeed_beef_1234);
     let one = (1.0, 0.0);
@@ -1232,15 +1365,34 @@ fn sim_rank_k_symm_trmm_ger_and_friends() {
         let dv = gpu.upload(&enc(ty, &v)); // the swap above changed it
         let out = gpu.alloc(8);
         for (min, expect) in [(false, 18u32), (true, 51)] {
-            run(&mut gpu, vec![plan::amax(ty, nn as i32, dv, 2, out, min)]);
+            run(&mut gpu, plan::amax(ty, nn as i32, dv, 2, out, min, 0));
             let got = u32::from_le_bytes(gpu.download(out, 4).try_into().unwrap());
             assert_eq!(got, expect, "{ty:?} i?am{}", if min { "in" } else { "ax" });
         }
-        run(&mut gpu, vec![plan::amax(ty, 0, dv, 1, out, false)]);
+        run(&mut gpu, plan::amax(ty, 0, dv, 1, out, false, 0));
         assert_eq!(
             u32::from_le_bytes(gpu.download(out, 4).try_into().unwrap()),
             0
         );
+        // multi-block amax / amin: ties across blocks still go to the first index
+        let nb = 5000usize;
+        let mut w = rng.vec(ty, nb);
+        for e in w.iter_mut().filter(|e| e.0 == 0.0 && e.1 == 0.0) {
+            *e = (0.5, 0.0);
+        }
+        w[4700] = (3.0, 0.0);
+        w[4100] = (-3.0, 0.0);
+        w[2300] = (0.0, 0.0);
+        w[4900] = (0.0, 0.0);
+        let dw2 = gpu.upload(&enc(ty, &w));
+        let scratch = gpu.alloc(plan::PART_BYTES as usize);
+        for (min, expect) in [(false, 4101u32), (true, 2301)] {
+            let l = plan::amax(ty, nb as i32, dw2, 1, out, min, scratch);
+            assert_eq!(l.len(), 2);
+            run(&mut gpu, l);
+            let got = u32::from_le_bytes(gpu.download(out, 4).try_into().unwrap());
+            assert_eq!(got, expect, "{ty:?} multi-block i?am{}", if min { "in" } else { "ax" });
+        }
     }
 }
 
@@ -1250,7 +1402,8 @@ fn sim_getrf_getrs_batched() {
     let mut rng = Rng(0x1u64 << 40 | 0x5151);
     for ty in Ty::BLAS {
         let es = ty.size() as usize;
-        let (n, nrhs, lda, ldb, batch) = (9usize, 3usize, 11usize, 10usize, 3usize);
+        // 9: one thread per matrix; 20: one work-group per matrix
+        for (n, nrhs, lda, ldb, batch) in [(9usize, 3usize, 11usize, 10usize, 3usize), (20, 2, 21, 22, 3)] {
         let mut a = rng.vec(ty, lda * n * batch);
         // matrix 1 needs pivoting (zero leading entry); matrix 2 is singular in column 4
         a[lda * n] = (0.0, 0.0);
@@ -1378,8 +1531,9 @@ fn sim_getrf_getrs_batched() {
                 );
             }
         }
+        let _ = tb;
+        }
         assert_eq!(plan::getrs(ty, 5, 2, 1, 0, 2, 0, 0, 2, 1), Err(-2));
         assert_eq!(plan::getrs(ty, 0, 4, 1, 0, 3, 0, 0, 4, 1), Err(-6));
-        let _ = tb;
     }
 }
