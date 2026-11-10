@@ -514,8 +514,7 @@ pub(crate) fn run(o: &Options, log: &mut (dyn std::io::Write + Send)) -> Result<
             "off (CFI_NO_CACHE)"
         }
     );
-    // Big modules first so the long Intel-compiler jobs do not end up last.
-    jobs.sort_by_key(|j| std::cmp::Reverse(modules[j.module].raw.len()));
+    schedule_jobs(&mut jobs, |m| modules[m].raw.len());
     let threads = o
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(2, usize::from))
@@ -599,6 +598,19 @@ pub(crate) fn run(o: &Options, log: &mut (dyn std::io::Write + Send)) -> Result<
         counters.subst_built.load(Ordering::Relaxed)
     );
     Ok(summary)
+}
+
+/// Orders the work queue. Big modules come first so the long Intel-compiler jobs do not end up
+/// last. Within that order, the first entry of every module is moved to the front: its worker
+/// runs the module's (single-threaded) PTX normalisation, so the modules are prepared
+/// concurrently. Without this, all workers reach the same module together and wait for one
+/// thread's prepare, module after module.
+fn schedule_jobs(jobs: &mut Vec<Job>, module_len: impl Fn(usize) -> usize) {
+    jobs.sort_by_key(|j| std::cmp::Reverse(module_len(j.module)));
+    let mut seen = std::collections::HashSet::new();
+    let (first, rest): (Vec<Job>, Vec<Job>) = std::mem::take(jobs).into_iter().partition(|j| seen.insert(j.module));
+    jobs.extend(first);
+    jobs.extend(rest);
 }
 
 /// Translates (or finds) one entry and builds it natively. Returns (result, translate_ms,
@@ -731,6 +743,22 @@ mod tests {
         // nvcc aligns frames in `.nv_fatb` to 8 bytes.
         f.resize(f.len().next_multiple_of(8), 0);
         f
+    }
+
+    #[test]
+    fn schedule_starts_every_module_before_the_rest() {
+        let job = |module: usize, entry: &str| Job { module, entry: entry.into(), native: false };
+        // Module sizes: 0 is small, 1 is big, 2 is medium.
+        let sizes = [10usize, 300, 200];
+        let mut jobs = vec![job(0, "a0"), job(0, "a1"), job(1, "b0"), job(1, "b1"), job(1, "b2"), job(2, "c0"), job(2, "c1")];
+        schedule_jobs(&mut jobs, |m| sizes[m]);
+        let order: Vec<&str> = jobs.iter().map(|j| j.entry.as_str()).collect();
+        // First one entry per module, biggest module first, then the others in the same big-first order.
+        assert_eq!(order, ["b0", "c0", "a0", "b1", "b2", "c1", "a1"]);
+        let mut one = vec![job(0, "x")];
+        schedule_jobs(&mut one, |_| 1);
+        assert_eq!(one.len(), 1);
+        schedule_jobs(&mut Vec::new(), |_| 1);
     }
 
     #[test]
