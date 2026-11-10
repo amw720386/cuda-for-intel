@@ -174,6 +174,7 @@ unless the description says otherwise. Defaults are taken from the source at thi
 | `CFI_NO_ALLOC_TOUCH` | off | Skip the zero-fill of fresh `cuMemAlloc` buffers. Without the fill, a kernel's first touch of an untouched Level Zero allocation can lose the device on Windows. |
 | `CFI_STRICT_BARRIERS` | off | Apply the barrier-convergence check also inside loops (by default tid-dependent loop tests are trusted). |
 | `CUDA_FOR_INTEL_DYN_SHARED` | 65536 | Bytes reserved for the dynamic shared window of each kernel, clamped to the device maximum (at least 48 KiB where the device allows). |
+| `CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE` | on | `0`: launch every kernel with its full dynamic shared window. By default a lazily translated kernel launched with at most 16 KiB of dynamic shared memory runs a variant translated with a window cut to the request (power of two, at least 1 KiB), because a workgroup reserves its whole window and a 64 KiB window caps occupancy (see `docs/hw-logs/dyn-shared-window-2026-11-10.md`). |
 | `CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS` | 65536 | Work-groups queued on a stream before the host waits for it to drain; `0` disables the window. |
 | `CUDA_FOR_INTEL_LAZY` | on | `0`: translate whole library modules instead of one kernel per module. |
 | `CUDA_FOR_INTEL_NO_INDIRECT` | off | Set: do not declare indirect USM access on kernels (by default every kernel declares it, which batched GEMM pointer tables need). |

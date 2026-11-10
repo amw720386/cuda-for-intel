@@ -370,11 +370,63 @@ fn lazy_kernel_function(state: &mut State, library: usize, name: &CStr) -> Resul
     module_function(&state.runtime.api, context, &mut state.next_handle, module, name).map(Some)
 }
 
+/// Smallest dynamic window a specialised variant gets (see [`dynamic_variant`]).
+pub(super) const MIN_DYNAMIC_VARIANT: u32 = 1024;
+
+/// `CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE=0` keeps every launch on the full dynamic shared window.
+pub(super) fn dynamic_variants_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE").as_deref() != Some(std::ffi::OsStr::new("0")))
+}
+
+/// Names of the module-level `.extern .shared NAME[]` arrays of a PTX module. `normalize` turns
+/// each into a sized `.shared` declaration (the dynamic window) inside every entry that uses it.
+pub(super) fn extern_shared_names(raw: &str) -> Vec<&str> {
+    raw.lines()
+        .filter(|line| line.contains(".extern") && line.contains(".shared"))
+        .filter_map(|line| {
+            let open = line.find('[')?;
+            line[..open].split_whitespace().last()
+        })
+        .collect()
+}
+
+/// Copy of the normalised module text with `entry`'s dynamic shared window resized to `bytes`. The
+/// window is the entry's `.shared` declaration of one of `names` (see [`extern_shared_names`]).
+/// `None` when the entry has no such declaration or its window is not larger than `bytes`.
+pub(super) fn resize_dynamic_window(prepared: &str, entry: &str, bytes: u32, names: &[&str]) -> Option<String> {
+    let head = format!(".entry {entry}");
+    let start = prepared.match_indices(&head).map(|(at, _)| at).find(|&at| {
+        prepared[at + head.len()..].starts_with(|c: char| c == '(' || c.is_whitespace())
+    })?;
+    let body = start + head.len();
+    let end = prepared[body..].find(".entry ").map_or(prepared.len(), |offset| body + offset);
+    let mut offset = start;
+    for line in prepared[start..end].split_inclusive('\n') {
+        let at = offset;
+        offset += line.len();
+        let text = line.trim_start();
+        if !text.starts_with(".shared") {
+            continue;
+        }
+        let Some(open) = line.find('[') else { continue };
+        let Some(symbol) = line[..open].split_whitespace().last() else { continue };
+        if !names.contains(&symbol) {
+            continue;
+        }
+        let close = line[open..].find(']')? + open;
+        let window: u32 = line[open + 1..close].trim().parse().ok()?;
+        return (window > bytes).then(|| format!("{}[ {bytes} ]{}", &prepared[..at + open], &prepared[at + close + 1..]));
+    }
+    None
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
     trace::call("cuLibraryUnload", || {
         status(state(|state| {
             let key = library.addr();
+            super::drop_dynamic_variants(state, key)?;
             if let Some(lazy) = state.lazy_modules.remove(&key) {
                 for ((ctx, _), (child, _)) in lazy.children.iter() {
                     if let Some(context) = state.contexts.get_mut(ctx) {
@@ -410,4 +462,39 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
             Ok(())
         }))
     })
+}
+
+#[cfg(test)]
+mod dynamic_window_tests {
+    use super::{extern_shared_names, resize_dynamic_window};
+
+    const RAW: &str = ".extern .shared .align 16 .b8 dyn[];\n.extern .shared .align 8 .b8 data_x[];\n.shared .align 4 .b8 st[64];\n";
+    const MODULE: &str = ".visible .entry a(.param .u64 p)\n{\n.shared .align 4 .b8 st [ 65520 ] ;\n.shared .align 16 .b8 dyn [ 65520 ] ;\nret;\n}\n\
+.visible .entry ab(.param .u64 p)\n{\n.shared .align 8 .b8 data_x [ 61440 ] ;\nret;\n}\n\
+.visible .entry b (.param .u64 p)\n{\nret;\n}\n";
+
+    #[test]
+    fn finds_module_level_extern_shared_names() {
+        assert_eq!(extern_shared_names(RAW), ["dyn", "data_x"]);
+    }
+
+    #[test]
+    fn resizes_only_the_window_of_the_named_entry() {
+        let names = extern_shared_names(RAW);
+        let out = resize_dynamic_window(MODULE, "a", 4096, &names).unwrap();
+        assert!(out.contains(".b8 st [ 65520 ] ;"), "static arrays keep their size");
+        assert!(out.contains(".b8 dyn [ 4096 ] ;\nret;\n}\n.visible .entry ab"));
+        assert!(out.contains(".b8 data_x [ 61440 ] ;"), "entry `ab` keeps its window");
+        let out = resize_dynamic_window(MODULE, "ab", 2048, &names).unwrap();
+        assert!(out.contains(".b8 dyn [ 65520 ] ;") && out.contains(".b8 data_x [ 2048 ] ;"));
+    }
+
+    #[test]
+    fn leaves_entries_without_a_window_or_with_a_smaller_one() {
+        let names = extern_shared_names(RAW);
+        assert_eq!(resize_dynamic_window(MODULE, "b", 4096, &names), None);
+        assert_eq!(resize_dynamic_window(MODULE, "missing", 4096, &names), None);
+        assert_eq!(resize_dynamic_window(MODULE, "a", 65520, &names), None);
+        assert_eq!(resize_dynamic_window(MODULE, "a", 4096, &[]), None);
+    }
 }
