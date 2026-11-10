@@ -21,6 +21,20 @@ human `summary.md`. The test result is the only thing that decides what merges t
   queue otherwise).
 - The working tree is committed and pushed: `sync.sh` ships `git archive HEAD`, so the box always runs a known revision.
 
+## Second box (Lunar Lake / Arc 140V, Xe2, older driver)
+
+A second Windows box is meant to be the Xe2 and older-driver target. It is set up like the first: ssh alias in `~/.ssh/config`,
+everything under the user's `cfi-work`, the same `gpu-queue.ps1`, and the same toolchain (Rust stable MSVC 1.99.1,
+Python 3.12.10, Git, LLVM 20.1.8 for `NVRTC_SHIM_CLANG`), plus VS Build Tools 2022 instead of VS 18. Stock Ollama v0.12.6
+is extracted portably under `cfi-work\stock\ollama-v0.12.6`. Differences from the first box:
+- The execution policy is Restricted, so run scripts with `powershell -NoProfile -ExecutionPolicy Bypass -File ...`. Child
+  `powershell` processes inherit the process-scope policy, including the gpu-queue calls inside the repo scripts.
+- The source tree is at `cfi-work\main\src` and the target dir is `cfi-work\main\target`. `build.ps1` and `gpuhw.ps1`
+  (in `cfi-work`) build the workspace and run `gpu-*.exe --ignored --test-threads=1` in one queue slot.
+- **As of 2026-11-10 its GPU driver does not load** (code 39, kernel code integrity rejects `igdkmdn64.sys` 32.0.101.5564),
+  so `zeInit` finds no driver and every GPU test fails at `cuInit` = 100. Run `scripts\cfi-doctor.ps1` first: the
+  `gpu-device-status` row must say `working`. See `hw-logs/second-box-bringup-2026-11-10.md`.
+
 ## Commands
 
 ```
