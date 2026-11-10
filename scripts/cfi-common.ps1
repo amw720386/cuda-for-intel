@@ -81,6 +81,9 @@ function Get-IntelGpus {
             $result += [pscustomobject]@{
                 Name = $g.Name; Driver = $g.DriverVersion; DriverDate = $g.DriverDate
                 Vendor = $ven; Device = $dev; IsIntel = ($ven -eq '8086' -or $g.Name -match 'Intel')
+                # Device Manager problem code (0 = working). 39/31/43 mean the display driver is not running: the adapter
+                # is still listed with its driver version, but Level Zero finds no device and cuInit returns 100.
+                Problem = [int]$g.ConfigManagerErrorCode; Status = $g.Status
             }
         }
     } catch { }
@@ -111,4 +114,17 @@ function Get-OllamaVersion([string]$Exe) {
 function Get-CfiDefaultInstallDir {
     if ($env:LOCALAPPDATA) { return (Join-Path $env:LOCALAPPDATA 'cuda-for-intel\install') }
     return (Join-Path $env:TEMP 'cuda-for-intel\install')
+}
+
+function Get-PnpProblemText([int]$Code) {
+    switch ($Code) {
+        0 { 'working' }
+        10 { 'code 10: the device cannot start' }
+        22 { 'code 22: the device is disabled' }
+        28 { 'code 28: no driver installed' }
+        31 { 'code 31: the driver failed to load' }
+        39 { 'code 39: the driver failed to load (corrupted, missing or blocked, for example by Memory integrity)' }
+        43 { 'code 43: the driver stopped the device after a failure' }
+        default { "code ${Code}" }
+    }
 }

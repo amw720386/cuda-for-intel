@@ -70,7 +70,10 @@ function Invoke-Prereqs {
         Write-Host 'FAIL  no Intel GPU detected. Remote desktop sessions and VMs without passthrough expose none.'
         $problems++
     } else {
-        foreach ($g in $gpus) { Write-Safe "OK    Intel GPU: $($g.Name), driver $($g.Driver)" }
+        foreach ($g in $gpus) {
+            if ($g.Problem) { Write-Safe "FAIL  Intel GPU: $($g.Name), driver $($g.Driver): Device Manager reports $(Get-PnpProblemText $g.Problem). Level Zero finds no device until the driver loads."; $problems++ }
+            else { Write-Safe "OK    Intel GPU: $($g.Name), driver $($g.Driver)" }
+        }
         Write-Host '      Only Arc B390 (driver 32.0.101.9033) is a tested part; see docs/compatibility.md.'
     }
     $ze = Find-LevelZeroLoader

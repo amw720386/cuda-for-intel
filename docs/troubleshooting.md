@@ -48,6 +48,7 @@ See the README Troubleshooting table for error codes (209, 218, 301, 3/100, 719,
 | --- | --- | --- |
 | Self-test SKIPPED: Level Zero loader missing | No or old Intel graphics driver | Install the current driver from Intel, reboot |
 | Self-test FAIL with 100 or 3 | No GPU visible (remote desktop, VM, hybrid laptop on the wrong GPU) | Run locally; check Device Manager |
+| Self-test FAIL with 100, `gpu-device-status` in `cfi-doctor.ps1` shows PROBLEM code 39 | The adapter is listed with its driver version but the kernel driver did not load (System log: Kernel-PnP event 219). Seen on a Lunar Lake board with driver 32.0.101.5564 and Memory integrity on | Install a driver that loads on this board (or check whether Memory integrity blocks it), reboot, confirm the adapter shows "working" |
 | Application loads NVIDIA's `nvcuda.dll` instead | Environment not loaded | Dot-source `cfi-env.ps1` in the shell that starts the app; check `where.exe nvcuda.dll` |
 | Error 719 or "device lost" | Windows GPU timeout (TDR) | Close other GPU programs; `CUDA_FOR_INTEL_SYNC_LAUNCH=1` to find the kernel |
 | Very slow first request | Kernel compilation | Wait once; keep the caches |

@@ -37,6 +37,8 @@ foreach ($g in $gpus) {
     $date = ''
     if ($g.DriverDate) { $date = $g.DriverDate.ToString('yyyy-MM-dd') }
     Row 'gpu' "$($g.Name) | PCI $($g.Vendor):$($g.Device) | driver $($g.Driver) $date | intel=$($g.IsIntel)"
+    if ($g.Problem) { Row 'gpu-device-status' "PROBLEM $(Get-PnpProblemText $g.Problem): the GPU is not usable, cuInit returns 100. See Device Manager and docs/troubleshooting.md" }
+    else { Row 'gpu-device-status' 'working' }
 }
 $ze = Find-LevelZeroLoader
 if ($ze) {
