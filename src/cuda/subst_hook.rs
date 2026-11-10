@@ -16,6 +16,8 @@ pub(super) struct Natives {
     map: HashMap<String, Native>,
     /// (dst, tmp_fixup) of the last native `mul_mat_q`: its stream-k fixup kernel is skipped.
     pending_fixup: Option<(u64, u64)>,
+    /// dst of the last native `flash_attn_ext_f16`: its stream-k fixup kernel is skipped.
+    pending_fa_fixup: Option<u64>,
     /// Shadow-check launches done per plan (`CUDA_FOR_INTEL_SUBST_CHECK`).
     checks: HashMap<String, usize>,
     fixup_events: usize,
@@ -70,12 +72,24 @@ pub(super) fn launch(
     args: &[KernelArg],
 ) -> Result<(), CuResult> {
     if let Some(plan) = plan {
-        let needs_values = matches!(plan.kernel, subst::Kernel::Mmq { .. } | subst::Kernel::MmqFixup { .. });
+        let needs_values = matches!(
+            plan.kernel,
+            subst::Kernel::Mmq { .. } | subst::Kernel::MmqFixup { .. } | subst::Kernel::Fattn { .. } | subst::Kernel::FattnFixup
+        );
         let vals: Vec<u64> = if needs_values { arg_values(args) } else { Vec::new() };
         if matches!(plan.kernel, subst::Kernel::Mmq { .. }) {
             context.subst.pending_fixup = None;
         }
-        if matches!(plan.kernel, subst::Kernel::MmqFixup { .. }) {
+        if matches!(plan.kernel, subst::Kernel::Fattn { .. }) {
+            context.subst.pending_fa_fixup = None;
+        }
+        if matches!(plan.kernel, subst::Kernel::FattnFixup) {
+            // [dst, dst_fixup, ne01, ne02, ne03, ne11]: only fixups of a native FlashAttention are no-ops
+            if vals.first().copied().is_some() && context.subst.pending_fa_fixup == vals.first().copied() {
+                context.subst.pending_fa_fixup = None;
+                return Ok(());
+            }
+        } else if matches!(plan.kernel, subst::Kernel::MmqFixup { .. }) {
             // [ids, bounds, dst, tmp, ...]: only fixups of a native mul_mat_q are no-ops
             let skip = vals.len() == 13 && context.subst.pending_fixup == Some((vals[2], vals[3]));
             let n = context.subst.fixup_events;
@@ -95,10 +109,26 @@ pub(super) fn launch(
         } else if let Some(mapped) = plan.map_launch(geometry.0, geometry.1, &vals)
             && let Some(kernel) = native(api, context, plan, stream)
         {
-            match context.streams.launch(api, &context.backend, kernel, stream, mapped, args) {
+            let extra = plan.extra_word(geometry.0);
+            let extended: Vec<KernelArg>;
+            let native_args = match &extra {
+                Some(word) => {
+                    extended = args
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(KernelArg { value: (word as *const u32).cast(), size: 4 }))
+                        .collect();
+                    &extended[..]
+                }
+                None => args,
+            };
+            match context.streams.launch(api, &context.backend, kernel, stream, mapped, native_args) {
                 Ok(()) => {
                     if matches!(plan.kernel, subst::Kernel::Mmq { .. }) {
                         context.subst.pending_fixup = Some((vals[4], vals[5]));
+                    }
+                    if matches!(plan.kernel, subst::Kernel::Fattn { .. }) {
+                        context.subst.pending_fa_fixup = Some(vals[6]);
                     }
                     shadow_check(api, context, plan, translated, stream, geometry, args);
                     return Ok(());

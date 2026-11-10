@@ -9,6 +9,7 @@
 //! family (`mmvq`, `quantize_q8_1`) optionally narrowed to a type (`mmvq:q8_0`, `mmvq:q4_k`).
 use crate::ptx::Param;
 
+pub(crate) mod fattn;
 pub(crate) mod mmq;
 pub(crate) mod mmvq;
 pub(crate) mod probe;
@@ -22,6 +23,36 @@ mod interp;
 mod tests;
 
 // ---- environment switch ----
+
+/// Native FlashAttention geometry, or `None` when the launch uses a feature the native kernel does
+/// not implement (sinks, ALiBi, softcap, other head size, unaligned K/V) or has fewer queries than
+/// one tile.
+fn fattn_geometry(d: u32, v: &[u64]) -> Option<([u32; 3], [u32; 3])> {
+    if v.len() != 37 {
+        return None;
+    }
+    let f32_is_zero = |x: u64| (x as u32) & 0x7fff_ffff == 0;
+    let (ne00, ne01, ne02, ne03) = (v[14], v[15], v[16], v[17]);
+    let (ne11, ne12) = (v[22], v[23]);
+    // Below a full tile (decode, GQA-batched decode) the stock kernel's split-KV parallelism wins:
+    // one 16-query tile per head leaves most of the GPU idle (Llama-3.2-1B decode: 287 us native
+    // vs 176 us translated).
+    let ok = ne01 >= u64::from(fattn::qt())
+        && v[4] == 0
+        && f32_is_zero(v[9])
+        && f32_is_zero(v[13])
+        && ne00 == u64::from(d)
+        && ne01 > 0
+        && ne02 > 0
+        && ne03 > 0
+        && ne11 > 0
+        && ne12 > 0
+        && ne02 % ne12 == 0
+        && (v[1] | v[2] | v[25] | v[28]) % 4 == 0
+        && (v[0] | v[18] | v[19] | v[20]) % 4 == 0
+        && (v[3] == 0 || ((v[3] | v[34]) % 2 == 0 && v[33] > 0));
+    ok.then(|| ([ne01.div_ceil(u64::from(fattn::qt())) as u32, ne02 as u32, ne03 as u32], [32, fattn::nw(), 1]))
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Switch {
@@ -149,6 +180,10 @@ pub(crate) enum Kernel {
     Mmq { ty: u32 },
     /// `mul_mat_q_stream_k_fixup<ty>`: skipped after a native `Mmq` launch.
     MmqFixup { ty: u32 },
+    /// `flash_attn_ext_f16<d, d, ..., false, false>` (tensor-core FlashAttention).
+    Fattn { d: u32 },
+    /// `flash_attn_stream_k_fixup<d, ...>`: skipped after a native `Fattn` launch.
+    FattnFixup,
 }
 
 fn ptr() -> Param {
@@ -170,6 +205,9 @@ pub(crate) fn auto_ok(kernel: Kernel) -> bool {
     match kernel {
         Kernel::Mmvq { .. } | Kernel::QuantizeQ81 => true,
         Kernel::Mmq { ty } | Kernel::MmqFixup { ty } => AUTO_MMQ.contains(&ty),
+        // FA-on prefill +81-88 % end to end on the B390 with CPU-identical greedy text
+        // (docs/hw-logs/perf-mmvq-2026-11-09); `auto,-fattn` switches it off
+        Kernel::Fattn { .. } | Kernel::FattnFixup => true,
     }
 }
 
@@ -198,6 +236,16 @@ fn mmq_fixup_layout() -> Vec<Param> {
     v
 }
 
+/// `flash_attn_ext_f16`: 8 pointers, 29 scalars (three of them int64).
+fn fattn_layout() -> Vec<Param> {
+    fattn::arg_sizes().iter().map(|&n| if n == 8 { Param::U64 } else { Param::U32 }).collect()
+}
+
+/// `flash_attn_stream_k_fixup`: dst, dst_fixup, ne01, ne02, ne03, ne11.
+fn fattn_fixup_layout() -> Vec<Param> {
+    vec![Param::U64, Param::U64, Param::U32, Param::U32, Param::U32, Param::U32]
+}
+
 /// FNV-1a over the debug rendering of the layout: a stable key for logs and the registry.
 pub(crate) fn layout_hash(params: &[Param]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -210,7 +258,21 @@ pub(crate) fn layout_hash(params: &[Param]) -> u64 {
 
 /// Exact parameter match, except that `mul_mat_vec_q`'s `ids` slot may be typed `u64` by the
 /// translator when the instantiation never dereferences it (ncols_dst > 1): same 8 bytes.
+fn param_bytes(p: &Param) -> Option<usize> {
+    match p {
+        Param::U32 | Param::F32 => Some(4),
+        Param::U64 | Param::GlobalPtr => Some(8),
+        _ => None,
+    }
+}
+
 fn layout_matches(kernel: Kernel, params: &[Param], expected: &[Param]) -> bool {
+    if matches!(kernel, Kernel::Fattn { .. } | Kernel::FattnFixup) {
+        // pointers may be typed u64 and floats u32 by the translator: compare word sizes
+        let sizes: Vec<Option<usize>> = params.iter().map(param_bytes).collect();
+        let want: Vec<Option<usize>> = expected.iter().map(param_bytes).collect();
+        return sizes == want;
+    }
     if params == expected {
         return true;
     }
@@ -254,6 +316,44 @@ pub(crate) struct Plan {
     pub layout_hash: u64,
     /// Template tile width (`mmq_x`) of mul_mat_q variants; 0 otherwise.
     pub aux: u32,
+    /// Decode-fast mmvq (`CUDA_FOR_INTEL_MMVQ_FAST`, ncols_dst 1).
+    pub fast: Option<mmvq::Fast>,
+}
+
+/// `CUDA_FOR_INTEL_MMVQ_FAST`: `0`/`off` keeps the stock-order native mmvq; `1`/`on` selects the
+/// decode-fast variant with the per-type default; `<rows>x<warps>x<unroll>` (or comma separated)
+/// picks one shape for every type; a trailing `w` selects the whole-dword group loads (Q8_0, Q4_K,
+/// Q6_K; ignored for Q4_0).
+pub(crate) fn mmvq_fast_from(text: Option<&str>, ty: u32) -> Option<mmvq::Fast> {
+    let text = text?.trim().to_ascii_lowercase();
+    match text.as_str() {
+        "" | "0" | "off" | "none" => None,
+        "1" | "on" | "auto" => Some(mmvq_fast_default(ty)),
+        _ => {
+            let (body, wide) = match text.strip_suffix('w') {
+                Some(b) => (b, true),
+                None => (text.as_str(), false),
+            };
+            let v: Vec<Option<u32>> = body.split([',', 'x']).map(|v| v.trim().parse::<u32>().ok()).collect();
+            let [Some(rows), Some(warps), Some(unroll)] = v[..] else { return None };
+            let f = mmvq::Fast { rows, warps, unroll, wide: wide && matches!(ty, refs::Q8_0 | refs::Q4_K | refs::Q6_K) };
+            (rows.is_power_of_two() && warps.is_power_of_two() && rows * warps <= 32 && warps <= 8 && (1..=8).contains(&unroll))
+                .then_some(f)
+        }
+    }
+}
+
+/// Per-type default shape of the decode-fast mmvq, from `hw_subst_mmvq_decode_shapes` on the Arc
+/// B390: whole-dword group loads (Q8_0 / Q4_K / Q6_K) with 4 rows per workgroup and 2 accumulators
+/// reach 106-109 GB/s on the output matrices (read ceiling 114 GB/s, `hw_perf_probe`) against
+/// 36-53 GB/s for the stock-order native kernel. Q4_0 has no wide form.
+pub(crate) fn mmvq_fast_default(ty: u32) -> mmvq::Fast {
+    let wide = matches!(ty, refs::Q8_0 | refs::Q4_K | refs::Q6_K);
+    mmvq::Fast { rows: 4, warps: 1, unroll: 2, wide }
+}
+
+fn mmvq_fast_env(ty: u32) -> Option<mmvq::Fast> {
+    mmvq_fast_from(std::env::var("CUDA_FOR_INTEL_MMVQ_FAST").ok().as_deref(), ty)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -287,6 +387,15 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
             (Kernel::MmqFixup { ty: *ty as u32 }, mmq_fixup_layout(), "mmq", type_name(*ty as u32))
         }
         ("quantize_q8_1", []) => (Kernel::QuantizeQ81, quantize_layout(), "quantize_q8_1", None),
+        (
+            "flash_attn_ext_f16",
+            [TArg::Int(dkq), TArg::Int(dv), TArg::Int(_), TArg::Int(_), TArg::Int(_), TArg::Int(_), TArg::Int(0), TArg::Int(0)],
+        ) if dkq == dv && fattn::supported_d(*dkq as u32) => {
+            (Kernel::Fattn { d: *dkq as u32 }, fattn_layout(), "fattn", None)
+        }
+        ("flash_attn_stream_k_fixup", [TArg::Int(_), TArg::Int(_), TArg::Int(_)]) => {
+            (Kernel::FattnFixup, fattn_fixup_layout(), "fattn", None)
+        }
         _ => return Decision::NotApplicable,
     };
     if switch.denies(family, ty) {
@@ -307,17 +416,27 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
         _ => None,
     }
     .filter(|w| w.is_power_of_two() && (1..=32).contains(w));
+    let fast = match kernel {
+        Kernel::Mmvq { ty, ncols: 1 } => mmvq_fast_env(ty),
+        _ => None,
+    };
     let key = match kernel {
+        Kernel::Mmvq { ty, ncols } if fast.is_some() => {
+            let f = fast.unwrap();
+            format!("mmvq:t{ty}:c{ncols}:fast{}x{}x{}{}", f.rows, f.warps, f.unroll, if f.wide { "w" } else { "" })
+        }
         Kernel::Mmvq { ty, ncols } => format!("mmvq:t{ty}:c{ncols}:w{}", nwarps.unwrap_or(0)),
         Kernel::QuantizeQ81 => "quantize_q8_1".to_string(),
         Kernel::Mmq { ty } => format!("mmq:t{ty}"),
         Kernel::MmqFixup { ty } => format!("mmq_fixup:t{ty}"),
+        Kernel::Fattn { d } => format!("fattn:d{d}:w{}", fattn::nw()),
+        Kernel::FattnFixup => "fattn_fixup".to_string(),
     };
     let aux = match m.targs.as_slice() {
         [_, TArg::Int(x), _] if matches!(kernel, Kernel::Mmq { .. } | Kernel::MmqFixup { .. }) => *x as u32,
         _ => 0,
     };
-    Decision::Substitute(Plan { kernel, key, nwarps, layout_hash: layout_hash(params), aux })
+    Decision::Substitute(Plan { kernel, key, nwarps, layout_hash: layout_hash(params), aux, fast })
 }
 
 impl Plan {
@@ -328,12 +447,16 @@ impl Plan {
 
     pub(crate) fn entry_name(&self) -> String {
         match self.kernel {
+            Kernel::Mmvq { ty, .. } if self.fast.is_some() => {
+                mmvq::fast_entry_name(ty, self.fast.unwrap())
+            }
             Kernel::Mmvq { ty, ncols } => {
                 format!("cfi_mmvq_t{}_c{}_w{}", ty, ncols, self.nwarps_for(refs::Mmvq::ggml_nwarps(ncols as usize) as u32))
             }
             Kernel::QuantizeQ81 => "cfi_quantize_q8_1".to_string(),
             Kernel::Mmq { ty } => mmq::entry_name(ty),
-            Kernel::MmqFixup { .. } => String::new(),
+            Kernel::MmqFixup { .. } | Kernel::FattnFixup => String::new(),
+            Kernel::Fattn { d } => fattn::entry_name(d),
         }
     }
 
@@ -342,13 +465,17 @@ impl Plan {
     pub(crate) fn build(&self, dot: bool) -> Result<Vec<u32>, String> {
         let plan = self.clone();
         std::panic::catch_unwind(move || match plan.kernel {
+            Kernel::Mmvq { ty, .. } if plan.fast.is_some() => {
+                mmvq::build_fast(ty, plan.fast.unwrap(), dot)
+            }
             Kernel::Mmvq { ty, ncols } => {
                 let nwarps = plan.nwarps_for(refs::Mmvq::ggml_nwarps(ncols as usize) as u32);
                 mmvq::build(mmvq::Cfg { ty, ncols, nwarps }, dot)
             }
             Kernel::QuantizeQ81 => quantize::build(dot),
             Kernel::Mmq { ty } => mmq::build(ty, dot),
-            Kernel::MmqFixup { .. } => Vec::new(),
+            Kernel::MmqFixup { .. } | Kernel::FattnFixup => Vec::new(),
+            Kernel::Fattn { d } => fattn::build(d),
         })
         .map_err(|_| format!("native generator for {} panicked", self.key))
     }
@@ -362,10 +489,23 @@ impl Plan {
                 if block != [32, stock, 1] {
                     return None;
                 }
+                if let Some(f) = self.fast {
+                    // stock ncols_dst 1: one row per block, grid.x == nrows
+                    return Some(([grid[0].div_ceil(f.rows), grid[1], grid[2]], [32, f.rows * f.warps, 1]));
+                }
                 Some((grid, [32, self.nwarps_for(stock), 1]))
             }
             Kernel::QuantizeQ81 => (block == [256, 1, 1]).then_some((grid, block)),
-            Kernel::Mmq { .. } | Kernel::MmqFixup { .. } => None, // needs the argument values: `map_launch`
+            Kernel::Mmq { .. } | Kernel::MmqFixup { .. } | Kernel::Fattn { .. } | Kernel::FattnFixup => None, // needs the argument values: `map_launch`
+        }
+    }
+
+    /// A launch word the native kernel takes after the stock parameters (`nrows` for the
+    /// decode-fast mmvq, from the stock grid).
+    pub(crate) fn extra_word(&self, stock_grid: [u32; 3]) -> Option<u32> {
+        match self.kernel {
+            Kernel::Mmvq { .. } if self.fast.is_some() => Some(stock_grid[0]),
+            _ => None,
         }
     }
 
@@ -389,6 +529,10 @@ impl Plan {
                 ];
                 let _ = grid;
                 Some((g, [16, 16, 1]))
+            }
+            Kernel::Fattn { d } => {
+                let _ = (grid, block);
+                fattn_geometry(d, vals)
             }
             _ => self.map_geometry(grid, block),
         }
