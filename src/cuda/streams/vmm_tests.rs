@@ -264,6 +264,17 @@ fn map_rejects_misuse_and_first_access_fills_once() {
     let accesses: Vec<u32> = fake::vmm_snapshot().mappings.iter().map(|m| m.4).collect();
     assert_eq!(accesses, vec![1, 1]);
 
+    // Device memory in use counts the physical allocation once, not once per mapping.
+    let used = || {
+        let guard = RUNTIME.lock().unwrap();
+        used_device_bytes(&guard.as_ref().unwrap().contexts, 0)
+    };
+    assert_eq!(used(), 4 * MIB);
+    let spare = create(GRAN);
+    assert_eq!(used(), 4 * MIB + GRAN, "unmapped physical memory is in use too");
+    assert_eq!(unsafe { cuMemRelease(spare) }, Success);
+    assert_eq!(used(), 4 * MIB);
+
     // Retain returns the handle behind an address and needs its own release.
     let mut retained = 0;
     assert_eq!(

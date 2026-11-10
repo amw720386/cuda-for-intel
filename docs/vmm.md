@@ -18,7 +18,8 @@ context's allocation table as coalesced runs. A contiguous range built from seve
 checks and `cuMemGetAddressRange`/`cuPointerGetAttribute`. Mapped-but-not-yet-accessible
 ranges are rejected with `CUDA_ERROR_INVALID_VALUE`, like on NVIDIA. `cuMemFree` on a VMM
 address returns `CUDA_ERROR_INVALID_VALUE`. Context destruction unmaps, destroys and
-unreserves whatever the application left.
+unreserves whatever the application left. `cuMemGetInfo` counts each physical allocation once,
+mapped or not, however many times it is mapped.
 
 The first `cuMemSetAccess` on fresh physical pages zero-fills them with the copy engine,
 the same residency workaround `cuMemAlloc` uses (a kernel's first touch of a fresh Level

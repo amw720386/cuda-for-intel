@@ -113,6 +113,11 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// Device memory held by live physical allocations.
+    pub(crate) fn physical_bytes(&self) -> usize {
+        self.physical.values().fold(0usize, |total, p| total.saturating_add(p.size))
+    }
+
     fn reservation_of(&self, base: usize, size: usize) -> Option<(usize, usize)> {
         let (&start, r) = self.reservations.range(..=base).next_back()?;
         let offset = base - start;

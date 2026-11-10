@@ -525,7 +525,7 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuEventSynchronize" => entry!(cuEventSynchronize, 2000),
         b"cuEventDestroy" => entry!(cuEventDestroy_v2, 4000),
         b"cuStreamWaitEvent" => entry!(cuStreamWaitEvent, 3020, DRIVER_ABI + 1, true),
-        // Virtual memory management (exported as NotSupported stubs; attr 102 = 0).
+        // Virtual memory management on Level Zero virtual memory (cuda/vmm.rs); attr 102 is opt-in.
         b"cuMemAddressReserve" => entry!(cuMemAddressReserve, 10020),
         b"cuMemAddressFree" => entry!(cuMemAddressFree, 10020),
         b"cuMemCreate" => entry!(cuMemCreate, 10020),
@@ -534,6 +534,11 @@ fn lookup(symbol: &[u8], version: c_int, per_thread: bool) -> Result<Opaque, c_i
         b"cuMemUnmap" => entry!(cuMemUnmap, 10020),
         b"cuMemSetAccess" => entry!(cuMemSetAccess, 10020),
         b"cuMemGetAllocationGranularity" => entry!(cuMemGetAllocationGranularity, 10020),
+        b"cuMemGetAccess" => entry!(cuMemGetAccess, 10020),
+        b"cuMemGetAllocationPropertiesFromHandle" => entry!(cuMemGetAllocationPropertiesFromHandle, 10020),
+        b"cuMemRetainAllocationHandle" => entry!(cuMemRetainAllocationHandle, 11000),
+        b"cuMemExportToShareableHandle" => entry!(cuMemExportToShareableHandle, 10020),
+        b"cuMemImportFromShareableHandle" => entry!(cuMemImportFromShareableHandle, 10020),
         b"cuCtxGetLimit" => entry!(cuCtxGetLimit, 3010),
         b"cuCtxSetLimit" => entry!(cuCtxSetLimit, 3010),
         b"cuCtxGetCacheConfig" => entry!(cuCtxGetCacheConfig, 3020),
@@ -681,6 +686,17 @@ mod tests {
             );
             assert!(function.is_null());
             assert_eq!(query, expected);
+        }
+        // The VMM family resolves to the implementations (cuda/vmm.rs).
+        for (symbol, target) in [
+            (c"cuMemCreate", cuMemCreate as *const () as Opaque),
+            (c"cuMemMap", cuMemMap as *const () as Opaque),
+            (c"cuMemGetAccess", cuMemGetAccess as *const () as Opaque),
+            (c"cuMemRetainAllocationHandle", cuMemRetainAllocationHandle as *const () as Opaque),
+            (c"cuMemExportToShareableHandle", cuMemExportToShareableHandle as *const () as Opaque),
+        ] {
+            assert_eq!(resolve(symbol, &mut function, 12000, 0, &mut query), Success);
+            assert_eq!((function, query), (target, FOUND), "{symbol:?}");
         }
         for (name, legacy, explicit) in [
             (

@@ -2040,8 +2040,16 @@ fn used_device_bytes(contexts: &HashMap<usize, CudaContext>, device: c_int) -> u
     contexts
         .values()
         .filter(|context| context.device == device)
-        .flat_map(|context| context.allocations.values())
-        .fold(0usize, |total, &size| total.saturating_add(size))
+        .map(|context| {
+            // VMM runs are views of physical memory, which is counted once (mapped or not).
+            let table = context
+                .allocations
+                .iter()
+                .filter(|(base, _)| !context.vmm.runs.contains(base))
+                .fold(0usize, |total, (_, &size)| total.saturating_add(size));
+            table.saturating_add(context.vmm.physical_bytes())
+        })
+        .fold(0usize, usize::saturating_add)
 }
 
 #[unsafe(no_mangle)]
