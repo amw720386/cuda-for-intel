@@ -310,7 +310,18 @@ fn strict_barriers() -> bool {
     STRICT_OVERRIDE.with(|s| s.get()) || std::env::var_os("CFI_STRICT_BARRIERS").is_some()
 }
 
+/// The register a `%r+8` style address operand is based on.
+fn base_register(src: &str) -> &str {
+    src.split('+').next().unwrap_or(src)
+}
+
 fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<usize>]) -> Result<(), Error> {
+    // Read once per call: this loop visits every instruction of the entry, possibly several
+    // times, and an environment lookup per instruction dominated the analysis of big kernels.
+    let debug = std::env::var_os("CFI_FLOW_DEBUG").is_some();
+    let strict = strict_barriers();
+    // Reused for every instruction (`collect_definitions` appends to it).
+    let mut defined = Vec::new();
     // A branch's strict postdominators are guaranteed reconvergence points.
     let postdom = Graphs::build(blocks, predecessors);
     let uniformity = super::uniform::analyze(blocks, order, predecessors, &postdom);
@@ -384,15 +395,14 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
                     }
                     _ => {}
                 }
-                let mut defined = Vec::new();
+                defined.clear();
                 if let Some(inputs) = inst.collect_definitions(&mut defined) {
-                    let base = |src: &&str| src.split('+').next().unwrap_or(src).to_string();
                     let thread_dependent = inputs.iter().any(|src| {
-                        let b = base(src);
-                        src.starts_with("%tid.") || varying.contains(src) || varying.contains(b.as_str())
+                        let b = base_register(src);
+                        src.starts_with("%tid.") || varying.contains(src) || varying.contains(b)
                     });
                     let private = matches!(inst, super::Instruction::LocalSymbol64(..))
-                        || inputs.iter().any(|src| local_derived.contains(base(src).as_str()));
+                        || inputs.iter().any(|src| local_derived.contains(base_register(src)));
                     if private {
                         local_derived.extend(defined.iter().copied());
                     }
@@ -417,11 +427,11 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
                     }
                     let tid_dependent = !inst.is_memory_load()
                         && inputs.iter().any(|src| {
-                            let b = base(src);
-                            src.starts_with("%tid.x") || tid_derived.contains(src) || tid_derived.contains(b.as_str())
+                            let b = base_register(src);
+                            src.starts_with("%tid.x") || tid_derived.contains(src) || tid_derived.contains(b)
                         });
                     if tid_dependent {
-                        if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
+                        if debug {
                             for d in &defined {
                                 tid_defs.entry(*d).or_insert_with(|| (format!("{inst:?}"), inputs.iter().copied().collect()));
                             }
@@ -474,7 +484,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
             // bound up to a multiple of the block size. Uniformity of the trip count is a
             // value fact we cannot prove, so trust the program as CUDA does.
             let in_loop = in_cycle[index];
-            if in_loop && !strict_barriers() {
+            if in_loop && !strict {
                 continue;
             }
             checked_branches[index] = true;
@@ -488,7 +498,7 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
                 }
                 for inst in &blocks[next].instructions {
                     if inst.is_convergent() {
-                        if std::env::var_os("CFI_FLOW_DEBUG").is_some() {
+                        if debug {
                             eprintln!("convergent inst {inst:?} in block {next}");
                             let mut work: Vec<&str> = vec![predicate];
                             let mut seen_names = HashSet::new();

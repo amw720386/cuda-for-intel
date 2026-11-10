@@ -274,6 +274,9 @@ pub(super) fn analyze<'a>(
     predecessors: &[Vec<usize>],
     graphs: &Graphs,
 ) -> Uniformity {
+    // Debug switches, read once per call rather than per branch and per tainted block.
+    let debug = std::env::var_os("CFI_UNIFORM_DEBUG").is_some();
+    let watch = std::env::var_os("CFI_UNIFORM_WATCH");
     let mut ids: HashMap<&'a str, u32> = HashMap::new();
     let mut defcount: Vec<u32> = Vec::new();
     let mut scratch = Vec::new();
@@ -517,7 +520,7 @@ pub(super) fn analyze<'a>(
             if !meets(taken, other, &mut stamp, &mut generation, &mut budget) {
                 continue;
             }
-            if std::env::var_os("CFI_UNIFORM_DEBUG").is_some() {
+            if debug {
                 eprintln!("TAINT branch {predicate} in block {bi} class {c:?}");
             }
             let mut stack = vec![taken, other];
@@ -538,7 +541,7 @@ pub(super) fn analyze<'a>(
                 if !tainted[next] {
                     tainted[next] = true;
                     grew = true;
-                    if let Some(watch) = std::env::var_os("CFI_UNIFORM_WATCH") {
+                    if let Some(watch) = &watch {
                         let w = watch.to_string_lossy();
                         let mut d = Vec::new();
                         if blocks[next].instructions.iter().any(|i| i.collect_definitions(&mut d).is_some() && d.iter().any(|x| *x == w)) {
@@ -550,7 +553,7 @@ pub(super) fn analyze<'a>(
             }
         }
         if !grew {
-            if std::env::var_os("CFI_UNIFORM_DEBUG").is_some() {
+            if debug {
                 for (name, &id) in &ids {
                     eprintln!("UNI {name} {:?} single={}", cls[id as usize], single[id as usize]);
                 }
