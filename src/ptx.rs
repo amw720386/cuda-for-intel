@@ -1342,6 +1342,37 @@ mod tests {
     }
 
     #[test]
+    fn narrowing_skips_unreferenced_module_tables_without_changing_the_output() {
+        let source = ".version 7.0\n.target sm_80\n.address_size 64\n\
+.global .align 4 .b8 used_tbl[8] = {1, 2, 3, 4, 5, 6, 7, 8};\n\
+.global .align 4 .b8 unused_tbl[8] = {9, 9, 9, 9, 9, 9, 9, 9};\n\
+.visible .entry k1(\n.param .u64 out\n)\n{\n.reg .b32 %r<3>;\n.reg .b64 %rd<4>;\n\
+ld.param.u64 %rd1, [out];\ncvta.to.global.u64 %rd2, %rd1;\nmov.u64 %rd3, used_tbl;\n\
+ld.global.u32 %r1, [%rd3];\nst.global.u32 [%rd2], %r1;\nret;\n}\n";
+        let prepared = prepare_module(source).unwrap();
+        let narrowed = parse::narrow_to_entry(&prepared, "k1").unwrap();
+        assert!(narrowed.contains("used_tbl [ 8 ]") && !narrowed.contains("unused_tbl"), "{narrowed}");
+        // Same SPIR-V as parsing the whole module and filtering the variables afterwards.
+        let fresh = translate_prepared_entry(&prepared, "k1").unwrap();
+        let (entries, vars) = parse::parse_module(&prepared).unwrap();
+        let entry = entries.into_iter().find(|e| e.name == "k1").unwrap();
+        let body = format!("{:?}", entry.blocks);
+        let mut device = vars.device.clone();
+        device.retain(|data| body.contains(&format!("{:?}", data.name)));
+        let reference = spirv::emit(vec![entry], device).unwrap();
+        assert_eq!(fresh.words, reference.words);
+        assert_eq!(fresh.globals.len(), 1);
+
+        // A table only reachable through another kept declaration stays (normalised layout, as
+        // `prepare_module` produces it).
+        let chained = ".version 7.0\n.target sm_80\n.address_size 64\n\
+.global .align 8 .u64 target_tbl [ 1 ] = { 0 } ;\n.global .align 8 .u64 ptr_tbl [ 1 ] = { generic ( target_tbl ) } ;\n\
+.global .align 8 .u64 other [ 1 ] = { 0 } ;\n.visible .entry k2 ( ) {\nmov.u64 %rd1 , ptr_tbl ;\nret ;\n}\n";
+        let narrowed = parse::narrow_to_entry(chained, "k2").unwrap();
+        assert!(narrowed.contains("ptr_tbl [") && narrowed.contains("target_tbl [") && !narrowed.contains("other ["), "{narrowed}");
+    }
+
+    #[test]
     fn ignores_trailing_control_characters_after_the_last_entry() {
         let source = format!("{}\u{1a}\0", include_str!("../examples/rope_neox_f32_dump.ptx").trim_end_matches(['\u{1a}', '\0']));
         translate(&source).unwrap();
