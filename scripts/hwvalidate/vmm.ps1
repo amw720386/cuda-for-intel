@@ -3,9 +3,11 @@
   CUDA VMM hardware gate (docs/vmm.md, gpu-day-checklist item 9). Runs ON a Windows GPU box.
 
 .DESCRIPTION
-  Runs tests/gpu/vmm.rs (GGML pool growth, kernel across chunks, copies across the chunk
-  boundary, physical aliasing, teardown) once per Level Zero device ordinal, three times
-  each, and writes the `VMM:` summary lines plus the full output to <Out>\vmm-<ordinal>.log.
+  Runs both tests in tests/gpu/vmm.rs once per Level Zero device ordinal, three times each:
+  vmm_pool_growth_kernel_copies_and_aliasing (kernel and copies across chunks, physical
+  aliasing, teardown) and vmm_ggml_pool_sequence (Ollama v0.12.6's exact VMM pool calls,
+  including the 32 GiB reservation). Writes the `VMM:` and `VMM-GGML:` summary lines plus
+  the full output to <Out>\vmm-<ordinal>.log.
   It does not change any default: CUDA_FOR_INTEL_VMM stays unset here (the test calls the
   entry points directly).
 
@@ -31,10 +33,10 @@ try {
     Remove-Item -ErrorAction SilentlyContinue $log
     $env:CUDA_FOR_INTEL_DEVICE = "$ordinal"
     for ($i = 1; $i -le $Repeats; $i++) {
-      $text = cargo test --release --locked -j 2 --test gpu vmm_pool_growth -- --ignored --nocapture --test-threads=1 2>&1 | Out-String
+      $text = cargo test --release --locked -j 2 --test gpu vmm_ -- --ignored --nocapture --test-threads=1 2>&1 | Out-String
       $code = $LASTEXITCODE
       Add-Content $log "=== ordinal $ordinal run $i exit $code ===`n$text"
-      $line = ($text -split "`n" | Where-Object { $_ -match '^VMM:' }) -join ' '
+      $line = ($text -split "`n" | Where-Object { $_ -match '^VMM(-GGML)?:' }) -join ' '
       Write-Host "ordinal $ordinal run ${i}: exit $code $line"
       if ($code -ne 0) { $failed++ }
     }

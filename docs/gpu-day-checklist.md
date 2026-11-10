@@ -131,7 +131,9 @@ modules translates for minutes; the translation cache makes the second run about
 - Background: [vmm.md](vmm.md). The VMM entry points are implemented on Level Zero virtual memory; the device attribute stays 0
   unless `CUDA_FOR_INTEL_VMM=1`. Run on GPU A (Iris Xe) and GPU B (Arc B390) separately; record each.
 - Step 1, API on hardware: `powershell -NoProfile -File scripts\hwvalidate\vmm.ps1 -Ordinals 0 -Out <Out>\vmm` (3 runs). Pass: 3 of 3
-  exit 0 with `kernel=PASS copies=PASS alias=PASS`; note `granularity` and `grow_per_chunk_us`. `NOT_SUPPORTED` means the loader lacks
+  exit 0 with `VMM: ... kernel=PASS copies=PASS alias=PASS` and `VMM-GGML: ... kernel=PASS teardown=PASS`; note `granularity`,
+  `grow_per_chunk_us` and `reserve_32GiB_us`. `VMM-GGML` replays Ollama v0.12.6's `ggml_cuda_pool_vmm` calls, including its 32 GiB
+  `cuMemAddressReserve`: a refusal there would abort Ollama with VMM on, so it fails the gate for that GPU. `NOT_SUPPORTED` means the loader lacks
   `zeVirtualMem*`: record it, the gate stays closed on that GPU.
 - Step 2, stock Ollama A/B (only after step 1 passes on that GPU): with the same run dir, model, prompt and port, run
   `scripts\bench-subst-ollama.ps1 -RunDir <run> -Gguf <qwen2.5-0.5b-q8_0.gguf> -Tag vmm0 -Configs auto -Runs 3 -Check 12` with

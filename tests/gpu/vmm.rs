@@ -233,3 +233,134 @@ fn vmm_pool_growth_kernel_copies_and_aliasing() {
          kernel=PASS copies=PASS alias=PASS"
     );
 }
+
+/// Ollama v0.12.6's `ggml_cuda_pool_vmm` call sequence on hardware (ggml-cuda.cu 506-600):
+/// a 32 GiB reservation, physical memory created before it, each handle released right
+/// after mapping, per-growth access, a kernel over the whole grown pool, and teardown with
+/// one cuMemUnmap of the pool. Prints one `VMM-GGML:` line.
+#[test]
+#[ignore = "requires a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn vmm_ggml_pool_sequence() {
+    const MAX: usize = 1 << 35;
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuDeviceGetName(*mut c_char, i32, i32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxDestroy_v2(Handle),
+        cuCtxSynchronize(),
+        cuModuleLoadData(*mut Handle, *const c_void),
+        cuModuleUnload(Handle),
+        cuModuleGetFunction(*mut Handle, Handle, *const c_char),
+        cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuMemGetAllocationGranularity(*mut usize, *const Prop, c_int),
+        cuMemCreate(*mut u64, usize, *const Prop, u64),
+        cuMemRelease(u64),
+        cuMemAddressReserve(*mut u64, usize, usize, u64, u64),
+        cuMemAddressFree(u64, usize),
+        cuMemMap(u64, usize, usize, u64, u64),
+        cuMemUnmap(u64, usize),
+        cuMemSetAccess(u64, usize, *const Access, usize),
+    );
+    ok!(cuInit(0));
+    let device = test_device();
+    let mut name = [0 as c_char; 256];
+    ok!(cuDeviceGetName(name.as_mut_ptr(), 256, device));
+    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, device));
+    let prop = Prop {
+        kind: 1,
+        handle_types: 0,
+        location: Location {
+            kind: 1,
+            id: device,
+        },
+        win32: null_mut(),
+        flags: [0; 8],
+    };
+    let access = Access {
+        location: prop.location,
+        flags: 3,
+    };
+    let mut granularity = 0usize;
+    let status = unsafe { cuMemGetAllocationGranularity(&mut granularity, &prop, 1) };
+    if status == 801 {
+        println!("VMM-GGML: device={name} NOT_SUPPORTED");
+        ok!(cuCtxDestroy_v2(context));
+        return;
+    }
+    assert_eq!(status, 0, "cuMemGetAllocationGranularity(RECOMMENDED)");
+
+    let (mut pool_addr, mut pool_size) = (0u64, 0usize);
+    let mut reserve_us = 0.0;
+    let started = Instant::now();
+    for granules in [1usize, 3, 2] {
+        let reserve_size = granules * granularity;
+        let mut handle = 0u64;
+        ok!(cuMemCreate(&mut handle, reserve_size, &prop, 0));
+        if pool_addr == 0 {
+            let t = Instant::now();
+            let status = unsafe { cuMemAddressReserve(&mut pool_addr, MAX, 0, 0, 0) };
+            reserve_us = t.elapsed().as_secs_f64() * 1e6;
+            // GGML aborts (CU_CHECK) here; a refusal means VMM must stay off on this GPU.
+            assert_eq!(
+                status, 0,
+                "32 GiB cuMemAddressReserve refused: keep CUDA_FOR_INTEL_VMM off"
+            );
+        }
+        let start = pool_addr + pool_size as u64;
+        ok!(cuMemMap(start, reserve_size, 0, handle, 0));
+        ok!(cuMemRelease(handle));
+        ok!(cuMemSetAccess(start, reserve_size, &access, 1));
+        pool_size += reserve_size;
+    }
+    let grow_ms = started.elapsed().as_secs_f64() * 1e3;
+
+    let mut module = null_mut();
+    ok!(cuModuleLoadData(&mut module, PTX.as_ptr().cast()));
+    let mut kernel = null_mut();
+    ok!(cuModuleGetFunction(&mut kernel, module, c"stamp".as_ptr()));
+    let words = (pool_size / 4) as u32;
+    let (mut out, mut n) = (pool_addr, words);
+    let mut params = [from_mut(&mut out).cast::<c_void>(), from_mut(&mut n).cast()];
+    ok!(cuLaunchKernel(
+        kernel,
+        words.div_ceil(256),
+        1,
+        1,
+        256,
+        1,
+        1,
+        0,
+        null_mut(),
+        params.as_mut_ptr(),
+        null_mut()
+    ));
+    ok!(cuCtxSynchronize());
+    let mut host = vec![0u32; pool_size / 4];
+    ok!(cuMemcpyDtoH_v2(
+        host.as_mut_ptr().cast(),
+        pool_addr,
+        pool_size
+    ));
+    let bad = host
+        .iter()
+        .enumerate()
+        .filter(|&(i, &v)| v != i as u32 ^ 0xA5A5_A5A5)
+        .count();
+    assert_eq!(bad, 0, "kernel output across the released, mapped chunks");
+
+    ok!(cuMemUnmap(pool_addr, pool_size));
+    ok!(cuMemAddressFree(pool_addr, MAX));
+    ok!(cuModuleUnload(module));
+    ok!(cuCtxDestroy_v2(context));
+    println!(
+        "VMM-GGML: device={name} granularity={granularity} reserve_32GiB_us={reserve_us:.0} \
+         pool_bytes={pool_size} grow_3x_ms={grow_ms:.1} kernel=PASS teardown=PASS"
+    );
+}

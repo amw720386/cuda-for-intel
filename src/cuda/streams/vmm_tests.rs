@@ -271,7 +271,11 @@ fn map_rejects_misuse_and_first_access_fills_once() {
     };
     assert_eq!(used(), 4 * MIB);
     let spare = create(GRAN);
-    assert_eq!(used(), 4 * MIB + GRAN, "unmapped physical memory is in use too");
+    assert_eq!(
+        used(),
+        4 * MIB + GRAN,
+        "unmapped physical memory is in use too"
+    );
     assert_eq!(unsafe { cuMemRelease(spare) }, Success);
     assert_eq!(used(), 4 * MIB);
 
@@ -343,4 +347,71 @@ fn vmm_attribute_is_opt_in() {
     assert_eq!(unsafe { cuDeviceGetAttribute(&mut value, 102, 0) }, Success);
     unsafe { std::env::remove_var("CUDA_FOR_INTEL_VMM") };
     assert_eq!(value, 1);
+}
+
+/// The exact call sequence of `ggml_cuda_pool_vmm` in Ollama v0.12.6 (ggml-cuda.cu lines
+/// 506-600): physical memory created before the first reservation, a 32 GiB reservation,
+/// each handle released right after cuMemMap, access set per growth, and teardown unmapping
+/// the whole grown pool in one call. Release, reserve and unmap failures abort GGML
+/// (`CU_CHECK`), so each must succeed here.
+#[test]
+fn ggml_v0_12_6_vmm_pool_sequence() {
+    const MAX: usize = 1 << 35;
+    let _fixture = Fixture::new();
+    let ctx = context(None);
+    let mut granularity = 0;
+    assert_eq!(
+        unsafe { cuMemGetAllocationGranularity(&mut granularity, &prop(0), 1) },
+        Success
+    );
+    let (mut pool_addr, mut pool_size) = (0u64, 0usize);
+    // Three growths of 1, 3 and 2 granules, as successive graph evaluations need more.
+    for granules in [1, 3, 2] {
+        let reserve_size = granules * granularity;
+        let handle = create(reserve_size);
+        if pool_addr == 0 {
+            assert_eq!(
+                unsafe { cuMemAddressReserve(&mut pool_addr, MAX, 0, 0, 0) },
+                Success
+            );
+        }
+        let start = pool_addr + pool_size as u64;
+        assert_eq!(
+            unsafe { cuMemMap(start, reserve_size, 0, handle, 0) },
+            Success
+        );
+        assert_eq!(unsafe { cuMemRelease(handle) }, Success);
+        assert_eq!(
+            unsafe { cuMemSetAccess(start, reserve_size, &rw(0), 1) },
+            Success
+        );
+        pool_size += reserve_size;
+        // Tensors are carved from the pool at 128-byte alignment and may straddle growths.
+        assert_eq!(cuMemsetD8_v2(pool_addr + 128, 3, pool_size - 128), Success);
+        assert_eq!(
+            range_of(pool_addr + pool_size as u64 - 1),
+            Some((pool_addr, pool_size))
+        );
+    }
+    assert_eq!(
+        fake::vmm_snapshot().physical.len(),
+        3,
+        "released handles stay alive while mapped"
+    );
+    // The failure path GGML takes when cuMemSetAccess fails: unmap the released chunk.
+    let handle = create(granularity);
+    let start = pool_addr + pool_size as u64;
+    assert_eq!(
+        unsafe { cuMemMap(start, granularity, 0, handle, 0) },
+        Success
+    );
+    assert_eq!(unsafe { cuMemRelease(handle) }, Success);
+    assert_eq!(unsafe { cuMemUnmap(start, granularity) }, Success);
+    assert_eq!(fake::vmm_snapshot().physical.len(), 3);
+    // ~ggml_cuda_pool_vmm
+    assert_eq!(unsafe { cuMemUnmap(pool_addr, pool_size) }, Success);
+    assert_eq!(unsafe { cuMemAddressFree(pool_addr, MAX) }, Success);
+    assert_clean();
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
 }
