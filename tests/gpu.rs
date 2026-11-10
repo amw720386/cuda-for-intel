@@ -120,6 +120,8 @@ mod hw_cusparse;
 mod hw_libs_perf;
 #[path = "gpu/hw_launch_stress.rs"]
 mod hw_launch_stress;
+#[path = "gpu/hw_perf_probe.rs"]
+mod hw_perf_probe;
 #[path = "gpu/hw_xmx_gemm.rs"]
 mod hw_xmx_gemm;
 #[path = "gpu/hw_nvrtc.rs"]
