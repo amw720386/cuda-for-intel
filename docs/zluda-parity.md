@@ -38,7 +38,7 @@ Caveats (measured):
 | Library | ZLUDA declared | ZLUDA implemented | ours implemented | both | ZLUDA only | ours only | torch_cuda.dll imports: ZLUDA impl / ours impl |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Driver API (nvcuda) | 728 | 156 | 250 | 130 | 26 | 120 | n/a (torch links cudart) |
-| cuBLAS | 530 | 19 | 161 | 18 | 1 | 143 | 55: 11 / 47 |
+| cuBLAS | 530 | 19 | 169 | 18 | 1 | 151 | 55: 11 / 55 |
 | cuBLASLt | 45 | 18 | 17 | 13 | 5 | 4 | 11: 11 / 11 |
 | cuDNN 9 | 220 | 40 | 94 | 37 | 3 | 57 | not in the import list (torch loads cuDNN lazily) |
 | cuFFT | 60 | 32 | 38 | 32 | 0 | 6 | 7: 5 / 7 |
@@ -74,12 +74,12 @@ Texture support is what ZLUDA's Q1/Q2 2026 post credits for Blender working.
   - IPC (5), peer copies, `cuLaunchCooperativeKernel`, `cuLaunchHostFunc`, stream callbacks, and stream getters.
 - **cuDNN: 94 against 40.** These include the backend (graph) API and an explicit-GEMM conv that runs on our XMX cuBLAS. See `docs/cudnn-shim.md`.
 - **NVML: 33 against 15.**
-- **cuBLAS: 161 against 19.** Since item 10 these include the f64 and complex level 1-3 surface (`D/C/Z gemm` in every batching form, `GemmEx` on R_64F/C_32F/C_64F, gemv, dot/dotc, nrm2, axpy, scal, trsm, trsv, trmm, trmv, syrk/herk, syr2k/her2k, symm/hemm, symv/hemv, ger, geam, dgmm, copy, swap, i?amax/i?amin, `getrfBatched`/`getrsBatched`) and the host/device matrix and vector copies. That gives 47 against 11 of torch's 55 cuBLAS imports, and all 90 cuBLAS names NVIDIA's `cusolver64_11.dll` imports.
+- **cuBLAS: 169 against 19.** Since item 10 these include the f64 and complex level 1-3 surface (`D/C/Z gemm` in every batching form, `GemmEx` on R_64F/C_32F/C_64F, gemv, dot/dotc, nrm2, axpy, scal, trsm, trsv, trmm, trmv, syrk/herk, syr2k/her2k, symm/hemm, symv/hemv, ger, geam, dgmm, copy, swap, i?amax/i?amin, `getrfBatched`/`getrsBatched`, `geqrfBatched`/`gelsBatched`) and the host/device matrix and vector copies. That gives all 55 against 11 of torch's 55 cuBLAS imports, and all 90 cuBLAS names NVIDIA's `cusolver64_11.dll` imports.
 - **Own NVRTC** (clang NVPTX) and **own cudart**. ZLUDA ships neither.
 
 ### Real PyTorch imports that neither project implements (measured, `--torch-gaps`)
 
-- **cuBLAS (8 of 55, 39 before item 10).** Only the batched QR and least-squares helpers `cublas{S,D,C,Z}geqrfBatched` and `cublas{S,D,C,Z}gelsBatched` remain. torch uses them for batched `linalg.qr` and `lstsq`.
+- **cuBLAS (none; 39 before item 10).** The last 8, the batched QR and least-squares helpers `cublas{S,D,C,Z}geqrfBatched` and `cublas{S,D,C,Z}gelsBatched` (torch's batched `linalg.qr` and `lstsq`), are implemented since 2026-11-09 (`hw-logs/cublas-qr-perf-2026-11-09.md`).
 - **cuSOLVER (97 of 97).** All `torch.linalg` decompositions.
 - **cuSPARSE (62 of 98).** SpGEMM (sparse @ sparse), `csrgeam2` (sparse + sparse), SpSV/SpSM and `bsrsv2`/`bsrsm2` (triangular solves), `Xcsrsort`/`Xcoosort`, and the complex `C`/`Z` BSR products. We implement the other 36 (generic descriptors, SpMV, SpMM, SDDMM, S/D `bsrmv`/`bsrmm`, `Xcoo2csr`, legacy descriptors).
 - **cuFFT: none since item 9.** torch 2.x plans FFTs through `cufftXtMakePlanMany` and `cufftXtExec`, which ZLUDA does not implement (both names are absent from its implemented list); we implement both.
@@ -168,7 +168,7 @@ Status of item 10 (branch `blas64`): done. `crates/cublas_shim` grows from 25 to
 - Other kernels: gemv with signed increments; single-block dot/dotc (also f16/bf16 for `DotEx`), scaled nrm2 and i?amax/i?amin reductions; axpy, scal, copy/swap and geam/dgmm elementwise kernels; per-vector trsm (trsv as the one-vector case); per-matrix LU with partial pivoting (`getrfBatched`) plus a row-swap kernel (`getrsBatched` = laswp + two trsm).
 - Scalars: device-pointer-mode scalars are read in the kernel, and dot/nrm2/amax write device results directly. In-place trmm and trmv multiply from a scratch copy.
 - Tests: `src/ptx/cublas64_tests.rs` (simulator, every op pair and side/uplo/diag case against an f64 complex reference) and `tests/gpu/hw_cublas64.rs` (about 1,240 cases on the B390, f64 worst 1e-15). `scripts/torch/blas64_check.py` passes 527 of 527 checks on torch 2.2.2+cu118 under `cfi-run`. See `hw-logs/cublas64-2026-11-09.md`.
-- Not done: `geqrfBatched`/`gelsBatched`, `_64` (ILP64) entry points, `gemm3m` as a real 3M algorithm (it runs the plain product), `CUDA_C_8I`/`CUDA_C_16F` GemmEx types, tbmv/gbmv/packed formats, and performance work (f64 gemm is a plain shared-memory tile with no register blocking).
+- Not done: `_64` (ILP64) entry points, `gemm3m` as a real 3M algorithm (it runs the plain product), `CUDA_C_8I`/`CUDA_C_16F` GemmEx types, tbmv/gbmv/packed formats, and further gemm tuning. Since 2026-11-09 (`hw-logs/cublas-qr-perf-2026-11-09.md`): `geqrfBatched`/`gelsBatched`, a register-blocked f64/complex gemm (Dgemm 1024 360 GFLOP/s, Cgemm 512 2.1-2.7 TFLOP/s), multi-block dot/nrm2/amax at the copy roofline (~110 GB/s, 15-55x), blocked trsm (10x at 1024) and work-group getrfBatched (3-30x for n >= 32).
 
 Status of item 9 (branch `cufft-shim`): done. `crates/cufft_shim` implements 38 of the 60 cuFFT names: ZLUDA's 32 plus `cufftXtMakePlanMany`, `cufftXtExec`, `cufftXtGetSizeMany` and `cufft{Get,Set,Reset}PlanProperty*`; all 7 torch imports are covered. Backend: generated PTX through our Driver API, like the cuBLAS shim (the box has no oneAPI and the repo ships no oneMKL dependency). Each transform is a gather into a dense complex work area (real input, or a Hermitian half expanded by symmetry), one mixed-radix Stockham pass per radix (4, 2, 3, 5, 7, other primes as one direct-DFT pass) with host-computed f64 twiddle tables, and a scatter to the cuFFT layout (basic, padded in-place real, or advanced `*embed`/stride/dist). Tests: `plan.rs` host model against a naive DFT; `src/ptx/cufft_tests.rs` runs the translated kernels in the SPIR-V simulator; `tests/gpu/hw_cufft.rs` (42 transforms, f32 and f64, sizes up to 4099, 1D/2D/3D, batched, in-place and out-of-place, the torch Xt path) passes on the B390; `scripts/torch/fft_check.py` (196 checks: `fft/ifft/rfft/irfft` for sizes 1-4096 incl. 97, 105 and 840, `fft2/fftn/rfftn/irfftn`, a non-last dim, `stft`) passes on torch 2.2.2+cu118 under `cfi-run` with an untouched `torch\lib`. Not done: callbacks, multi-GPU `cufftXt*` descriptors, guru plans, half/bfloat16, Bluestein for large primes (a prime length costs O(n^2)), and no performance tuning.
 
@@ -208,7 +208,7 @@ Item 18: `docs/api-coverage.md` is regenerated. The `coverage-docs` CI job fails
 - **Driver API.** 229 against 156 implemented. Our lead is the explicit graph API (51 calls), memory pools, VMM, IPC and cooperative launch. ZLUDA's graphs are 7 forwards to hipGraph.
 - **cuDNN.** 94 against 40 entry points, including the backend API.
 - **NVML.** 33 against 15.
-- **cuBLAS.** We implement 47 of torch's 55 cuBLAS imports; ZLUDA implements 11. That includes all f64 and complex products and every cuBLAS name NVIDIA's cuSOLVER imports.
+- **cuBLAS.** We implement all 55 of torch's cuBLAS imports; ZLUDA implements 11. That includes all f64 and complex products and every cuBLAS name NVIDIA's cuSOLVER imports.
 - **NVRTC.** We ship our own, which needs no NVIDIA binary. ZLUDA requires NVIDIA's NVRTC and redirects it.
 - **cudart.** We ship our own minimal cudart. ZLUDA relies on NVIDIA's.
 - **PTX breadth.** All 74 ZLUDA parser opcodes are handled or explicitly rejected by name. We also lower wmma, stmatrix, video SIMD, carry chains, elect and testp.
