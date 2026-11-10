@@ -421,10 +421,13 @@ impl<'a> Math<'a> {
             Mode::Up => self.both(overflow, s_neg)?,
         };
         let result = self.select(use_max, max_val, stepped)?;
-        // Exact cancellation of nonzero operands yields -0 when rounding down.
+        // An exact zero sum is -0 when rounding down unless both operands are +0 (IEEE 754
+        // 6.3), also for (+0) + (-0): `sub.rm.f32 d, +0, +0` (ptx_tests sub_rm_ftz_f32).
         if mode == Mode::Down && kind != Arith::Mul {
-            let a_nz = self.lt(zero, a_mag)?;
-            let cancel = self.both(a_nz, s_zero)?;
+            let a_pos_zero = self.eq(a, zero)?;
+            let b_pos_zero = self.eq(b, zero)?;
+            let both_pos_zero = self.both(a_pos_zero, b_pos_zero)?;
+            let cancel = self.both_not(s_zero, both_pos_zero)?;
             let cancel = self.both(cancel, fin)?;
             let pos_zero = self.eq(s, zero)?;
             let cancel = self.both(cancel, pos_zero)?;

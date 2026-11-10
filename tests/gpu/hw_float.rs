@@ -48,7 +48,9 @@ pub fn directed(op: u8, mode: Mode, a: f32, b: f32) -> u32 {
         let sign = if op == 2 {
             a.is_sign_negative() ^ b.is_sign_negative()
         } else if a == 0.0 && b == 0.0 {
-            a.is_sign_negative() && b.is_sign_negative()
+            // IEEE 754 6.3: zeros of opposite sign sum to -0 when rounding down, +0 otherwise.
+            (a.is_sign_negative() && b.is_sign_negative())
+                || (mode == Mode::Down && (a.is_sign_negative() || b.is_sign_negative()))
         } else {
             mode == Mode::Down // x + (-x)
         };
@@ -252,6 +254,11 @@ fn directed_reference_self_check() {
     assert_eq!(directed(0, Mode::Zero, 1.0, tiny), 0x3f80_0000);
     assert_eq!(directed(0, Mode::Down, -1.0, -tiny), 0xbf80_0001);
     assert_eq!(directed(0, Mode::Zero, -1.0, -tiny), 0xbf80_0000);
+    // Opposite zeros (and +0 - +0) sum to -0 only when rounding down.
+    assert_eq!(directed(0, Mode::Down, 0.0, -0.0), 0x8000_0000);
+    assert_eq!(directed(1, Mode::Down, 0.0, 0.0), 0x8000_0000);
+    assert_eq!(directed(0, Mode::Up, 0.0, -0.0), 0);
+    assert_eq!(directed(0, Mode::Down, 0.0, 0.0), 0);
     assert_eq!(directed(2, Mode::Zero, f32::MAX, 2.0), 0x7f7f_ffff);
     assert_eq!(directed(2, Mode::Up, f32::MAX, 2.0), 0x7f80_0000);
     assert_eq!(directed(0, Mode::Down, 1.0, -1.0), 0x8000_0000);

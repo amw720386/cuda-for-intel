@@ -1,0 +1,100 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 0bfb41d..0d86ebd 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -23,3 +23,5 @@ version = "1.26.1"
+ [profile.release]
+ codegen-units = 1
+ lto = "fat"
++
++[workspace]
+diff --git a/src/main.rs b/src/main.rs
+index ca35c20..4f50de9 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -116,7 +116,21 @@ fn run(tests: Vec<TestCase>, ctx: impl TestContext, fail_fast: bool) -> i32 {
+     for t in tests {
+         use TestError::*;
+ 
+-        let result = (t.test)(&ctx, fail_fast);
++        // A panic (a failed Driver API call) fails this test only.
++        let test = t.test;
++        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&ctx, fail_fast))) {
++            Ok(result) => result,
++            Err(payload) => {
++                failures += 1;
++                let message = payload
++                    .downcast_ref::<String>()
++                    .cloned()
++                    .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
++                    .unwrap_or_default();
++                println!("{}: FAIL - Panic: {message}", t.name);
++                continue;
++            }
++        };
+         if result.is_err() {
+             failures += 1;
+         }
+diff --git a/src/test.rs b/src/test.rs
+index b8014cb..848ea62 100644
+--- a/src/test.rs
++++ b/src/test.rs
+@@ -653,6 +653,26 @@ impl Fp8 for F8E5M2 {
+ }
+ 
+ const SEED: u64 = 0x761194f3027874ef;
++
++/// `PTX_TESTS_ELEMENTS=<n>` caps the inputs per test (rounded up to a multiple of GROUP_SIZE).
++/// Unset, every test runs 2^32 inputs (all of them for range tests), as upstream does.
++fn sample_elements() -> Option<usize> {
++    let n: usize = std::env::var("PTX_TESTS_ELEMENTS").ok()?.parse().ok()?;
++    Some(next_multiple_of(n.max(GROUP_SIZE), GROUP_SIZE))
++}
++
++/// Input index `i` of a sampled range test with `n` of `total` inputs: the lowest n/8 values,
++/// the highest n/8 values, then uniformly random values.
++fn sampled_value(i: usize, n: usize, total: usize, rng: &mut XorShiftRng) -> u32 {
++    let edge = n / 8;
++    if i < edge {
++        i as u32
++    } else if i < 2 * edge {
++        (total - 1 - (i - edge)) as u32
++    } else {
++        rng.gen_range(0..total as u64) as u32
++    }
++}
+ const GROUP_SIZE: usize = 128;
+ // Totally unscientific number that works on my machine
+ const SAFE_MEMORY_LIMIT: usize = 1 << 29;
+@@ -698,7 +718,7 @@ pub fn run_random<Test: RandomTest>(
+     let mut total_memory = 0;
+     unsafe { cuda.cuMemGetInfo_v2(&mut free_memory, &mut total_memory) }.unwrap();
+     let max_memory = (total_memory / 2).min(SAFE_MEMORY_LIMIT);
+-    let total_elements = 2.pow(32);
++    let total_elements = sample_elements().unwrap_or(2.pow(32)).min(2.pow(32));
+     assert!(total_elements % GROUP_SIZE == 0);
+     let element_size = Test::Input::size_of() + Test::Output::size_of();
+     let required_memory = total_elements * element_size;
+@@ -822,7 +842,10 @@ pub fn run_range<Test: RangeTest>(
+     let mut total_memory = 0;
+     unsafe { cuda.cuMemGetInfo_v2(&mut free_memory, &mut total_memory) }.unwrap();
+     let max_memory = (total_memory / 2).min(SAFE_MEMORY_LIMIT);
+-    let total_elements = Test::MAX_VALUE as usize + 1;
++    let range_elements = Test::MAX_VALUE as usize + 1;
++    let total_elements = sample_elements().map_or(range_elements, |n| n.min(range_elements));
++    let sampled = total_elements < range_elements;
++    let mut rng = XorShiftRng::seed_from_u64(SEED);
+     if total_elements % GROUP_SIZE != 0 {
+         panic!(
+             "Total element count {} must be divisble by {}",
+@@ -854,7 +877,9 @@ pub fn run_range<Test: RangeTest>(
+             vec.clear();
+         }
+         for i in 0..element_batch_size {
+-            let input = t.generate((elment_start + i) as u32);
++            let index = elment_start + i;
++            let value = if sampled { sampled_value(index, total_elements, range_elements, &mut rng) } else { index as u32 };
++            let input = t.generate(value);
+             input.write(&mut inputs);
+         }
+         outputs.resize(element_batch_size, Test::Output::zero());

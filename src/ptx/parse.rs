@@ -963,12 +963,13 @@ impl<'a> Parser<'a> {
             ["not.b64" | "not.u64" | "not.s64", dst, ",", src] => Instruction::Not64(dst, src),
             ["mov.b32" | "mov.f32", dst, ",", src] => Instruction::Move32(dst, src),
             ["mov.b32", dst, ",", "{", lo, ",", hi, "}"] => Instruction::PackB16(dst, [lo, hi]),
-            ["cvt.u64.u32", dst, ",", src] => Instruction::Widen {
+            // Integer widening extends by the source type (PTX ISA, cvt).
+            ["cvt.u64.u32" | "cvt.s64.u32", dst, ",", src] => Instruction::Widen {
                 signed: false,
                 dst,
                 src,
             },
-            ["cvt.s64.s32", dst, ",", src] => Instruction::Widen {
+            ["cvt.s64.s32" | "cvt.u64.s32", dst, ",", src] => Instruction::Widen {
                 signed: true,
                 dst,
                 src,

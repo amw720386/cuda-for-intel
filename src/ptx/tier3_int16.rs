@@ -110,6 +110,22 @@ pub(super) fn rewrite(st: &mut State, inst: &Inst) -> Option<Vec<String>> {
             b.p(format!("shr.{sfx} {r} , {r} , 16 ;"));
             wr(&mut b, g, inst.operand(0), &r, t);
         }
+        "mad" if parts.contains(&"hi") && !parts.contains(&"sat") && inst.operands.len() == 4 => {
+            // mad.hi.{u16,s16}: high half of the 32-bit product plus c, truncated.
+            let (x, y, z) = (rd(&mut b, inst.operand(1), t), rd(&mut b, inst.operand(2), t), rd(&mut b, inst.operand(3), t));
+            let r = b.t32();
+            b.p(format!("mul.lo.{sfx} {r} , {x} , {y} ;"));
+            b.p(format!("shr.{sfx} {r} , {r} , 16 ;"));
+            b.p(format!("add.u32 {r} , {r} , {z} ;"));
+            wr(&mut b, g, inst.operand(0), &r, t);
+        }
+        "sad" if inst.operands.len() == 4 => {
+            // sad.{u16,s16}: |a - b| + c on the extended values, truncated.
+            let (x, y, z) = (rd(&mut b, inst.operand(1), t), rd(&mut b, inst.operand(2), t), rd(&mut b, inst.operand(3), t));
+            let r = b.t32();
+            b.p(format!("sad.{sfx} {r} , {x} , {y} , {z} ;"));
+            wr(&mut b, g, inst.operand(0), &r, t);
+        }
         "mul" | "mad" if parts.contains(&"wide") => {
             let n = if family == "mad" { 4 } else { 3 };
             if inst.operands.len() != n {
@@ -280,6 +296,12 @@ fn cvt(st: &mut State, inst: &Inst, parts: &[&str]) -> Option<Vec<String>> {
         } else {
             b.p(format!("bfe.u32 {t} , {v} , 0 , {dw} ;"));
         }
+        v = t;
+    } else if sat && xs && !ds {
+        // cvt.sat.{u32,u64}.{s8,s16}: negative sources clamp to 0. Wider destinations
+        // need no other clamp.
+        let t = b.t32();
+        b.p(format!("max.s32 {t} , {v} , 0 ;"));
         v = t;
     }
     if dw == 64 {

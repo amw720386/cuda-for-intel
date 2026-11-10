@@ -773,8 +773,12 @@ fn parse_cvt<'a>(
         // Plain integer conversions are handled by the original table.
         return Ok(None);
     }
+    // `.ftz` is meaningless on an integer source, but the original table spells out only the
+    // forms without it (`cvt.rn.ftz.f32.s32`).
+    let ftz_int_source = !s.is_float() && parts.contains(&"ftz");
     let original = !mods.sat
         && !mods.relu
+        && !ftz_int_source
         && matches!(
             (d, s, round),
             (NumTy::F16, NumTy::F32, Round::Rn | Round::Rz)

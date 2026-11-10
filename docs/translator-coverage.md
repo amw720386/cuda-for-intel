@@ -65,7 +65,7 @@ Verified by the fuzzer against a PTX-ISA reference unless noted.
 
 | Feature | Behaviour | Corpus occurrences |
 | --- | --- | --- |
-| `.ftz` on f32 add/sub/mul/fma/div/sqrt/cvt/setp/min/max | **Ignored**: denormals are not flushed. Results differ from NVIDIA only when an operand or the result is a denormal. The fuzzer compares `.ftz` forms only for non-denormal cases. | add.ftz 162 k, mul.ftz 226 k, fma.ftz 322 k, ex2.ftz 27 k |
+| `.ftz` on f32 add/sub/mul/fma/div/sqrt/cvt/setp/min/max | **Ignored by default**: denormals are not flushed. Results differ from NVIDIA only when an operand or the result is a denormal (115 vosen/ptx_tests cases, every one of which passes without `.ftz`). `CFI_EXACT_FTZ=1` flushes subnormal f32 sources and results (and f16/f16x2 lanes of the half forms) exactly, at five integer operations per operand; it is not the default because ggml's fast-math kernels use `.ftz` throughout. The fuzzer compares `.ftz` forms only for non-denormal cases. | add.ftz 162 k, mul.ftz 226 k, fma.ftz 322 k, ex2.ftz 27 k |
 | `fma.rz/rm/rp.f32` | Exact except when 0 < \|a*b\| < 2^-100 (the error-free transform loses the product error); then the result may be 1 ulp off. Overflow now returns +-MAX like hardware. | fma.rz 2.7 k, fma.rm 10.6 k |
 | `.approx` transcendental (ex2, lg2, sin, cos, tanh, rcp, rsqrt, div.approx, sqrt.approx) | Mapped to OpenCL builtins whose accuracy is whatever the Intel runtime provides; they are not bit-identical to the NVIDIA approximations. | ex2.approx 28 k, rcp.approx 16 k, div.approx 6.5 k, tanh 1.8 k, sin/cos 196 |
 | `trap`, `brkpt`, `exit` without operands | Lowered to `ret`: the kernel does not abort. | trap 1049, exit 678 |

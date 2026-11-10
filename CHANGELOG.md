@@ -14,7 +14,13 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 - PTX translator: fp8 pair conversions (`cvt.rn.satfinite[.relu].{e4m3x2,e5m2x2}.{f32,f16x2}`, `cvt.rn[.relu].f16x2.{e4m3x2,e5m2x2}`), `.reg .v2/.v4` vector registers, `mov.vN` and `ld/st .v8`.
 - PTX translator: function pointers and indirect calls (a switch over the address-taken `.func`s matching the call prototype), `.reg` parameters and return values of `.func`, and function-scope `.shared`/`.global`/`.const` variables. Calls that cannot be inlined (into another module, recursive) fail with `unsupported PTX call: <reason>`.
 
+- `tests/ptx_tests`: ZLUDA's vosen/ptx_tests suite on the SPIR-V simulator (`run.sh`, `simcuda`, CI job `ptx-tests-sim`) and on the GPU (`scripts/hwvalidate/ptx_tests.ps1`), compared with `expected_status.tsv`.
+- PTX translator: `CFI_EXACT_FTZ=1` lowers `.ftz` exactly (subnormal f32 sources and results, and f16/f16x2 lanes of the half forms, become signed zeros). Off by default, where `.ftz` is still ignored.
+- PTX translator: `set.CMP.{and,or,xor}` on f32 sources, `{add,sub,mul,fma}.{rz,rm,rp}.sat.f32`, `{div,sqrt,rcp}.{rz,rm,rp}.f32`, `mad.hi.{u16,s16}`, `sad.{u16,s16}`, `mad.hi.sat.s32`, `cvt.u64.s32`, `cvt.s64.u32` and `cvt.rn.ftz.f32.<int>`.
+
 ### Fixed
+- PTX translator: register names without `%` (valid PTX, used by ptx_tests and ZLUDA's fixtures) are accepted.
+- PTX translator: `cvt.sat.{u32,u64}.{s8,s16}` clamps negative values to 0; `cvt.{rni,rzi,rmi,rpi}` to a float destination rounds; `testp.normal` is true for zero; `div.approx.f32` returns 0 for 2^126 < |b|; round-down add/sub of an exact zero sum gives -0 (also +0 - +0); adding two addresses gives an integer instead of an error.
 - The translation-cache key no longer includes `CFI_REDIRECT_*` and other launcher, dump and tracing variables, so `cfi-run` and a run without it share cache entries.
 - PTX translator: a branch on a `shfl.sync.idx` broadcast (lane and control independent of the thread), `vote` or `redux` result around `bar.sync` is no longer rejected as divergent. cuSOLVER's `laed4_par` (the divide-and-conquer merge of `syevd`/`heevd`) failed to translate, cuSOLVER ignored the failed `cuModuleGetFunction`, and `torch.linalg.eigh` returned the unmerged leaf eigenvalues.
 - PTX translator: `ld.volatile` and `ld.relaxed.{gpu,sys}` loads from global or generic memory are followed by a fence, so spin-waits on another block's flag (cuSOLVER `sytrd4_gpu`, `eigh` for n > 32 in float64) see the update instead of hanging the GPU. Translation cache version 7.

@@ -399,7 +399,13 @@ impl<'a> Emitter<'a> {
                 let nan = self.builder.logical_and(b, None, exp_ones, mant_nonzero)?;
                 self.builder.logical_not(b, None, nan)?
             }
-            TestKind::Normal => self.builder.logical_and(b, None, not_exp_zero, not_exp_ones)?,
+            // NVIDIA hardware (and ZLUDA) reports +-0 as normal; the PTX ISA only excludes
+            // NaN, infinity and subnormals (vosen/ptx_tests `testp_normal_f32`).
+            TestKind::Normal => {
+                let normal = self.builder.logical_and(b, None, not_exp_zero, not_exp_ones)?;
+                let is_zero = self.builder.logical_and(b, None, exp_zero, mant_zero)?;
+                self.builder.logical_or(b, None, normal, is_zero)?
+            }
             TestKind::Subnormal => self.builder.logical_and(b, None, exp_zero, mant_nonzero)?,
         })
     }
@@ -444,7 +450,18 @@ impl<'a> Emitter<'a> {
         dst: &'a str,
         src: [&str; 4],
     ) -> R<()> {
-        let mode = Self::rounding(round);
+        // Integer rounding to a float destination (`cvt.rni.f16.f16`, `cvt.rzi.sat.f32.f32`)
+        // rounds the source to an integral value; the result is then exact in the destination
+        // unless it overflows, so any narrowing rounds to nearest.
+        let integral = match round {
+            Round::Rni => Some(OpenclStd100Op::rint),
+            Round::Rzi => Some(OpenclStd100Op::trunc),
+            Round::Rmi => Some(OpenclStd100Op::floor),
+            Round::Rpi => Some(OpenclStd100Op::ceil),
+            _ => None,
+        }
+        .filter(|_| d.is_float() && s.is_float());
+        let mode = if integral.is_some() { FPRoundingMode::RTE } else { Self::rounding(round) };
         // tf32 keeps an f32 with the low 13 mantissa bits cleared.
         if d == NumTy::Tf32 {
             let ty = self.u32_type;
@@ -485,6 +502,15 @@ impl<'a> Emitter<'a> {
                     first
                 }
             } else {
+                Vec::new()
+            };
+            if let Some(op) = integral {
+                let lty = if s == NumTy::F64 { self.f64_type() } else { self.f32_type };
+                for lane in lanes.iter_mut() {
+                    *lane = self.ext_f(lty, op, &[*lane])?;
+                }
+            }
+            if !s.is_float() {
                 let (value, wide) = self.read_int(src[0], s)?;
                 let target = if d == NumTy::F64 { NumTy::F64 } else { NumTy::F32 };
                 let fty = self.float_type_of(target);
@@ -499,8 +525,8 @@ impl<'a> Emitter<'a> {
                     Decoration::FPRoundingMode,
                     [Operand::FPRoundingMode(mode)],
                 );
-                vec![converted]
-            };
+                lanes = vec![converted];
+            }
             // f64 -> narrower float: apply the requested rounding once.
             if s == NumTy::F64 && d != NumTy::F64 {
                 let converted = self.builder.f_convert(self.f32_type, None, lanes[0])?;

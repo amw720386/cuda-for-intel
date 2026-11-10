@@ -904,6 +904,10 @@ fn prepare(source: &str) -> Result<String, Error> {
             t = std::time::Instant::now();
         }
     };
+    // PTX identifiers need no `%`: `.reg .u64 in_addr;` is valid (vosen/ptx_tests and ZLUDA's
+    // fixtures use it). The parser keys registers on the prefix, so add it to declared names.
+    let prefixed = if zluda_source::has_bare_regs(source) { Some(zluda_source::prefix_regs(source)) } else { None };
+    let source = prefixed.as_deref().unwrap_or(source);
     let rewritten = parse::rewrite_half_scopes(source);
     lap("half_scopes");
     // Constant-bank variables live in ordinary device memory, so reads are global loads.
@@ -1091,6 +1095,26 @@ pub(crate) fn load16_merge_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("CFI_OPT_LD16").as_deref() == Some(std::ffi::OsStr::new("1")))
 }
 
+thread_local! {
+    static EXACT_FTZ: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// `CFI_EXACT_FTZ=1` lowers `.ftz` on f32 instructions exactly (subnormal sources and results
+/// become signed zeros). Off by default: `.ftz` is then ignored, which differs from NVIDIA only
+/// for subnormal values and costs nothing (ggml's fast-math kernels use `.ftz` throughout).
+pub(crate) fn exact_ftz_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    EXACT_FTZ.with(|v| v.get()).unwrap_or_else(|| {
+        *ON.get_or_init(|| std::env::var_os("CFI_EXACT_FTZ").as_deref() == Some(std::ffi::OsStr::new("1")))
+    })
+}
+
+/// Per-thread override of `CFI_EXACT_FTZ` (tests).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn set_exact_ftz(on: Option<bool>) {
+    EXACT_FTZ.with(|v| v.set(on));
+}
+
 /// `CFI_OPT_SHFL=0` keeps the general computed-lane lowering for constant butterfly shuffles.
 pub(crate) fn xor_shuffle_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1187,10 +1211,12 @@ mod nvrtc_tests;
 mod corpus_scan;
 #[cfg(test)]
 mod fuzz_tests;
-#[cfg(test)]
+/// Bare (unprefixed) register names, `prefix_regs`; also the ZLUDA test-source normaliser.
 mod zluda_source;
 #[cfg(test)]
 mod zluda_vector_tests;
+#[cfg(test)]
+mod ptx_tests_regressions;
 #[cfg(test)]
 mod fp8_tests;
 #[cfg(test)]
@@ -2179,7 +2205,8 @@ mod tests {
                 })
         );
         assert!(translate(&SOURCE.replace("rsqrt.approx.f32", "rsqrt.rn.f32")).is_err());
-        assert!(translate(&SOURCE.replace("cvt.s64.s32", "cvt.s64.u32")).is_err());
+        // Mixed-signedness widening extends by the source type (ptx_tests_regressions).
+        assert!(translate(&SOURCE.replace("cvt.s64.s32", "cvt.s64.u32")).is_ok());
     }
 
     #[test]
