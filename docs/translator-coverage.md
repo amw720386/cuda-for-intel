@@ -97,7 +97,8 @@ message); none is silently miscompiled.
 
 | Feature | Corpus occurrences / note |
 | --- | --- |
-| Texture and surface: `tex`, `tld4`, `txq`, `suld`, `sust`, `sured`, `.texref`, `.surfref`, `.samplerref` | 22 entries in the ZLUDA tests. Decision: **clean unsupported error**. The OpenCL-environment SPIR-V target has no bindless image objects. |
+| Texture and surface: `tex`, `txq`, `suld.b`, `sust.b`, `suq` on object handles | Emulated on linear memory (`src/ptx/tier3_tex.rs`, `docs/textures.md`): the handle is a device descriptor; addressing and filtering are arithmetic, texels are global loads. The 12 ZLUDA texobj fixtures pass. |
+| Texture references and the rest: `.texref`, `.surfref`, `.samplerref`, `tld4`, `tex.grad`, layered/cube geometries, `sust.p`, `sured` | Clean unsupported error. |
 | `div.rz/rm/rp.f32`, `sqrt.rz/rm/rp.f32` | none in the corpus (only `.rn`, `.approx`, `.full` are used by compilers) |
 | `mad.hi.u64` | none in the corpus |
 | `atom.cas.b128`, `atom.global.cas` with vector operands | 1 |
