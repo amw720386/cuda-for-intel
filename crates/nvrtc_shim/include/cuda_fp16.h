@@ -6,17 +6,35 @@
 struct __half_raw { unsigned short x; };
 struct __half2_raw { unsigned short x, y; };
 
+// f32 <-> f16 bit conversions. Device code uses the PTX cvt instructions directly (valid on
+// every sm, as in NVIDIA's header): clang only enables _Float16 on NVPTX for sm_53 and newer
+// (clang 18 rejects it for the default sm_52), and the host pass keeps _Float16.
+__NV_HD__ __forceinline__ unsigned short __nvs_f2h(float f) {
+#ifdef __CUDA_ARCH__
+  unsigned short h; asm("cvt.rn.f16.f32 %0, %1;" : "=h"(h) : "f"(f)); return h;
+#else
+  _Float16 h = (_Float16)f; return __builtin_bit_cast(unsigned short, h);
+#endif
+}
+__NV_HD__ __forceinline__ float __nvs_h2f(unsigned short h) {
+#ifdef __CUDA_ARCH__
+  float f; asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h)); return f;
+#else
+  return (float)__builtin_bit_cast(_Float16, h);
+#endif
+}
+
 struct __align__(2) __half {
   unsigned short __x;
   __NV_HD__ __half() = default;
   __NV_HD__ __half(const __half_raw& r) : __x(r.x) {}
-  __NV_HD__ __half(float f) { _Float16 h = (_Float16)f; __x = __builtin_bit_cast(unsigned short, h); }
-  __NV_HD__ __half(double f) { _Float16 h = (_Float16)(float)f; __x = __builtin_bit_cast(unsigned short, h); }
-  __NV_HD__ __half(int i) { _Float16 h = (_Float16)(float)i; __x = __builtin_bit_cast(unsigned short, h); }
-  __NV_HD__ __half(unsigned i) { _Float16 h = (_Float16)(float)i; __x = __builtin_bit_cast(unsigned short, h); }
-  __NV_HD__ __half(short i) { _Float16 h = (_Float16)(float)i; __x = __builtin_bit_cast(unsigned short, h); }
-  __NV_HD__ __half(long long i) { _Float16 h = (_Float16)(float)i; __x = __builtin_bit_cast(unsigned short, h); }
-  __NV_HD__ operator float() const { return (float)__builtin_bit_cast(_Float16, __x); }
+  __NV_HD__ __half(float f) : __x(__nvs_f2h(f)) {}
+  __NV_HD__ __half(double f) : __x(__nvs_f2h((float)f)) {}
+  __NV_HD__ __half(int i) : __x(__nvs_f2h((float)i)) {}
+  __NV_HD__ __half(unsigned i) : __x(__nvs_f2h((float)i)) {}
+  __NV_HD__ __half(short i) : __x(__nvs_f2h((float)i)) {}
+  __NV_HD__ __half(long long i) : __x(__nvs_f2h((float)i)) {}
+  __NV_HD__ operator float() const { return __nvs_h2f(__x); }
   __NV_HD__ operator __half_raw() const { __half_raw r; r.x = __x; return r; }
   __NV_HD__ __half& operator=(const __half_raw& r) { __x = r.x; return *this; }
   __NV_HD__ __half& operator=(float f) { *this = __half(f); return *this; }
