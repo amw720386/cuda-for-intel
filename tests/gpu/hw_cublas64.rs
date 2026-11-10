@@ -351,6 +351,8 @@ fn hw_cublas64_matches_host_reference() {
             (200, 130, 70),
             (5, 300, 3),
             (33, 17, 0),
+            // register-blocked kernel (16+ tiles of 64 or 32), partial edge tiles
+            (300, 270, 90),
         ];
         for (si, &(m, n, k)) in sizes.iter().enumerate() {
             for &ta in ops(ty) {
@@ -726,6 +728,9 @@ fn hw_cublas64_matches_host_reference() {
                 (1000, 1, 1),
                 (4097, 1, 1),
                 (333, -2, 3),
+                // multi-block partials
+                (100_000, 1, 1),
+                (50_001, -1, 2),
             ] {
                 let len = |inc: i32| (n.max(1) as usize) * inc.unsigned_abs() as usize;
                 let (x, y) = (rng.vec(ty, len(incx)), rng.vec(ty, len(incy)));
@@ -815,7 +820,7 @@ fn hw_cublas64_matches_host_reference() {
         (Ty::Z, "cublasDznrm2_v2"),
     ] {
         let nrm2: Nrm2 = sym!(Nrm2, name);
-        for (n, incx) in [(1i32, 1i32), (1000, 1), (4097, 3)] {
+        for (n, incx) in [(1i32, 1i32), (1000, 1), (4097, 3), (100_000, 1), (30_000, 2)] {
             for scale in [
                 1.0,
                 if ty.double() { 1e200 } else { 1e30 },
@@ -920,15 +925,25 @@ fn hw_cublas64_matches_host_reference() {
         for side in [plan::SIDE_LEFT, plan::SIDE_RIGHT] {
             for uplo in [plan::FILL_LOWER, plan::FILL_UPPER] {
                 for &trans in ops(ty) {
-                    for diag in [plan::DIAG_NON_UNIT, plan::DIAG_UNIT] {
-                        let (m, n) = (33usize, 17usize);
+                    for (diag, big) in [
+                        (plan::DIAG_NON_UNIT, false),
+                        (plan::DIAG_UNIT, false),
+                        (plan::DIAG_NON_UNIT, true),
+                    ] {
+                        // big: order 300 > 2 * TRSM_NB takes the blocked (gemm-update) path
+                        let (m, n) = match (big, side == plan::SIDE_LEFT) {
+                            (false, _) => (33usize, 17usize),
+                            (true, true) => (300, 40),
+                            (true, false) => (40, 300),
+                        };
                         let order = if side == plan::SIDE_LEFT { m } else { n };
-                        let (lda, ldb, batch) = (order + 3, m + 2, 4usize);
+                        let (lda, ldb, batch) = (order + 3, m + 2, if big { 1 } else { 4usize });
                         let alpha = rng.cx(ty);
+                        let shrink = 0.2 * (33.0 / order as f64).min(1.0);
                         let mut a: Vec<Cx> = rng
                             .vec(ty, lda * order * batch)
                             .iter()
-                            .map(|v| round(ty, (v.0 * 0.2, v.1 * 0.2)))
+                            .map(|v| round(ty, (v.0 * shrink, v.1 * shrink)))
                             .collect();
                         for z in 0..batch {
                             for d in 0..order {
@@ -1720,7 +1735,7 @@ fn hw_cublas64_solver_helpers() {
         };
         for pivot in [true, false] {
             for &op in ops {
-                let (n, nrhs, lda, ldb, batch) = (24usize, 5usize, 26usize, 25usize, 50usize);
+                for (n, nrhs, lda, ldb, batch) in [(24usize, 5usize, 26usize, 25usize, 50usize), (70, 3, 71, 72, 5)] {
                 let mut a = rng.vec(ty, lda * n * batch);
                 if !pivot {
                     for z in 0..batch {
@@ -1810,6 +1825,7 @@ fn hw_cublas64_solver_helpers() {
                     worst_b,
                     tol(ty) * 1000.0,
                 );
+                }
             }
         }
         let mut info = 0;
@@ -1831,6 +1847,73 @@ fn hw_cublas64_solver_helpers() {
             },
             7
         );
+        assert_eq!(info, -2);
+    }
+
+    // ---- geqrfBatched / gelsBatched ----
+    type Geqrf = unsafe extern "system" fn(P, i32, i32, C, i32, C, *mut i32, i32) -> i32;
+    type Gels = unsafe extern "system" fn(P, i32, i32, i32, i32, C, i32, C, i32, *mut i32, *mut i32, i32) -> i32;
+    for ty in Ty::BLAS {
+        let t = ty.tag().to_uppercase();
+        let es = ty.size() as usize;
+        let geqrf: Geqrf = sym!(Geqrf, format!("cublas{t}geqrfBatched"));
+        let gels: Gels = sym!(Gels, format!("cublas{t}gelsBatched"));
+        for (m, n, nrhs, batch) in [(8usize, 8usize, 2usize, 40usize), (100, 30, 4, 6), (5, 9, 0, 3), (64, 64, 1, 4)] {
+            let (lda, ldc) = (m + 3, m + 1);
+            let mut a = rng.vec(ty, lda * n * batch);
+            // the last matrix has a zero column 1 (rank deficient for gels)
+            for i in 0..lda {
+                a[(batch - 1) * lda * n + lda + i] = (0.0, 0.0);
+            }
+            let k = m.min(n);
+            let tab = |base: u64, s: usize| {
+                up(&(0..batch).flat_map(|z| (base + (z * s * es) as u64).to_le_bytes()).collect::<Vec<u8>>())
+            };
+            let (da, dt) = (up(&enc(ty, &a)), up(&vec![0u8; k * batch * es]));
+            let (ta, tt) = (tab(da, lda * n), tab(dt, k));
+            let mut info = 99;
+            assert_eq!(unsafe { geqrf(h, m as i32, n as i32, ta as C, lda as i32, tt as C, &mut info, batch as i32) }, 0);
+            assert_eq!(info, 0);
+            let qr = dec(ty, &down(da, a.len() * es));
+            let tau = dec(ty, &down(dt, k * batch * es));
+            let mut worst_q = 0.0f64;
+            for z in 0..batch {
+                let got = plan::qr_product(m, n, &qr[z * lda * n..], lda, &tau[z * k..]);
+                let want: Vec<Cx> = (0..n).flat_map(|j| (0..m).map(move |i| (i, j))).map(|(i, j)| a[z * lda * n + i + j * lda]).collect();
+                worst_q = worst_q.max(max_err(&got, &want));
+            }
+            record(format!("{t} geqrfBatched (H R - A)"), worst_q, tol(ty) * 50.0);
+            if n > m {
+                let mut info = 0;
+                let st = unsafe { gels(h, 0, m as i32, n as i32, 1, ta as C, lda as i32, ta as C, ldc as i32, &mut info, null_mut(), 1) };
+                assert_eq!((st, info), (7, -4), "{t}gelsBatched m < n");
+                continue;
+            }
+            let c = rng.vec(ty, ldc * nrhs.max(1) * batch);
+            let (da, dc, di) = (up(&enc(ty, &a)), up(&enc(ty, &c)), up(&vec![0xffu8; batch * 4]));
+            let (ta, tc) = (tab(da, lda * n), tab(dc, ldc * nrhs.max(1)));
+            let mut info = 99;
+            assert_eq!(
+                unsafe { gels(h, 0, m as i32, n as i32, nrhs as i32, ta as C, lda as i32, tc as C, ldc as i32, &mut info, di as *mut i32, batch as i32) },
+                0
+            );
+            assert_eq!(info, 0);
+            let infos: Vec<i32> = down(di, batch * 4).chunks(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+            assert!(infos[..batch - 1].iter().all(|&i| i == 0), "{t}gelsBatched devInfo {infos:?}");
+            assert_eq!(infos[batch - 1], if n > 1 { 2 } else { 0 }, "{t}gelsBatched rank-deficient devInfo");
+            let x = dec(ty, &down(dc, c.len() * es));
+            let mut worst_x = 0.0f64;
+            for z in 0..batch - 1 {
+                for r in 0..nrhs {
+                    let cb = z * ldc * nrhs + r * ldc;
+                    let want = plan::lstsq(m, n, &a[z * lda * n..], lda, &c[cb..cb + m]);
+                    worst_x = worst_x.max(max_err(&x[cb..cb + n], &want));
+                }
+            }
+            record(format!("{t} gelsBatched (X vs normal equations)"), worst_x, tol(ty) * 1000.0);
+        }
+        let mut info = 0;
+        assert_eq!(unsafe { gels(h, 1, 4, 2, 1, null_mut(), 4, null_mut(), 4, &mut info, null_mut(), 1) }, 15);
         assert_eq!(info, -2);
     }
 

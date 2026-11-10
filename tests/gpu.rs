@@ -116,6 +116,8 @@ mod hw_cudnn;
 mod hw_cufft;
 #[path = "gpu/hw_cusparse.rs"]
 mod hw_cusparse;
+#[path = "gpu/hw_libs_perf.rs"]
+mod hw_libs_perf;
 #[path = "gpu/hw_launch_stress.rs"]
 mod hw_launch_stress;
 #[path = "gpu/hw_xmx_gemm.rs"]

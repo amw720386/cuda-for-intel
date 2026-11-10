@@ -119,6 +119,16 @@ for dt in [torch.float64, torch.complex64, torch.complex128]:
         check(f"linalg.det batched {tag}", lambda: torch.linalg.det(sq.cuda()), lambda: torch.linalg.det(sq), tol * 100)
         check(f"linalg.lu_factor batched {tag}", lambda: torch.linalg.lu_factor(sq.cuda())[0], lambda: torch.linalg.lu_factor(sq)[0], tol * 100)
         check(f"lu_solve batched {tag}", lambda: torch.linalg.lu_solve(*torch.linalg.lu_factor(sq.cuda()), rhs.cuda()), lambda: torch.linalg.lu_solve(*torch.linalg.lu_factor(sq), rhs), tol * 100)
+    # batched Householder QR and least squares (cublas geqrfBatched / gelsBatched)
+    for bs, m, n in [(4, 8, 8), (3, 20, 6), (5, 32, 32), (2, 6, 9)]:
+        a = rnd(bs, m, n, dt=dt)
+        tag = f"{bs}x{m}x{n} {dt}"
+        check(f"linalg.qr batched R {tag}", lambda: torch.linalg.qr(a.cuda())[1], lambda: torch.linalg.qr(a)[1], tol * 100)
+        check(f"linalg.qr batched Q {tag}", lambda: torch.linalg.qr(a.cuda())[0], lambda: torch.linalg.qr(a)[0], tol * 100)
+        check(f"geqrf batched {tag}", lambda: torch.geqrf(a.cuda())[0], lambda: torch.geqrf(a)[0], tol * 100)
+        if m >= n:
+            rhs = rnd(bs, m, 3, dt=dt)
+            check(f"linalg.lstsq batched {tag}", lambda: torch.linalg.lstsq(a.cuda(), rhs.cuda()).solution, lambda: torch.linalg.lstsq(a, rhs).solution, tol * 100)
     mats = [rnd(30, 40, dt=dt), rnd(40, 25, dt=dt), rnd(25, 60, dt=dt), rnd(60, 5, dt=dt)]
     check(f"linalg.multi_dot {dt}", lambda: torch.linalg.multi_dot([m.cuda() for m in mats]), lambda: torch.linalg.multi_dot(mats), tol)
     sq = rnd(48, 48, dt=dt) / 7
@@ -144,6 +154,10 @@ check("mv f32 strided x", lambda: torch.mv(a.cuda(), x.cuda()[::2]), lambda: tor
 t, bm = tri(64, f, True), rnd(64, 5, dt=f)
 check("solve_triangular f32", lambda: torch.linalg.solve_triangular(t.cuda(), bm.cuda(), upper=True), lambda: torch.linalg.solve_triangular(t, bm, upper=True), 1e-4)
 tb = tri(16, f, False, (6,))
+aq = rnd(3, 12, 5, dt=f)
+check("linalg.qr f32 batched R", lambda: torch.linalg.qr(aq.cuda())[1], lambda: torch.linalg.qr(aq)[1], 1e-3)
+bq = rnd(3, 12, 2, dt=f)
+check("linalg.lstsq f32 batched", lambda: torch.linalg.lstsq(aq.cuda(), bq.cuda()).solution, lambda: torch.linalg.lstsq(aq, bq).solution, 1e-3)
 check("solve_triangular f32 batched", lambda: torch.linalg.solve_triangular(tb.cuda(), torch.ones(6, 16, 2).cuda(), upper=False), lambda: torch.linalg.solve_triangular(tb, torch.ones(6, 16, 2), upper=False), 1e-4)
 
 print(f"{n_ok} checks passed, {len(fails)} failed, {time.time() - t0:.1f} s")
@@ -162,7 +176,6 @@ gaps = {
     "linalg.eigh": lambda: (torch.linalg.eigvalsh(spd.cuda()).cpu(), torch.linalg.eigvalsh(spd)),
     "linalg.svd": lambda: (torch.linalg.svdvals(s.cuda()).cpu(), torch.linalg.svdvals(s)),
     "linalg.lstsq": lambda: (torch.linalg.lstsq(s.cuda(), torch.ones(32, 2, dtype=torch.float64).cuda()).solution.cpu(), torch.linalg.lstsq(s, torch.ones(32, 2, dtype=torch.float64)).solution),
-    "linalg.qr batched (geqrfBatched)": lambda: (torch.linalg.qr(s.expand(4, -1, -1).cuda())[1].abs().cpu(), torch.linalg.qr(s.expand(4, -1, -1))[1].abs()),
 }
 for name, fn in gaps.items():
     try:
