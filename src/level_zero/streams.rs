@@ -235,6 +235,8 @@ impl CommandList {
         let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
         #[cfg(all(test, windows))]
         let signal = super::profiling::operation_signal(signal);
+        #[cfg(all(not(test), windows))]
+        let signal = super::profiling::runtime_signal(signal);
         call("zeCommandListAppendLaunchKernel", || unsafe {
             (api.zeCommandListAppendLaunchKernel)(
                 self.0.0,
