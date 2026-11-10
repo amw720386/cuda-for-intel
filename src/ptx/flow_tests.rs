@@ -231,3 +231,70 @@ $L_d:
         assert_eq!(got, want);
     }
 }
+
+/// cuSOLVER `laed4_par` (the divide-and-conquer secular-equation solver behind `eigh`): every
+/// thread holds a term that depends on `tid`, the warp sums them with `shfl.down`, lane 0's sum
+/// is broadcast with `shfl.idx`, and both sides of a branch on the broadcast value reach a
+/// `bar.sync`. The broadcast is the same in every lane, so the branch is not divergent.
+/// `literal` picks the immediate-operand `shfl` form over the register-operand one.
+fn broadcast_branch(lane: &str, literal: bool) -> String {
+    let (seg, full) = if literal { ("4127", "31") } else { ("%r20", "%r21") };
+    kernel(
+        &format!(
+            "	mov.u32 %r20, 4127;
+	mov.u32 %r21, 31;
+	cvt.u32.u64 %r1, %rd3;
+	setp.lt.u32 %p1, %r2, 3;
+	add.u32 %r4, %r2, 1;
+	selp.b32 %r5, %r4, 0, %p1;
+	shfl.sync.down.b32 %r6|%p2, %r5, 1, {seg}, -1;
+	add.u32 %r5, %r5, %r6;
+	shfl.sync.down.b32 %r6|%p2, %r5, 2, {seg}, -1;
+	add.u32 %r5, %r5, %r6;
+	shfl.sync.down.b32 %r6|%p2, %r5, 4, {seg}, -1;
+	add.u32 %r5, %r5, %r6;
+	shfl.sync.down.b32 %r6|%p2, %r5, 8, {seg}, -1;
+	add.u32 %r5, %r5, %r6;
+	shfl.sync.idx.b32 %r8|%p3, %r5, {lane}, {full}, -1;
+	setp.gt.u32 %p4, %r8, %r1;
+	@%p4 bra $L_big;
+	bar.sync 0;
+	add.u32 %r7, %r8, 100;
+	bra.uni $L_join;
+$L_big:
+	bar.sync 0;
+	add.u32 %r7, %r8, 200;
+$L_join:
+	bar.sync 0;
+{STORE}"
+        ),
+        "",
+    )
+}
+
+#[test]
+fn shfl_idx_broadcast_branch_around_barrier_is_accepted_and_runs() {
+    for strict in [false, true] {
+        set_strict_barriers(strict);
+        for literal in [false, true] {
+            let src = broadcast_branch("0", literal);
+            // Lanes 0..3 contribute 1 + 2 + 3; the branch compares the sum 6 with n.
+            for (n, want) in [(5u64, 206u32), (10, 106)] {
+                let got = run(&src, n, 16).unwrap_or_else(|e| panic!("strict={strict} literal={literal} n={n}: {e}"));
+                assert_eq!(got, vec![want; 16], "strict={strict} literal={literal} n={n}");
+            }
+        }
+    }
+    set_strict_barriers(false);
+}
+
+#[test]
+fn shfl_idx_from_thread_dependent_lane_is_rejected() {
+    // Reading lane `tid ^ 1` gives each thread a different value: still divergent.
+    let src = broadcast_branch("%r9", false).replacen(
+        "	mov.u32 %r20, 4127;",
+        "	xor.b32 %r9, %r2, 1;\n	mov.u32 %r20, 4127;",
+        1,
+    );
+    assert!(rejected(&src));
+}

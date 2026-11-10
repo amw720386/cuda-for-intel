@@ -1492,6 +1492,13 @@ pub(crate) fn lazy_module_function(state: &mut State, module: usize, name: &CStr
                 ));
             }
             export_log(format_args!("PTX reject {}: {error}", name.to_string_lossy()));
+            // Always on, once per kernel: libraries such as cuSOLVER ignore a failed
+            // cuModuleGetFunction and go on without the kernel, so the result is silently wrong.
+            let short: String = name.to_string_lossy().chars().take(120).collect();
+            cfi_fatbin::report_once_for(
+                &format!("translate:{short}"),
+                &format!("CUDA for Intel: kernel {short} could not be translated: {error}"),
+            );
             InvalidPtx
         })?;
     if let Some(dir) = std::env::var_os("CFI_PTX_DUMP_DIR") {

@@ -415,6 +415,10 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
                             }
                         }
                     }
+                    // Warp collectives whose result is the same in every lane (a `shfl.sync.idx`
+                    // broadcast from a lane that does not depend on the thread, `vote`, `redux`)
+                    // are not provably thread-divergent even when their operand is.
+                    let inputs = warp_uniform_sources(inst).unwrap_or(inputs);
                     let tid_dependent = !inst.is_memory_load()
                         && inputs.iter().any(|src| {
                             let b = base(src);
@@ -515,5 +519,21 @@ fn verify_barriers(blocks: &[Block<'_>], order: &[usize], predecessors: &[Vec<us
         if old_count == varying.len() {
             return Ok(());
         }
+    }
+}
+
+/// For a warp collective that returns the same value in every lane of its segment, the sources
+/// that decide *which* value that is: the lane index and clamp/segment control of a
+/// `shfl.sync.idx` broadcast, nothing for `vote` and `redux`. `None` for every other instruction.
+/// The data operand is left out: cuSOLVER's `laed4` reduces per-thread terms with `shfl.down`
+/// and broadcasts lane 0 with `shfl.idx`, then branches around `bar.sync` on the result.
+fn warp_uniform_sources<'s, 'a>(inst: &'s Instruction<'a>) -> Option<&'s [&'a str]> {
+    use super::ext::{ExtOp, ShflMode};
+    match inst {
+        Instruction::Shuffle { mode: super::ShuffleMode::Idx, src, .. } => Some(&src[1..3]),
+        Instruction::Ext { op: ExtOp::ShflDyn(ShflMode::Idx), src, .. } => Some(&src[1..3]),
+        Instruction::Vote { .. } | Instruction::ReduxSyncAdd { .. } => Some(&[]),
+        Instruction::Ext { op: ExtOp::Redux { .. } | ExtOp::VoteUni, .. } => Some(&[]),
+        _ => None,
     }
 }
