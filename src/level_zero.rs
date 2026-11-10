@@ -1326,6 +1326,11 @@ unsafe impl Send for NativeCompiler {}
 unsafe impl Sync for NativeCompiler {}
 
 impl NativeCompiler {
+    /// Whether the native cache already holds a binary for `words` on this device.
+    pub(crate) fn is_cached(&self, words: &[u32]) -> bool {
+        native_cache::directory().is_some_and(|dir| native_cache::contains(dir, &native_cache::key(words, &self.tag, &build_flags(words.len()))))
+    }
+
     /// Returns true when a binary for `words` is in the cache afterwards.
     pub(crate) fn precompile(&self, words: &[u32]) -> bool {
         let Some(dir) = native_cache::directory() else { return false };
