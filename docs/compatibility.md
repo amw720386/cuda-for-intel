@@ -40,7 +40,8 @@ though the Level Zero loader code compiles there. macOS builds and runs library 
 | Ahead-of-time kernel precompile | `cfi-precompile` / `cfi.ps1 precompile`: stock Ollama's cold first request 115.5 s -> 2.36 s on the B390 ([precompile.md](precompile.md)) |
 | Quantised ggml kernels substitution | `CUDA_FOR_INTEL_SUBST=auto` by default; `none` turns it off |
 | Texture and surface objects, CUDA arrays | Emulated on linear memory: 1D/2D/3D arrays and copies, texture objects over arrays, linear and pitched memory (every address mode, nearest/linear filtering, normalised coordinates), surface loads/stores. No texture references, gather, layered/cube or mipmapped textures; no hardware sampler speed ([textures.md](textures.md)) |
-| VMM, multi-GPU peer access, conditional graph nodes | Not implemented |
+| VMM (`cuMemCreate`, `cuMemAddressReserve`, `cuMemMap`, `cuMemSetAccess`) | Implemented on Level Zero virtual memory; fake-backend tested, hardware gate pending. The capability attribute reports 0 unless `CUDA_FOR_INTEL_VMM=1` ([vmm.md](vmm.md)) |
+| Multi-GPU peer access, conditional graph nodes | Not implemented |
 
 ## Known issues (honest list)
 

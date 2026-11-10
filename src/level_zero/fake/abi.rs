@@ -515,6 +515,7 @@ unsafe extern "system" fn can_access_peer(device: Raw, peer: Raw, out: *mut u8) 
 pub(super) fn api() -> Api {
     Api {
         can_access_peer: Some(can_access_peer),
+        vmm: Some(super::vmm::api()),
         zeContextCreate: context_create,
         zeContextDestroy: context_destroy,
         zeCommandListCreateImmediate: list_immediate,

@@ -33,7 +33,7 @@ Behaviour notes for the entry points that are not plain forwards:
 
 | Library | Reference symbols | Implemented | Stub | Missing | of which core | Torch imports (impl/stub/missing) |
 |---|---|---|---|---|---|---|
-| CUDA driver API (cuda.h) | 728 | 249 | 219 | 260 | 0 | 0 (0/0/0) |
+| CUDA driver API (cuda.h) | 728 | 257 | 211 | 260 | 0 | 0 (0/0/0) |
 | CUDA runtime API (cuda_runtime_api.h) | 330 | 87 | 242 | 1 | 1 | 69 (46/23/0) |
 | cuBLAS | 530 | 169 | 361 | 0 | 0 | 55 (55/0/0) |
 | cuBLASLt | 45 | 17 | 28 | 0 | 0 | 11 (11/0/0) |
@@ -428,7 +428,7 @@ Binary: `nvcuda`. Exported but not in the reference list: 3 (`cfi_build_info`, `
 | `cuLogsDumpToMemory` | stub | core |  |
 | `cuLogsRegisterCallback` | stub | core |  |
 | `cuLogsUnregisterCallback` | stub | core |  |
-| `cuMemAddressFree` | stub | core |  |
+| `cuMemAddressFree` | implemented | core |  |
 | `cuMemAddressReserve` | implemented | core |  |
 | `cuMemAdvise` | implemented | legacy |  |
 | `cuMemAdvise_v2` | implemented | core |  |
@@ -456,11 +456,11 @@ Binary: `nvcuda`. Exported but not in the reference list: 3 (`cfi_build_info`, `
 | `cuMemFreeAsync_ptsz` | missing | ptsz |  |
 | `cuMemFreeHost` | implemented | core |  |
 | `cuMemFree_v2` | implemented | core |  |
-| `cuMemGetAccess` | stub | core |  |
+| `cuMemGetAccess` | implemented | core |  |
 | `cuMemGetAddressRange` | missing | legacy |  |
 | `cuMemGetAddressRange_v2` | implemented | core |  |
 | `cuMemGetAllocationGranularity` | implemented | core |  |
-| `cuMemGetAllocationPropertiesFromHandle` | stub | core |  |
+| `cuMemGetAllocationPropertiesFromHandle` | implemented | core |  |
 | `cuMemGetDefaultMemPool` | stub | core |  |
 | `cuMemGetHandleForAddressRange` | stub | core |  |
 | `cuMemGetInfo` | missing | legacy |  |
@@ -474,7 +474,7 @@ Binary: `nvcuda`. Exported but not in the reference list: 3 (`cfi_build_info`, `
 | `cuMemHostRegister_v2` | implemented | core |  |
 | `cuMemHostUnregister` | implemented | core |  |
 | `cuMemImportFromShareableHandle` | stub | core |  |
-| `cuMemMap` | stub | core |  |
+| `cuMemMap` | implemented | core |  |
 | `cuMemMapArrayAsync` | stub | core |  |
 | `cuMemMapArrayAsync_ptsz` | missing | ptsz |  |
 | `cuMemPoolCreate` | implemented | core |  |
@@ -496,11 +496,11 @@ Binary: `nvcuda`. Exported but not in the reference list: 3 (`cfi_build_info`, `
 | `cuMemPrefetchBatchAsync_ptsz` | missing | ptsz |  |
 | `cuMemRangeGetAttribute` | stub | core |  |
 | `cuMemRangeGetAttributes` | stub | core |  |
-| `cuMemRelease` | stub | core |  |
-| `cuMemRetainAllocationHandle` | stub | core |  |
-| `cuMemSetAccess` | stub | core |  |
+| `cuMemRelease` | implemented | core |  |
+| `cuMemRetainAllocationHandle` | implemented | core |  |
+| `cuMemSetAccess` | implemented | core |  |
 | `cuMemSetMemPool` | stub | core |  |
-| `cuMemUnmap` | stub | core |  |
+| `cuMemUnmap` | implemented | core |  |
 | `cuMemcpy` | implemented | core |  |
 | `cuMemcpy2D` | missing | legacy |  |
 | `cuMemcpy2DAsync` | missing | legacy |  |

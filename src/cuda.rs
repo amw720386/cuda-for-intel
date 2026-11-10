@@ -40,7 +40,7 @@ pub(crate) fn profile_on() -> bool {
 pub(crate) fn profile_note(name: &'static str, nanos: u64) {
     trace::profile_record(name, nanos);
 }
-mod vmm;
+pub(crate) mod vmm;
 use streams::Streams;
 
 #[cfg(all(test, windows))]
@@ -121,6 +121,8 @@ struct CudaContext {
     peer_access: BTreeSet<usize>,
     /// Validated native kernel substitutions (empty unless `CUDA_FOR_INTEL_SUBST` is set).
     subst: subst_hook::Natives,
+    /// Virtual memory objects (`cuMemCreate`, `cuMemAddressReserve`, `cuMemMap`).
+    vmm: vmm::State,
 }
 
 /// A PTX module whose kernels are translated one at a time on first lookup.
@@ -483,6 +485,7 @@ impl State {
                 local_storage: HashMap::new(),
                 peer_access: BTreeSet::new(),
                 subst: Default::default(),
+                vmm: Default::default(),
             },
         );
         if trace::enabled() {
@@ -625,6 +628,7 @@ impl CudaContext {
         while let Some(&key) = self.modules.keys().next() {
             self.unload(api, key)?;
         }
+        self.destroy_vmm(api)?;
         while let Some((&base, _)) = self.allocations.first_key_value() {
             self.free(api, base)?;
         }
@@ -674,7 +678,10 @@ impl CudaContext {
     }
 
     fn free(&mut self, api: &Api, base: usize) -> Result<(), CuResult> {
-        if !self.allocations.contains_key(&base) || self.module_globals.contains(&base) {
+        if !self.allocations.contains_key(&base)
+            || self.module_globals.contains(&base)
+            || self.vmm.runs.contains(&base)
+        {
             return Err(InvalidValue);
         }
         self.backend
@@ -2335,7 +2342,13 @@ pub unsafe extern "system" fn cuDeviceGetAttribute(
                 "device attribute ordinal={ordinal} attribute={attr}"
             ));
         }
-        if let Ok(Some(value)) = runtime(|rt| Ok(devices::list_attribute(rt, ordinal, attr)))
+        if let Ok(Some(value)) = runtime(|rt| {
+            // 102 VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED: opt-in, see cuda/vmm.rs.
+            if attr == 102 && (ordinal as usize) < rt.devices.len() {
+                return Ok(Some(c_int::from(vmm::advertised(&rt.api))));
+            }
+            Ok(devices::list_attribute(rt, ordinal, attr))
+        })
             && !out.is_null()
         {
             unsafe { out.write(value) };

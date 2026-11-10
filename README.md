@@ -90,8 +90,10 @@ What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a transl
   (logging off: 30 to 46 tok/s decode on the GPU vs 119 tok/s on the CPU backend, see [docs/hw-logs/perf-matrix.md](docs/hw-logs/perf-matrix.md); llama-bench tg128 18.3 tok/s with large variance). Do not expect native-Vulkan speed.
 - **Flash attention** kernels (`flash_attn_ext_*`) do not all translate (87 entries in the stock Ollama scan); disable flash attention.
 - **No NCCL, cuFFT, cuSOLVER.** cuDNN is a partial shim: 2-D convolution and batch norm run on it (enabled by `cfi_torch.install()`, [docs/pytorch.md](docs/pytorch.md); hardware gate pending); everything else (3-D/fp64 convolution, RNN, CTC) falls back to PyTorch's native kernels ([docs/cudnn-shim.md](docs/cudnn-shim.md)).
-- **Not implemented:** SASS execution, VMM (`cuMemCreate` family reports no capability), multi-GPU peer access, conditional and memory-allocation graph nodes,
+- **Not implemented:** SASS execution, multi-GPU peer access, conditional and memory-allocation graph nodes,
   texture/surface instructions.
+- **VMM is opt-in.** `cuMemCreate`/`cuMemAddressReserve`/`cuMemMap`/`cuMemSetAccess` run on Level Zero virtual memory, but the device reports
+  no VMM capability unless `CUDA_FOR_INTEL_VMM=1`, so GGML and PyTorch keep their ordinary pools until the hardware gate passes ([docs/vmm.md](docs/vmm.md)).
 - **Numerics.** GPU and CPU outputs can differ at near-ties (2 of 12 greedy prompts diverged); Q8_0 perplexity is 0.11 % below CPU in one run, unexplained.
 - **Architecture-guard stubs.** PTX built for another architecture can contain empty stub kernels; the runtime reports error 209 instead of computing nothing
   (see Troubleshooting).
@@ -237,7 +239,7 @@ Set `CUDA_FOR_INTEL_TRACE=1` and `CUDA_FOR_INTEL_LOG=1` first; most failures nam
 | `CUDA_ERROR_NOT_INITIALIZED` (3) / `NO_DEVICE` (100) | No Level Zero device or loader. Install the Intel graphics driver, check Device Manager, run `cargo run --release --example devices`. Remote desktop sessions and VMs without GPU passthrough expose no GPU. |
 | `CUDA_ERROR_LAUNCH_FAILED` (719), "device lost", error 600/719 on synchronisation | The Level Zero device was lost or needs a reset (the driver reports device-lost and requires-reset as 719). On Windows this is usually a TDR: a single command took too long. Close other GPU-heavy programs; set `CUDA_FOR_INTEL_SYNC_LAUNCH=1` to find the kernel; reduce work per launch; `CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS` bounds queued work (default 65536 work-groups). If the first touch of fresh memory kills the device, make sure `CFI_NO_ALLOC_TOUCH` is not set. |
 | `CUDA_ERROR_OUT_OF_MEMORY` (2) | Device or host allocation failed. Integrated GPUs share system RAM: `cuMemGetInfo` reports capacity minus this driver's allocations, bounded by available system memory minus a reserve. Use a smaller model or context, close other programs. |
-| `CUDA_ERROR_NOT_SUPPORTED` (801) | A feature the Intel driver or this project lacks (for example VMM or an unimplemented cuBLAS name). |
+| `CUDA_ERROR_NOT_SUPPORTED` (801) | A feature the Intel driver or this project lacks (for example shareable VMM handles or an unimplemented cuBLAS name). |
 | `CUBLAS_STATUS_NOT_INITIALIZED` | Call `cudaFree(0)` (or create a context) before `cublasCreate`; the shim needs a current context. |
 | `CUBLAS_STATUS_EXECUTION_FAILED` on batched fp16 GQA GEMM | Seen in an early llama.cpp run; the shapes pass in `hw_cublas_batched`. Update to a current build. |
 | Hangs for minutes on the first request | Compilation of large kernels by the Intel compiler. Wait, keep the caches (`CUDA_FOR_INTEL_CACHE_DIR`). |

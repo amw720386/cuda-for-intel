@@ -2,6 +2,8 @@
 //! completion signals, with no kernel execution or memory emulation.
 use super::*;
 mod abi;
+mod vmm;
+pub(crate) use vmm::{VmmSnapshot, vmm_snapshot};
 use std::collections::{BTreeMap, VecDeque};
 use std::ptr::{null_mut, without_provenance_mut};
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -77,6 +79,7 @@ pub(crate) enum Kind {
     Fence,
     HostAllocation,
     DeviceAllocation,
+    PhysicalMemory,
 }
 
 #[derive(Default)]
@@ -158,6 +161,8 @@ struct Driver {
     copies: Vec<(Id, usize, usize, usize)>,
     /// Device each command list was created for.
     list_device: BTreeMap<Id, Id>,
+    /// Virtual address reservations and mappings (`zeVirtualMem*`).
+    vmm: vmm::VmmState,
 }
 
 impl Driver {

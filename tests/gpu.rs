@@ -89,6 +89,8 @@ mod hw_float;
 mod hw_warp;
 #[path = "gpu/hw_fa_vec.rs"]
 mod hw_fa_vec;
+#[path = "gpu/vmm.rs"]
+mod vmm;
 #[path = "gpu/module_globals.rs"]
 mod module_globals;
 #[path = "gpu/event_timing.rs"]

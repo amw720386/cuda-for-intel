@@ -229,12 +229,6 @@ pub extern "system" fn cuMemDiscardAndPrefetchBatchAsync() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemDiscardBatchAsync() -> i32 { 801 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cuMemExportToShareableHandle() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemGetAccess() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemGetAllocationPropertiesFromHandle() -> i32 { 801 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cuMemGetDefaultMemPool() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemGetHandleForAddressRange() -> i32 { 801 }
@@ -244,8 +238,6 @@ pub extern "system" fn cuMemGetMemPool() -> i32 { 801 }
 pub extern "system" fn cuMemHostGetDevicePointer_v2() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemHostGetFlags() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemImportFromShareableHandle() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemMapArrayAsync() -> i32 { 801 }
 #[unsafe(no_mangle)]
@@ -266,8 +258,6 @@ pub extern "system" fn cuMemPrefetchBatchAsync() -> i32 { 801 }
 pub extern "system" fn cuMemRangeGetAttribute() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemRangeGetAttributes() -> i32 { 801 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cuMemRetainAllocationHandle() -> i32 { 801 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cuMemSetMemPool() -> i32 { 801 }
 #[unsafe(no_mangle)]

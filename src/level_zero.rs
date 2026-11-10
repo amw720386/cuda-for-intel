@@ -15,6 +15,7 @@ mod native_cache;
 mod regular;
 pub(crate) use regular::{Queue, QueueFence};
 mod streams;
+pub(crate) mod vmm;
 pub(crate) use streams::WaitFn;
 pub(crate) use streams::KernelArg;
 pub(crate) use streams::{CommandList, Fence, Fences};
@@ -299,6 +300,8 @@ macro_rules! loader_api {
             $( $name: unsafe extern "system" fn($($arg),*) -> Status, )+
             get_pci: Option<GetPci>,
             can_access_peer: Option<CanAccessPeer>,
+            /// Virtual memory entry points, when the loader exports all of them.
+            pub(crate) vmm: Option<vmm::VmmApi>,
             #[cfg(not(test))]
             _library: Library,
             #[cfg(test)]
@@ -327,6 +330,7 @@ macro_rules! loader_api {
                         .ok().map(|symbol| *symbol),
                     can_access_peer: unsafe { library.get::<CanAccessPeer>(b"zeDeviceCanAccessPeer\0") }
                         .ok().map(|symbol| *symbol),
+                    vmm: vmm::VmmApi::load(&library),
                     #[cfg(not(test))]
                     _library: library,
                     #[cfg(test)]
@@ -345,6 +349,7 @@ macro_rules! loader_api {
                     }, )+
                     get_pci: None,
                     can_access_peer: None,
+                    vmm: None,
                     _library: None,
                 }
             }

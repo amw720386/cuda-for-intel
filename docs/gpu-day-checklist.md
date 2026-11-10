@@ -125,3 +125,22 @@ modules translates for minutes; the translation cache makes the second run about
 - Output: `docs/hw-logs/ld16-<date>.md` with the A/B table. Time: 45 min.
 - On failure (any launch failure or token mismatch): leave opt-in, capture the failing kernel with `CUDA_FOR_INTEL_SYNC_LAUNCH=1`, dump its PTX
   (`CFI_PTX_DUMP_DIR`) and compare the merged-load output with the unmerged one in the harness.
+
+## 9. CUDA VMM gate (`CUDA_FOR_INTEL_VMM`), both GPUs
+
+- Background: [vmm.md](vmm.md). The VMM entry points are implemented on Level Zero virtual memory; the device attribute stays 0
+  unless `CUDA_FOR_INTEL_VMM=1`. Run on GPU A (Iris Xe) and GPU B (Arc B390) separately; record each.
+- Step 1, API on hardware: `powershell -NoProfile -File scripts\hwvalidate\vmm.ps1 -Ordinals 0 -Out <Out>\vmm` (3 runs). Pass: 3 of 3
+  exit 0 with `kernel=PASS copies=PASS alias=PASS`; note `granularity` and `grow_per_chunk_us`. `NOT_SUPPORTED` means the loader lacks
+  `zeVirtualMem*`: record it, the gate stays closed on that GPU.
+- Step 2, stock Ollama A/B (only after step 1 passes on that GPU): with the same run dir, model, prompt and port, run
+  `scripts\bench-subst-ollama.ps1 -RunDir <run> -Gguf <qwen2.5-0.5b-q8_0.gguf> -Tag vmm0 -Configs auto -Runs 3 -Check 12` with
+  `CUDA_FOR_INTEL_VMM` unset, then again with `$env:CUDA_FOR_INTEL_VMM='1'` and `-Tag vmm1`. Confirm CUDA was selected in both server
+  logs (`library=CUDA`, the ggml device line, no Vulkan or CPU fallback for the offloaded layers) and that the `vmm1` log's ggml device
+  line says `VMM: yes` while `vmm0` says `VMM: no`. Repeat once with a K-quant model (Llama-3.2-1B Q4_K_M).
+- Pass (make default-on for that GPU): both GPUs pass step 1; step 2 tokens identical between vmm0 and vmm1 for the check prompts;
+  no DEVICE_LOST; prefill and decode within run-to-run noise or better; peak device memory (Task Manager dedicated/shared, or the
+  server's `offloaded`/`memory` lines) not higher. Report the Vulkan backend's numbers from the same session as the baseline.
+- Output: `docs/hw-logs/vmm-<gpu>-<date>.md` (scrubbed) with the step 1 lines and the step 2 table. Time: 30 min per GPU.
+- On failure: rerun step 1 with `CUDA_FOR_INTEL_TRACE=1` and `CFI_NO_ALLOC_TOUCH` unset; the trace names the failing `zeVirtualMem*` /
+  `zePhysicalMem*` call and its status. Leave the attribute opt-in.
