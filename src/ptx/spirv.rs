@@ -670,7 +670,9 @@ impl<'a> Emitter<'a> {
         let (base_name, offset) = match (address(a), address(b)) {
             (Some(_), None) => (a, b),
             (None, Some(_)) => (b, a),
-            (None, None) => {
+            // The sum of two addresses is no address (ZLUDA `stateful_neg_offset` computes one
+            // and discards it); keep it as a plain 64-bit integer.
+            (None, None) | (Some(_), Some(_)) => {
                 let a = self.integer(a, Kind::B64)?;
                 let b = self.integer(b, Kind::B64)?;
                 let id = self.builder.i_add(self.u64_type, None, a, b)?;
@@ -678,9 +680,6 @@ impl<'a> Emitter<'a> {
                     id,
                     kind: Kind::B64,
                 });
-            }
-            (Some(_), Some(_)) => {
-                return Err(Error::new("adding two PTX addresses is unsupported"));
             }
         };
         let offset = self.integer(offset, Kind::B64)?;

@@ -57,6 +57,20 @@ jobs:
         run: cargo test --release --locked --manifest-path tests/ptx_corpus/harness/Cargo.toml
       - name: PTX corpus matches expected_status.tsv
         run: sh tests/ptx_corpus/run.sh
+  ptx-tests-sim:
+    name: vosen/ptx_tests on the simulator (macOS)
+    # ptx_tests (MIT OR Apache-2.0) is cloned at the commit tests/ptx_tests/run.sh pins, built with
+    # RUSTC_BOOTSTRAP=1, and pointed at simcuda (translator + SPIR-V simulator behind 12 Driver API calls).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - name: ptx_tests match tests/ptx_tests/expected_status.tsv (default and CFI_EXACT_FTZ=1)
+        run: |
+          sh tests/ptx_tests/run.sh
+          sh tests/ptx_tests/run.sh --exact-ftz
   coverage-docs:
     name: generated coverage docs are current
     runs-on: ubuntu-latest

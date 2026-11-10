@@ -1,0 +1,23 @@
+[package]
+name = "cfi-simcuda"
+version = "0.0.0"
+edition = "2024"
+publish = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+# The 12 Driver API calls vosen/ptx_tests makes, backed by the translator (src/ptx.rs) and the
+# SPIR-V simulator (src/ptx/sim.rs). Builds on macOS, where the main crate does not.
+[lib]
+name = "simcuda"
+crate-type = ["cdylib"]
+
+[dependencies]
+rspirv = "0.13"
+
+[profile.release]
+debug = false
+panic = "unwind"
+
+[workspace]

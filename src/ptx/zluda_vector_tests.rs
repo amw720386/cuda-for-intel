@@ -23,7 +23,6 @@ const EXPECTED_FAILURES: &[(&str, &str)] = &[
     ("mul_ftz", ".ftz is ignored, denormals are not flushed (docs/translator-coverage.md)"),
     ("reg_local", "non-standard `reg + imm` value operand (st.u64 [x], temp + 1)"),
     ("sqrt_rn_ftz", ".ftz is ignored, denormals are not flushed (docs/translator-coverage.md)"),
-    ("stateful_neg_offset", "adding (or subtracting) two global addresses is rejected, even when the result is dead"),
 ];
 
 /// Kernels that access memory outside their buffers on 64 threads. ZLUDA's harness does not

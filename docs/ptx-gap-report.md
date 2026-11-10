@@ -128,3 +128,11 @@ Closed gaps:
 - **tex/surf/sured/txq**: fail early with `unsupported PTX instruction: ... need bindless images`; no bindless image extension is exposed by the OpenCL-environment SPIR-V target, so image2d lowering is not possible without a host-side handle table.
 
 Still open: `mma.sp` sparse (metadata layout not validated), s4/b1 `mma`, legacy `mma.m8n8k4` f16 (sm_70), `redux.f32`, fp4/fp6 converts, `atom.cas.b128`, `multimem`, mbarrier/TMA/wgmma/tcgen05 (Hopper/Blackwell, by design), `cvta.to.shared` of an untyped generic pointer, ZLUDA control-flow torture files. Semantics worth knowing: counted barriers need all participating subgroups resident (true on Xe), `%dynamic_smem_size` is not the launch value, f64 directed rounding does not model overflow to the largest finite value, and tensor-core results differ from hardware only in summation order.
+
+## 7. vosen/ptx_tests (roadmap item 1, branch `ptx-tests`)
+
+ZLUDA's per-instruction suite now runs on the simulator (`tests/ptx_tests/run.sh`) and on the B390
+(`scripts/hwvalidate/ptx_tests.ps1`): 668 of 787 cases pass on the GPU by default and 780 with `CFI_EXACT_FTZ=1`.
+The cases left and the 12 translator bugs it found are in `hw-logs/ptx-tests-2026-11-09.md`; `tests/ptx_tests/expected_status.tsv`
+gives each remaining case its reason.
+
