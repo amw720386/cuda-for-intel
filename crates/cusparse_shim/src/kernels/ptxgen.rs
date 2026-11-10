@@ -16,6 +16,15 @@
 //!
 //! The index module (32-bit only) holds `coo2csr`, `csr2coo` and `identity`.
 //!
+//! The product module (one per value type; index widths are runtime flags) holds the
+//! CSR x CSR product (`cusparseSpGEMM`) and the CSR sum (`csrgeam2`), one thread per row of C:
+//! * `rowbound` - products per row, `sum_{p in A(i,:)} nnz(B(col_A[p], :))`;
+//! * `expand` - the row's products `alpha a b` inserted into a sorted, duplicate-free list
+//!   (binary search, shift) in its segment of the work buffer; writes its length;
+//! * `compact` - copies each row's list into C at C's row offset (index base and width of C);
+//! * `geamcount` / `geam` - the merged pattern size and values of `alpha A + beta B` for
+//!   sorted 32-bit CSR rows.
+//!
 //! Every parameter is a `.u64` slot (the launcher passes 8-byte values); scalars travel as
 //! their bit patterns, and a nonzero `*_ptr` parameter makes the kernel load the scalar from
 //! device memory (`CUSPARSE_POINTER_MODE_DEVICE`). Dense operands are addressed as
@@ -461,6 +470,199 @@ fn identity() -> String {
     k.finish()
 }
 
+pub const ROWBOUND: &str = "rowbound";
+pub const EXPAND: &str = "expand";
+pub const COMPACT: &str = "compact";
+pub const GEAMCOUNT: &str = "geamcount";
+pub const GEAM: &str = "geam";
+/// Product-module kernels and their parameter counts.
+pub const PRODUCT_KERNELS: [(&str, usize); 5] = [(ROWBOUND, 8), (EXPAND, 16), (COMPACT, 10), (GEAMCOUNT, 8), (GEAM, 17)];
+
+pub fn product_name(stem: &str, double: bool) -> String {
+    format!("cfi_sp_{stem}_{}", if double { "f64" } else { "f32" })
+}
+
+impl K {
+    /// `%rd<dst>` = index array `%rd<arr>`[`%rd<i>`] minus `%rd<base>`, 64-bit elements when
+    /// `%p<wide>`, else 32-bit.
+    fn ld_index_rt(&mut self, dst: u32, arr: u32, i: u32, wide: u32, base: u32) {
+        let (w, d) = (self.label("w"), self.label("wd"));
+        self.l(&format!("@%p{wide} bra {w};\nmad.lo.u64 %rd94, %rd{i}, 4, %rd{arr};\nld.global.u32 %r5, [%rd94];\ncvt.u64.u32 %rd{dst}, %r5;\nbra {d};\n{w}:\nmad.lo.u64 %rd94, %rd{i}, 8, %rd{arr};\nld.global.u64 %rd{dst}, [%rd94];\n{d}:\nsub.u64 %rd{dst}, %rd{dst}, %rd{base};"));
+    }
+
+    /// Store `%rd<v>` + `%rd<base>` into index array `%rd<arr>`[`%rd<i>`] (width by `%p<wide>`).
+    fn st_index_rt(&mut self, arr: u32, i: u32, v: u32, wide: u32, base: u32) {
+        let (w, d) = (self.label("sw"), self.label("swd"));
+        self.l(&format!("add.u64 %rd93, %rd{v}, %rd{base};\n@%p{wide} bra {w};\nmad.lo.u64 %rd94, %rd{i}, 4, %rd{arr};\ncvt.u32.u64 %r5, %rd93;\nst.global.u32 [%rd94], %r5;\nbra {d};\n{w}:\nmad.lo.u64 %rd94, %rd{i}, 8, %rd{arr};\nst.global.u64 [%rd94], %rd93;\n{d}:"));
+    }
+
+    /// `%p<dst>` = bit `bit` of `%rd<flags>`.
+    fn flag(&mut self, dst: u32, flags: u32, bit: u32) {
+        self.l(&format!("and.b64 %rd91, %rd{flags}, {};\nsetp.ne.u64 %p{dst}, %rd91, 0;", 1u64 << bit));
+    }
+}
+
+// rowbound: 0 a_ptr, 1 a_idx, 2 b_ptr, 3 out (u64 per row), 4 m, 5 flags (1 a_ptr64,
+// 2 a_idx64, 4 b_ptr64), 6 a_base, 7 b_base.
+fn rowbound(double: bool) -> String {
+    let mut k = K::new(&product_name(ROWBOUND, double), 8, double);
+    k.gid(20, 21);
+    k.l("setp.ge.u64 %p1, %rd20, %rd4;\n@%p1 bra $L_done;");
+    for p in [0, 1, 2, 3] {
+        k.ptr(p, 21, None, 0);
+    }
+    k.flag(2, 5, 0);
+    k.flag(3, 5, 1);
+    k.flag(4, 5, 2);
+    k.l("add.u64 %rd22, %rd20, 1;");
+    k.ld_index_rt(23, 0, 20, 2, 6);
+    k.ld_index_rt(24, 0, 22, 2, 6);
+    k.l("mov.u64 %rd25, 0;\n$L_p:\nsetp.ge.u64 %p5, %rd23, %rd24;\n@%p5 bra $L_st;");
+    k.ld_index_rt(26, 1, 23, 3, 6);
+    k.l("add.u64 %rd27, %rd26, 1;");
+    k.ld_index_rt(28, 2, 26, 4, 7);
+    k.ld_index_rt(29, 2, 27, 4, 7);
+    k.l("sub.u64 %rd29, %rd29, %rd28;\nadd.u64 %rd25, %rd25, %rd29;\nadd.u64 %rd23, %rd23, 1;\nbra $L_p;");
+    k.l("$L_st:\nmad.lo.u64 %rd30, %rd20, 8, %rd3;\nst.global.u64 [%rd30], %rd25;");
+    k.finish()
+}
+
+// expand: 0 a_ptr, 1 a_idx, 2 a_val, 3 b_ptr, 4 b_idx, 5 b_val, 6 off (u64 per row), 7 tcol
+// (u64 per slot), 8 tval, 9 count (u64 per row), 10 m, 11 flags (1 a_ptr64, 2 a_idx64,
+// 4 b_ptr64, 8 b_idx64), 12 a_base, 13 b_base, 14 alpha bits, 15 alpha_ptr.
+fn expand(double: bool) -> String {
+    let mut k = K::new(&product_name(EXPAND, double), 16, double);
+    let (t, sz) = (k.t, k.sz);
+    k.gid(20, 21);
+    k.l("setp.ge.u64 %p1, %rd20, %rd10;\n@%p1 bra $L_done;");
+    for p in 0..10 {
+        k.ptr(p, 21, None, 0);
+    }
+    k.flag(2, 11, 0);
+    k.flag(3, 11, 1);
+    k.flag(4, 11, 2);
+    k.flag(5, 11, 3);
+    k.scalar(1, 14, 15);
+    // segment base: tcol + off[i] * 8, tval + off[i] * sz; c = %rd40
+    k.l(&format!("mad.lo.u64 %rd30, %rd20, 8, %rd6;\nld.global.u64 %rd31, [%rd30];\nmad.lo.u64 %rd32, %rd31, 8, %rd7;\nmad.lo.u64 %rd33, %rd31, {sz}, %rd8;\nmov.u64 %rd40, 0;"));
+    k.l("add.u64 %rd22, %rd20, 1;");
+    k.ld_index_rt(23, 0, 20, 2, 12);
+    k.ld_index_rt(24, 0, 22, 2, 12);
+    k.l("$L_p:\nsetp.ge.u64 %p6, %rd23, %rd24;\n@%p6 bra $L_end;");
+    k.ld_index_rt(26, 1, 23, 3, 12);
+    k.val_addr(34, 2, 23);
+    k.l(&format!("ld.global.{t} %f2, [%rd34];\nmul.rn.{t} %f2, %f2, %f1;\nadd.u64 %rd27, %rd26, 1;"));
+    k.ld_index_rt(28, 3, 26, 4, 13);
+    k.ld_index_rt(29, 3, 27, 4, 13);
+    k.l("$L_q:\nsetp.ge.u64 %p7, %rd28, %rd29;\n@%p7 bra $L_qd;");
+    k.ld_index_rt(35, 4, 28, 5, 13);
+    k.val_addr(36, 5, 28);
+    k.l(&format!("ld.global.{t} %f3, [%rd36];\nmul.rn.{t} %f3, %f3, %f2;"));
+    // lower bound of col %rd35 in tcol[0..c)
+    k.l("mov.u64 %rd41, 0;\nmov.u64 %rd42, %rd40;\n$L_bs:\nsetp.ge.u64 %p8, %rd41, %rd42;\n@%p8 bra $L_bf;\nadd.u64 %rd43, %rd41, %rd42;\nshr.u64 %rd43, %rd43, 1;\nmad.lo.u64 %rd44, %rd43, 8, %rd32;\nld.global.u64 %rd45, [%rd44];\nsetp.lt.u64 %p9, %rd45, %rd35;\nadd.u64 %rd46, %rd43, 1;\nselp.b64 %rd41, %rd46, %rd41, %p9;\nselp.b64 %rd42, %rd42, %rd43, %p9;\nbra $L_bs;\n$L_bf:");
+    // equal column: accumulate
+    k.l(&format!("setp.ge.u64 %p8, %rd41, %rd40;\n@%p8 bra $L_ins;\nmad.lo.u64 %rd44, %rd41, 8, %rd32;\nld.global.u64 %rd45, [%rd44];\nsetp.ne.u64 %p9, %rd45, %rd35;\n@%p9 bra $L_ins;\nmad.lo.u64 %rd47, %rd41, {sz}, %rd33;\nld.global.{t} %f4, [%rd47];\nadd.rn.{t} %f4, %f4, %f3;\nst.global.{t} [%rd47], %f4;\nbra $L_qn;"));
+    // shift [lo, c) up by one and insert
+    k.l(&format!("$L_ins:\nmov.u64 %rd48, %rd40;\n$L_sh:\nsetp.le.u64 %p8, %rd48, %rd41;\n@%p8 bra $L_put;\nsub.u64 %rd49, %rd48, 1;\nmad.lo.u64 %rd44, %rd49, 8, %rd32;\nld.global.u64 %rd45, [%rd44];\nst.global.u64 [%rd44+8], %rd45;\nmad.lo.u64 %rd47, %rd49, {sz}, %rd33;\nld.global.{t} %f4, [%rd47];\nst.global.{t} [%rd47+{sz}], %f4;\nmov.u64 %rd48, %rd49;\nbra $L_sh;"));
+    k.l(&format!("$L_put:\nmad.lo.u64 %rd44, %rd41, 8, %rd32;\nst.global.u64 [%rd44], %rd35;\nmad.lo.u64 %rd47, %rd41, {sz}, %rd33;\nst.global.{t} [%rd47], %f3;\nadd.u64 %rd40, %rd40, 1;"));
+    k.l("$L_qn:\nadd.u64 %rd28, %rd28, 1;\nbra $L_q;\n$L_qd:\nadd.u64 %rd23, %rd23, 1;\nbra $L_p;");
+    k.l("$L_end:\nmad.lo.u64 %rd30, %rd20, 8, %rd9;\nst.global.u64 [%rd30], %rd40;");
+    k.finish()
+}
+
+// compact: 0 off, 1 tcol, 2 tval, 3 count, 4 c_ptr, 5 c_idx, 6 c_val, 7 m, 8 flags (1 c_ptr64,
+// 2 c_idx64), 9 c_base.
+fn compact(double: bool) -> String {
+    let mut k = K::new(&product_name(COMPACT, double), 10, double);
+    let (t, sz) = (k.t, k.sz);
+    k.gid(20, 21);
+    k.l("setp.ge.u64 %p1, %rd20, %rd7;\n@%p1 bra $L_done;");
+    for p in 0..7 {
+        k.ptr(p, 21, None, 0);
+    }
+    k.flag(2, 8, 0);
+    k.flag(3, 8, 1);
+    k.l(&format!("mad.lo.u64 %rd30, %rd20, 8, %rd0;\nld.global.u64 %rd31, [%rd30];\nmad.lo.u64 %rd32, %rd31, 8, %rd1;\nmad.lo.u64 %rd33, %rd31, {sz}, %rd2;\nmad.lo.u64 %rd30, %rd20, 8, %rd3;\nld.global.u64 %rd34, [%rd30];"));
+    k.ld_index_rt(35, 4, 20, 2, 9);
+    k.l("mov.u64 %rd36, 0;\n$L_c:\nsetp.ge.u64 %p4, %rd36, %rd34;\n@%p4 bra $L_done;\nmad.lo.u64 %rd37, %rd36, 8, %rd32;\nld.global.u64 %rd38, [%rd37];\nadd.u64 %rd39, %rd35, %rd36;");
+    k.st_index_rt(5, 39, 38, 3, 9);
+    k.l(&format!("mad.lo.u64 %rd40, %rd36, {sz}, %rd33;\nld.global.{t} %f1, [%rd40];"));
+    k.val_addr(41, 6, 39);
+    k.l(&format!("st.global.{t} [%rd41], %f1;\nadd.u64 %rd36, %rd36, 1;\nbra $L_c;"));
+    k.finish()
+}
+
+// geamcount: 0 a_ptr, 1 a_idx, 2 b_ptr, 3 b_idx, 4 out (u64 per row), 5 m, 6 a_base, 7 b_base.
+// geam: 0 a_ptr, 1 a_idx, 2 a_val, 3 b_ptr, 4 b_idx, 5 b_val, 6 c_ptr, 7 c_idx, 8 c_val, 9 m,
+// 10 a_base, 11 b_base, 12 c_base, 13 alpha, 14 alpha_ptr, 15 beta, 16 beta_ptr. 32-bit
+// indices, sorted rows; the merge walks both rows once.
+fn geam(double: bool, values: bool) -> String {
+    let name = product_name(if values { GEAM } else { GEAMCOUNT }, double);
+    let mut k = K::new(&name, if values { 17 } else { 8 }, double);
+    let t = k.t;
+    let (ap, ai, bp, bi) = if values { (0, 1, 3, 4) } else { (0, 1, 2, 3) };
+    let (abase, bbase, m) = if values { (10, 11, 9) } else { (6, 7, 5) };
+    k.gid(20, 21);
+    k.l(&format!("setp.ge.u64 %p1, %rd20, %rd{m};\n@%p1 bra $L_done;"));
+    for p in 0..if values { 9 } else { 5 } {
+        k.ptr(p, 21, None, 0);
+    }
+    if values {
+        k.scalar(1, 13, 14);
+        k.scalar(2, 15, 16);
+    }
+    k.l("add.u64 %rd22, %rd20, 1;");
+    k.ld_index(23, ap, 20, false, abase);
+    k.ld_index(24, ap, 22, false, abase);
+    k.ld_index(25, bp, 20, false, bbase);
+    k.ld_index(26, bp, 22, false, bbase);
+    if values {
+        k.ld_index(27, 6, 20, false, 12);
+    }
+    // %rd28 = out count; big = u64 max for an exhausted row
+    k.l("mov.u64 %rd28, 0;\nmov.u64 %rd29, 0;\nnot.b64 %rd29, %rd29;\n$L_m:\nsetp.ge.u64 %p2, %rd23, %rd24;\nsetp.ge.u64 %p3, %rd25, %rd26;\nand.pred %p4, %p2, %p3;\n@%p4 bra $L_end;");
+    k.l("mov.u64 %rd30, %rd29;\n@%p2 bra $L_na;");
+    k.ld_index(30, ai, 23, false, abase);
+    k.l("$L_na:\nmov.u64 %rd31, %rd29;\n@%p3 bra $L_nb;");
+    k.ld_index(31, bi, 25, false, bbase);
+    k.l("$L_nb:\nmin.u64 %rd32, %rd30, %rd31;\nsetp.eq.u64 %p5, %rd30, %rd32;\nsetp.eq.u64 %p6, %rd31, %rd32;");
+    if values {
+        let z = k.zero();
+        k.l(&format!("mov.{t} %f3, {z};\n@!%p5 bra $L_va;"));
+        k.val_addr(33, 2, 23);
+        k.l(&format!("ld.global.{t} %f4, [%rd33];\nmul.rn.{t} %f3, %f4, %f1;\n$L_va:\n@!%p6 bra $L_vb;"));
+        k.val_addr(33, 5, 25);
+        k.l(&format!("ld.global.{t} %f4, [%rd33];\nfma.rn.{t} %f3, %f4, %f2, %f3;\n$L_vb:\nadd.u64 %rd34, %rd27, %rd28;\nadd.u64 %rd35, %rd32, %rd12;\ncvt.u32.u64 %r7, %rd35;\nmad.lo.u64 %rd36, %rd34, 4, %rd7;\nst.global.u32 [%rd36], %r7;"));
+        k.val_addr(37, 8, 34);
+        k.l(&format!("st.global.{t} [%rd37], %f3;"));
+    }
+    k.l("@%p5 add.u64 %rd23, %rd23, 1;\n@%p6 add.u64 %rd25, %rd25, 1;\nadd.u64 %rd28, %rd28, 1;\nbra $L_m;\n$L_end:");
+    if !values {
+        k.l("mad.lo.u64 %rd38, %rd20, 8, %rd4;\nst.global.u64 [%rd38], %rd28;");
+    }
+    k.finish()
+}
+
+fn product(stem: &str, double: bool) -> String {
+    match stem {
+        ROWBOUND => rowbound(double),
+        EXPAND => expand(double),
+        COMPACT => compact(double),
+        GEAMCOUNT => geam(double, false),
+        _ => geam(double, true),
+    }
+}
+
+/// The product module of one value type.
+pub fn product_module(double: bool) -> String {
+    let mut s = String::from(HEAD);
+    for (stem, _) in PRODUCT_KERNELS {
+        s += &product(stem, double);
+        s.push('\n');
+    }
+    s
+}
+
 pub fn index_module() -> String {
     format!("{HEAD}{}\n{}\n{}\n", coo2csr(), csr2coo(), identity())
 }
@@ -476,5 +678,10 @@ pub fn all_entries() -> Vec<(String, String, usize)> {
     out.push((COO2CSR.to_owned(), format!("{HEAD}{}", coo2csr()), INDEX_PARAMS));
     out.push((CSR2COO.to_owned(), format!("{HEAD}{}", csr2coo()), INDEX_PARAMS));
     out.push((IDENTITY.to_owned(), format!("{HEAD}{}", identity()), INDEX_PARAMS));
+    for double in [false, true] {
+        for (stem, n) in PRODUCT_KERNELS {
+            out.push((product_name(stem, double), format!("{HEAD}{}", product(stem, double)), n));
+        }
+    }
     out
 }

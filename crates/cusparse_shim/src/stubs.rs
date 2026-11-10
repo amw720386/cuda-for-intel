@@ -229,10 +229,6 @@ pub extern "system" fn cusparseDcsr2gebsr_bufferSizeExt() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDcsrcolor() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseDcsrgeam2() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseDcsrgeam2_bufferSizeExt() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseDcsric02() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseDcsric02_analysis() -> i32 { 10 }
@@ -417,10 +413,6 @@ pub extern "system" fn cusparseScsr2gebsr_bufferSizeExt() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseScsrcolor() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseScsrgeam2() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseScsrgeam2_bufferSizeExt() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseScsric02() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseScsric02_analysis() -> i32 { 10 }
@@ -485,19 +477,7 @@ pub extern "system" fn cusparseSnnz() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSnnz_compress() -> i32 { 10 }
 #[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpGEMM_compute() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpGEMM_copy() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpGEMM_createDescr() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpGEMM_destroyDescr() -> i32 { 10 }
-#[unsafe(no_mangle)]
 pub extern "system" fn cusparseSpGEMM_estimateMemory() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpGEMM_getNumProducts() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseSpGEMM_workEstimation() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseSpGEMMreuse_compute() -> i32 { 10 }
 #[unsafe(no_mangle)]
@@ -598,8 +578,6 @@ pub extern "system" fn cusparseXcscsort_bufferSizeExt() -> i32 { 10 }
 pub extern "system" fn cusparseXcsr2bsrNnz() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseXcsr2gebsrNnz() -> i32 { 10 }
-#[unsafe(no_mangle)]
-pub extern "system" fn cusparseXcsrgeam2Nnz() -> i32 { 10 }
 #[unsafe(no_mangle)]
 pub extern "system" fn cusparseXcsric02_zeroPivot() -> i32 { 10 }
 #[unsafe(no_mangle)]

@@ -16,10 +16,13 @@
 //! `cusparseCreateIdentityPermutation`, and the version and error-string queries.
 //! Values must be f32 or f64 (`CUDA_R_32F`/`CUDA_R_64F`), with the compute type equal to the
 //! value type; anything else returns `CUSPARSE_STATUS_NOT_SUPPORTED`, as does every entry
-//! point in `stubs.rs` (SpGEMM, SpSV/SpSM, csrgeam2, sorts, BSR solves, complex types).
+//! point in `stubs.rs` (SpGEMM reuse, SpSV/SpSM, complex csrgeam2, sorts, BSR solves,
+//! complex types). `cusparseSpGEMM` (CSR x CSR, op N, beta 0, f32/f64, 32- or 64-bit indices)
+//! and `cusparse{S,D}csrgeam2` (32-bit CSR with sorted rows) run on the product kernels.
 //!
-//! Execution is asynchronous on the handle's stream, like cuSPARSE. No external buffer is
-//! needed (every bufferSize query returns 0). `CFI_CUSPARSE_TRACE=1` logs each operation;
+//! Execution is asynchronous on the handle's stream, like cuSPARSE, except where cuSPARSE
+//! itself returns host-side results (SpGEMM's C size, csrgeam2's nnz), which synchronize.
+//! Only SpGEMM and csrgeam2 use external buffers; every other bufferSize query returns 0. `CFI_CUSPARSE_TRACE=1` logs each operation;
 //! `CFI_CUSPARSE_KERNEL=scalar|vector` forces the CSR kernel (default: vector when rows hold
 //! 32 or more nonzeros on average).
 #![allow(non_snake_case)]
@@ -126,6 +129,9 @@ struct Driver {
     cuModuleLoadData: unsafe extern "system" fn(*mut CUmodule, *const c_void) -> CuResult,
     cuModuleGetFunction: unsafe extern "system" fn(*mut CUfunction, CUmodule, *const c_char) -> CuResult,
     cuLaunchKernel: unsafe extern "system" fn(CUfunction, u32, u32, u32, u32, u32, u32, u32, CUstream, *mut *mut c_void, *mut *mut c_void) -> CuResult,
+    cuMemcpyDtoH_v2: unsafe extern "system" fn(*mut c_void, u64, usize) -> CuResult,
+    cuMemcpyHtoD_v2: unsafe extern "system" fn(u64, *const c_void, usize) -> CuResult,
+    cuStreamSynchronize: unsafe extern "system" fn(CUstream) -> CuResult,
 }
 
 // Function pointers into a library that is never unloaded.
@@ -160,6 +166,9 @@ fn load_driver() -> Result<Driver, i32> {
             cuModuleLoadData: sym!("cuModuleLoadData"),
             cuModuleGetFunction: sym!("cuModuleGetFunction"),
             cuLaunchKernel: sym!("cuLaunchKernel"),
+            cuMemcpyDtoH_v2: sym!("cuMemcpyDtoH_v2"),
+            cuMemcpyHtoD_v2: sym!("cuMemcpyHtoD_v2"),
+            cuStreamSynchronize: sym!("cuStreamSynchronize"),
             _lib: lib,
         })
     }
@@ -971,6 +980,326 @@ pub unsafe extern "system" fn cusparseCreateIdentityPermutation(h: *mut c_void, 
     })())
 }
 
+// ---------------------------------------------------------------------------
+// Sparse products: SpGEMM (CSR x CSR) and csrgeam2 (CSR + CSR)
+// ---------------------------------------------------------------------------
+
+fn product_function(drv: &Driver, ctx: usize, stem: &str, double: bool) -> Result<usize, i32> {
+    static CACHE: OnceLock<Mutex<HashMap<(usize, bool), Vec<usize>>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let pos = ptxgen::PRODUCT_KERNELS.iter().position(|(n, _)| *n == stem).unwrap();
+    if let Some(f) = cache.get(&(ctx, double)) {
+        return Ok(f[pos]);
+    }
+    let names: Vec<String> = ptxgen::PRODUCT_KERNELS.iter().map(|(n, _)| ptxgen::product_name(n, double)).collect();
+    let f = load_module(drv, &ptxgen::product_module(double), &names, double)?;
+    let r = f[pos];
+    cache.insert((ctx, double), f);
+    Ok(r)
+}
+
+/// One thread per row of `rows` rows.
+fn run_product(h: &Handle, stem: &str, double: bool, rows: u64, args: &[u64]) -> Result<(), i32> {
+    if rows == 0 {
+        return Ok(());
+    }
+    let drv = driver()?;
+    let ctx = context(drv)?;
+    let f = product_function(drv, ctx, stem, double)?;
+    launch_raw(drv, f, rows.div_ceil(u64::from(plan::BLOCK)), 1, plan::BLOCK, h.stream, args)
+}
+
+fn sync(h: &Handle) -> Result<&'static Driver, i32> {
+    let drv = driver()?;
+    if unsafe { (drv.cuStreamSynchronize)(h.stream as CUstream) } != 0 {
+        return Err(EXECUTION_FAILED);
+    }
+    Ok(drv)
+}
+
+fn download_u64(h: &Handle, src: u64, n: usize) -> Result<Vec<u64>, i32> {
+    let drv = sync(h)?;
+    let mut v = vec![0u64; n];
+    if n > 0 && unsafe { (drv.cuMemcpyDtoH_v2)(v.as_mut_ptr().cast(), src, n * 8) } != 0 {
+        return Err(EXECUTION_FAILED);
+    }
+    Ok(v)
+}
+
+fn upload(dst: u64, bytes: &[u8]) -> Result<(), i32> {
+    let drv = driver()?;
+    if !bytes.is_empty() && unsafe { (drv.cuMemcpyHtoD_v2)(dst, bytes.as_ptr().cast(), bytes.len()) } != 0 {
+        return Err(EXECUTION_FAILED);
+    }
+    Ok(())
+}
+
+/// `base + exclusive prefix sums` of `counts` (m + 1 entries).
+fn offsets(counts: &[u64], base: u64) -> Vec<u64> {
+    let mut out = Vec::with_capacity(counts.len() + 1);
+    let mut acc = 0u64;
+    out.push(base);
+    for &c in counts {
+        acc += c;
+        out.push(acc + base);
+    }
+    out
+}
+
+fn index_bytes(v: &[u64], wide: bool) -> Vec<u8> {
+    if wide { v.iter().flat_map(|x| x.to_le_bytes()).collect() } else { v.iter().flat_map(|&x| (x as u32).to_le_bytes()).collect() }
+}
+
+/// SpGEMM state between `workEstimation`, `compute` and `copy`.
+#[derive(Default)]
+pub struct SpGemm {
+    /// Device row offsets of the expanded products (buffer 1), and their total.
+    off: u64,
+    products: u64,
+    /// Buffer 2: sorted product lists (columns, values) and per-row lengths.
+    tcol: u64,
+    tval: u64,
+    count: u64,
+    /// C's row offsets (with C's index base) once `compute` has run.
+    c_ptr: Vec<u64>,
+}
+
+fn align8(x: u64) -> u64 {
+    x.div_ceil(8) * 8
+}
+
+/// Checks a SpGEMM call: CSR operands, op N, matching f32/f64 values and compute type, and
+/// beta = 0. Returns (A, B, C, double).
+unsafe fn spgemm_args(h: &Handle, op_a: i32, op_b: i32, beta: *const c_void, a: *const c_void, b: *const c_void, c: *mut c_void, compute: i32) -> Result<(&'static SpMat, &'static SpMat, &'static mut SpMat, bool), i32> {
+    let a = unsafe { obj::<SpMat>(a) }?;
+    let b = unsafe { obj::<SpMat>(b) }?;
+    let c = unsafe { obj::<SpMat>(c) }?;
+    if op_a != plan::OP_N || op_b != plan::OP_N {
+        return Err(NOT_SUPPORTED);
+    }
+    if [a.format, b.format, c.format].iter().any(|&f| f != plan::FORMAT_CSR) || a.batch > 1 || b.batch > 1 {
+        return Err(NOT_SUPPORTED);
+    }
+    let double = match compute {
+        plan::R_32F => false,
+        plan::R_64F => true,
+        _ => return Err(NOT_SUPPORTED),
+    };
+    let vt = if double { plan::R_64F } else { plan::R_32F };
+    if a.val_ty != vt || b.val_ty != vt || c.val_ty != vt {
+        return Err(NOT_SUPPORTED);
+    }
+    if a.cols != b.rows || c.rows != a.rows || c.cols != b.cols {
+        return Err(INVALID_VALUE);
+    }
+    // beta * C is not supported (cuSPARSE's own SpGEMM requires beta = 0 as well)
+    if beta.is_null() {
+        return Err(INVALID_VALUE);
+    }
+    if h.pointer_mode == 0 {
+        let zero = unsafe { if double { beta.cast::<f64>().read_unaligned() == 0.0 } else { beta.cast::<f32>().read_unaligned() == 0.0 } };
+        if !zero {
+            return Err(NOT_SUPPORTED);
+        }
+    }
+    Ok((a, b, c, double))
+}
+
+fn wide(ty: i32) -> bool {
+    ty == plan::INDEX_64I
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseSpGEMM_createDescr(out: *mut *mut c_void) -> i32 {
+    unsafe { create(out, Ok(SpGemm::default())) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseSpGEMM_destroyDescr(d: *mut c_void) -> i32 {
+    unsafe { destroy::<SpGemm>(d) }
+}
+
+/// First phase: products per row of C (buffer 1 = m + 1 u64 offsets).
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseSpGEMM_workEstimation(h: *mut c_void, op_a: i32, op_b: i32, alpha: *const c_void, a: *const c_void, b: *const c_void, beta: *const c_void, c: *mut c_void, compute: i32, _alg: i32, d: *mut c_void, size1: *mut usize, buffer1: *mut c_void) -> i32 {
+    status((|| {
+        let h = unsafe { handle(h) }?;
+        let (a, b, _c, double) = unsafe { spgemm_args(h, op_a, op_b, beta, a, b, c, compute) }?;
+        let g = unsafe { obj::<SpGemm>(d) }?;
+        if size1.is_null() || alpha.is_null() {
+            return Err(INVALID_VALUE);
+        }
+        let need = (a.rows as usize + 1) * 8;
+        if buffer1.is_null() {
+            return unsafe { put(size1, need) };
+        }
+        if unsafe { *size1 } < need {
+            return Err(INVALID_VALUE);
+        }
+        let m = a.rows as u64;
+        let flags = u64::from(wide(a.ptr_ty)) | u64::from(wide(a.idx_ty)) << 1 | u64::from(wide(b.ptr_ty)) << 2;
+        let buf = buffer1 as u64;
+        run_product(h, ptxgen::ROWBOUND, double, m, &[a.ptr, a.idx, b.ptr, buf, m, flags, a.base as u64, b.base as u64])?;
+        let bound = download_u64(h, buf, m as usize)?;
+        let off = offsets(&bound, 0);
+        upload(buf, &index_bytes(&off, true))?;
+        g.off = buf;
+        g.products = off[m as usize];
+        trace!("SpGEMM workEstimation {}x{} * {}x{}: {} products", a.rows, a.cols, b.rows, b.cols, g.products);
+        Ok(())
+    })())
+}
+
+/// Second phase: each row's sorted, merged product list in buffer 2; C's size.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseSpGEMM_compute(h: *mut c_void, op_a: i32, op_b: i32, alpha: *const c_void, a: *const c_void, b: *const c_void, beta: *const c_void, c: *mut c_void, compute: i32, _alg: i32, d: *mut c_void, size2: *mut usize, buffer2: *mut c_void) -> i32 {
+    status((|| {
+        let h = unsafe { handle(h) }?;
+        let (a, b, c, double) = unsafe { spgemm_args(h, op_a, op_b, beta, a, b, c, compute) }?;
+        let g = unsafe { obj::<SpGemm>(d) }?;
+        if size2.is_null() || alpha.is_null() || g.off == 0 {
+            return Err(INVALID_VALUE);
+        }
+        let es = if double { 8 } else { 4 };
+        let m = a.rows as u64;
+        let tval = g.products * 8;
+        let count = align8(tval + g.products * es);
+        let need = (count + m * 8).max(8) as usize;
+        if buffer2.is_null() {
+            return unsafe { put(size2, need) };
+        }
+        if unsafe { *size2 } < need {
+            return Err(INVALID_VALUE);
+        }
+        let buf = buffer2 as u64;
+        (g.tcol, g.tval, g.count) = (buf, buf + tval, buf + count);
+        let sc = unsafe { scalars(h, double, alpha, alpha) }?;
+        let flags = u64::from(wide(a.ptr_ty)) | u64::from(wide(a.idx_ty)) << 1 | u64::from(wide(b.ptr_ty)) << 2 | u64::from(wide(b.idx_ty)) << 3;
+        run_product(h, ptxgen::EXPAND, double, m, &[a.ptr, a.idx, a.val, b.ptr, b.idx, b.val, g.off, g.tcol, g.tval, g.count, m, flags, a.base as u64, b.base as u64, sc.alpha, sc.alpha_ptr])?;
+        let counts = download_u64(h, g.count, m as usize)?;
+        g.c_ptr = offsets(&counts, c.base as u64);
+        c.nnz = (g.c_ptr[m as usize] - c.base as u64) as i64;
+        trace!("SpGEMM compute: C {}x{} nnz={}", c.rows, c.cols, c.nnz);
+        Ok(())
+    })())
+}
+
+/// Third phase: C's row offsets, columns and values (after `cusparseCsrSetPointers`).
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseSpGEMM_copy(h: *mut c_void, op_a: i32, op_b: i32, alpha: *const c_void, a: *const c_void, b: *const c_void, beta: *const c_void, c: *mut c_void, compute: i32, _alg: i32, d: *mut c_void) -> i32 {
+    status((|| {
+        let h = unsafe { handle(h) }?;
+        let (a, _b, c, double) = unsafe { spgemm_args(h, op_a, op_b, beta, a, b, c, compute) }?;
+        let g = unsafe { obj::<SpGemm>(d) }?;
+        if alpha.is_null() || g.c_ptr.len() != a.rows as usize + 1 {
+            return Err(INVALID_VALUE);
+        }
+        if c.ptr == 0 || (c.nnz > 0 && (c.idx == 0 || c.val == 0)) {
+            return Err(INVALID_VALUE);
+        }
+        upload(c.ptr, &index_bytes(&g.c_ptr, wide(c.ptr_ty)))?;
+        let m = a.rows as u64;
+        let flags = u64::from(wide(c.ptr_ty)) | u64::from(wide(c.idx_ty)) << 1;
+        run_product(h, ptxgen::COMPACT, double, m, &[g.off, g.tcol, g.tval, g.count, c.ptr, c.idx, c.val, m, flags, c.base as u64])
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseSpGEMM_getNumProducts(d: *mut c_void, products: *mut i64) -> i32 {
+    status(unsafe { obj::<SpGemm>(d) }.and_then(|g| unsafe { put(products, g.products as i64) }))
+}
+
+/// Legacy-descriptor index base (general matrices only).
+unsafe fn descr_base(d: *const c_void) -> Result<u64, i32> {
+    let m = unsafe { obj::<MatDescr>(d) }?;
+    if m.ty != 0 {
+        return Err(MATRIX_TYPE_NOT_SUPPORTED);
+    }
+    Ok(m.base as u64)
+}
+
+/// Bytes of csrgeam2's buffer: one u64 count per row.
+fn geam_buffer(m: c_int) -> usize {
+    (m.max(0) as usize).max(1) * 8
+}
+
+unsafe fn geam_buffer_size(m: c_int, n: c_int, size: *mut usize) -> i32 {
+    if m < 0 || n < 0 {
+        return INVALID_VALUE;
+    }
+    status(unsafe { put(size, geam_buffer(m)) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseScsrgeam2_bufferSizeExt(_h: *mut c_void, m: c_int, n: c_int, _alpha: *const f32, _da: *const c_void, _nnza: c_int, _va: *const f32, _pa: *const c_int, _ia: *const c_int, _beta: *const f32, _db: *const c_void, _nnzb: c_int, _vb: *const f32, _pb: *const c_int, _ib: *const c_int, _dc: *const c_void, _vc: *const f32, _pc: *const c_int, _ic: *const c_int, size: *mut usize) -> i32 {
+    unsafe { geam_buffer_size(m, n, size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseDcsrgeam2_bufferSizeExt(_h: *mut c_void, m: c_int, n: c_int, _alpha: *const f64, _da: *const c_void, _nnza: c_int, _va: *const f64, _pa: *const c_int, _ia: *const c_int, _beta: *const f64, _db: *const c_void, _nnzb: c_int, _vb: *const f64, _pb: *const c_int, _ib: *const c_int, _dc: *const c_void, _vc: *const f64, _pc: *const c_int, _ic: *const c_int, size: *mut usize) -> i32 {
+    unsafe { geam_buffer_size(m, n, size) }
+}
+
+/// C's row offsets for `alpha A + beta B` and its nnz (`*nnz` on the host or the device per
+/// the pointer mode). Synchronizes the stream.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseXcsrgeam2Nnz(h: *mut c_void, m: c_int, n: c_int, da: *const c_void, _nnza: c_int, pa: *const c_int, ia: *const c_int, db: *const c_void, _nnzb: c_int, pb: *const c_int, ib: *const c_int, dc: *const c_void, pc: *mut c_int, nnz: *mut c_int, buffer: *mut c_void) -> i32 {
+    status((|| {
+        let h = unsafe { handle(h) }?;
+        if m < 0 || n < 0 || pc.is_null() || nnz.is_null() {
+            return Err(INVALID_VALUE);
+        }
+        let (ba, bb, bc) = unsafe { (descr_base(da)?, descr_base(db)?, descr_base(dc)?) };
+        if m > 0 && (pa.is_null() || pb.is_null() || buffer.is_null()) {
+            return Err(INVALID_VALUE);
+        }
+        let mu = m as u64;
+        run_product(h, ptxgen::GEAMCOUNT, false, mu, &[pa as u64, ia as u64, pb as u64, ib as u64, buffer as u64, mu, ba, bb])?;
+        let counts = download_u64(h, buffer as u64, m as usize)?;
+        let off = offsets(&counts, bc);
+        let total = off[m as usize] - bc;
+        if total > i32::MAX as u64 {
+            return Err(NOT_SUPPORTED);
+        }
+        upload(pc as u64, &index_bytes(&off, false))?;
+        if h.pointer_mode == 1 {
+            upload(nnz as u64, &(total as i32).to_le_bytes())?;
+        } else {
+            unsafe { nnz.write(total as i32) };
+        }
+        trace!("csrgeam2Nnz m={m} n={n}: nnz={total}");
+        Ok(())
+    })())
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn csrgeam2(double: bool, h: *mut c_void, m: c_int, n: c_int, alpha: *const c_void, da: *const c_void, pa: *const c_int, ia: *const c_int, va: *const c_void, beta: *const c_void, db: *const c_void, pb: *const c_int, ib: *const c_int, vb: *const c_void, dc: *const c_void, pc: *const c_int, ic: *mut c_int, vc: *mut c_void) -> i32 {
+    status((|| {
+        let h = unsafe { handle(h) }?;
+        if m < 0 || n < 0 {
+            return Err(INVALID_VALUE);
+        }
+        let (ba, bb, bc) = unsafe { (descr_base(da)?, descr_base(db)?, descr_base(dc)?) };
+        let sc = unsafe { scalars(h, double, alpha, beta) }?;
+        if m > 0 && (pa.is_null() || pb.is_null() || pc.is_null()) {
+            return Err(INVALID_VALUE);
+        }
+        let mu = m as u64;
+        trace!("{}csrgeam2 m={m} n={n}", if double { "D" } else { "S" });
+        run_product(h, ptxgen::GEAM, double, mu, &[pa as u64, ia as u64, va as u64, pb as u64, ib as u64, vb as u64, pc as u64, ic as u64, vc as u64, mu, ba, bb, bc, sc.alpha, sc.alpha_ptr, sc.beta, sc.beta_ptr])
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseScsrgeam2(h: *mut c_void, m: c_int, n: c_int, alpha: *const f32, da: *const c_void, _nnza: c_int, va: *const f32, pa: *const c_int, ia: *const c_int, beta: *const f32, db: *const c_void, _nnzb: c_int, vb: *const f32, pb: *const c_int, ib: *const c_int, dc: *const c_void, vc: *mut f32, pc: *mut c_int, ic: *mut c_int, _buffer: *mut c_void) -> i32 {
+    unsafe { csrgeam2(false, h, m, n, alpha.cast(), da, pa, ia, va.cast(), beta.cast(), db, pb, ib, vb.cast(), dc, pc, ic, vc.cast()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn cusparseDcsrgeam2(h: *mut c_void, m: c_int, n: c_int, alpha: *const f64, da: *const c_void, _nnza: c_int, va: *const f64, pa: *const c_int, ia: *const c_int, beta: *const f64, db: *const c_void, _nnzb: c_int, vb: *const f64, pb: *const c_int, ib: *const c_int, dc: *const c_void, vc: *mut f64, pc: *mut c_int, ic: *mut c_int, _buffer: *mut c_void) -> i32 {
+    unsafe { csrgeam2(true, h, m, n, alpha.cast(), da, pa, ia, va.cast(), beta.cast(), db, pb, ib, vb.cast(), dc, pc, ic, vc.cast()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,8 +1447,8 @@ mod tests {
 
     #[test]
     fn everything_else_reports_not_supported() {
-        assert_eq!(stubs::cusparseSpGEMM_compute(), NOT_SUPPORTED);
-        assert_eq!(stubs::cusparseScsrgeam2(), NOT_SUPPORTED);
+        assert_eq!(stubs::cusparseSpGEMMreuse_compute(), NOT_SUPPORTED);
+        assert_eq!(stubs::cusparseCcsrgeam2(), NOT_SUPPORTED);
         assert_eq!(stubs::cusparseCbsrmm(), NOT_SUPPORTED);
     }
 
