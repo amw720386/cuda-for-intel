@@ -307,7 +307,7 @@ fn registry_accepts_every_stock_mmvq_instantiation() {
 fn mmq_q8_0_matches_reference() {
     let words = super::mmq::build(refs::Q8_0, true);
     validate(&words);
-    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0, abi: super::MmqAbi::Legacy }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     // ragged rows/cols, channels with a ratio, two samples, k not a multiple of the 4-block stage
     for (ncols_x, nrows, ncols, nch, ratio, nsamples) in [(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] {
         let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 5 + ncols as u64);
@@ -325,7 +325,7 @@ fn translated_stock_mmq_q8_0_matches_native_on_the_interpreter() {
     let entry = "_Z9mul_mat_qIL9ggml_type8ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     crate::ptx::set_dynamic_shared_bytes(65536);
     let Some((stock, params)) = translated("blob98.ptx", entry) else { return };
-    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0, abi: super::MmqAbi::Legacy }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     assert!(matches!(
         super::decide(entry, &params, &super::Switch::parse("mmq")),
         super::Decision::Substitute(_)
@@ -397,7 +397,7 @@ fn auto_policy_follows_the_measurements() {
 #[ignore = "slow: multi-tile stock mmq on the interpreter; mismatch under investigation"]
 fn translated_stock_mmq_q8_0_multi_tile_shapes() {
     crate::ptx::set_dynamic_shared_bytes(65536);
-    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0, abi: super::MmqAbi::Legacy }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     let words = super::mmq::build(refs::Q8_0, true);
     let mut failed = false;
     // (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples)
@@ -465,7 +465,7 @@ fn mmq_all_types_match_reference_bitwise() {
     for (ty, _) in MMQ_TYPES {
         let words = super::mmq::build(ty, true);
         validate(&words);
-        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+        let plan = super::Plan { kernel: super::Kernel::Mmq { ty, abi: super::MmqAbi::Legacy }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
         let shapes: &[(usize, usize, usize, usize, usize, usize)] =
             if refs::mmq_groups(ty) == 1 { &[(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] } else { &[(512, 70, 40, 2, 1, 1), (256, 65, 9, 4, 2, 2), (768, 3, 1, 1, 1, 1)] };
         for &(ncols_x, nrows, ncols, nch, ratio, nsamples) in shapes {
@@ -487,7 +487,7 @@ fn translated_stock_mmq_all_types_match_native_on_the_interpreter() {
     for (ty, blob) in MMQ_TYPES {
         let entry = format!("_Z9mul_mat_qIL9ggml_type{ty}ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
         let Some((stock, params)) = translated(blob, &entry) else { return };
-        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+        let plan = super::Plan { kernel: super::Kernel::Mmq { ty, abi: super::MmqAbi::Legacy }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
         assert!(matches!(super::decide(&entry, &params, &super::Switch::parse("mmq")), super::Decision::Substitute(_)), "type {ty}");
         let case = probe::mmq_case_ty(ty, 512, 70, 8, 1, 1, 1, 21 + u64::from(ty));
         let mut dev = Dev::default();
@@ -869,4 +869,160 @@ fn fusion_launch_words_reject_what_the_native_epilogue_lacks() {
     set_ptr(&mut scaled, 9, 0x5000); // x_scale (NVFP4)
     assert_eq!(super::fusion_launch_words(&scaled), None);
     assert_eq!(super::fusion_launch_words(&w[..43]), None);
+}
+
+// ---- Ollama 0.40 `mul_mat_q<type, mmq_x, need_check, ggml_prec, has_fusion>` ----
+
+/// Translated 0.40 stock entry from `CFI_STOCK_PTX_DIR_040` (any `.ptx` file holding it).
+fn translated_040(entry: &str) -> Option<(Vec<u32>, Vec<crate::ptx::Param>)> {
+    let dir = std::env::var_os("CFI_STOCK_PTX_DIR_040")?;
+    for e in std::fs::read_dir(&dir).ok()? {
+        let path = e.ok()?.path();
+        let Ok(source) = std::fs::read_to_string(&path) else { continue };
+        if !source.contains(&format!(".entry {entry}(")) {
+            continue;
+        }
+        let prepared = crate::ptx::prepare_source(&source).ok()?;
+        crate::ptx::set_dot_product(true);
+        let t = crate::ptx::translate_entry(&prepared, entry).unwrap_or_else(|e| panic!("{entry}: {e}"));
+        return Some((t.words, t.kernels[0].params.clone()));
+    }
+    None
+}
+
+fn mmq_040_name(ty: u32, mmq_x: u32, need_check: u32, fusion: u32) -> String {
+    format!(
+        "_Z9mul_mat_qIL9ggml_type{ty}ELi{mmq_x}ELb{need_check}EL9ggml_prec30ELb{fusion}EEvPKcS3_PKiS5_S5_PfS6_PKf11ggml_glu_opf5uint3iiiiiSA_SA_iiiSA_SA_iiiSA_"
+    )
+}
+
+/// 0.40 launch words for a legacy `MmqCase` (inverse of the hook's 39 -> 23 mapping): `tiles`
+/// is the value of the trailing uint3.
+fn mmq_040_args(case: &probe::MmqCase, x: u64, y: u64, dst: u64, tmp: u64, last: u32) -> Vec<ArgVal> {
+    let p = &case.p;
+    let qk = 32 * refs::mmq_groups(case.ty);
+    let u = |v: usize| ArgVal::U32(v as u32);
+    let fd = |d: usize| refs::fastdiv_values(d as u32).map(ArgVal::U32);
+    let mut a = vec![
+        ArgVal::Ptr(x),
+        ArgVal::Ptr(0),
+        ArgVal::Ptr(y),
+        ArgVal::Ptr(0),
+        ArgVal::Ptr(0),
+        ArgVal::Ptr(dst),
+        ArgVal::Ptr(tmp),
+        ArgVal::Ptr(0),
+        ArgVal::U32(0),
+        ArgVal::F32(0.0),
+    ];
+    a.extend(fd(p.ncols_x / qk));
+    a.extend([u(p.nrows_x), u(p.ncols_dst), u(p.stride_row_x), u(p.ncols_y), u(p.stride_col_dst)]);
+    a.extend(fd(p.channel_ratio));
+    a.extend(fd(p.nchannels_y));
+    a.extend([u(p.stride_channel_x), u(p.stride_channel_y), u(p.stride_channel_dst)]);
+    a.extend(fd(p.sample_ratio));
+    a.extend(fd(p.nsamples_y));
+    a.extend([u(p.stride_sample_x), u(p.stride_sample_y), u(p.stride_sample_dst)]);
+    a.extend(refs::fastdiv_values(last).map(ArgVal::U32));
+    a
+}
+
+fn argval_words(args: &[ArgVal]) -> Vec<u64> {
+    args.iter()
+        .map(|a| match *a {
+            ArgVal::Ptr(v) | ArgVal::U64(v) => v,
+            ArgVal::U32(v) => u64::from(v),
+            ArgVal::F32(v) => u64::from(v.to_bits()),
+        })
+        .collect()
+}
+
+#[test]
+fn mmq_v040_words_map_to_the_legacy_launch() {
+    for ty in [refs::Q8_0, refs::Q4_K] {
+        let case = probe::mmq_case_ty(ty, 512, 70, 9, 4, 2, 2, 3);
+        let v040 = argval_words(&mmq_040_args(&case, 0x1000, 0x2000, 0x3000, 0x4000, 2));
+        assert_eq!(v040.len(), super::MMQ_V040_WORDS);
+        let mut legacy = probe::launch_values(&case.args(0x1000, 0x2000, 0x3000));
+        legacy[5] = 0x4000; // tmp_fixup
+        assert_eq!(super::mmq_legacy_words(ty, &v040).map(|w| w.to_vec()), Some(legacy), "type {ty}");
+        // what the native kernel lacks stays on the translated kernel
+        for (slot, what) in [(1, "x_gate"), (7, "y_scale"), (3, "ids_dst"), (4, "expert_bounds")] {
+            let mut w = v040.clone();
+            w[slot] = 0x9000;
+            assert_eq!(super::mmq_legacy_words(ty, &w), None, "{what}");
+        }
+        assert_eq!(super::mmq_legacy_words(ty, &v040[..38]), None);
+    }
+}
+
+#[test]
+fn mmq_v040_registry_decisions() {
+    use super::{Decision, Kernel, MmqAbi, Switch, decide, mmq_fixup_v040_layout, mmq_v040_layout};
+    let mmq = Switch::parse("mmq");
+    match decide(&mmq_040_name(8, 64, 0, 0), &mmq_v040_layout(), &mmq) {
+        Decision::Substitute(p) => {
+            assert_eq!(p.kernel, Kernel::Mmq { ty: 8, abi: MmqAbi::V040 });
+            assert_eq!((p.aux, p.key.as_str()), (64, "mmq:t8"), "same native module as v0.12.6");
+        }
+        other => panic!("{other:?}"),
+    }
+    // fused gate (has_fusion) and the FP4 activation path (ggml_prec 40) stay translated
+    assert_eq!(decide(&mmq_040_name(8, 64, 0, 1), &mmq_v040_layout(), &mmq), Decision::NotApplicable);
+    let prec40 = mmq_040_name(8, 64, 0, 0).replace("ggml_prec30", "ggml_prec40");
+    assert_eq!(decide(&prec40, &mmq_v040_layout(), &mmq), Decision::NotApplicable);
+    assert!(matches!(decide(&mmq_040_name(8, 64, 0, 0), &super::mmq_layout(), &mmq), Decision::Mismatch(_)));
+    let fixup = "_Z24mul_mat_q_stream_k_fixupIL9ggml_type12ELi64ELb1EL9ggml_prec30EEvPKiS3_PfS4_5uint3iiiS5_iS5_iS5_";
+    match decide(fixup, &mmq_fixup_v040_layout(), &mmq) {
+        Decision::Substitute(p) => assert_eq!(p.kernel, Kernel::MmqFixup { ty: 12, abi: MmqAbi::V040 }),
+        other => panic!("{other:?}"),
+    }
+    // auto enables the same types as for v0.12.6
+    let auto = Switch::parse("auto");
+    assert!(matches!(decide(&mmq_040_name(8, 64, 0, 0), &mmq_v040_layout(), &auto), Decision::Substitute(_)));
+}
+
+/// The translated Ollama 0.40 stock `mul_mat_q` (one stream-k CTA covering one tile, the shape
+/// the v0.12.6 counterpart test uses) against the native kernel fed the hook's legacy words, for
+/// every supported type, and the registry against the real parameter layouts (needs
+/// `CFI_STOCK_PTX_DIR_040` with the 0.40 mul_mat_q modules, extracted locally, never committed).
+#[test]
+fn translated_stock_0_40_mmq_matches_native() {
+    use super::{Decision, Kernel, MmqAbi, Switch, decide};
+    crate::ptx::set_dynamic_shared_bytes(65536);
+    let mut ran = 0;
+    for (ty, _) in MMQ_TYPES {
+        let entry = mmq_040_name(ty, 8, 1, 0);
+        let Some((stock, params)) = translated_040(&entry) else { continue };
+        let Decision::Substitute(plan) = decide(&entry, &params, &Switch::parse("mmq")) else {
+            panic!("{entry}: registry rejects the real layout {params:?}")
+        };
+        assert_eq!(plan.kernel, Kernel::Mmq { ty, abi: MmqAbi::V040 });
+        let ncols_x = 256 * refs::mmq_groups(ty);
+        let case = probe::mmq_case_ty(ty, ncols_x, 70, 8, 1, 1, 1, 21 + u64::from(ty));
+        let mut dev = Dev::default();
+        let (xa, ya) = (dev.put(&case.x), dev.put(&case.y));
+        let n = case.dst_len();
+        let da = dev.alloc(n * 4);
+        let tmp = dev.alloc(1 << 16);
+        let args = mmq_040_args(&case, xa, ya, da, tmp, 1);
+        // the hook's mapping of these exact words is what the native kernel receives
+        let legacy = super::mmq_legacy_words(ty, &argval_words(&args)).expect("supported launch");
+        interp::run(&mut dev, &stock, &args, [1, 1, 1], [32, 8, 1]);
+        let stock_out: Vec<f32> = dev.download(da, n * 4).chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let words = super::mmq::build(ty, true);
+        let mut sim = Sim { dev: Dev::default(), words: &words };
+        let native = case.run(&mut sim, &plan).unwrap();
+        assert_eq!(&legacy[6..22], &probe::launch_values(&case.args(0, 0, 0))[6..22], "{entry}: word mapping");
+        let reference = case.reference();
+        let nmse = refs::nmse(&native, &stock_out);
+        let bad = native.iter().zip(&stock_out).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        println!("{entry}: native vs stock nmse {nmse:.2e}, {bad}/{n} bitwise differences; stock vs reference {:.2e}", refs::nmse(&stock_out, &reference));
+        assert!(nmse < 1e-9, "{entry}: nmse {nmse}");
+        assert!(stock_out.iter().any(|v| *v != 0.0));
+        ran += 1;
+    }
+    if std::env::var_os("CFI_STOCK_PTX_DIR_040").is_some() {
+        assert_eq!(ran, MMQ_TYPES.len());
+    }
 }

@@ -434,7 +434,7 @@ pub(crate) fn validate(plan: &Plan, dev: &mut impl Device) -> Result<(), String>
             }
             Ok(())
         }
-        Kernel::Mmq { ty } => {
+        Kernel::Mmq { ty, .. } => {
             let case = mmq_case_ty(ty, 256, 70, 40, 2, 1, 1, 0x3171);
             let want = case.reference();
             let got = case.run(dev, plan)?;

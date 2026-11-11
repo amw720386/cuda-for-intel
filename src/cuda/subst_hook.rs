@@ -77,6 +77,8 @@ pub(super) fn launch(
         let legacy: Vec<KernelArg>;
         // owned values of the fused epilogue words: [x_bias, gate, gate_bias, glu_op]
         let fusion_values: [u64; 4];
+        // owned legacy words of a 0.40 mul_mat_q launch
+        let mmq_words: [u64; 23];
         let native_base = match plan.kernel {
             subst::Kernel::Mmvq { abi: abi @ subst::MmvqAbi::Fused { fusion, .. }, .. } => {
                 let Some(mut words) = abi.legacy_words(args) else {
@@ -93,6 +95,19 @@ pub(super) fn launch(
                     }
                 }
                 legacy = words;
+                &legacy[..]
+            }
+            subst::Kernel::Mmq { ty, abi: subst::MmqAbi::V040 } => {
+                match subst::mmq_legacy_words(ty, &arg_values(args)) {
+                    Some(w) => mmq_words = w,
+                    None => return context.streams.launch(api, &context.backend, translated, stream, geometry, args),
+                }
+                // pointers keep 8 bytes, the 17 ints 4 (the native kernel's parameter widths)
+                legacy = mmq_words
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| KernelArg { value: (v as *const u64).cast(), size: if i < 6 { 8 } else { 4 } })
+                    .collect();
                 &legacy[..]
             }
             _ => args,
@@ -120,7 +135,9 @@ pub(super) fn launch(
             }
         } else if matches!(plan.kernel, subst::Kernel::MmqFixup { .. }) {
             // [ids, bounds, dst, tmp, ...]: only fixups of a native mul_mat_q are no-ops
-            let skip = vals.len() == 13 && context.subst.pending_fixup == Some((vals[2], vals[3]));
+            // legacy 13 words and the 0.40 21 words both start [ids, bounds, dst, tmp, ...]
+            let skip = (vals.len() == 13 || vals.len() == subst::MMQ_FIXUP_V040_WORDS)
+                && context.subst.pending_fixup == Some((vals[2], vals[3]));
             let n = context.subst.fixup_events;
             context.subst.fixup_events += 1;
             if n < 40 {

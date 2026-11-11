@@ -246,14 +246,48 @@ pub(crate) fn fusion_launch_words(words: &[u64]) -> Option<[u64; 4]> {
     (ids == 0 && shared_up == 0 && x_scale == 0 && gate_scale == 0 && gated_ok).then_some([x_bias, gate, gate_bias, glu_op])
 }
 
+/// Which `mul_mat_q` / `mul_mat_q_stream_k_fixup` signature a kernel has.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum MmqAbi {
+    /// Ollama v0.12.6: `<type, mmq_x, need_check>`, 23 launch words (fixup 13).
+    Legacy,
+    /// Ollama 0.40: `<type, mmq_x, need_check, ggml_prec, has_fusion>` with `x_gate`, `y_scale`,
+    /// `glu_op`, `glu_limit` and uint3 fastdiv triples: 39 launch words (fixup 21). Substituted
+    /// for `ggml_prec` 30 (the q8_1 activation path) without fusion; the hook maps the words to
+    /// the legacy 23 (`mmq_legacy_words`).
+    V040,
+}
+
+/// Launch words of the 0.40 `mul_mat_q` and of its stream-k fixup.
+pub(crate) const MMQ_V040_WORDS: usize = 39;
+pub(crate) const MMQ_FIXUP_V040_WORDS: usize = 21;
+
+/// The legacy 23 `mul_mat_q` launch words for a 0.40 launch (`w` = its 39 words), or `None` when
+/// the launch needs what the native kernel lacks (a fused gate matrix, scaled activations, MoE ids).
+/// fastdiv triples are `{mp, L, d}`: the plain value is `d`. `ncols_x` = blocks_per_ne00 * qk.
+/// The trailing triple (stream-k tile count) has no legacy counterpart; `ncols_max` = ncols_dst.
+pub(crate) fn mmq_legacy_words(ty: u32, w: &[u64]) -> Option<[u64; 23]> {
+    if w.len() != MMQ_V040_WORDS || w[1] != 0 || w[7] != 0 || w[3] != 0 || w[4] != 0 {
+        return None;
+    }
+    let qk = 32 * refs::mmq_groups(ty) as u64;
+    Some([
+        w[0], w[2], w[3], w[4], w[5], w[6], // x, y, ids_dst, expert_bounds, dst, tmp_fixup
+        w[12] * qk, w[13], w[14], w[15], w[16], w[17], // ncols_x, nrows_x, ncols_dst, stride_row_x, ncols_y, stride_col_dst
+        w[20], w[23], w[24], w[25], w[26], // channel_ratio, nchannels_y, stride_channel_{x,y,dst}
+        w[29], w[32], w[33], w[34], w[35], // sample_ratio, nsamples_y, stride_sample_{x,y,dst}
+        w[14], // ncols_max
+    ])
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Kernel {
     Mmvq { ty: u32, ncols: u32, abi: MmvqAbi },
     QuantizeQ81,
     /// `mul_mat_q<ty>` (any mmq_x / need_check), non-MoE only.
-    Mmq { ty: u32 },
+    Mmq { ty: u32, abi: MmqAbi },
     /// `mul_mat_q_stream_k_fixup<ty>`: skipped after a native `Mmq` launch.
-    MmqFixup { ty: u32 },
+    MmqFixup { ty: u32, abi: MmqAbi },
     /// `flash_attn_ext_f16<d, d, ..., false, false>` (tensor-core FlashAttention).
     Fattn { d: u32 },
     /// `flash_attn_stream_k_fixup<d, ...>`: skipped after a native `Fattn` launch.
@@ -278,7 +312,7 @@ const AUTO_MMQ: [u32; 6] = [refs::Q8_0, refs::Q4_0, refs::Q5_0, refs::Q4_K, refs
 pub(crate) fn auto_ok(kernel: Kernel) -> bool {
     match kernel {
         Kernel::Mmvq { .. } | Kernel::QuantizeQ81 => true,
-        Kernel::Mmq { ty } | Kernel::MmqFixup { ty } => AUTO_MMQ.contains(&ty),
+        Kernel::Mmq { ty, .. } | Kernel::MmqFixup { ty, .. } => AUTO_MMQ.contains(&ty),
         // FA-on prefill +81-88 % end to end on the B390 with CPU-identical greedy text
         // (docs/hw-logs/perf-mmvq-2026-11-09); `auto,-fattn` switches it off
         Kernel::Fattn { .. } | Kernel::FattnFixup => true,
@@ -296,6 +330,22 @@ fn mmvq_fused_layout() -> Vec<Param> {
     use Param::U32;
     let fusion = Param::Words { words: 20, align: 8, trim: 0 };
     vec![ptr(), ptr(), ptr(), fusion, ptr(), U32, u3(), U32, U32, U32, u3(), U32, U32, U32, u3(), U32, U32, U32, U32]
+}
+
+/// `mul_mat_q` of Ollama 0.40 (see `MmqAbi::V040`).
+pub(crate) fn mmq_v040_layout() -> Vec<Param> {
+    use Param::{F32, U32};
+    let mut v = vec![ptr(); 8];
+    v.extend([U32, F32, u3(), U32, U32, U32, U32, U32, u3(), u3(), U32, U32, U32, u3(), u3(), U32, U32, U32, u3()]);
+    v
+}
+
+/// `mul_mat_q_stream_k_fixup` of Ollama 0.40.
+pub(crate) fn mmq_fixup_v040_layout() -> Vec<Param> {
+    use Param::U32;
+    let mut v = vec![ptr(); 4];
+    v.extend([u3(), U32, U32, U32, u3(), U32, u3(), U32, u3()]);
+    v
 }
 
 fn quantize_layout() -> Vec<Param> {
@@ -358,8 +408,12 @@ fn layout_matches(kernel: Kernel, params: &[Param], expected: &[Param]) -> bool 
         return true;
     }
     if matches!(kernel, Kernel::Mmq { .. } | Kernel::MmqFixup { .. }) {
-        // unused pointer slots (ids, expert bounds, ...) may be typed u64
-        let lead = if matches!(kernel, Kernel::Mmq { .. }) { 6 } else { 4 };
+        // unused pointer slots (ids, expert bounds, x_gate, y_scale, ...) may be typed u64
+        let lead = match kernel {
+            Kernel::Mmq { abi: MmqAbi::V040, .. } => 8,
+            Kernel::Mmq { .. } => 6,
+            _ => 4,
+        };
         return params.len() == expected.len()
             && params.iter().zip(expected).enumerate().all(|(i, (a, b))| {
                 a == b || (i < lead && matches!(a, Param::U64 | Param::GlobalPtr))
@@ -481,12 +535,23 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
             (Kernel::Mmvq { ty: *ty as u32, ncols: *ncols as u32, abi }, mmvq_fused_layout(), "mmvq", Some(tn))
         }
         ("mul_mat_q", [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_)]) if e == "ggml_type" && mmq::supported(*ty as u32) => {
-            (Kernel::Mmq { ty: *ty as u32 }, mmq_layout(), "mmq", type_name(*ty as u32))
+            (Kernel::Mmq { ty: *ty as u32, abi: MmqAbi::Legacy }, mmq_layout(), "mmq", type_name(*ty as u32))
+        }
+        (
+            "mul_mat_q",
+            [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_), TArg::Enum(prec, 30), TArg::Int(0)],
+        ) if e == "ggml_type" && prec == "ggml_prec" && mmq::supported(*ty as u32) => {
+            (Kernel::Mmq { ty: *ty as u32, abi: MmqAbi::V040 }, mmq_v040_layout(), "mmq", type_name(*ty as u32))
+        }
+        ("mul_mat_q_stream_k_fixup", [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_), TArg::Enum(prec, 30)])
+            if e == "ggml_type" && prec == "ggml_prec" && mmq::supported(*ty as u32) =>
+        {
+            (Kernel::MmqFixup { ty: *ty as u32, abi: MmqAbi::V040 }, mmq_fixup_v040_layout(), "mmq", type_name(*ty as u32))
         }
         ("mul_mat_q_stream_k_fixup", [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_)])
             if e == "ggml_type" && mmq::supported(*ty as u32) =>
         {
-            (Kernel::MmqFixup { ty: *ty as u32 }, mmq_fixup_layout(), "mmq", type_name(*ty as u32))
+            (Kernel::MmqFixup { ty: *ty as u32, abi: MmqAbi::Legacy }, mmq_fixup_layout(), "mmq", type_name(*ty as u32))
         }
         ("quantize_q8_1", []) => (Kernel::QuantizeQ81, quantize_layout(), "quantize_q8_1", None),
         (
@@ -536,13 +601,14 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
             if matches!(abi, MmvqAbi::Fused { fusion: true, .. }) { ":fused" } else { "" }
         ),
         Kernel::QuantizeQ81 => "quantize_q8_1".to_string(),
-        Kernel::Mmq { ty } => format!("mmq:t{ty}"),
-        Kernel::MmqFixup { ty } => format!("mmq_fixup:t{ty}"),
+        // one native module per type serves both ABIs (the hook maps 0.40 launches to legacy words)
+        Kernel::Mmq { ty, .. } => format!("mmq:t{ty}"),
+        Kernel::MmqFixup { ty, .. } => format!("mmq_fixup:t{ty}"),
         Kernel::Fattn { d } => format!("fattn:d{d}:w{}", fattn::nw()),
         Kernel::FattnFixup => "fattn_fixup".to_string(),
     };
     let aux = match m.targs.as_slice() {
-        [_, TArg::Int(x), _] if matches!(kernel, Kernel::Mmq { .. } | Kernel::MmqFixup { .. }) => *x as u32,
+        [_, TArg::Int(x), ..] if matches!(kernel, Kernel::Mmq { .. } | Kernel::MmqFixup { .. }) => *x as u32,
         _ => 0,
     };
     Decision::Substitute(Plan { kernel, key, nwarps, layout_hash: layout_hash(params), aux, fast })
@@ -568,7 +634,7 @@ impl Plan {
                 if matches!(abi, MmvqAbi::Fused { fusion: true, .. }) { "_f" } else { "" }
             ),
             Kernel::QuantizeQ81 => "cfi_quantize_q8_1".to_string(),
-            Kernel::Mmq { ty } => mmq::entry_name(ty),
+            Kernel::Mmq { ty, .. } => mmq::entry_name(ty),
             Kernel::MmqFixup { .. } | Kernel::FattnFixup => String::new(),
             Kernel::Fattn { d } => fattn::entry_name(d),
         }
@@ -588,7 +654,7 @@ impl Plan {
                 mmvq::build(mmvq::Cfg { ty, ncols, nwarps, rpb: abi.rows_per_block(ty, ncols), fusion }, dot)
             }
             Kernel::QuantizeQ81 => quantize::build(dot),
-            Kernel::Mmq { ty } => mmq::build(ty, dot),
+            Kernel::Mmq { ty, .. } => mmq::build(ty, dot),
             Kernel::MmqFixup { .. } | Kernel::FattnFixup => Vec::new(),
             Kernel::Fattn { d } => fattn::build(d),
         })
