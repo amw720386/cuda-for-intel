@@ -3,7 +3,7 @@
 //! Every mode runs in a fresh context (the submission settings are read when a context is created):
 //!   (a) 1000 back-to-back trivial launches (1 block of 32 threads): host us/launch to enqueue, us/launch to completion;
 //!   (b) launch + cuStreamSynchronize round trip;
-//!   (c) a decode-shaped chain of ~700 launches per "token" (Qwen2.5-0.5B layer pattern: many 1-19 block element-wise
+//!   (c) a decode-shaped chain of 702 launches per "token" (Qwen2.5-0.5B layer pattern: many 1-19 block element-wise
 //!       launches, 128/896/4864-block matrix-vector shapes, one 151936-block lm_head), ending like ggml's decode step with
 //!       an async 4-byte device-to-host copy and cuStreamSynchronize; ms/token, host us/launch and us/launch to completion.
 //!
@@ -12,9 +12,10 @@
 //!
 //! Modes come from `CFI_SUBMIT_MODES` (`name:VAR=value,VAR=value;name2:...`; `name:` alone means no variables) and default
 //! to every mode the shim knows (see `DEFAULT_MODES`). Variables the DLL does not know leave it on its default path, so an
-//! older DLL just repeats the baseline. `batch64` needs a DLL built with `--features experimental-batching`.
+//! older DLL just repeats the baseline; each context logs its effective settings (`CUDA_FOR_INTEL_LOG_SUBMIT`, stderr) next
+//! to the mode name. `batch*` modes need a DLL built with `--features experimental-batching`.
 //!
-//!   cargo build --release --locked -p cuda-for-intel
+//!   cargo build --release --locked -p cuda-for-intel --features experimental-batching
 //!   cargo test --release --locked --test gpu hw_submit_modes -- --ignored --nocapture --test-threads=1
 use super::{Handle, library, ok, symbols, test_device};
 use std::ffi::{CString, c_void};
@@ -31,18 +32,21 @@ mul.wide.u32 %rd3, %r2, 4;\nadd.s64 %rd4, %rd2, %rd3;\n\
 ld.global.f32 %f1, [%rd4];\nadd.f32 %f2, %f1, 0f3F800000;\nst.global.f32 [%rd4], %f2;\n\
 DONE:\nret;\n}\n";
 
-/// Modes measured when `CFI_SUBMIT_MODES` is unset.
+/// Modes measured when `CFI_SUBMIT_MODES` is unset. `batch*` need `--features experimental-batching`.
 const DEFAULT_MODES: &str = "immediate:;\
+inflight0:CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS=0;\
+window:CUDA_FOR_INTEL_INFLIGHT=window;\
+batch16:CUDA_FOR_INTEL_BATCH_CAP=16,CUDA_FOR_INTEL_BATCH_US=250;\
 batch64:CUDA_FOR_INTEL_BATCH_CAP=64,CUDA_FOR_INTEL_BATCH_US=250;\
-deferred:CUDA_FOR_INTEL_SUBMIT=deferred;\
-deferred16:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_SUBMIT_CAP=16;\
-deferred256:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_SUBMIT_CAP=256";
+batch256:CUDA_FOR_INTEL_BATCH_CAP=256,CUDA_FOR_INTEL_BATCH_US=1000";
 
 /// Every variable any mode may set; cleared before each mode so modes do not leak into each other.
 const KNOWN_VARS: &[&str] = &[
     "CUDA_FOR_INTEL_BATCH_CAP",
     "CUDA_FOR_INTEL_BATCH_US",
     "CUDA_FOR_INTEL_BATCH_TIMER",
+    "CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS",
+    "CUDA_FOR_INTEL_INFLIGHT",
     "CUDA_FOR_INTEL_SUBMIT",
     "CUDA_FOR_INTEL_SUBMIT_CAP",
 ];
@@ -154,6 +158,10 @@ fn hw_submit_modes() {
         for (key, value) in &vars {
             unsafe { std::env::set_var(key, value) };
         }
+        // The DLL prints the settings the new context really uses (stderr), so a mode the DLL
+        // does not support shows up as a repeat of the baseline settings.
+        unsafe { std::env::set_var("CUDA_FOR_INTEL_LOG_SUBMIT", "1") };
+        eprintln!("[{name}]");
         let mut ctx = null_mut();
         ok!(cuCtxCreate_v2(&mut ctx, 0, test_device()));
         let mut stream = null_mut();
@@ -236,7 +244,7 @@ fn hw_submit_modes() {
         ok!(cuMemFreeHost(pinned));
         ok!(cuCtxDestroy_v2(ctx));
     }
-    for key in KNOWN_VARS {
+    for key in KNOWN_VARS.iter().chain(&["CUDA_FOR_INTEL_LOG_SUBMIT"]) {
         unsafe { std::env::remove_var(key) };
     }
 }
