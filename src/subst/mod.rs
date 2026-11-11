@@ -180,9 +180,11 @@ pub(crate) enum MmvqAbi {
     /// Ollama 0.40 (current ggml): `<type, ncols_dst, has_fusion, small_k, halve_iters>` with an
     /// 80-byte `ggml_cuda_mm_fusion_args_device` (20 words) after `ids` and a trailing `ids_stride`:
     /// 44 launch words.
-    /// Only `has_fusion = false` is substituted; the hook drops the fusion words and `ids_stride`,
-    /// so the native kernels see the legacy 23-word layout.
-    Fused { small_k: bool },
+    /// The hook drops the fusion words and `ids_stride`, so the native kernels see the legacy
+    /// 23-word layout; with `fusion` (has_fusion) it appends `x_bias`, `gate`, `gate_bias` and
+    /// `glu_op` from the fusion struct (bias-only and SwiGLU epilogues, no MoE: see
+    /// `fusion_launch_supported`).
+    Fused { small_k: bool, fusion: bool },
 }
 
 /// Launch words of the 0.40 `mul_mat_vec_q` and the legacy words they map to.
@@ -208,7 +210,7 @@ impl MmvqAbi {
     /// `nwarps` warps of an ncols_dst-1 block its own row.
     pub(crate) fn rows_per_block(self, ty: u32, ncols: u32) -> u32 {
         match self {
-            Self::Fused { small_k: true } if ncols == 1 => self.stock_nwarps(ty, ncols),
+            Self::Fused { small_k: true, .. } if ncols == 1 => self.stock_nwarps(ty, ncols),
             _ if ncols == 1 => 1,
             _ => 2,
         }
@@ -223,6 +225,25 @@ impl MmvqAbi {
                 .then(|| words[..3].iter().chain(&words[23..MMVQ_FUSED_WORDS - 1]).copied().collect()),
         }
     }
+}
+
+/// The native fused kernel's extra launch words from ggml's 20-word
+/// `ggml_cuda_mm_fusion_args_device` (words 3..23 of the 44): `[x_bias, gate, gate_bias, glu_op]`,
+/// or `None` when the launch needs something the native epilogue lacks (MoE ids, a shared
+/// expert, NVFP4 scales, a gated op other than SwiGLU); the translated kernel then runs.
+pub(crate) fn fusion_launch_words(words: &[u64]) -> Option<[u64; 4]> {
+    if words.len() != MMVQ_FUSED_WORDS {
+        return None;
+    }
+    let ptr = |i: usize| (words[i] & 0xffff_ffff) | (words[i + 1] << 32);
+    let f = 3; // fusion struct start
+    let (x_bias, gate, gate_bias) = (ptr(f), ptr(f + 2), ptr(f + 4));
+    let (x_scale, gate_scale) = (ptr(f + 6), ptr(f + 8));
+    let glu_op = words[f + 10] & 0xffff_ffff;
+    let shared_up = ptr(f + 12);
+    let ids = words[2];
+    let gated_ok = gate == 0 || glu_op == u64::from(mmvq::GLU_SWIGLU);
+    (ids == 0 && shared_up == 0 && x_scale == 0 && gate_scale == 0 && gated_ok).then_some([x_bias, gate, gate_bias, glu_op])
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -344,6 +365,15 @@ fn layout_matches(kernel: Kernel, params: &[Param], expected: &[Param]) -> bool 
                 a == b || (i < lead && matches!(a, Param::U64 | Param::GlobalPtr))
             });
     }
+    if let Kernel::Mmvq { abi: MmvqAbi::Fused { .. }, .. } = kernel {
+        // vx, vy, ids and dst may be typed u64 by the translator (in has_fusion kernels the
+        // shared-expert branch reassigns vx and dst): the same 8 bytes either way.
+        let pointer = |p: &Param| matches!(p, Param::GlobalPtr | Param::U64);
+        return params.len() == expected.len()
+            && params.iter().zip(expected).enumerate().all(|(i, (a, b))| {
+                a == b || (matches!(i, 0 | 1 | 2 | 4) && pointer(a) && pointer(b))
+            });
+    }
     matches!(kernel, Kernel::Mmvq { ncols, .. } if ncols > 1)
         && params.len() == expected.len()
         && params.get(2) == Some(&Param::U64)
@@ -442,12 +472,12 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
         ("mul_mat_vec_q", [TArg::Enum(e, ty), TArg::Int(ncols), TArg::Int(fusion), TArg::Int(small_k), TArg::Int(_halve)])
             if e == "ggml_type" =>
         {
-            let (Some(tn), true, 0) =
+            let (Some(tn), true, 0 | 1) =
                 (type_name(*ty as u32).filter(|_| mmvq_supported(*ty as u32)), (1..=8).contains(ncols), *fusion)
             else {
                 return Decision::NotApplicable;
             };
-            let abi = MmvqAbi::Fused { small_k: *small_k != 0 };
+            let abi = MmvqAbi::Fused { small_k: *small_k != 0, fusion: *fusion != 0 };
             (Kernel::Mmvq { ty: *ty as u32, ncols: *ncols as u32, abi }, mmvq_fused_layout(), "mmvq", Some(tn))
         }
         ("mul_mat_q", [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_)]) if e == "ggml_type" && mmq::supported(*ty as u32) => {
@@ -489,6 +519,8 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
     }
     .filter(|w| w.is_power_of_two() && (1..=32).contains(w));
     let fast = match kernel {
+        // the decode-fast kernel has no fused epilogue
+        Kernel::Mmvq { abi: MmvqAbi::Fused { fusion: true, .. }, .. } => None,
         Kernel::Mmvq { ty, ncols: 1, .. } => mmvq_fast_env(ty),
         _ => None,
     };
@@ -497,9 +529,12 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
             let f = fast.unwrap();
             format!("mmvq:t{ty}:c{ncols}:fast{}x{}x{}{}", f.rows, f.warps, f.unroll, if f.wide { "w" } else { "" })
         }
-        Kernel::Mmvq { ty, ncols, abi } => {
-            format!("mmvq:t{ty}:c{ncols}:w{}:r{}", nwarps.unwrap_or(0), abi.rows_per_block(ty, ncols))
-        }
+        Kernel::Mmvq { ty, ncols, abi } => format!(
+            "mmvq:t{ty}:c{ncols}:w{}:r{}{}",
+            nwarps.unwrap_or(0),
+            abi.rows_per_block(ty, ncols),
+            if matches!(abi, MmvqAbi::Fused { fusion: true, .. }) { ":fused" } else { "" }
+        ),
         Kernel::QuantizeQ81 => "quantize_q8_1".to_string(),
         Kernel::Mmq { ty } => format!("mmq:t{ty}"),
         Kernel::MmqFixup { ty } => format!("mmq_fixup:t{ty}"),
@@ -525,11 +560,12 @@ impl Plan {
                 mmvq::fast_entry_name(ty, self.fast.unwrap())
             }
             Kernel::Mmvq { ty, ncols, abi } => format!(
-                "cfi_mmvq_t{}_c{}_w{}_r{}",
+                "cfi_mmvq_t{}_c{}_w{}_r{}{}",
                 ty,
                 ncols,
                 self.nwarps_for(abi.stock_nwarps(ty, ncols)),
-                abi.rows_per_block(ty, ncols)
+                abi.rows_per_block(ty, ncols),
+                if matches!(abi, MmvqAbi::Fused { fusion: true, .. }) { "_f" } else { "" }
             ),
             Kernel::QuantizeQ81 => "cfi_quantize_q8_1".to_string(),
             Kernel::Mmq { ty } => mmq::entry_name(ty),
@@ -548,7 +584,8 @@ impl Plan {
             }
             Kernel::Mmvq { ty, ncols, abi } => {
                 let nwarps = plan.nwarps_for(abi.stock_nwarps(ty, ncols));
-                mmvq::build(mmvq::Cfg { ty, ncols, nwarps, rpb: abi.rows_per_block(ty, ncols) }, dot)
+                let fusion = matches!(abi, MmvqAbi::Fused { fusion: true, .. });
+                mmvq::build(mmvq::Cfg { ty, ncols, nwarps, rpb: abi.rows_per_block(ty, ncols), fusion }, dot)
             }
             Kernel::QuantizeQ81 => quantize::build(dot),
             Kernel::Mmq { ty } => mmq::build(ty, dot),

@@ -75,14 +75,26 @@ pub(super) fn launch(
         // The 0.40 mul_mat_vec_q carries a fusion struct and ids_stride the native kernels do
         // not take (only has_fusion = false is substituted): hand them the legacy 23 words.
         let legacy: Vec<KernelArg>;
+        // owned values of the fused epilogue words: [x_bias, gate, gate_bias, glu_op]
+        let fusion_values: [u64; 4];
         let native_base = match plan.kernel {
-            subst::Kernel::Mmvq { abi: abi @ subst::MmvqAbi::Fused { .. }, .. } => match abi.legacy_words(args) {
-                Some(words) => {
-                    legacy = words;
-                    &legacy[..]
+            subst::Kernel::Mmvq { abi: abi @ subst::MmvqAbi::Fused { fusion, .. }, .. } => {
+                let Some(mut words) = abi.legacy_words(args) else {
+                    return context.streams.launch(api, &context.backend, translated, stream, geometry, args);
+                };
+                if fusion {
+                    match subst::fusion_launch_words(&arg_values(args)) {
+                        Some(v) => fusion_values = v,
+                        None => return context.streams.launch(api, &context.backend, translated, stream, geometry, args),
+                    }
+                    for (i, value) in fusion_values.iter().enumerate() {
+                        let size = if i < 3 { 8 } else { 4 };
+                        words.push(KernelArg { value: (value as *const u64).cast(), size });
+                    }
                 }
-                None => return context.streams.launch(api, &context.backend, translated, stream, geometry, args),
-            },
+                legacy = words;
+                &legacy[..]
+            }
             _ => args,
         };
         let needs_values = matches!(

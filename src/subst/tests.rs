@@ -47,7 +47,7 @@ fn check(pr: &MmvqCase, nwarps: Option<usize>) {
     let p = &pr.p;
     let nw = nwarps.unwrap_or(p.nwarps);
     let want = pr.reference(nw);
-    let cfg = mmvq::Cfg { ty: p.ty, ncols: p.ncols_dst as u32, nwarps: nw as u32, rpb: p.rows_per_block() as u32 };
+    let cfg = mmvq::Cfg { ty: p.ty, ncols: p.ncols_dst as u32, nwarps: nw as u32, rpb: p.rows_per_block() as u32, fusion: false };
     let got = run_native(pr, cfg);
     let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
     let nmse = refs::nmse(&got, &want);
@@ -665,24 +665,32 @@ fn fused_name(ty: u32, ncols: u32, fusion: u32, small_k: u32, halve: u32) -> Str
 }
 
 #[test]
-fn fused_abi_mmvq_is_substituted_only_without_fusion() {
+fn fused_abi_mmvq_registry_decisions() {
     use super::{Decision, Kernel, MmvqAbi, Switch, decide, mmvq_fused_layout};
     let all = Switch::parse("all");
     let layout = mmvq_fused_layout();
     match decide(&fused_name(8, 1, 0, 1, 0), &layout, &all) {
         Decision::Substitute(p) => {
-            assert_eq!(p.kernel, Kernel::Mmvq { ty: 8, ncols: 1, abi: MmvqAbi::Fused { small_k: true } })
+            assert_eq!(p.kernel, Kernel::Mmvq { ty: 8, ncols: 1, abi: MmvqAbi::Fused { small_k: true, fusion: false } })
         }
         other => panic!("{other:?}"),
     }
     match decide(&fused_name(14, 4, 0, 0, 1), &layout, &all) {
         Decision::Substitute(p) => {
-            assert_eq!(p.kernel, Kernel::Mmvq { ty: 14, ncols: 4, abi: MmvqAbi::Fused { small_k: false } })
+            assert_eq!(p.kernel, Kernel::Mmvq { ty: 14, ncols: 4, abi: MmvqAbi::Fused { small_k: false, fusion: false } })
         }
         other => panic!("{other:?}"),
     }
-    // A fused gate/bias/GLU epilogue has no native kernel yet: keep the translated stock kernel.
-    assert_eq!(decide(&fused_name(8, 1, 1, 0, 0), &layout, &all), Decision::NotApplicable);
+    // has_fusion kernels are substituted too; unsupported epilogues are rejected per launch
+    // (`fusion_launch_words`), and the decode-fast kernel is never used for them.
+    match decide(&fused_name(8, 1, 1, 0, 0), &layout, &all) {
+        Decision::Substitute(p) => {
+            assert_eq!(p.kernel, Kernel::Mmvq { ty: 8, ncols: 1, abi: MmvqAbi::Fused { small_k: false, fusion: true } });
+            assert!(p.fast.is_none());
+            assert!(p.entry_name().ends_with("_f"), "{}", p.entry_name());
+        }
+        other => panic!("{other:?}"),
+    }
     // Unsupported type (IQ4_NL) and a legacy layout under the new name.
     assert_eq!(decide(&fused_name(20, 1, 0, 0, 0), &layout, &all), Decision::NotApplicable);
     assert!(matches!(decide(&fused_name(8, 1, 0, 0, 0), &super::mmvq_layout(), &all), Decision::Mismatch(_)));
@@ -697,7 +705,7 @@ fn fused_abi_mmvq_is_substituted_only_without_fusion() {
 #[test]
 fn fused_abi_geometry_follows_the_turing_table() {
     use super::{Decision, MmvqAbi, Switch, decide, mmvq_fused_layout};
-    let (plain, small) = (MmvqAbi::Fused { small_k: false }, MmvqAbi::Fused { small_k: true });
+    let (plain, small) = (MmvqAbi::Fused { small_k: false, fusion: false }, MmvqAbi::Fused { small_k: true, fusion: false });
     // `.maxntid` of the Ollama 0.40.14 compute_75 instantiations
     for (ty, ncols, warps) in [(8, 1, 4), (2, 1, 4), (12, 1, 2), (14, 1, 2), (8, 4, 4), (12, 3, 4), (8, 5, 2), (14, 8, 2)] {
         assert_eq!(plain.stock_nwarps(ty, ncols), warps, "type {ty} ncols {ncols}");
@@ -743,13 +751,13 @@ fn fused_abi_geometry_follows_the_turing_table() {
 #[test]
 fn small_k_native_mmvq_matches_reference() {
     use super::MmvqAbi;
-    let abi = MmvqAbi::Fused { small_k: true };
+    let abi = MmvqAbi::Fused { small_k: true, fusion: false };
     for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
         let ncols_x = if matches!(ty, refs::Q4_K | refs::Q6_K) { 512 } else { 896 };
         let mut pr = problem(ty, 1, 13, ncols_x, 2, 1, 2, false, 0x5a11 + u64::from(ty));
         pr.p.nwarps = abi.stock_nwarps(ty, 1) as usize;
         pr.p.rpb = abi.rows_per_block(ty, 1) as usize;
-        let cfg = mmvq::Cfg { ty, ncols: 1, nwarps: pr.p.nwarps as u32, rpb: pr.p.rpb as u32 };
+        let cfg = mmvq::Cfg { ty, ncols: 1, nwarps: pr.p.nwarps as u32, rpb: pr.p.rpb as u32, fusion: false };
         let want = pr.reference(pr.p.nwarps);
         let got = run_native(&pr, cfg);
         let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
@@ -772,23 +780,93 @@ fn stock_0_40_mmvq_instantiations_are_accepted() {
     crate::ptx::set_dot_product(true);
     let mut accepted = 0;
     for ty in [refs::Q4_0, refs::Q8_0, refs::Q4_K, refs::Q6_K] {
-        for ncols in 1..=8u32 {
+        for (ncols, fusion) in (1..=8u32).map(|n| (n, 0)).chain([(1, 1)]) {
             for (small_k, halve) in [(0, 0), (1, 0), (0, 1)] {
                 if ncols > 1 && (small_k, halve) != (0, 0) {
                     continue;
                 }
-                let entry = fused_name(ty, ncols, 0, small_k, halve);
+                let entry = fused_name(ty, ncols, fusion, small_k, halve);
                 let t = crate::ptx::translate_entry(&prepared, &entry).unwrap_or_else(|e| panic!("{entry}: {e}"));
                 let params = t.kernels[0].params.clone();
                 let Decision::Substitute(plan) = decide(&entry, &params, &Switch::parse("all")) else {
                     panic!("{entry}: registry rejects the real layout {params:?}")
                 };
                 let Kernel::Mmvq { abi, .. } = plan.kernel else { unreachable!() };
-                assert_eq!(abi, MmvqAbi::Fused { small_k: small_k == 1 });
+                assert_eq!(abi, MmvqAbi::Fused { small_k: small_k == 1, fusion: fusion == 1 });
                 assert_eq!(Some(abi.stock_nwarps(ty, ncols) * 32), t.kernels[0].max_threads, "{entry}");
                 accepted += 1;
             }
         }
     }
-    assert_eq!(accepted, 4 * (8 + 2));
+    assert_eq!(accepted, 4 * (8 + 2 + 3));
+}
+
+/// ggml's fused epilogue on the native kernel: bias only (q/k/v projections), a SwiGLU gate
+/// (FFN gate/up), and both, against the composed host reference, with and without small_k.
+#[test]
+fn fused_native_mmvq_matches_reference() {
+    use super::MmvqAbi;
+    use super::probe::Fusion;
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
+        for (ncols, small_k) in [(1u32, true), (1, false), (2, false)] {
+            for (gate, x_bias, gate_bias) in [(false, true, false), (true, false, false), (true, true, true)] {
+                let abi = MmvqAbi::Fused { small_k, fusion: true };
+                let ncols_x = match (small_k, ty) {
+                    (true, refs::Q4_K | refs::Q6_K) => 512,
+                    (true, _) => 896,
+                    _ => 1024,
+                };
+                let seed = 0xf0 + u64::from(ty) * 7 + u64::from(ncols) * 3 + u64::from(small_k);
+                let mut pr = problem(ty, ncols as usize, 13, ncols_x, 2, 1, 2, false, seed);
+                pr.p.nwarps = abi.stock_nwarps(ty, ncols) as usize;
+                pr.p.rpb = abi.rows_per_block(ty, ncols) as usize;
+                let mut rng = refs::Rng(seed ^ 0x9e37);
+                let nblocks = pr.x.len() / refs::traits(ty).unwrap().block_bytes;
+                let n = pr.dst_len();
+                let f = Fusion {
+                    gate: gate.then(|| refs::random_blocks(ty, nblocks, &mut rng)),
+                    x_bias: x_bias.then(|| (0..n).map(|_| rng.unit()).collect()),
+                    gate_bias: gate_bias.then(|| (0..n).map(|_| rng.unit()).collect()),
+                };
+                let cfg = mmvq::Cfg { ty, ncols, nwarps: pr.p.nwarps as u32, rpb: pr.p.rpb as u32, fusion: true };
+                let words = mmvq::build(cfg, true);
+                validate(&words);
+                let mut sim = Sim { dev: Dev::default(), words: &words };
+                let got = pr.run_fusion(&mut sim, pr.p.nwarps, &f).unwrap();
+                let want = pr.reference_fusion(pr.p.nwarps, &f);
+                let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
+                let nmse = refs::nmse(&got, &want);
+                assert!(
+                    bad == 0 || nmse < 1e-12,
+                    "type {ty} ncols {ncols} small_k {small_k} gate {gate} bias {x_bias}/{gate_bias}: {bad}/{n} differ, nmse {nmse}"
+                );
+                assert!(want.iter().any(|v| *v != 0.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn fusion_launch_words_reject_what_the_native_epilogue_lacks() {
+    let mut w = vec![0u64; super::MMVQ_FUSED_WORDS];
+    let set_ptr = |w: &mut Vec<u64>, i: usize, v: u64| {
+        w[i] = v & 0xffff_ffff;
+        w[i + 1] = v >> 32;
+    };
+    set_ptr(&mut w, 3, 0x1_0000_1000); // x_bias
+    assert_eq!(super::fusion_launch_words(&w), Some([0x1_0000_1000, 0, 0, 0]), "bias only, any glu op");
+    set_ptr(&mut w, 5, 0x2_0000_2000); // gate
+    assert_eq!(super::fusion_launch_words(&w), None, "gate with REGLU (0)");
+    w[13] = u64::from(mmvq::GLU_SWIGLU);
+    assert_eq!(super::fusion_launch_words(&w), Some([0x1_0000_1000, 0x2_0000_2000, 0, 2]));
+    let mut moe = w.clone();
+    moe[2] = 0x3000; // ids
+    assert_eq!(super::fusion_launch_words(&moe), None);
+    let mut shared = w.clone();
+    set_ptr(&mut shared, 15, 0x4000); // shared_up
+    assert_eq!(super::fusion_launch_words(&shared), None);
+    let mut scaled = w.clone();
+    set_ptr(&mut scaled, 9, 0x5000); // x_scale (NVFP4)
+    assert_eq!(super::fusion_launch_words(&scaled), None);
+    assert_eq!(super::fusion_launch_words(&w[..43]), None);
 }

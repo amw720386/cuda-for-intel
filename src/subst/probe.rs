@@ -21,6 +21,15 @@ pub(crate) trait Device {
     fn run(&mut self, grid: [u32; 3], block: [u32; 3], args: &[PArg]) -> Result<(), String>;
 }
 
+/// Inputs of ggml's fused mmvq epilogue (`ggml_cuda_mm_fusion_args_device`): a gate matrix with
+/// the main matrix's layout, and biases with the destination's layout.
+#[derive(Clone, Default)]
+pub(crate) struct Fusion {
+    pub gate: Option<Vec<u8>>,
+    pub x_bias: Option<Vec<f32>>,
+    pub gate_bias: Option<Vec<f32>>,
+}
+
 pub(crate) struct MmvqCase {
     pub p: Mmvq,
     pub x: Vec<u8>,
@@ -110,7 +119,60 @@ impl MmvqCase {
         self.run_with(dev, 0, Some((rows, warps)))
     }
 
+    /// Host reference of ggml's fused epilogue: `sum + x_bias`, and with a gate matrix
+    /// `* silu(gate_sum + gate_bias)` (SwiGLU), each sum in ggml's order.
+    pub fn reference_fusion(&self, nwarps: usize, f: &Fusion) -> Vec<f32> {
+        let mut out = self.reference(nwarps);
+        let gate_sum = f.gate.as_ref().map(|g| {
+            let mut gc = MmvqCase { p: self.p.clone(), x: g.clone(), y: self.y.clone(), ids: self.ids.clone() };
+            gc.p.nwarps = nwarps;
+            gc.reference(nwarps)
+        });
+        for (i, v) in out.iter_mut().enumerate() {
+            let mut r = *v + f.x_bias.as_ref().map_or(0.0, |b| b[i]);
+            if let Some(gs) = &gate_sum {
+                let g = gs[i] + f.gate_bias.as_ref().map_or(0.0, |b| b[i]);
+                r *= g / (1.0 + (-g).exp());
+            }
+            *v = r;
+        }
+        out
+    }
+
+    /// Runs a native fused kernel (`FUSION_ARGS`): the legacy words, then `x_bias`, `gate`,
+    /// `gate_bias` (0 when absent) and `glu_op` SwiGLU.
+    pub fn run_fusion(&self, dev: &mut impl Device, nwarps: usize, f: &Fusion) -> Result<Vec<f32>, String> {
+        let mut upload = |data: Option<Vec<u8>>| -> Result<u64, String> {
+            match data {
+                Some(b) => {
+                    let a = dev.alloc(b.len())?;
+                    dev.upload(a, &b)?;
+                    Ok(a)
+                }
+                None => Ok(0),
+            }
+        };
+        let f32s = |v: &Option<Vec<f32>>| v.as_ref().map(|v| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+        let extra = [
+            PArg::Ptr(upload(f32s(&f.x_bias))?),
+            PArg::Ptr(upload(f.gate.clone())?),
+            PArg::Ptr(upload(f32s(&f.gate_bias))?),
+            PArg::U32(super::mmvq::GLU_SWIGLU),
+        ];
+        self.run_with_extra(dev, nwarps, None, &extra)
+    }
+
     fn run_with(&self, dev: &mut impl Device, nwarps: usize, fast_rows: Option<(u32, u32)>) -> Result<Vec<f32>, String> {
+        self.run_with_extra(dev, nwarps, fast_rows, &[])
+    }
+
+    fn run_with_extra(
+        &self,
+        dev: &mut impl Device,
+        nwarps: usize,
+        fast_rows: Option<(u32, u32)>,
+        extra: &[PArg],
+    ) -> Result<Vec<f32>, String> {
         let p = &self.p;
         let xa = dev.alloc(self.x.len())?;
         dev.upload(xa, &self.x)?;
@@ -165,7 +227,8 @@ impl MmvqCase {
         } else {
             let mut q = p.clone();
             q.nwarps = nwarps;
-            dev.run(q.grid(), q.block(), &args)?;
+            let launch: Vec<PArg> = args.iter().chain(extra).copied().collect();
+            dev.run(q.grid(), q.block(), &launch)?;
         }
         let bytes = dev.download(da, n * 4)?;
         Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())

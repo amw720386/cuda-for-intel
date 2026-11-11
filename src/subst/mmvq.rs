@@ -17,6 +17,23 @@ pub(crate) const ARGS: [Arg; 23] = {
     a
 };
 
+/// Argument slots of the fused variant: the legacy 23 words, then `x_bias`, `gate`, `gate_bias`
+/// (null when absent) and `glu_op` (the hook extracts them from ggml's fusion struct).
+pub(crate) const FUSION_ARGS: [Arg; 27] = {
+    let mut a = [Arg::U32; 27];
+    a[0] = Arg::Ptr;
+    a[1] = Arg::Ptr;
+    a[2] = Arg::Ptr;
+    a[3] = Arg::Ptr;
+    a[23] = Arg::Ptr;
+    a[24] = Arg::Ptr;
+    a[25] = Arg::Ptr;
+    a
+};
+
+/// `GGML_GLU_OP_SWIGLU`, the gated epilogue the native fused kernel implements.
+pub(crate) const GLU_SWIGLU: u32 = 2;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct Cfg {
     pub ty: u32,
@@ -24,12 +41,15 @@ pub(crate) struct Cfg {
     pub nwarps: u32,
     /// Matrix rows per block (`MmvqAbi::rows_per_block`): 1 or 2, or `nwarps` for small_k.
     pub rpb: u32,
+    /// ggml's fused epilogue (`has_fusion`): `+ x_bias`, and with a gate matrix
+    /// `* silu(gate . y + gate_bias)` (SwiGLU). No MoE ids.
+    pub fusion: bool,
 }
 
 impl Cfg {
     /// The v0.12.6 decomposition: one row per block for one column, two otherwise.
     pub(crate) fn legacy(ty: u32, ncols: u32, nwarps: u32) -> Self {
-        Self { ty, ncols, nwarps, rpb: if ncols == 1 { 1 } else { 2 } }
+        Self { ty, ncols, nwarps, rpb: if ncols == 1 { 1 } else { 2 }, fusion: false }
     }
 }
 
@@ -334,14 +354,22 @@ fn dot_y(kb: &mut Kb, ty: u32, r: &Row, xd: &XData, kqs: V, acc: V) -> V {
     }
 }
 
+fn out_zero(kb: &mut Kb) -> V {
+    kb.cf(0.0)
+}
+
 pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
     let t = refs::traits(cfg.ty).expect("unsupported type");
     let (ncols, nw) = (cfg.ncols, cfg.nwarps);
     let rpb = cfg.rpb;
     assert!(rpb >= 1 && (ncols == 1 || rpb == 2), "rows per block {rpb} for ncols {ncols}");
-    let shared_words = if nw > 1 { (nw - 1) * ncols * rpb * 32 } else { 0 };
-    let name = format!("cfi_mmvq_t{}_c{}_w{}_r{}", cfg.ty, ncols, nw, rpb);
-    let mut kb = Kb::new(&name, &ARGS, shared_words, true, dot);
+    let fusion = cfg.fusion;
+    // with fusion the gate partial sums follow the main ones in shared memory
+    let gate_base = if nw > 1 { (nw - 1) * ncols * rpb * 32 } else { 0 };
+    let shared_words = if fusion { 2 * gate_base } else { gate_base };
+    let name = format!("cfi_mmvq_t{}_c{}_w{}_r{}{}", cfg.ty, ncols, nw, rpb, if fusion { "_f" } else { "" });
+    let args: &[Arg] = if fusion { &FUSION_ARGS } else { &ARGS };
+    let mut kb = Kb::new(&name, args, shared_words, true, dot);
     let p = kb.params.clone();
     let (vx, vy, ids, dst) = (p[0], p[1], p[2], p[3]);
     let (ncols_x, nch_y, srx, scy, scd) = (p[4], [p[5], p[6], p[7]], p[8], p[9], p[10]);
@@ -358,6 +386,15 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
     let vy = kb.ptr_to_u64(vy);
     let ids = kb.ptr_to_u64(ids);
     let dst = kb.ptr_to_u64(dst);
+    // fused epilogue inputs; `use_gate` is uniform across the launch
+    let (x_bias, gate, gate_bias, use_gate) = if fusion {
+        let (xb, g, gb) = (kb.ptr_to_u64(p[23]), kb.ptr_to_u64(p[24]), kb.ptr_to_u64(p[25]));
+        let z = kb.c64(0);
+        let ug = kb.ne(g, z);
+        (Some(xb), Some(g), Some(gb), Some(ug))
+    } else {
+        (None, None, None, None)
+    };
 
     let tidx = kb.local_id(0);
     let tidy = kb.local_id(1);
@@ -415,6 +452,13 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
         let z = kb.cf(0.0);
         tmp.push(kb.var(Ty::F32, z));
     }
+    let mut tmp_gate = Vec::new();
+    if fusion {
+        for _ in 0..ncols * rpb {
+            let z = kb.cf(0.0);
+            tmp_gate.push(kb.var(Ty::F32, z));
+        }
+    }
     let kqs = {
         let m = kb.andc(tid, tpb - 1);
         kb.mulc(m, t.vdr as u32)
@@ -442,6 +486,7 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
                 let xi = kb.add(xi, k);
                 let xa = kb.addr(vx, xi, t.block_bytes as u32);
                 let tmp = &tmp;
+                let tmp_gate = &tmp_gate;
                 let yas = &yas;
                 let body = |kb: &mut Kb| {
                     // weights are loaded once and reused for every activation column
@@ -451,6 +496,19 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
                         let acc = kb.get(slot);
                         let r = dot_y(kb, cfg.ty, &Row { x: xa, y: yas[j as usize], ones, bias }, &xd, kqs, acc);
                         kb.set(slot, r);
+                    }
+                    // ggml: tmp_gate[j][i] += vec_dot(gate, ...) at the same block index
+                    if let (Some(gate), Some(use_gate)) = (gate, use_gate) {
+                        kb.if_(use_gate, |kb| {
+                            let ga = kb.addr(gate, xi, t.block_bytes as u32);
+                            let gd = load_x(kb, cfg.ty, &Row { x: ga, y: ga, ones, bias }, kqs);
+                            for j in 0..ncols {
+                                let slot = tmp_gate[(j * rpb + i) as usize];
+                                let acc = kb.get(slot);
+                                let r = dot_y(kb, cfg.ty, &Row { x: ga, y: yas[j as usize], ones, bias }, &gd, kqs, acc);
+                                kb.set(slot, r);
+                            }
+                        });
                     }
                 };
                 if i == 0 {
@@ -481,6 +539,11 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
                     let off = kb.addc(base, (j * rpb + i) * 32);
                     let idx = kb.add(off, tidx);
                     kb.sh_st_f(idx, v);
+                    if fusion {
+                        let g = kb.get(tmp_gate[(j * rpb + i) as usize]);
+                        let gidx = kb.addc(idx, gate_base);
+                        kb.sh_st_f(gidx, g);
+                    }
                 }
             }
         });
@@ -500,19 +563,29 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
     };
     for j in 0..ncols {
         let mut vals = Vec::new();
+        let mut gvals = Vec::new();
         for i in 0..rpb {
-            let mut v = kb.get(tmp[(j * rpb + i) as usize]);
-            for l in 0..nw.saturating_sub(1) {
-                let off = kb.c32((((l * ncols + j) * rpb) + i) * 32);
-                let idx = kb.add(off, tidx);
-                let o = kb.sh_ld_f(idx);
-                v = kb.fadd(v, o);
+            // the same cross-warp then cross-lane order for the main and the gate sums
+            let mut reduce = |kb: &mut Kb, start: V, shared_off: u32| {
+                let mut v = start;
+                for l in 0..nw.saturating_sub(1) {
+                    let off = kb.c32(shared_off + (((l * ncols + j) * rpb) + i) * 32);
+                    let idx = kb.add(off, tidx);
+                    let o = kb.sh_ld_f(idx);
+                    v = kb.fadd(v, o);
+                }
+                for mask in [16u32, 8, 4, 2, 1] {
+                    let o = kb.shfl_xor_f(v, mask);
+                    v = kb.fadd(v, o);
+                }
+                v
+            };
+            let v = kb.get(tmp[(j * rpb + i) as usize]);
+            vals.push(reduce(&mut kb, v, 0));
+            if fusion {
+                let g = kb.get(tmp_gate[(j * rpb + i) as usize]);
+                gvals.push(reduce(&mut kb, g, gate_base));
             }
-            for mask in [16u32, 8, 4, 2, 1] {
-                let o = kb.shfl_xor_f(v, mask);
-                v = kb.fadd(v, o);
-            }
-            vals.push(v);
         }
         // if (tidx < rpb && (rpb == 1 || row0 + tidx < stride_col_dst)) dst[j*scd + tidx] = vals[tidx]
         let lim = kb.c32(rpb);
@@ -523,17 +596,64 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
             cond = kb.land(cond, inb);
         }
         // lane i writes row i's sum (rows per block may exceed 2 for the 0.40 small_k mode)
-        let mut value = vals[0];
-        for (i, &v) in vals.iter().enumerate().skip(1) {
-            let ci = kb.c32(i as u32);
-            let is_i = kb.eq(tidx, ci);
-            value = kb.select(Ty::F32, is_i, v, value);
-        }
+        let pick = |kb: &mut Kb, v: &[V]| {
+            let mut value = v[0];
+            for (i, &x) in v.iter().enumerate().skip(1) {
+                let ci = kb.c32(i as u32);
+                let is_i = kb.eq(tidx, ci);
+                value = kb.select(Ty::F32, is_i, x, value);
+            }
+            value
+        };
+        let value = pick(&mut kb, &vals);
+        let gvalue = if fusion { Some(pick(&mut kb, &gvals)) } else { None };
         kb.if_(cond, |kb| {
             let jo = kb.mulc(scd, j);
             let idx = kb.add(jo, tidx);
             let a = kb.addr(dst_base, idx, 4);
-            kb.st(Ty::F32, a, value, 4);
+            let mut out = value;
+            if let (Some(x_bias), Some(gate_bias), Some(use_gate), Some(g)) = (x_bias, gate_bias, use_gate, gvalue) {
+                // result = sum + x_bias[i]; with a gate: result *= silu(gate_sum + gate_bias[i]).
+                // Bias rows share the destination's index (no MoE ids on this path).
+                let bias_at = |kb: &mut Kb, base: V| {
+                    let z0 = out_zero(kb);
+                    let r = kb.var(Ty::F32, z0);
+                    let z = kb.c64(0);
+                    let present = kb.ne(base, z);
+                    kb.if_(present, |kb| {
+                        let rel = {
+                            let a = kb.mul(bz, ssd);
+                            let b = kb.mul(by, scd_);
+                            let ab = kb.add(a, b);
+                            let ab = kb.add(ab, row0);
+                            kb.add(ab, idx)
+                        };
+                        let ba = kb.addr(base, rel, 4);
+                        let v = kb.ld(Ty::F32, ba, 4);
+                        kb.set(r, v);
+                    });
+                    kb.get(r)
+                };
+                let xb = bias_at(kb, x_bias);
+                out = kb.fadd(out, xb);
+                let res = kb.var(Ty::F32, out);
+                kb.if_(use_gate, |kb| {
+                    let gb = bias_at(kb, gate_bias);
+                    let gv = kb.fadd(g, gb);
+                    // ggml_cuda_op_silu_single: x / (1.0f + expf(-x))
+                    let neg1 = kb.cf(-1.0);
+                    let ng = kb.fmul(gv, neg1);
+                    let e = kb.exp(ng);
+                    let one = kb.cf(1.0);
+                    let den = kb.fadd(one, e);
+                    let silu = kb.fdiv(gv, den);
+                    let cur = kb.get(res);
+                    let m = kb.fmul(cur, silu);
+                    kb.set(res, m);
+                });
+                out = kb.get(res);
+            }
+            kb.st(Ty::F32, a, out, 4);
         });
     }
     kb.finish()
