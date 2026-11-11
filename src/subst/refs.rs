@@ -280,11 +280,13 @@ pub struct Mmvq {
     pub stride_sample_x: u32,
     pub stride_sample_y: u32,
     pub stride_sample_dst: u32,
+    /// Matrix rows per block: 1 for one column, 2 otherwise; `nwarps` for the 0.40 small_k mode.
+    pub rpb: usize,
 }
 
 impl Mmvq {
     pub fn rows_per_block(&self) -> usize {
-        if self.ncols_dst == 1 { 1 } else { 2 }
+        self.rpb
     }
     /// Stock (NVIDIA generic table) warps per block.
     pub fn ggml_nwarps(ncols_dst: usize) -> usize {
@@ -359,7 +361,7 @@ pub fn mmvq(p: &Mmvq, x: &[u8], y: &[u8], ids: Option<&[i32]>, dst: &mut [f32]) 
                     + channel_dst as usize * p.stride_channel_dst as usize
                     + row0;
                 for j in 0..p.ncols_dst {
-                    let mut lanes = [[0f32; 32]; 2];
+                    let mut lanes = vec![[0f32; 32]; rpb];
                     for i in 0..rpb {
                         for lane in 0..32 {
                             let mut v = tmp[0][lane][j][i];

@@ -72,11 +72,28 @@ pub(super) fn launch(
     args: &[KernelArg],
 ) -> Result<(), CuResult> {
     if let Some(plan) = plan {
+        // The 0.40 mul_mat_vec_q carries a fusion struct and ids_stride the native kernels do
+        // not take (only has_fusion = false is substituted): hand them the legacy 23 words.
+        let legacy: Vec<KernelArg>;
+        let native_base = match plan.kernel {
+            subst::Kernel::Mmvq { abi: abi @ subst::MmvqAbi::Fused { .. }, .. } => match abi.legacy_words(args) {
+                Some(words) => {
+                    legacy = words;
+                    &legacy[..]
+                }
+                None => return context.streams.launch(api, &context.backend, translated, stream, geometry, args),
+            },
+            _ => args,
+        };
         let needs_values = matches!(
             plan.kernel,
-            subst::Kernel::Mmq { .. } | subst::Kernel::MmqFixup { .. } | subst::Kernel::Fattn { .. } | subst::Kernel::FattnFixup
+            subst::Kernel::Mmq { .. }
+                | subst::Kernel::MmqFixup { .. }
+                | subst::Kernel::Fattn { .. }
+                | subst::Kernel::FattnFixup
+                | subst::Kernel::Mmvq { .. }
         );
-        let vals: Vec<u64> = if needs_values { arg_values(args) } else { Vec::new() };
+        let vals: Vec<u64> = if needs_values { arg_values(native_base) } else { Vec::new() };
         if matches!(plan.kernel, subst::Kernel::Mmq { .. }) {
             context.subst.pending_fixup = None;
         }
@@ -109,18 +126,18 @@ pub(super) fn launch(
         } else if let Some(mapped) = plan.map_launch(geometry.0, geometry.1, &vals)
             && let Some(kernel) = native(api, context, plan, stream)
         {
-            let extra = plan.extra_word(geometry.0);
+            let extra = plan.extra_word(geometry.0, &vals);
             let extended: Vec<KernelArg>;
             let native_args = match &extra {
                 Some(word) => {
-                    extended = args
+                    extended = native_base
                         .iter()
                         .copied()
                         .chain(std::iter::once(KernelArg { value: (word as *const u32).cast(), size: 4 }))
                         .collect();
                     &extended[..]
                 }
-                None => args,
+                None => native_base,
             };
             match context.streams.launch(api, &context.backend, kernel, stream, mapped, native_args) {
                 Ok(()) => {
@@ -312,6 +329,10 @@ fn shadow_check(
             (4usize, vals[18] * vals[21], ([tiles as u32, 1, 1], [32u32, 8, 1]))
         }
         subst::Kernel::Mmvq { .. } if vals.len() == 23 => (3usize, u64::from(geometry.0[2]) * vals[22], geometry),
+        // 0.40 layout: dst after the 20 fusion words, stride_sample_dst before ids_stride
+        subst::Kernel::Mmvq { .. } if vals.len() == subst::MMVQ_FUSED_WORDS => {
+            (23usize, u64::from(geometry.0[2]) * vals[42], geometry)
+        }
         _ => return,
     };
     let count = context.subst.checks.entry(plan.key.clone()).or_insert(0);

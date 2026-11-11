@@ -47,7 +47,7 @@ fn check(pr: &MmvqCase, nwarps: Option<usize>) {
     let p = &pr.p;
     let nw = nwarps.unwrap_or(p.nwarps);
     let want = pr.reference(nw);
-    let cfg = mmvq::Cfg { ty: p.ty, ncols: p.ncols_dst as u32, nwarps: nw as u32 };
+    let cfg = mmvq::Cfg { ty: p.ty, ncols: p.ncols_dst as u32, nwarps: nw as u32, rpb: p.rows_per_block() as u32 };
     let got = run_native(pr, cfg);
     let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
     let nmse = refs::nmse(&got, &want);
@@ -90,7 +90,7 @@ fn mmvq_channels_samples_and_ids() {
 fn mmvq_nwarps_override_is_numerically_close() {
     let pr = problem(refs::Q8_0, 1, 4, 1024, 1, 1, 1, false, 5);
     let want = pr.reference(4);
-    let got = run_native(&pr, mmvq::Cfg { ty: refs::Q8_0, ncols: 1, nwarps: 8 });
+    let got = run_native(&pr, mmvq::Cfg::legacy(refs::Q8_0, 1, 8));
     assert!(refs::nmse(&got, &want) < 1e-5);
 }
 
@@ -127,10 +127,10 @@ fn every_mmvq_variant_validates() {
     for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
         for ncols in 1..=8u32 {
             let nwarps = Mmvq::ggml_nwarps(ncols as usize) as u32;
-            validate(&mmvq::build(mmvq::Cfg { ty, ncols, nwarps }, true));
+            validate(&mmvq::build(mmvq::Cfg::legacy(ty, ncols, nwarps), true));
         }
     }
-    validate(&mmvq::build(mmvq::Cfg { ty: refs::Q8_0, ncols: 1, nwarps: 4 }, false));
+    validate(&mmvq::build(mmvq::Cfg::legacy(refs::Q8_0, 1, 4), false));
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn device_probe_accepts_native_kernels_and_rejects_corrupt_ones() {
     use super::{Kernel, Plan, Switch, decide};
     let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
-        let p = plan(Kernel::Mmvq { ty, ncols: 3 }, "m");
+        let p = plan(Kernel::Mmvq { ty, ncols: 3, abi: super::MmvqAbi::Legacy }, "m");
         let words = p.build(true).unwrap();
         let mut sim = Sim { dev: Dev::default(), words: &words };
         probe::validate(&p, &mut sim).unwrap();
@@ -156,8 +156,8 @@ fn device_probe_accepts_native_kernels_and_rejects_corrupt_ones() {
     let words = p.build(true).unwrap();
     probe::validate(&p, &mut Sim { dev: Dev::default(), words: &words }).unwrap();
     // a different kernel's code must fail the check
-    let wrong = plan(Kernel::Mmvq { ty: refs::Q8_0, ncols: 1 }, "m").build(true).unwrap();
-    let p = plan(Kernel::Mmvq { ty: refs::Q4_0, ncols: 1 }, "m");
+    let wrong = plan(Kernel::Mmvq { ty: refs::Q8_0, ncols: 1, abi: super::MmvqAbi::Legacy }, "m").build(true).unwrap();
+    let p = plan(Kernel::Mmvq { ty: refs::Q4_0, ncols: 1, abi: super::MmvqAbi::Legacy }, "m");
     assert!(probe::validate(&p, &mut Sim { dev: Dev::default(), words: &wrong }).is_err());
     let _ = (decide, Switch::default());
 }
@@ -191,7 +191,7 @@ fn switch_parsing_and_decisions() {
     let name = "_Z13mul_mat_vec_qIL9ggml_type8ELi4EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj";
     let layout = mmvq_layout();
     match decide(name, &layout, &Switch::parse("mmvq")) {
-        Decision::Substitute(p) => assert_eq!(p.kernel, super::Kernel::Mmvq { ty: 8, ncols: 4 }),
+        Decision::Substitute(p) => assert_eq!(p.kernel, super::Kernel::Mmvq { ty: 8, ncols: 4, abi: super::MmvqAbi::Legacy }),
         other => panic!("{other:?}"),
     }
     assert_eq!(decide(name, &layout, &Switch::parse("mmvq:q4_0")), Decision::NotApplicable);
@@ -211,7 +211,7 @@ fn switch_parsing_and_decisions() {
 #[test]
 fn geometry_mapping_rejects_unexpected_launches() {
     use super::{Kernel, Plan};
-    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1, abi: super::MmvqAbi::Legacy }, key: "k".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     assert_eq!(p.map_geometry([10, 1, 1], [32, 4, 1]), Some(([10, 1, 1], [32, 4, 1])));
     assert_eq!(p.map_geometry([10, 1, 1], [32, 2, 1]), None);
     let wide = Plan { nwarps: Some(8), ..p };
@@ -252,7 +252,7 @@ fn translated_stock_mmvq_matches_native_on_the_interpreter() {
         );
         let pr = problem(ty, ncols as usize, 6, 512, nch, ratio, nsamples, false, 77);
         let nw = pr.p.nwarps;
-        let native = run_native(&pr, mmvq::Cfg { ty, ncols, nwarps: nw as u32 });
+        let native = run_native(&pr, mmvq::Cfg::legacy(ty, ncols, nw as u32));
         let mut sim = Sim { dev: Dev::default(), words: &stock };
         let translated = pr.run(&mut sim, nw).unwrap();
         let nmse = refs::nmse(&native, &translated);
@@ -654,4 +654,141 @@ fn fattn_names_and_layout_are_recognised() {
         super::Decision::Substitute(p) => assert_eq!(p.kernel, super::Kernel::FattnFixup),
         other => panic!("{other:?}"),
     }
+}
+
+// ---- Ollama 0.40 `mul_mat_vec_q<type, ncols, has_fusion, small_k, halve_iters>` ----
+
+fn fused_name(ty: u32, ncols: u32, fusion: u32, small_k: u32, halve: u32) -> String {
+    format!(
+        "_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{ncols}ELb{fusion}ELb{small_k}ELb{halve}EEvPKvS2_PKi31ggml_cuda_mm_fusion_args_devicePfj5uint3jjjS7_jjjS7_jjjj"
+    )
+}
+
+#[test]
+fn fused_abi_mmvq_is_substituted_only_without_fusion() {
+    use super::{Decision, Kernel, MmvqAbi, Switch, decide, mmvq_fused_layout};
+    let all = Switch::parse("all");
+    let layout = mmvq_fused_layout();
+    match decide(&fused_name(8, 1, 0, 1, 0), &layout, &all) {
+        Decision::Substitute(p) => {
+            assert_eq!(p.kernel, Kernel::Mmvq { ty: 8, ncols: 1, abi: MmvqAbi::Fused { small_k: true } })
+        }
+        other => panic!("{other:?}"),
+    }
+    match decide(&fused_name(14, 4, 0, 0, 1), &layout, &all) {
+        Decision::Substitute(p) => {
+            assert_eq!(p.kernel, Kernel::Mmvq { ty: 14, ncols: 4, abi: MmvqAbi::Fused { small_k: false } })
+        }
+        other => panic!("{other:?}"),
+    }
+    // A fused gate/bias/GLU epilogue has no native kernel yet: keep the translated stock kernel.
+    assert_eq!(decide(&fused_name(8, 1, 1, 0, 0), &layout, &all), Decision::NotApplicable);
+    // Unsupported type (IQ4_NL) and a legacy layout under the new name.
+    assert_eq!(decide(&fused_name(20, 1, 0, 0, 0), &layout, &all), Decision::NotApplicable);
+    assert!(matches!(decide(&fused_name(8, 1, 0, 0, 0), &super::mmvq_layout(), &all), Decision::Mismatch(_)));
+    // The legacy name keeps the legacy ABI.
+    let legacy = "_Z13mul_mat_vec_qIL9ggml_type8ELi1EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj";
+    match decide(legacy, &super::mmvq_layout(), &all) {
+        Decision::Substitute(p) => assert_eq!(p.kernel, Kernel::Mmvq { ty: 8, ncols: 1, abi: MmvqAbi::Legacy }),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn fused_abi_geometry_follows_the_turing_table() {
+    use super::{Decision, MmvqAbi, Switch, decide, mmvq_fused_layout};
+    let (plain, small) = (MmvqAbi::Fused { small_k: false }, MmvqAbi::Fused { small_k: true });
+    // `.maxntid` of the Ollama 0.40.14 compute_75 instantiations
+    for (ty, ncols, warps) in [(8, 1, 4), (2, 1, 4), (12, 1, 2), (14, 1, 2), (8, 4, 4), (12, 3, 4), (8, 5, 2), (14, 8, 2)] {
+        assert_eq!(plain.stock_nwarps(ty, ncols), warps, "type {ty} ncols {ncols}");
+        assert_eq!(small.stock_nwarps(ty, ncols), warps, "type {ty} ncols {ncols}");
+    }
+    assert_eq!((plain.rows_per_block(8, 1), small.rows_per_block(8, 1), small.rows_per_block(14, 1)), (1, 4, 2));
+    assert_eq!((small.rows_per_block(8, 2), MmvqAbi::Legacy.rows_per_block(8, 1)), (2, 1));
+    // the hook's 47 -> 23 word normalisation
+    let words: Vec<u32> = (0..44).collect();
+    let legacy = small.legacy_words(&words).unwrap();
+    assert_eq!(legacy.len(), 23);
+    assert_eq!(&legacy[..4], &[0, 1, 2, 23]);
+    assert_eq!(legacy[22], 42); // stride_sample_dst; 43 (ids_stride) is dropped
+    assert!(small.legacy_words(&words[..43]).is_none());
+    // stock block shape is checked against the TURING table, rows from stride_col_dst
+    let Decision::Substitute(p) = decide(&fused_name(12, 1, 0, 1, 0), &mmvq_fused_layout(), &Switch::parse("all")) else {
+        panic!()
+    };
+    assert_eq!(p.map_launch([7, 1, 1], [32, 2, 1], &[0; 23]), Some(([7, 1, 1], [32, 2, 1])));
+    assert_eq!(p.map_launch([7, 1, 1], [32, 4, 1], &[0; 23]), None);
+    let mut vals = vec![0u64; 23];
+    vals[10] = 13; // 13 rows in 7 blocks of 2
+    assert_eq!(p.mmvq_rows([7, 1, 1], &vals), Some(13));
+    // The decode-fast kernel (CUDA_FOR_INTEL_MMVQ_FAST) covers exactly the matrix rows: 13 rows
+    // in 4 stock small_k blocks of 4 become 4 workgroups of 4 rows, and nrows is passed as 13.
+    let fast_plan = super::Plan {
+        kernel: super::Kernel::Mmvq { ty: 8, ncols: 1, abi: small },
+        key: "f".into(),
+        nwarps: None,
+        layout_hash: 0,
+        aux: 0,
+        fast: Some(fast(4, 1, 2)),
+    };
+    assert_eq!(fast_plan.map_launch([4, 1, 1], [32, 4, 1], &vals), Some(([4, 1, 1], [32, 4, 1])));
+    assert_eq!(fast_plan.extra_word([4, 1, 1], &vals), Some(13));
+    assert_eq!(fast_plan.map_geometry([4, 1, 1], [32, 4, 1]), None, "needs the row count");
+    let legacy_fast = super::Plan { kernel: super::Kernel::Mmvq { ty: 8, ncols: 1, abi: MmvqAbi::Legacy }, ..fast_plan };
+    assert_eq!(legacy_fast.extra_word([13, 1, 1], &[]), Some(13));
+}
+
+/// The small_k decomposition (rows per block = nwarps for one column) against the reference,
+/// on a row count that is not a multiple of the rows per block and K below one block pass.
+#[test]
+fn small_k_native_mmvq_matches_reference() {
+    use super::MmvqAbi;
+    let abi = MmvqAbi::Fused { small_k: true };
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
+        let ncols_x = if matches!(ty, refs::Q4_K | refs::Q6_K) { 512 } else { 896 };
+        let mut pr = problem(ty, 1, 13, ncols_x, 2, 1, 2, false, 0x5a11 + u64::from(ty));
+        pr.p.nwarps = abi.stock_nwarps(ty, 1) as usize;
+        pr.p.rpb = abi.rows_per_block(ty, 1) as usize;
+        let cfg = mmvq::Cfg { ty, ncols: 1, nwarps: pr.p.nwarps as u32, rpb: pr.p.rpb as u32 };
+        let want = pr.reference(pr.p.nwarps);
+        let got = run_native(&pr, cfg);
+        let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
+        assert_eq!(bad, 0, "type {ty}: {bad}/{} differ, nmse {}", got.len(), refs::nmse(&got, &want));
+        assert!(want.iter().any(|v| *v != 0.0));
+    }
+}
+
+/// Ollama 0.40.14 stock PTX (`CFI_STOCK_PTX_DIR_040` with the compute_75 module holding
+/// mul_mat_vec_q as `blob40.ptx`, extracted locally, never committed): the registry accepts the
+/// real parameter layout of every supported instantiation without fusion, and the TURING table
+/// matches each kernel's launch bounds. The numeric check against the stock kernel is
+/// `ptx::ggml_conformance::mmvq_fused_abi_stock_matches_reference_bitwise`.
+#[test]
+fn stock_0_40_mmvq_instantiations_are_accepted() {
+    use super::{Decision, Kernel, MmvqAbi, Switch, decide};
+    let Some(dir) = std::env::var_os("CFI_STOCK_PTX_DIR_040") else { return };
+    let source = std::fs::read_to_string(std::path::Path::new(&dir).join("blob40.ptx")).unwrap();
+    let prepared = crate::ptx::prepare_source(&source).unwrap();
+    crate::ptx::set_dot_product(true);
+    let mut accepted = 0;
+    for ty in [refs::Q4_0, refs::Q8_0, refs::Q4_K, refs::Q6_K] {
+        for ncols in 1..=8u32 {
+            for (small_k, halve) in [(0, 0), (1, 0), (0, 1)] {
+                if ncols > 1 && (small_k, halve) != (0, 0) {
+                    continue;
+                }
+                let entry = fused_name(ty, ncols, 0, small_k, halve);
+                let t = crate::ptx::translate_entry(&prepared, &entry).unwrap_or_else(|e| panic!("{entry}: {e}"));
+                let params = t.kernels[0].params.clone();
+                let Decision::Substitute(plan) = decide(&entry, &params, &Switch::parse("all")) else {
+                    panic!("{entry}: registry rejects the real layout {params:?}")
+                };
+                let Kernel::Mmvq { abi, .. } = plan.kernel else { unreachable!() };
+                assert_eq!(abi, MmvqAbi::Fused { small_k: small_k == 1 });
+                assert_eq!(Some(abi.stock_nwarps(ty, ncols) * 32), t.kernels[0].max_threads, "{entry}");
+                accepted += 1;
+            }
+        }
+    }
+    assert_eq!(accepted, 4 * (8 + 2));
 }

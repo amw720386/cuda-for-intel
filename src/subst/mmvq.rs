@@ -22,6 +22,15 @@ pub(crate) struct Cfg {
     pub ty: u32,
     pub ncols: u32,
     pub nwarps: u32,
+    /// Matrix rows per block (`MmvqAbi::rows_per_block`): 1 or 2, or `nwarps` for small_k.
+    pub rpb: u32,
+}
+
+impl Cfg {
+    /// The v0.12.6 decomposition: one row per block for one column, two otherwise.
+    pub(crate) fn legacy(ty: u32, ncols: u32, nwarps: u32) -> Self {
+        Self { ty, ncols, nwarps, rpb: if ncols == 1 { 1 } else { 2 } }
+    }
 }
 
 fn log2(v: u32) -> u32 {
@@ -328,9 +337,10 @@ fn dot_y(kb: &mut Kb, ty: u32, r: &Row, xd: &XData, kqs: V, acc: V) -> V {
 pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
     let t = refs::traits(cfg.ty).expect("unsupported type");
     let (ncols, nw) = (cfg.ncols, cfg.nwarps);
-    let rpb: u32 = if ncols == 1 { 1 } else { 2 };
+    let rpb = cfg.rpb;
+    assert!(rpb >= 1 && (ncols == 1 || rpb == 2), "rows per block {rpb} for ncols {ncols}");
     let shared_words = if nw > 1 { (nw - 1) * ncols * rpb * 32 } else { 0 };
-    let name = format!("cfi_mmvq_t{}_c{}_w{}", cfg.ty, ncols, nw);
+    let name = format!("cfi_mmvq_t{}_c{}_w{}_r{}", cfg.ty, ncols, nw, rpb);
     let mut kb = Kb::new(&name, &ARGS, shared_words, true, dot);
     let p = kb.params.clone();
     let (vx, vy, ids, dst) = (p[0], p[1], p[2], p[3]);
@@ -512,13 +522,13 @@ pub(crate) fn build(cfg: Cfg, dot: bool) -> Vec<u32> {
             let inb = kb.ult(r, scd);
             cond = kb.land(cond, inb);
         }
-        let value = if rpb == 1 {
-            vals[0]
-        } else {
-            let z = kb.c32(0);
-            let is0 = kb.eq(tidx, z);
-            kb.select(Ty::F32, is0, vals[0], vals[1])
-        };
+        // lane i writes row i's sum (rows per block may exceed 2 for the 0.40 small_k mode)
+        let mut value = vals[0];
+        for (i, &v) in vals.iter().enumerate().skip(1) {
+            let ci = kb.c32(i as u32);
+            let is_i = kb.eq(tidx, ci);
+            value = kb.select(Ty::F32, is_i, v, value);
+        }
         kb.if_(cond, |kb| {
             let jo = kb.mulc(scd, j);
             let idx = kb.add(jo, tidx);

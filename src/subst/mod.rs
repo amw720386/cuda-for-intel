@@ -172,9 +172,62 @@ fn source_name(s: &str) -> Option<(String, &str)> {
 
 // ---- kernel table ----
 
+/// Which `mul_mat_vec_q` signature a kernel has.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum MmvqAbi {
+    /// Ollama v0.12.6: `<type, ncols_dst>`, 23 launch words.
+    Legacy,
+    /// Ollama 0.40 (current ggml): `<type, ncols_dst, has_fusion, small_k, halve_iters>` with an
+    /// 80-byte `ggml_cuda_mm_fusion_args_device` (20 words) after `ids` and a trailing `ids_stride`:
+    /// 44 launch words.
+    /// Only `has_fusion = false` is substituted; the hook drops the fusion words and `ids_stride`,
+    /// so the native kernels see the legacy 23-word layout.
+    Fused { small_k: bool },
+}
+
+/// Launch words of the 0.40 `mul_mat_vec_q` and the legacy words they map to.
+pub(crate) const MMVQ_FUSED_WORDS: usize = 44;
+
+impl MmvqAbi {
+    /// Warps per block ggml compiled the stock kernel for (its `__launch_bounds__`).
+    pub(crate) fn stock_nwarps(self, ty: u32, ncols: u32) -> u32 {
+        match self {
+            Self::Legacy => refs::Mmvq::ggml_nwarps(ncols as usize) as u32,
+            // MMVQ_PARAMETERS_TURING (the compute_75 PTX that a reported 7.5 selects); checked
+            // against the `.maxntid` of every Ollama 0.40.14 instantiation.
+            Self::Fused { .. } => match ncols {
+                1 if matches!(ty, 10..=14) => 2, // Q2_K .. Q6_K
+                1..=4 => 4,
+                5..=8 => 2,
+                _ => 1,
+            },
+        }
+    }
+
+    /// Matrix rows per thread block (ggml's `calc_rows_per_block`): `small_k` gives each of the
+    /// `nwarps` warps of an ncols_dst-1 block its own row.
+    pub(crate) fn rows_per_block(self, ty: u32, ncols: u32) -> u32 {
+        match self {
+            Self::Fused { small_k: true } if ncols == 1 => self.stock_nwarps(ty, ncols),
+            _ if ncols == 1 => 1,
+            _ => 2,
+        }
+    }
+
+    /// The legacy 23 launch words: the three leading pointers, then `dst` onward without the
+    /// fusion struct words (3..23) and the trailing `ids_stride`.
+    pub(crate) fn legacy_words<T: Copy>(self, words: &[T]) -> Option<Vec<T>> {
+        match self {
+            Self::Legacy => (words.len() == 23).then(|| words.to_vec()),
+            Self::Fused { .. } => (words.len() == MMVQ_FUSED_WORDS)
+                .then(|| words[..3].iter().chain(&words[23..MMVQ_FUSED_WORDS - 1]).copied().collect()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Kernel {
-    Mmvq { ty: u32, ncols: u32 },
+    Mmvq { ty: u32, ncols: u32, abi: MmvqAbi },
     QuantizeQ81,
     /// `mul_mat_q<ty>` (any mmq_x / need_check), non-MoE only.
     Mmq { ty: u32 },
@@ -215,6 +268,13 @@ pub(crate) fn auto_ok(kernel: Kernel) -> bool {
 fn mmvq_layout() -> Vec<Param> {
     use Param::U32;
     vec![ptr(), ptr(), ptr(), ptr(), U32, u3(), U32, U32, U32, u3(), U32, U32, U32, u3(), U32, U32, U32]
+}
+
+/// Parameter layout of the 0.40 `mul_mat_vec_q` (see `MmvqAbi::Fused`).
+fn mmvq_fused_layout() -> Vec<Param> {
+    use Param::U32;
+    let fusion = Param::Words { words: 20, align: 8, trim: 0 };
+    vec![ptr(), ptr(), ptr(), fusion, ptr(), U32, u3(), U32, U32, U32, u3(), U32, U32, U32, u3(), U32, U32, U32, U32]
 }
 
 fn quantize_layout() -> Vec<Param> {
@@ -376,7 +436,19 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
             else {
                 return Decision::NotApplicable;
             };
-            (Kernel::Mmvq { ty: *ty as u32, ncols: *ncols as u32 }, mmvq_layout(), "mmvq", Some(tn))
+            (Kernel::Mmvq { ty: *ty as u32, ncols: *ncols as u32, abi: MmvqAbi::Legacy }, mmvq_layout(), "mmvq", Some(tn))
+        }
+        // halve_iters only changes the warp count of the GB10 table, never of TURING.
+        ("mul_mat_vec_q", [TArg::Enum(e, ty), TArg::Int(ncols), TArg::Int(fusion), TArg::Int(small_k), TArg::Int(_halve)])
+            if e == "ggml_type" =>
+        {
+            let (Some(tn), true, 0) =
+                (type_name(*ty as u32).filter(|_| mmvq_supported(*ty as u32)), (1..=8).contains(ncols), *fusion)
+            else {
+                return Decision::NotApplicable;
+            };
+            let abi = MmvqAbi::Fused { small_k: *small_k != 0 };
+            (Kernel::Mmvq { ty: *ty as u32, ncols: *ncols as u32, abi }, mmvq_fused_layout(), "mmvq", Some(tn))
         }
         ("mul_mat_q", [TArg::Enum(e, ty), TArg::Int(_), TArg::Int(_)]) if e == "ggml_type" && mmq::supported(*ty as u32) => {
             (Kernel::Mmq { ty: *ty as u32 }, mmq_layout(), "mmq", type_name(*ty as u32))
@@ -417,15 +489,17 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
     }
     .filter(|w| w.is_power_of_two() && (1..=32).contains(w));
     let fast = match kernel {
-        Kernel::Mmvq { ty, ncols: 1 } => mmvq_fast_env(ty),
+        Kernel::Mmvq { ty, ncols: 1, .. } => mmvq_fast_env(ty),
         _ => None,
     };
     let key = match kernel {
-        Kernel::Mmvq { ty, ncols } if fast.is_some() => {
+        Kernel::Mmvq { ty, ncols, .. } if fast.is_some() => {
             let f = fast.unwrap();
             format!("mmvq:t{ty}:c{ncols}:fast{}x{}x{}{}", f.rows, f.warps, f.unroll, if f.wide { "w" } else { "" })
         }
-        Kernel::Mmvq { ty, ncols } => format!("mmvq:t{ty}:c{ncols}:w{}", nwarps.unwrap_or(0)),
+        Kernel::Mmvq { ty, ncols, abi } => {
+            format!("mmvq:t{ty}:c{ncols}:w{}:r{}", nwarps.unwrap_or(0), abi.rows_per_block(ty, ncols))
+        }
         Kernel::QuantizeQ81 => "quantize_q8_1".to_string(),
         Kernel::Mmq { ty } => format!("mmq:t{ty}"),
         Kernel::MmqFixup { ty } => format!("mmq_fixup:t{ty}"),
@@ -450,9 +524,13 @@ impl Plan {
             Kernel::Mmvq { ty, .. } if self.fast.is_some() => {
                 mmvq::fast_entry_name(ty, self.fast.unwrap())
             }
-            Kernel::Mmvq { ty, ncols } => {
-                format!("cfi_mmvq_t{}_c{}_w{}", ty, ncols, self.nwarps_for(refs::Mmvq::ggml_nwarps(ncols as usize) as u32))
-            }
+            Kernel::Mmvq { ty, ncols, abi } => format!(
+                "cfi_mmvq_t{}_c{}_w{}_r{}",
+                ty,
+                ncols,
+                self.nwarps_for(abi.stock_nwarps(ty, ncols)),
+                abi.rows_per_block(ty, ncols)
+            ),
             Kernel::QuantizeQ81 => "cfi_quantize_q8_1".to_string(),
             Kernel::Mmq { ty } => mmq::entry_name(ty),
             Kernel::MmqFixup { .. } | Kernel::FattnFixup => String::new(),
@@ -468,9 +546,9 @@ impl Plan {
             Kernel::Mmvq { ty, .. } if plan.fast.is_some() => {
                 mmvq::build_fast(ty, plan.fast.unwrap(), dot)
             }
-            Kernel::Mmvq { ty, ncols } => {
-                let nwarps = plan.nwarps_for(refs::Mmvq::ggml_nwarps(ncols as usize) as u32);
-                mmvq::build(mmvq::Cfg { ty, ncols, nwarps }, dot)
+            Kernel::Mmvq { ty, ncols, abi } => {
+                let nwarps = plan.nwarps_for(abi.stock_nwarps(ty, ncols));
+                mmvq::build(mmvq::Cfg { ty, ncols, nwarps, rpb: abi.rows_per_block(ty, ncols) }, dot)
             }
             Kernel::QuantizeQ81 => quantize::build(dot),
             Kernel::Mmq { ty } => mmq::build(ty, dot),
@@ -484,13 +562,17 @@ impl Plan {
     /// have the shape the native kernel was written for (the translated kernel then runs).
     pub(crate) fn map_geometry(&self, grid: [u32; 3], block: [u32; 3]) -> Option<([u32; 3], [u32; 3])> {
         match self.kernel {
-            Kernel::Mmvq { ncols, .. } => {
-                let stock = refs::Mmvq::ggml_nwarps(ncols as usize) as u32;
+            Kernel::Mmvq { ty, ncols, abi } => {
+                let stock = abi.stock_nwarps(ty, ncols);
                 if block != [32, stock, 1] {
                     return None;
                 }
                 if let Some(f) = self.fast {
-                    // stock ncols_dst 1: one row per block, grid.x == nrows
+                    // ncols_dst 1 with one row per block: grid.x == nrows (more rows per block
+                    // go through `map_launch`, which knows the row count)
+                    if abi.rows_per_block(ty, ncols) != 1 {
+                        return None;
+                    }
                     return Some(([grid[0].div_ceil(f.rows), grid[1], grid[2]], [32, f.rows * f.warps, 1]));
                 }
                 Some((grid, [32, self.nwarps_for(stock), 1]))
@@ -502,10 +584,24 @@ impl Plan {
 
     /// A launch word the native kernel takes after the stock parameters (`nrows` for the
     /// decode-fast mmvq, from the stock grid).
-    pub(crate) fn extra_word(&self, stock_grid: [u32; 3]) -> Option<u32> {
+    pub(crate) fn extra_word(&self, stock_grid: [u32; 3], vals: &[u64]) -> Option<u32> {
         match self.kernel {
-            Kernel::Mmvq { .. } if self.fast.is_some() => Some(stock_grid[0]),
+            Kernel::Mmvq { .. } if self.fast.is_some() => self.mmvq_rows(stock_grid, vals),
             _ => None,
+        }
+    }
+
+    /// Matrix rows an ncols_dst-1 `mul_mat_vec_q` launch covers: `grid.x` blocks of
+    /// `rows_per_block` rows, bounded by `stride_col_dst` (legacy word 10, the row count of a
+    /// one-column destination) when a block holds several rows.
+    pub(crate) fn mmvq_rows(&self, grid: [u32; 3], vals: &[u64]) -> Option<u32> {
+        let Kernel::Mmvq { ty, ncols: 1, abi } = self.kernel else { return None };
+        match abi.rows_per_block(ty, 1) {
+            1 => Some(grid[0]),
+            rpb => {
+                let bound = u32::try_from(*vals.get(10)?).ok()?;
+                Some(grid[0].checked_mul(rpb)?.min(bound))
+            }
         }
     }
 
@@ -533,6 +629,14 @@ impl Plan {
             Kernel::Fattn { d } => {
                 let _ = (grid, block);
                 fattn_geometry(d, vals)
+            }
+            Kernel::Mmvq { ty, ncols, abi } if self.fast.is_some() && abi.rows_per_block(ty, ncols) != 1 => {
+                let f = self.fast?;
+                if block != [32, abi.stock_nwarps(ty, ncols), 1] {
+                    return None;
+                }
+                let rows = self.mmvq_rows(grid, vals)?;
+                Some(([rows.div_ceil(f.rows), grid[1], grid[2]], [32, f.rows * f.warps, 1]))
             }
             _ => self.map_geometry(grid, block),
         }

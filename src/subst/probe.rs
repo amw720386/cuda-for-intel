@@ -69,6 +69,7 @@ pub(crate) fn mmvq_case(
         stride_sample_x: (nrows * bpr * nx_ch) as u32,
         stride_sample_y: ystride_col * ncols_dst as u32 * nch_y as u32,
         stride_sample_dst: (nrows * ncols_dst * nch) as u32,
+        rpb: if ncols_dst == 1 { 1 } else { 2 },
     };
     let x = refs::random_blocks(ty, nrows * bpr * nx_ch * nsamples, &mut rng);
     let acts: Vec<f32> = (0..ncols_x * ncols_dst * nch_y * nsamples).map(|_| rng.unit() * 3.0).collect();
@@ -159,7 +160,8 @@ impl MmvqCase {
             let mut fa = args.to_vec();
             fa.push(u(p.nrows_x as u32));
             let g = p.grid();
-            dev.run([g[0].div_ceil(rows), g[1], g[2]], [32, rows * warps, 1], &fa)?;
+            // the decode-fast kernel covers nrows_x rows whatever the stock rows per block
+            dev.run([(p.nrows_x as u32).div_ceil(rows), g[1], g[2]], [32, rows * warps, 1], &fa)?;
         } else {
             let mut q = p.clone();
             q.nwarps = nwarps;
@@ -351,9 +353,12 @@ pub(crate) fn launch_values(args: &[PArg]) -> Vec<u64> {
 /// reference (bitwise for quantize; NMSE below 1e-9 for the float dot products).
 pub(crate) fn validate(plan: &Plan, dev: &mut impl Device) -> Result<(), String> {
     match plan.kernel {
-        Kernel::Mmvq { ty, ncols } => {
-            // 11 rows: not a multiple of the decode-fast rows per workgroup (tail subgroups exit)
-            let case = mmvq_case(ty, ncols as usize, if plan.fast.is_some() { 11 } else { 5 }, 512, 1, 1, 1, false, 0x5eed + u64::from(ty));
+        Kernel::Mmvq { ty, ncols, abi } => {
+            // 11 rows: not a multiple of the decode-fast rows per workgroup (tail subgroups exit),
+            // nor of the small_k rows per block
+            let mut case = mmvq_case(ty, ncols as usize, if plan.fast.is_some() { 11 } else { 5 }, 512, 1, 1, 1, false, 0x5eed + u64::from(ty));
+            case.p.nwarps = abi.stock_nwarps(ty, ncols) as usize;
+            case.p.rpb = abi.rows_per_block(ty, ncols) as usize;
             let (want, got) = if let Some(f) = plan.fast {
                 (case.reference_fast(f), case.run_fast(dev, f.rows, f.warps)?)
             } else {
