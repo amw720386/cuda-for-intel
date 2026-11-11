@@ -18,7 +18,14 @@
 //! integers: a loaded or `.u64` row index times a stride is an offset, not a pointer. An address is
 //! direct when its set is exactly `TRACKED`; an address built from integers alone, or one that may
 //! carry an `UNKNOWN` pointer, is not. The one assumption is that kernels do not scale a pointer and
-//! then use the result as an offset into another allocation.
+//! then use the result as an offset into another allocation. Its inverse is accepted the same way:
+//! an `UNKNOWN` pointer passed through an identity scaling (`shl.b64 %rd, %rd, 0`, `mul.lo 1`, as
+//! de-optimised code can emit) becomes a plain integer; it can never be `TRACKED` on its own, so it
+//! is accepted only when added to a tracked base.
+//!
+//! Fail closed: `global_address` matches every instruction variant without a wildcard, so a new
+//! memory instruction must be classified before this compiles, and any memory read it does not
+//! classify (for example a future `Ext` load) makes the kernel not direct.
 use super::ext::ExtOp;
 use super::param_space::ParamOp;
 use super::{Alu64Op, Block, Instruction, IntegerOp, Param, Param as ParamKind, Space};
@@ -53,9 +60,41 @@ fn global_address<'a>(inst: &Instruction<'a>) -> Option<&'a str> {
         | Atomic { space, addr, .. } => (*space, *addr),
         StoreVec4U8(addr, _) | AtomicAdd32(_, addr, _) => (Space::Global, *addr),
         Ext { op: ExtOp::Atom { space, .. } | ExtOp::AtomIncDec { space, .. }, src, .. } => (*space, src[0]),
-        _ => return None,
+        // Exhaustive on purpose: a new memory instruction must be classified here, or the
+        // compiler rejects this match. (`Ext` is covered by the load check in `direct_access`.)
+        Param { .. } | ParamS8 { .. } | ParamS32 { .. } | ParamVec { .. } | ToGlobal { .. }
+        | SharedAddress { .. } | SharedSymbol32 { .. } | LocalSymbol64 { .. } | GlobalAddress { .. }
+        | Builtin { .. } | Mad32 { .. } | Dp4a { .. } | Compare { .. } | CompareFloat { .. }
+        | Compare64 { .. } | Select { .. } | PredicateLogic { .. } | NotPred { .. } | Integer32 { .. }
+        | Not32 { .. } | Not64 { .. } | Move32 { .. } | Move64 { .. } | PackB16 { .. }
+        | MulWide32 { .. } | Widen { .. } | Narrow { .. } | ShiftLeft64 { .. }
+        | ShiftRightLogical64 { .. } | And64 { .. } | Or64 { .. } | MinS64 { .. } | Alu3 { .. }
+        | Alu64 { .. } | LaneId { .. } | Special { .. } | Shuffle { .. } | Vote { .. } | Fence
+        | Mma { .. } | Rem64 { .. } | Add64 { .. } | Sub64 { .. } | Mul64 { .. } | Div64 { .. }
+        | ShiftRightArithmetic64 { .. } | Float32 { .. } | CvtRziS32 { .. } | CvtRniS32 { .. }
+        | CvtToU32 { .. } | CvtToHalf { .. } | CvtaShared { .. } | CvtaToShared { .. }
+        | ShuffleBfly { .. } | ReduxSyncAdd { .. } | Barrier | Ext { .. } => return None,
+        // Shared-only, and parameter space (a load, never a USM address).
+        LdMatrix { .. } | ParamSpace { .. } => return None,
     };
     (space == Space::Global).then_some(address)
+}
+
+/// A memory read whose address `global_address` did not classify (fail closed: not direct).
+fn unclassified_load(inst: &Instruction<'_>) -> bool {
+    inst.is_memory_load() && global_address(inst).is_none() && !shared_or_local(inst)
+}
+
+fn shared_or_local(inst: &Instruction<'_>) -> bool {
+    use Instruction::*;
+    let space = match inst {
+        Load32(space, ..) | Load64(space, ..) | Load16(space, ..) | Load8(space, ..) => *space,
+        LoadSigned { space, .. } | LoadVec { space, .. } | LoadVecU16 { space, .. } | LoadVecU8 { space, .. }
+        | Atomic { space, .. } => *space,
+        Ext { op: ExtOp::Atom { space, .. } | ExtOp::AtomIncDec { space, .. }, .. } => *space,
+        _ => return false,
+    };
+    space != Space::Global
 }
 
 fn operand(provenance: &HashMap<&str, u8>, operand: &str) -> u8 {
@@ -134,11 +173,11 @@ pub(super) fn direct_access(params: &[(&str, Param)], blocks: &[Block<'_>]) -> b
             break;
         }
     }
-    blocks
-        .iter()
-        .flat_map(|block| &block.instructions)
-        .filter_map(global_address)
-        .all(|address| operand(&provenance, address) == TRACKED)
+    let mut instructions = blocks.iter().flat_map(|block| &block.instructions);
+    instructions.all(|inst| {
+        !unclassified_load(inst)
+            && global_address(inst).is_none_or(|address| operand(&provenance, address) == TRACKED)
+    })
 }
 
 #[cfg(test)]
@@ -294,6 +333,32 @@ mod tests {
              ld.param.u32 %r1, [lo];\nld.param.u32 %r2, [hi];\ncvt.u64.u32 %rd1, %r1;\ncvt.u64.u32 %rd2, %r2;\n\
              shl.b64 %rd3, %rd2, 32;\nor.b64 %rd4, %rd3, %rd1;\nmov.u32 %r3, 1;\nst.global.u32 [%rd4], %r3;\nret;\n}\n"
         ));
+    }
+
+    #[test]
+    fn every_global_memory_read_has_a_classified_address() {
+        use super::super::ext::{AtomTy, ExtOp};
+        use super::super::{AtomicOp, Instruction::*, Space::Global};
+        let (d, a) = ("%r1", "%rd1");
+        let reads = [
+            Load32(Global, d, a),
+            Load64(Global, d, a),
+            Load16(Global, d, a),
+            Load8(Global, d, a),
+            LoadSigned { space: Global, bits: 8, dst: d, addr: a },
+            LoadVec { space: Global, count: 2, dst: [d; 4], addr: a },
+            LoadVecU16 { space: Global, count: 2, dst: [d; 4], addr: a },
+            LoadVecU8 { space: Global, count: 2, dst: [d; 4], addr: a },
+            AtomicAdd32(d, a, d),
+            Atomic { op: AtomicOp::Add, space: Global, float: false, wide: false, signed: false, dst: Some(d), addr: a, src: [d, "0"] },
+            Ext { op: ExtOp::Atom { op: AtomicOp::Add, ty: AtomTy::U64, space: Global, returns: true }, dst: [d, ""], src: [a, d, "0", "0"] },
+            Ext { op: ExtOp::AtomIncDec { dec: false, space: Global, returns: true }, dst: [d, ""], src: [a, d, "0", "0"] },
+        ];
+        for inst in &reads {
+            assert!(inst.is_memory_load(), "{inst:?}");
+            assert_eq!(super::global_address(inst), Some(a), "{inst:?}");
+            assert!(!super::unclassified_load(inst), "{inst:?}");
+        }
     }
 
     #[test]
