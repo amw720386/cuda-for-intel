@@ -32,7 +32,6 @@ that the Runtime checks are not published. This project therefore loads the genu
 absolute directory (`CUDA_FOR_INTEL_HYBRID_DIR`) and returns its resolver, instead of faking the table.
 The renamed 13.0.88 redistributable runtime does not have the required export, so it cannot replace the
 companion. The driver accepts only the two file names `nvcudart_hybrid64.dll` and `nvcudart_hybrid64a.dll`.
-Details: `docs/agent-handoff.md`, "The resolver and primary context".
 
 Without the companion, `cuGetExportTable` fails with `CUDA_ERROR_FILE_NOT_FOUND` (301) when
 `CUDA_FOR_INTEL_HYBRID_DIR` is unset, or `CUDA_ERROR_INVALID_VALUE` (1) when the path is not absolute

@@ -7,7 +7,7 @@ PTX (never SASS/cubin) to SPIR-V. Build it for a virtual architecture only.
 
 Needs a CUDA toolkit (nvcc) on the build machine, Visual Studio C++ tools and CMake. Verified toolchains:
 nvcc 13.5 for the `test-backend-ops` runs in `docs/hw-logs/ggml-test-backend-ops.md` (llama.cpp b12190),
-nvcc 12.9 with `80-virtual` for the controlled `llama-completion` build in `docs/agent-handoff.md` (commit `52e53a7`).
+nvcc 12.9 with `80-virtual` for the controlled `llama-completion` build (commit `52e53a7`).
 
 ```powershell
 cmake -S . -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75-virtual `

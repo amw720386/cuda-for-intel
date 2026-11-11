@@ -1,4 +1,4 @@
-# Prefill with kernel substitution off vs on, 2026-11-09 (claims-audit row 6)
+# Prefill with kernel substitution off vs on, 2026-11-09
 
 Arc B390, driver 32.0.101.9033, stock Ollama v0.12.6, flash attention off, LD16 off, 624-token prompt (623 for Llama) after a
 different warm-up prompt of the same length (no KV prefix cache hit), single runs. Build: main + translator-next + win-redirect

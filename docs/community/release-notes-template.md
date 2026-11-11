@@ -27,4 +27,4 @@ First run after upgrading rebuilds the translation cache if the translator stamp
 | File | SHA-256 |
 | --- | --- |
 
-Contains no NVIDIA files. Obtain NVIDIA software from NVIDIA. Full changelog: CHANGELOG.md.
+Contains no NVIDIA files. Obtain NVIDIA software from NVIDIA.

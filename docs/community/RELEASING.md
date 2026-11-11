@@ -4,7 +4,7 @@ Roles: a maintainer with access to the hardware test device and the GPU lock.
 
 1. **Branch**: cut from the integration branch at a green commit; create `release/vX.Y.Z`.
 2. **Version**: bump the five `Cargo.toml` versions together (see VERSIONING.md), update `Cargo.lock` (`cargo build --locked` must still pass after `cargo update -w`). Confirm the translator/cache version stamp was bumped if translator output changed.
-3. **CHANGELOG**: move "Unreleased" to the new version with the date; keep only user-visible changes.
+3. **Change list**: collect user-visible changes since the last tag (`git log`) for the release notes.
 4. **Gate: software tests (no GPU)**: `cargo test --locked --workspace`, `tests/ptx_corpus/run.sh` (no diff in expected_status.tsv unless intended).
 5. **Gate: hardware suite** on the reference device: `cargo test --release --locked --test gpu -- --ignored --nocapture --test-threads=1` and `scripts\validate-gpu.ps1`, holding the GPU lock. Save logs under `docs/hw-logs/` (paths scrubbed). Every result quoted in release notes must come from a log committed at the release commit. A failing test blocks the release unless the owner lists it as a known issue.
 6. **Gate: leak scan**: a full-history scan (grep for IPs, `user-at-host`, private keys, tokens, Windows user paths) on the tree, logs and release notes must report 0.
@@ -15,6 +15,6 @@ Roles: a maintainer with access to the hardware test device and the GPU lock.
 11. **Release notes** from `release-notes-template.md`; only verified results; no earlier or failed runs.
 12. **Tag** (owner only): `git tag -s vX.Y.Z -m "vX.Y.Z"` on the release commit, `git push <explicit-remote-url> vX.Y.Z`.
 13. **GitHub release** (owner only): attach zip and SHA256SUMS; mark pre-release while 0.x if desired.
-14. Merge `release/vX.Y.Z` back; open "Unreleased" in CHANGELOG; update docs/compatibility.md from accepted compat reports.
+14. Merge `release/vX.Y.Z` back; update docs/compatibility.md from accepted compat reports.
 
 Never: force-push a tag, push to `main` directly, attach a binary not produced by step 8.
