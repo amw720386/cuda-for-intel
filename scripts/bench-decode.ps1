@@ -9,11 +9,11 @@
   (never seen by the KV prefix cache, so the whole prompt is evaluated). Reports the best of the measured runs and whether the
   variant-3 text equals the CPU text (first differing character otherwise), plus a free-text story prompt compared the same way
   (`story_diff`, -1 = identical).
-  Configs: `name=K1:V1;K2:V2` entries separated by `|`, e.g. `base=|fast=CUDA_FOR_INTEL_MMVQ_FAST:1`. Every config runs with
+  Configs: `name=K1:V1;K2:V2` entries separated by `|`, e.g. `stock=CUDA_FOR_INTEL_MMVQ_FAST:0|fast=`. Every config runs with
   OLLAMA_FLASH_ATTENTION 0 and 1 unless -Fa says otherwise.
 
 .EXAMPLE
-  powershell -NoProfile -File bench-decode.ps1 -Tree <ollama tree with the shim> -Models a.gguf,b.gguf -Out <dir> -Configs 'base=|fast=CUDA_FOR_INTEL_MMVQ_FAST:1'
+  powershell -NoProfile -File bench-decode.ps1 -Tree <ollama tree with the shim> -Models a.gguf,b.gguf -Out <dir> -Configs 'stock=CUDA_FOR_INTEL_MMVQ_FAST:0|fast='
 #>
 param(
     [Parameter(Mandatory)][string]$Tree,
@@ -56,12 +56,25 @@ function Start-Srv([string]$Tag, [hashtable]$E) {
     for ($i = 0; $i -lt 40 -and -not $up; $i++) { Start-Sleep 2; if ((Get-Content "$wd\e.txt" -Raw -ErrorAction SilentlyContinue) -match "Listening on 127\.0\.0\.1:$port") { $up = $true } elseif ($p.HasExited) { break } }
     return @{ proc = $p; port = $port; wd = $wd; up = $up; model = $null }
 }
+# Ollama's GPU-discovery `runner` processes can outlive their server (their parent is gone, so Get-DescendantIds misses
+# them) and keep lib\ollama\cuda_v13\nvcuda.dll open. Kill runners of this bench executable whose parent is $ServerId
+# or no longer exists.
+function Stop-OrphanRunners([int]$ServerId) {
+    $leaf = [IO.Path]::GetFileName($exe)
+    foreach ($r in @(Get-CimInstance Win32_Process -Filter "Name='$leaf'" -ErrorAction SilentlyContinue)) {
+        if (-not $r.ExecutablePath -or [IO.Path]::GetFullPath($r.ExecutablePath) -ne [IO.Path]::GetFullPath($exe) -or $r.CommandLine -notmatch '\srunner(\s|$)') { continue }
+        $parentAlive = [bool](Get-Process -Id ([int]$r.ParentProcessId) -ErrorAction SilentlyContinue)
+        if ([int]$r.ParentProcessId -eq $ServerId -or -not $parentAlive) { try { Stop-Process -Id ([int]$r.ProcessId) -Force -ErrorAction Stop } catch {} }
+    }
+}
 function Stop-Srv($S) {
     try { Invoke-RestMethod -Uri "http://127.0.0.1:$($S.port)/api/generate" -Method Post -Body (@{ model = $S.model; keep_alive = 0 } | ConvertTo-Json) -ContentType 'application/json' -TimeoutSec 30 | Out-Null } catch {}
     Start-Sleep 3
     foreach ($id in @(Get-DescendantIds $S.proc.Id)) { try { [Diagnostics.Process]::GetProcessById($id).Kill() } catch {} }
     try { if (-not $S.proc.HasExited) { $S.proc.Kill() } } catch {}
-    [void]$S.proc.WaitForExit(30000); Start-Sleep 2
+    [void]$S.proc.WaitForExit(30000)
+    Stop-OrphanRunners $S.proc.Id
+    Start-Sleep 2
 }
 function Create($S, [string]$Gguf, [string]$Name) {
     "FROM $Gguf" | Set-Content "$($S.wd)\Mf"; $S.model = $Name
