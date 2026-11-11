@@ -2,11 +2,11 @@
 //!
 //! Level Zero rejected appends with OUT_OF_DEVICE_MEMORY when about a thousand unsynchronised
 //! 14336-group launches piled up (`hw_big_dispatch_loop_unsynchronised`), so a stream waits once
-//! too many work-groups are outstanding. The default `drain` mode waits for the whole stream, which
-//! leaves the GPU idle until the next append arrives; with a 65536-group limit a Qwen2.5-0.5B
-//! decode token (about 450k work-groups) drains about seven times.
+//! too many work-groups are outstanding. `CUDA_FOR_INTEL_INFLIGHT=drain` waits for the whole
+//! stream, which leaves the GPU idle until the next append arrives; with a 65536-group limit a
+//! Qwen2.5-0.5B decode token (about 450k work-groups) drains about seven times.
 //!
-//! `CUDA_FOR_INTEL_INFLIGHT=window` keeps a similar bound without emptying the queue: every
+//! The default `window` mode keeps a similar bound without emptying the queue: every
 //! `limit / 4` counted work-groups one launch carries a completion event (a checkpoint), and a
 //! stream over the limit waits for its oldest checkpoints only, so later work keeps the GPU busy
 //! meanwhile. A launch counts as at most `limit / 2` work-groups, so a launch larger than the limit
@@ -55,8 +55,8 @@ impl Config {
             limit: get("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS")
                 .and_then(|value| value.trim().parse().ok())
                 .unwrap_or(DEFAULT_LIMIT),
-            window: get("CUDA_FOR_INTEL_INFLIGHT")
-                .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("window")),
+            // Window unless `drain` is asked for (Arc B390 decode p50 55.6 -> 61.4 tok/s FA off).
+            window: !get("CUDA_FOR_INTEL_INFLIGHT").is_some_and(|mode| mode.trim().eq_ignore_ascii_case("drain")),
         }
     }
 
@@ -193,9 +193,16 @@ mod tests {
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |name: &str| pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| value.to_string())
         };
-        assert_eq!(Config::from(env(&[])), drain(DEFAULT_LIMIT));
-        assert_eq!(Config::from(env(&[("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS", "0")])), drain(0));
-        assert_eq!(Config::from(env(&[("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS", "x")])), drain(DEFAULT_LIMIT));
+        let window = |limit| Config { limit, window: true };
+        assert_eq!(Config::from(env(&[])), window(DEFAULT_LIMIT));
+        assert_eq!(Config::from(env(&[("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS", "0")])), window(0));
+        assert_eq!(Config::from(env(&[("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS", "x")])), window(DEFAULT_LIMIT));
+        assert_eq!(Config::from(env(&[("CUDA_FOR_INTEL_INFLIGHT", "")])), window(DEFAULT_LIMIT));
+        assert_eq!(Config::from(env(&[("CUDA_FOR_INTEL_INFLIGHT", " DRAIN ")])), drain(DEFAULT_LIMIT));
+        assert_eq!(
+            Config::from(env(&[("CUDA_FOR_INTEL_INFLIGHT", "drain"), ("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS", "1000")])),
+            drain(1000)
+        );
         assert_eq!(
             Config::from(env(&[("CUDA_FOR_INTEL_INFLIGHT", "Window"), ("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS", "1000")])),
             Config { limit: 1000, window: true }
