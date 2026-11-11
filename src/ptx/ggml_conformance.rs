@@ -1107,7 +1107,7 @@ fn mmvq_fused_abi_stock_matches_reference_bitwise() {
             if !index().contains_key(&name) {
                 continue;
             }
-            let abi = MmvqAbi::Fused { small_k };
+            let abi = MmvqAbi::Fused { small_k, fusion: false };
             // K below one block pass when small_k (ggml's trigger), 13 rows (not a multiple of the
             // rows per block), two channels and two samples
             let ncols_x = match (small_k, ty) {
@@ -1170,4 +1170,102 @@ fn mmvq_fused_abi_stock_matches_reference_bitwise() {
         }
     }
     assert_eq!(ran, 16, "expected every instantiation in a 0.40 dump");
+}
+
+/// Ollama 0.40 `mul_mat_vec_q<type, 1, true, small_k, false>` with ggml's fused epilogue (bias
+/// only, SwiGLU gate, both) against the substitution reference (`probe::reference_fusion`), which
+/// the native fused kernel also matches (`subst::tests::fused_native_mmvq_matches_reference`).
+/// Not bitwise: the stock kernel's expf is NVIDIA's ex2.approx-based sequence.
+#[test]
+fn mmvq_fused_epilogue_stock_matches_reference() {
+    use crate::subst::{MmvqAbi, mmvq::GLU_SWIGLU, probe, refs as sref};
+    if ptx_dir().is_none() {
+        return;
+    }
+    let mut ran = 0;
+    for ty in [sref::Q8_0, sref::Q4_0, sref::Q4_K, sref::Q6_K] {
+        for small_k in [true, false] {
+            let name = format!(
+                "_Z13mul_mat_vec_qIL9ggml_type{ty}ELi1ELb1ELb{}ELb0EEvPKvS2_PKi31ggml_cuda_mm_fusion_args_devicePfj5uint3jjjS7_jjjS7_jjjj",
+                u32::from(small_k)
+            );
+            if !index().contains_key(&name) {
+                continue;
+            }
+            for (gate, x_bias, gate_bias) in [(false, true, false), (true, false, false), (true, true, true)] {
+                let abi = MmvqAbi::Fused { small_k, fusion: true };
+                let ncols_x = match (small_k, ty) {
+                    (true, sref::Q4_K | sref::Q6_K) => 512,
+                    (true, _) => 896,
+                    _ => 1024,
+                };
+                let seed = 0x5f + u64::from(ty) * 5 + u64::from(small_k);
+                let mut case = probe::mmvq_case(ty, 1, 12, ncols_x, 2, 1, 2, false, seed);
+                case.p.nwarps = abi.stock_nwarps(ty, 1) as usize;
+                case.p.rpb = abi.rows_per_block(ty, 1) as usize;
+                let mut rng = sref::Rng(seed ^ 0x77);
+                let nblocks = case.x.len() / sref::traits(ty).unwrap().block_bytes;
+                let n = case.dst_len();
+                let f = probe::Fusion {
+                    gate: gate.then(|| sref::random_blocks(ty, nblocks, &mut rng)),
+                    x_bias: x_bias.then(|| (0..n).map(|_| rng.unit()).collect()),
+                    gate_bias: gate_bias.then(|| (0..n).map(|_| rng.unit()).collect()),
+                };
+                let want = case.reference_fusion(case.p.nwarps, &f);
+                let kern = load_kernel(&name, true);
+                let p = &case.p;
+                let mut gpu = Gpu::default();
+                let row_bytes = p.stride_row_x as usize * sref::traits(ty).unwrap().block_bytes;
+                let pad = |v: &[u8]| {
+                    let mut v = v.to_vec();
+                    v.resize(v.len() + p.rpb * row_bytes, 0);
+                    v
+                };
+                let (x, y) = (gpu.upload(&pad(&case.x)), gpu.upload(&case.y));
+                let bytes = |v: &Vec<f32>| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+                let xb = f.x_bias.as_ref().map_or(0, |v| gpu.upload(&bytes(v)));
+                let g = f.gate.as_ref().map_or(0, |v| gpu.upload(&pad(v)));
+                let gb = f.gate_bias.as_ref().map_or(0, |v| gpu.upload(&bytes(v)));
+                let dst = gpu.upload(&vec![0u8; n * 4]);
+                let lohi = |v: u64| [v as u32, (v >> 32) as u32];
+                let mut fusion = Vec::new();
+                for v in [xb, g, gb, 0, 0] {
+                    fusion.extend(lohi(v)); // x_bias, gate, gate_bias, x_scale, gate_scale
+                }
+                fusion.push(GLU_SWIGLU);
+                fusion.push(0f32.to_bits()); // glu_limit
+                fusion.extend([0u32; 8]); // shared_up, shared_gate, shared_dst, shared_stride, pad
+                let w = |v: [u32; 3]| Arg::W(v.to_vec());
+                let args = vec![
+                    Arg::P(x),
+                    Arg::P(y),
+                    Arg::P(0),
+                    Arg::W(fusion),
+                    Arg::P(dst),
+                    Arg::U(p.ncols_x as u32),
+                    w([0; 3]),
+                    Arg::U(p.stride_row_x),
+                    Arg::U(p.stride_col_y),
+                    Arg::U(p.stride_col_dst),
+                    w(sref::fastdiv_values(p.channel_ratio)),
+                    Arg::U(p.stride_channel_x),
+                    Arg::U(p.stride_channel_y),
+                    Arg::U(p.stride_channel_dst),
+                    w(sref::fastdiv_values(p.sample_ratio)),
+                    Arg::U(p.stride_sample_x),
+                    Arg::U(p.stride_sample_y),
+                    Arg::U(p.stride_sample_dst),
+                    Arg::U(0),
+                ];
+                kern.run(&mut gpu, p.grid(), p.block(), &args).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let got = gpu.download_f32(dst, n);
+                let nmse = sref::nmse(&got, &want);
+                let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs() / b.abs().max(1e-3)).fold(0f32, f32::max);
+                assert!(nmse < 1e-10, "{name} gate {gate} bias {x_bias}/{gate_bias}: nmse {nmse}, worst rel {worst}");
+                assert!(want.iter().any(|v| *v != 0.0));
+                ran += 1;
+            }
+        }
+    }
+    assert_eq!(ran, 24, "expected every fused instantiation in a 0.40 dump");
 }
