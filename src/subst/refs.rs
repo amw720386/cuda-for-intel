@@ -381,6 +381,121 @@ pub fn mmvq(p: &Mmvq, x: &[u8], y: &[u8], ids: Option<&[i32]>, dst: &mut [f32]) 
     }
 }
 
+/// Wide decode-fast per-lane dot (see `mmvq::wide_dot`): x block `xb`, group `g` (32 values),
+/// `yb` = the q8_1 block of that group.
+pub fn vec_dot_wide(ty: u32, xb: &[u8], yb: &[u8], g: usize, acc: f32) -> f32 {
+    let d8 = f16_to_f32(u16::from_le_bytes([yb[0], yb[1]]));
+    let u = |i: usize| b2(&yb[4..], i);
+    let w = |o: usize, i: usize| b2(&xb[o..], i);
+    match ty {
+        Q8_0 => {
+            let dx = f16_to_f32(u16::from_le_bytes([xb[0], xb[1]]));
+            let mut sumi = 0i32;
+            for i in 0..8 {
+                sumi = dp4a(w(2, i), u(i), sumi);
+            }
+            fmaf(dx * d8, sumi as f32, acc)
+        }
+        Q4_K => {
+            let dx = f16_to_f32(u16::from_le_bytes([xb[0], xb[1]]));
+            let dmin = f16_to_f32(u16::from_le_bytes([xb[2], xb[3]]));
+            let (sc, m) = scale_min_k4(g, &xb[4..16]);
+            let mut sumi = 0i32;
+            let mut sumy = 0i32;
+            for i in 0..8 {
+                let v = (w(16 + 32 * (g / 2), i) >> (4 * (g & 1))) & 0x0F0F_0F0F;
+                sumi = dp4a(v, u(i), sumi);
+                sumy = dp4a(0x0101_0101, u(i), sumy);
+            }
+            let a = d8 * (sumi.wrapping_mul(sc)) as f32;
+            let b = d8 * (sumy.wrapping_mul(m)) as f32;
+            acc + (dx * a - dmin * b)
+        }
+        Q6_K => {
+            let (h, sub) = (g / 4, g % 4);
+            let dx = f16_to_f32(u16::from_le_bytes([xb[208], xb[209]]));
+            let mut tot = 0i32;
+            for half in 0..2 {
+                let (mut sumi, mut sumu) = (0i32, 0i32);
+                for i in 4 * half..4 * half + 4 {
+                    let lo = (w(64 * h + 32 * (sub & 1), i) >> (4 * (sub >> 1))) & 0x0F0F_0F0F;
+                    let hi = ((w(128 + 32 * h, i) >> (2 * sub)) & 0x0303_0303) << 4;
+                    sumi = dp4a(lo | hi, u(i), sumi);
+                    sumu = dp4a(0x0101_0101, u(i), sumu);
+                }
+                let sc = xb[192 + 8 * h + 2 * sub + half] as i8 as i32;
+                tot = tot.wrapping_add(sumi.wrapping_sub(sumu << 5).wrapping_mul(sc));
+            }
+            fmaf(dx * d8, tot as f32, acc)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Host model of the decode-fast native kernel (`mmvq::build_fast`, ncols_dst 1): `warps` warps per
+/// row, `unroll` accumulators per lane over every `warps * 32 / tpb`-th block, a butterfly per warp,
+/// then the warp sums added in warp order.
+pub fn mmvq_fast(p: &Mmvq, x: &[u8], y: &[u8], ids: Option<&[i32]>, dst: &mut [f32], warps: usize, unroll: usize, wide: bool) {
+    assert_eq!(p.ncols_dst, 1);
+    let t = traits(p.ty).unwrap();
+    let (qk, qi, vdr) = (t.qk, t.qi, t.vdr);
+    let tpb = if wide { qk / 32 } else { qi / vdr };
+    let step = warps * 32 / tpb;
+    let blocks_per_row_x = p.ncols_x / qk;
+    let chr = fastdiv_values(p.channel_ratio.max(1));
+    let smr = fastdiv_values(p.sample_ratio.max(1));
+    let nchy = fastdiv_values(p.nchannels_y.max(1));
+    for bz in 0..p.nsamples_dst as u32 {
+        for by in 0..p.nchannels_dst as u32 {
+            let channel_x = if p.use_ids { ids.unwrap()[by as usize] as u32 } else { fastdiv(by, chr) };
+            let channel_y = if p.use_ids { fastmodulo(by, nchy) } else { by };
+            let sample_x = fastdiv(bz, smr);
+            let y_base = bz as usize * p.stride_sample_y as usize + channel_y as usize * p.stride_channel_y as usize;
+            for row in 0..p.nrows_x {
+                let kbx_offset = sample_x as usize * p.stride_sample_x as usize
+                    + channel_x as usize * p.stride_channel_x as usize
+                    + row * p.stride_row_x as usize;
+                let mut total = 0f32;
+                for w in 0..warps {
+                    let mut lanes = [0f32; 32];
+                    for (lane, out) in lanes.iter_mut().enumerate() {
+                        let tid = 32 * w + lane;
+                        let kqs = if wide { tid % tpb } else { vdr * (tid % tpb) };
+                        let mut acc = vec![0f32; unroll];
+                        let mut k = tid / tpb;
+                        while k < blocks_per_row_x {
+                            for (u, a) in acc.iter_mut().enumerate() {
+                                let ku = k + u * step;
+                                if ku < blocks_per_row_x {
+                                    let xb_i = kbx_offset + ku;
+                                    let xb = &x[xb_i * t.block_bytes..(xb_i + 1) * t.block_bytes];
+                                    *a = if wide {
+                                        let yb = &y[(y_base + ku * (qk / QK8_1) + kqs) * Q8_1_BYTES..];
+                                        vec_dot_wide(p.ty, xb, yb, kqs, *a)
+                                    } else {
+                                        let yb = &y[(y_base + ku * (qk / QK8_1)) * Q8_1_BYTES..];
+                                        vec_dot(p.ty, xb, yb, kqs, *a)
+                                    };
+                                }
+                            }
+                            k += unroll * step;
+                        }
+                        let mut v = acc[0];
+                        for a in &acc[1..] {
+                            v += *a;
+                        }
+                        *out = v;
+                    }
+                    let s = warp_sum(lanes)[0];
+                    total = if w == 0 { s } else { total + s };
+                }
+                let d = bz as usize * p.stride_sample_dst as usize + by as usize * p.stride_channel_dst as usize + row;
+                dst[d] = total;
+            }
+        }
+    }
+}
+
 // ---- block builders (test data) ----
 
 pub struct Rng(pub u64);

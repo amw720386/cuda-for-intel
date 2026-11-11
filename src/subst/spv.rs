@@ -401,6 +401,9 @@ impl Kb {
     pub(crate) fn fmax(&mut self, a: V, b: V) -> V {
         self.ext(Ty::F32, OpenclStd100Op::fmax, &[a, b])
     }
+    pub(crate) fn exp(&mut self, a: V) -> V {
+        self.ext(Ty::F32, OpenclStd100Op::exp, &[a])
+    }
     pub(crate) fn round(&mut self, a: V) -> V {
         self.ext(Ty::F32, OpenclStd100Op::round, &[a])
     }
@@ -490,6 +493,16 @@ impl Kb {
         let fp = self.b.type_pointer(None, StorageClass::Workgroup, t);
         let p = self.b.bitcast(fp, None, p).unwrap();
         self.b.store(p, val, Some(MemoryAccess::ALIGNED), [Operand::LiteralBit32(4)]).unwrap();
+    }
+    /// Four consecutive f32 of the workgroup array from `index` (a multiple of 4: 16-byte aligned).
+    pub(crate) fn sh_ld_f4(&mut self, index: V) -> [V; 4] {
+        let p = self.sh_ptr(index);
+        let f = self.t(Ty::F32);
+        let v4 = self.b.type_vector(f, 4);
+        let vp = self.b.type_pointer(None, StorageClass::Workgroup, v4);
+        let p = self.b.bitcast(vp, None, p).unwrap();
+        let v = self.b.load(v4, None, p, Some(MemoryAccess::ALIGNED), [Operand::LiteralBit32(16)]).unwrap();
+        [0u32, 1, 2, 3].map(|i| self.b.composite_extract(f, None, v, [i]).unwrap())
     }
     pub(crate) fn sh_ld(&mut self, index: V) -> V {
         let p = self.sh_ptr(index);
