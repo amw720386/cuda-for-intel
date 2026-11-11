@@ -122,15 +122,15 @@ fn apply_to(
     if state.args.len() < args.len() {
         state.args.resize(args.len(), None);
     }
-    for (index, arg) in args.iter().enumerate() {
+    for ((index, arg), cached) in args.iter().enumerate().zip(&mut state.args) {
         let value = bytes(arg.value, arg.size);
-        if value.is_some() && state.args[index] == value {
+        if value.is_some() && *cached == value {
             continue;
         }
         // Unknown until the call succeeds.
-        state.args[index] = None;
+        *cached = None;
         set_arg(index as u32, arg.size, arg.value)?;
-        state.args[index] = value;
+        *cached = value;
     }
     Ok(())
 }
