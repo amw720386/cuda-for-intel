@@ -28,6 +28,7 @@ Entries state current behaviour only; measured results live in `docs/hw-logs/`.
 - `trsm` on one matrix of order > 128 solves 64-row diagonal blocks and updates the remaining rows with the gemm kernel; `getrfBatched` uses one work-group per matrix above order 16.
 
 ### Fixed
+- nvrtc shim `cuda_fp16.h` compiles with clang 18 at the default sm_52: device-side half conversions use inline `cvt.rn.f16.f32` / `cvt.f32.f16` PTX instead of `_Float16`, which clang's NVPTX target only enables for sm_53+.
 - PTX translator: register names without `%` (valid PTX, used by ptx_tests and ZLUDA's fixtures) are accepted.
 - PTX translator: `cvt.sat.{u32,u64}.{s8,s16}` clamps negative values to 0; `cvt.{rni,rzi,rmi,rpi}` to a float destination rounds; `testp.normal` is true for zero; `div.approx.f32` returns 0 for 2^126 < |b|; round-down add/sub of an exact zero sum gives -0 (also +0 - +0); adding two addresses gives an integer instead of an error.
 - The translation-cache key no longer includes `CFI_REDIRECT_*` and other launcher, dump and tracing variables, so `cfi-run` and a run without it share cache entries.

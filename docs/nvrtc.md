@@ -100,7 +100,10 @@ Written once to `<tmp>/nvrtc_shim_inc_<hash>` and force-included, replacing NVRT
 * `cuda_fp16.h`: `__half`/`__half2`, conversions, arithmetic, comparisons, `hexp`/`hsqrt`/...,
   shuffles, `atomicAdd` on half and half2 (CAS loop on the containing word). Arithmetic goes
   through `cvt.f32.f16` / `cvt.rn.f16.f32`; `__hfma` rounds twice (f32 fma, then to half), so it
-  can differ from hardware by 1 ulp on rare inputs.
+  can differ from hardware by 1 ulp on rare inputs. Device code emits those conversions as inline
+  PTX rather than through `_Float16`, which clang's NVPTX target only enables for sm_53 and newer:
+  Ubuntu clang 18.1.3 rejected the header at the default sm_52 before this. `cargo test --lib nvrtc_tests`
+  passes with clang 18.1.3 at sm_52 and sm_75.
 * `cuda_bf16.h`: `__nv_bfloat16`/`__nv_bfloat162` using integer round-to-nearest-even
   (no sm_80 conversion instructions needed), atomicAdd.
 * `cooperative_groups.h`, `cooperative_groups/reduce.h`: `thread_block`, `this_thread_block()`,

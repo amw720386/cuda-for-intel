@@ -14,5 +14,7 @@ Final tree (all feature branches, tier2/tier3 translator, copy-queue fix): 215 l
 `gated_forge_copy_queue_timestamps` now passes in 0.5 s (test-lib-copyqueue.log).
 See ollama-stock-v0.12.6.md for the stock Ollama first-token run.
 
+See vulkan-baseline-2026-11-10.md for the stock Ollama Vulkan and CPU reference numbers (same request shape and Q8_0 file as `scripts/bench-decode.ps1`).
+
 - translate-precompile-2026-11-10.md: CPU-only PTX -> SPIR-V translation cost of stock ggml-cuda (Core Ultra 7 268V host),
   `cfi-precompile --translate-only` before/after the concurrent module prepare.

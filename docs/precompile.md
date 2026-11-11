@@ -40,6 +40,11 @@ given and calls that export, so the translator that fills the caches is exactly 
 | `--translate-only` | No GPU at all: SPIR-V cache only, with `--dynamic-shared N` (default 65536, the B390's window) standing in for the device probe |
 | `--threads N`, `--device N`, `--filter TEXT`, `--list`, `--report FILE`, `--quiet`, `--all-files` | Worker threads; device ordinal; only entries containing TEXT; list without translating; per-entry TSV; summary only; see above |
 
+The `--report` TSV columns are `module, entry, result, translate_ms, compile_ms, prepare_ms, detail`. `prepare_ms` is the
+module-wide PTX normalisation, charged once to the entry whose thread ran it (0 for the others of that module).
+`translate_ms` is the entry's own parse, SPIR-V emission and cache write, without the prepare or the time spent waiting for
+another thread's prepare of the same module.
+
 By default (no type selection) every entry gets a native build. For a ggml library that is 3,307 entries, and the mmq kernels
 of 21 tensor types alone take several GB. That is more than the native cache's default cap
 (`CUDA_FOR_INTEL_CACHE_MAX_MB=4096`), so select the types your models use (`--gguf`).

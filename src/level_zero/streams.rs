@@ -233,9 +233,13 @@ impl CommandList {
         let mut events = WaitEvents::new(waits)?;
         let groups = GroupCount { x, y, z };
         let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+        #[cfg(all(not(test), windows))]
+        let requested = signal;
         #[cfg(all(test, windows))]
         let signal = super::profiling::operation_signal(signal);
-        call("zeCommandListAppendLaunchKernel", || unsafe {
+        #[cfg(all(not(test), windows))]
+        let signal = super::profiling::runtime_signal(signal);
+        let appended = call("zeCommandListAppendLaunchKernel", || unsafe {
             (api.zeCommandListAppendLaunchKernel)(
                 self.0.0,
                 kernel,
@@ -244,7 +248,12 @@ impl CommandList {
                 events.count,
                 events.ptr(),
             )
-        })
+        });
+        #[cfg(all(not(test), windows))]
+        if appended.is_err() {
+            super::profiling::runtime_unsignal(requested, signal);
+        }
+        appended
     }
 }
 

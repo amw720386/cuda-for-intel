@@ -128,6 +128,8 @@ mod hw_nvrtc;
 mod hw_translator_edge;
 #[path = "gpu/hw_blas_l12.rs"]
 mod hw_blas_l12;
+#[path = "gpu/hw_launch_host.rs"]
+mod hw_launch_host;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

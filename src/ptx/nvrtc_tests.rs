@@ -12,6 +12,10 @@ struct Compiled {
 }
 
 fn compile(src: &str, names: &[&str]) -> Option<Compiled> {
+    compile_with(src, names, &[])
+}
+
+fn compile_with(src: &str, names: &[&str], options: &[&str]) -> Option<Compiled> {
     if compiler::find_clang().is_err() {
         eprintln!("SKIP nvrtc_tests: no clang with NVPTX");
         return None;
@@ -20,6 +24,7 @@ fn compile(src: &str, names: &[&str]) -> Option<Compiled> {
         source: src.into(),
         name: "k.cu".into(),
         name_expressions: names.iter().map(|s| (*s).to_owned()).collect(),
+        options: options.iter().map(|s| (*s).to_owned()).collect(),
         ..Default::default()
     };
     let out = compiler::compile(&req).unwrap_or_else(|e| panic!("nvrtc compile failed:\n{}", e.log()));
@@ -177,7 +182,15 @@ fn f16_bits(x: f32) -> u16 {
 
 #[test]
 fn half_math() {
-    let Some(c) = compile(include_str!("../../crates/nvrtc_shim/tests/kernels/half.cu"), &[]) else { return };
+    // The default sm_52 (no native _Float16 in clang's NVPTX target) and sm_75 (native).
+    for options in [&[][..], &["--gpu-architecture=compute_75"][..]] {
+        half_math_at(options);
+    }
+}
+
+fn half_math_at(options: &[&str]) {
+    let src = include_str!("../../crates/nvrtc_shim/tests/kernels/half.cu");
+    let Some(c) = compile_with(src, &[], options) else { return };
     let k = load(&c, "half_ops");
     let n = 40usize;
     let mut r = Rng(5);
