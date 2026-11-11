@@ -252,17 +252,70 @@ fn module_unload_and_free_invalidate_recorded_graphs() {
     assert_eq!(cuGraphLaunch(exec2, s), Success);
     assert_eq!(stats().recorded, 2, "a new allocation keeps the list");
     assert_eq!(cuStreamSynchronize(s), Success);
-    assert_eq!(unsafe { cuMemFree_v2(spare) }, Success);
+    assert_eq!(cuMemFree_v2(spare), Success);
     assert_eq!(cuGraphLaunch(exec2, s), Success);
     assert_eq!(stats().recorded, 3);
     assert_eq!(cuGraphLaunch(exec2, s), Success);
     assert_eq!(stats().recorded, 3);
     assert_eq!(cuStreamSynchronize(s), Success);
-    assert_eq!(unsafe { cuMemFree_v2(device) }, Success);
+    assert_eq!(cuMemFree_v2(device), Success);
     assert_eq!(cuGraphLaunch(exec2, s), InvalidValue);
     assert!(fake::snapshot().ledger.violations.is_empty());
     assert_eq!(cuGraphExecDestroy(exec), Success);
     assert_eq!(cuGraphExecDestroy(exec2), Success);
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+}
+
+/// The bug class from review: a graph names a pointer, the memory is freed and a new allocation
+/// takes its place (ggml's pool does this). The old list must not run again: the next launch
+/// validates against the new allocation table and records a fresh list.
+#[test]
+fn free_then_reallocate_rerecords() {
+    let _fixture = Fixture::new();
+    let _on = Recording::on();
+    let ctx = context(None);
+    let (s, f) = (stream(), function(module()));
+    let mut buffer = 0u64;
+    assert_eq!(unsafe { cuMemAlloc_v2(&mut buffer, 256) }, Success);
+    let (scratch, _) = allocations();
+    // The graph names only `buffer`; `scratch` is unrelated memory that comes and goes.
+    let exec = instantiate(capture(s, || chain(f, s, buffer, 6)));
+    assert_eq!(cuGraphLaunch(exec, s), Success);
+    assert_eq!(cuGraphLaunch(exec, s), Success);
+    assert_eq!(stats(), Stats { recorded: 1, replayed: 2, ..Stats::default() });
+    assert_eq!(cuStreamSynchronize(s), Success);
+
+    // Free and reallocate: whatever address the new allocation gets, the list is re-recorded.
+    assert_eq!(cuMemFree_v2(scratch), Success);
+    let mut again = 0u64;
+    assert_eq!(unsafe { cuMemAlloc_v2(&mut again, 64) }, Success);
+    let regular = regular_lists();
+    assert_eq!(cuGraphLaunch(exec, s), Success);
+    assert_eq!(stats(), Stats { recorded: 2, replayed: 3, ..Stats::default() });
+    assert_eq!(cuStreamSynchronize(s), Success);
+    // The stale list was retired and destroyed once its last run finished.
+    assert_eq!(cuGraphLaunch(exec, s), Success);
+    assert_eq!(stats(), Stats { recorded: 2, replayed: 4, ..Stats::default() });
+    assert_eq!(regular_lists(), regular, "old list destroyed, new one live");
+    assert_eq!(live_lists(), 1);
+
+    // A pinned host free counts too.
+    let mut host = null_mut();
+    assert_eq!(unsafe { cuMemHostAlloc(&mut host, 64, 0) }, Success);
+    assert_eq!(cuGraphLaunch(exec, s), Success);
+    assert_eq!(stats().recorded, 2);
+    assert_eq!(cuStreamSynchronize(s), Success);
+    assert_eq!(cuMemFreeHost(host), Success);
+    assert_eq!(cuGraphLaunch(exec, s), Success);
+    assert_eq!(stats().recorded, 3);
+
+    // Freeing the graph's own buffer makes the stale graph fail validation, as without recording.
+    assert_eq!(cuStreamSynchronize(s), Success);
+    assert_eq!(cuMemFree_v2(buffer), Success);
+    assert_eq!(cuGraphLaunch(exec, s), InvalidValue);
+    assert!(fake::snapshot().ledger.violations.is_empty());
+    assert_eq!(cuGraphExecDestroy(exec), Success);
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
     assert_baseline();
 }

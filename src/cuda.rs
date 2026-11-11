@@ -130,8 +130,8 @@ struct CudaContext {
     subst: subst_hook::Natives,
     /// Regular command lists recorded from executable graphs (`CUDA_FOR_INTEL_GRAPH_RECORD`).
     graph_lists: graph_record::Recordings,
-    /// Counts removals from `allocations`: a graph validated at the same count names no freed
-    /// memory (`graph_record`).
+    /// Counts frees (`allocations` removals, host allocations): a graph recorded at the same
+    /// count names no freed memory; any other count re-records it (`graph_record`).
     alloc_frees: u64,
 }
 
@@ -684,6 +684,7 @@ impl CudaContext {
             .inspect_err(|error| self.backend.health.observe(error))
             .map_err(backend_error)?;
         self.host_allocations.remove(&base);
+        self.alloc_frees += 1;
         self.staging.retain(|&slot| slot != base);
         self.staging_next = self.staging_next.min(self.staging.len());
         Ok(())
