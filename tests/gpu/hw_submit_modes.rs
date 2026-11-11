@@ -47,6 +47,7 @@ deferred64:CUDA_FOR_INTEL_SUBMIT=deferred;\
 deferred256:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_SUBMIT_CAP=256;\
 deferred+window:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_INFLIGHT=window;\
 indirect-dev:CUDA_FOR_INTEL_INDIRECT_ACCESS=device,shared;\
+indirect-auto:CUDA_FOR_INTEL_INDIRECT_ACCESS=auto;\
 noindirect:CUDA_FOR_INTEL_NO_INDIRECT=1";
 
 /// Every variable any mode may set; cleared before each mode so modes do not leak into each other.

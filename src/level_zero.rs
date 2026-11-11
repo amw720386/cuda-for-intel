@@ -289,6 +289,12 @@ struct PciProperties {
     bandwidth: i64,
 }
 
+/// `CUDA_FOR_INTEL_INDIRECT_ACCESS=auto`: kernels the translator proved direct declare none, all
+/// others keep every kind.
+fn indirect_access_auto(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("auto"))
+}
+
 /// `ZE_KERNEL_INDIRECT_ACCESS_FLAG_*` for `CUDA_FOR_INTEL_INDIRECT_ACCESS`: a comma list of `host`,
 /// `device`, `shared`, or `none`; unset or unparsable means all three (the default). Host indirect
 /// access marks every kernel as using system memory in the Intel runtime, which can add cache
@@ -308,7 +314,7 @@ fn indirect_access_flags(value: Option<&str>) -> u32 {
             "device" => 2,
             "shared" => 4,
             "none" => 0,
-            "all" => ALL,
+            "all" | "auto" => ALL,
             _ => return ALL,
         };
     }
@@ -394,8 +400,12 @@ macro_rules! loader_api {
             /// Declare that the kernel may dereference device/host/shared USM pointers it was not
             /// given as arguments (pointer tables, linked structures), as ggml's batched GEMM does.
             /// Without this the driver need not keep those allocations resident for the dispatch.
-            fn set_indirect_access(&self, kernel: Raw) {
+            fn set_indirect_access(&self, kernel: Raw, direct: bool) {
                 if std::env::var_os("CUDA_FOR_INTEL_NO_INDIRECT").is_some() {
+                    return;
+                }
+                let setting = std::env::var("CUDA_FOR_INTEL_INDIRECT_ACCESS").ok();
+                if direct && indirect_access_auto(setting.as_deref()) {
                     return;
                 }
                 #[cfg(not(test))]
@@ -404,7 +414,7 @@ macro_rules! loader_api {
                 let library = self._library.as_ref();
                 let Some(library) = library else { return };
                 type SetIndirect = unsafe extern "system" fn(Raw, u32) -> Status;
-                let flags = indirect_access_flags(std::env::var("CUDA_FOR_INTEL_INDIRECT_ACCESS").ok().as_deref());
+                let flags = indirect_access_flags(setting.as_deref());
                 if flags == 0 {
                     return;
                 }
@@ -693,7 +703,15 @@ pub(crate) struct Module {
 }
 
 impl Module {
+    /// Create a kernel that declares full indirect access (unknown provenance).
     pub(crate) fn create_kernel(&mut self, api: &Api, name: &CStr) -> Result<Handle, Error> {
+        self.create_kernel_with(api, name, false)
+    }
+
+    /// `direct`: the translator proved the kernel addresses only pointer-typed arguments
+    /// (`KernelMetadata::direct_access`); with `CUDA_FOR_INTEL_INDIRECT_ACCESS=auto` it then
+    /// declares no indirect access.
+    pub(crate) fn create_kernel_with(&mut self, api: &Api, name: &CStr, direct: bool) -> Result<Handle, Error> {
         let desc = KernelDesc {
             header: Header::new(0x1d),
             flags: 0,
@@ -703,7 +721,7 @@ impl Module {
         call("zeKernelCreate", || unsafe {
             (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
         })?;
-        api.set_indirect_access(kernel);
+        api.set_indirect_access(kernel, direct);
         api.log_kernel_properties(kernel, name);
         let kernel = Handle(kernel);
         self.kernels.push(kernel);
@@ -1432,6 +1450,10 @@ mod build_flag_tests {
         assert_eq!(flags(Some("host,device,shared")), 0b111);
         assert_eq!(flags(Some("none")), 0);
         assert_eq!(flags(Some("bogus")), 0b111);
+        assert_eq!(flags(Some("auto")), 0b111);
+        assert!(super::indirect_access_auto(Some(" Auto")));
+        assert!(!super::indirect_access_auto(Some("device")));
+        assert!(!super::indirect_access_auto(None));
     }
 
     #[test]
