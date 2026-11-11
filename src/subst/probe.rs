@@ -446,7 +446,25 @@ pub(crate) fn validate(plan: &Plan, dev: &mut impl Device) -> Result<(), String>
             let mut case = mmvq_case(ty, ncols as usize, if plan.fast.is_some() { 11 } else { 5 }, 512, 1, 1, 1, false, 0x5eed + u64::from(ty));
             case.p.nwarps = abi.stock_nwarps(ty, ncols) as usize;
             case.p.rpb = abi.rows_per_block(ty, ncols) as usize;
-            let (want, got) = if let Some(f) = plan.fast {
+            let fused = matches!(abi, super::MmvqAbi::Fused { fusion: true, .. });
+            let (want, got) = if fused {
+                // the epilogue in full: a SwiGLU gate and both biases
+                let mut rng = Rng(0xf05e + u64::from(ty));
+                let nblocks = case.x.len() / refs::traits(ty).ok_or("type")?.block_bytes;
+                let n = case.dst_len();
+                let f = Fusion {
+                    gate: Some(refs::random_blocks(ty, nblocks, &mut rng)),
+                    x_bias: Some((0..n).map(|_| rng.unit()).collect()),
+                    gate_bias: Some((0..n).map(|_| rng.unit()).collect()),
+                };
+                match plan.fast {
+                    Some(fast) => (case.reference_fast_fusion(fast, &f), case.run_fast_fusion(dev, fast, &f)?),
+                    None => {
+                        let nwarps = plan.nwarps_for(case.p.nwarps as u32) as usize;
+                        (case.reference_fusion(nwarps, &f), case.run_fusion(dev, nwarps, &f)?)
+                    }
+                }
+            } else if let Some(f) = plan.fast {
                 (case.reference_fast(f), case.run_fast(dev, f.rows, f.warps)?)
             } else {
                 let nwarps = plan.nwarps_for(case.p.nwarps as u32) as usize;

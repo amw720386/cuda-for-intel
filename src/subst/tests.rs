@@ -1027,6 +1027,26 @@ fn translated_stock_0_40_mmq_matches_native() {
     }
 }
 
+/// The runtime's self-check of a fused plan must run the fused kernel with real fusion inputs
+/// (27 launch words), not the plain 23: otherwise the epilogue is never checked on hardware.
+#[test]
+fn probe_validates_fused_plans_with_their_epilogue() {
+    use super::{Decision, Switch, decide, mmvq_fused_layout};
+    for (ty, small_k) in [(refs::Q8_0, 1), (refs::Q4_K, 0)] {
+        let Decision::Substitute(plan) = decide(&fused_name(ty, 1, 1, small_k, 0), &mmvq_fused_layout(), &Switch::parse("all")) else {
+            panic!()
+        };
+        let words = plan.build(true).unwrap();
+        probe::validate(&plan, &mut Sim { dev: Dev::default(), words: &words }).unwrap_or_else(|e| panic!("type {ty}: {e}"));
+        // a kernel without the epilogue must fail the fused probe
+        let Decision::Substitute(plain) = decide(&fused_name(ty, 1, 0, small_k, 0), &mmvq_fused_layout(), &Switch::parse("all")) else {
+            panic!()
+        };
+        let wrong = plain.build(true).unwrap();
+        assert!(probe::validate(&plan, &mut Sim { dev: Dev::default(), words: &wrong }).is_err(), "type {ty}");
+    }
+}
+
 /// The decode-fast kernel with ggml's fused epilogue (bias only, SwiGLU gate, both) against the
 /// fast reference composed with the epilogue, bit for bit, wide and narrow, with tail rows.
 #[test]
@@ -1060,5 +1080,22 @@ fn fused_fast_mmvq_matches_reference() {
                 assert!(refs::nmse(&got, &stock) < 1e-9, "type {ty} {f:?}: vs stock order");
             }
         }
+    }
+}
+
+#[test]
+fn probe_validates_fused_fast_plans() {
+    use super::{Decision, Switch, decide, mmvq_fused_layout};
+    let fast = mmvq::Fast { rows: 4, warps: 1, unroll: 2, wide: true };
+    for ty in [refs::Q8_0, refs::Q6_K] {
+        let Decision::Substitute(mut plan) = decide(&fused_name(ty, 1, 1, 0, 0), &mmvq_fused_layout(), &Switch::parse("all")) else {
+            panic!()
+        };
+        plan.fast = Some(fast);
+        assert!(plan.entry_name().ends_with("_wide_f"), "{}", plan.entry_name());
+        let words = plan.build(true).unwrap();
+        probe::validate(&plan, &mut Sim { dev: Dev::default(), words: &words }).unwrap_or_else(|e| panic!("type {ty}: {e}"));
+        let plain = mmvq::build_fast(ty, fast, true);
+        assert!(probe::validate(&plan, &mut Sim { dev: Dev::default(), words: &plain }).is_err(), "plain kernel must fail");
     }
 }
