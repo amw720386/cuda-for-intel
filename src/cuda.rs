@@ -31,6 +31,8 @@ mod stubs;
 mod subst_hook;
 mod texture;
 mod cfiprof;
+#[cfg(windows)]
+mod gpuprof;
 mod trace;
 
 pub(crate) fn profile_on() -> bool {
@@ -1392,6 +1394,28 @@ fn diagnose_reject(ptx: &str, error: &ptx::Error) {
 
 /// True for an entry with parameters whose body never touches global or shared
 /// memory and has no atomics or barriers.
+const BODY_END_MARKERS: [&str; 5] = ["\n.entry ", "\n.visible ", "\n.weak ", "\n.func ", "\n.extern "];
+
+/// Offset of the first [`BODY_END_MARKERS`] occurrence in `rest`, or `rest.len()`.
+///
+/// Every marker starts with `\n`, so the earliest one is found by walking the newlines once and
+/// stopping at the first that starts a marker. The previous `min` over five `find`s scanned to the
+/// end of the module for every marker that did not occur (`.extern` usually does not), which made
+/// the check quadratic in module size: 10.7 s of `cfi-precompile`'s 11.9 s scan over stock
+/// ggml-cuda, and a full scan of the module on each kernel's first lookup at run time.
+fn arch_guard_body_end(rest: &str) -> usize {
+    let bytes = rest.as_bytes();
+    let mut at = 0;
+    while let Some(nl) = bytes[at..].iter().position(|&b| b == b'\n') {
+        let pos = at + nl;
+        if BODY_END_MARKERS.iter().any(|m| bytes[pos..].starts_with(m.as_bytes())) {
+            return pos;
+        }
+        at = pos + 1;
+    }
+    rest.len()
+}
+
 fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
     let needle = format!(".entry {name}");
     let mut from = 0;
@@ -1404,11 +1428,7 @@ fn is_arch_guard_stub(prepared: &str, name: &str) -> bool {
         from = end;
     };
     // The body ends where the next kernel or function starts (`.visible .entry`, `.weak`, ...).
-    let end = ["\n.entry ", "\n.visible ", "\n.weak ", "\n.func ", "\n.extern "]
-        .iter()
-        .filter_map(|m| rest.find(m))
-        .min()
-        .unwrap_or(rest.len());
+    let end = arch_guard_body_end(rest);
     let body = &rest[..end];
     if !body.contains(".param") {
         return false;
@@ -1981,6 +2001,13 @@ pub unsafe extern "system" fn cuLaunchKernel(
             } else {
                 None
             };
+            #[cfg(windows)]
+            let gpu_slot = if gpuprof::enabled() {
+                let info = &runtime.devices[context.device as usize].info;
+                gpuprof::before(&runtime.api, info, &context.backend, key, &launched)
+            } else {
+                None
+            };
             let launch_result = subst_hook::launch(
                 &runtime.api,
                 context,
@@ -1990,6 +2017,8 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 (grid, block),
                 &args,
             );
+            #[cfg(windows)]
+            gpuprof::after(&runtime.api, gpu_slot, launch_result.is_ok());
             if let Some(pending) = copyback {
                 launch_result?;
                 copyback::after(&runtime.api, context, stream, pending, &launched, (grid, block), &args);
@@ -2564,7 +2593,25 @@ mod tests {
 
 #[cfg(test)]
 mod arch_guard_tests {
-    use super::is_arch_guard_stub;
+    use super::{BODY_END_MARKERS, arch_guard_body_end, is_arch_guard_stub};
+
+    #[test]
+    fn body_end_matches_the_earliest_marker_rule() {
+        let reference = |rest: &str| BODY_END_MARKERS.iter().filter_map(|m| rest.find(m)).min().unwrap_or(rest.len());
+        for rest in [
+            "",
+            "(\n.param .u64 p\n)\n{\nret;\n}\n",
+            "\n.entry next(",
+            "(){ret;}\n.func f()\n.visible .entry g(\n.weak h",
+            "(){}\r\n.visible .entry g(",
+            "(){ld.global.u32 %r1, [%rd1];}\n\n.extern .func vprintf\n.entry x(",
+            "(){}\n.entryx\n.visibl\n.weak\n.func  \n.weak x",
+            "(){}\n.visible .func f\n.entry e",
+            "no newline at all .entry .visible ",
+        ] {
+            assert_eq!(arch_guard_body_end(rest), reference(rest), "{rest:?}");
+        }
+    }
 
     #[test]
     fn stub_followed_by_real_kernel_is_still_a_stub() {
