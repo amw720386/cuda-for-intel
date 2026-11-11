@@ -1,9 +1,11 @@
 //! Host cost of `cuLaunchKernel` on the fake Level Zero backend, for a ggml-shaped kernel
 //! (3 pointers and 21 scalars, 24 parameters) launched on a non-blocking stream. No GPU: it
 //! times the frontend (`null driver`: the three per-launch Level Zero calls are no-op stubs) and
-//! the frontend plus the fake driver's bookkeeping (`fake driver`). Run in release:
+//! the frontend plus the fake driver's bookkeeping (`fake driver`), and the null driver again with
+//! the `CUkernel` of a `cuLibraryLoadData` library as the launch handle (`null driver, CUkernel`:
+//! the stock CUDA Runtime launches this way). Run in release:
 //!   cargo test --release --lib -j 2 launch_host_benchmark -- --ignored --nocapture
-//! `CFI_LAUNCH_BENCH=null` (or `fake`) runs one mode only, e.g. to count instructions per launch
+//! `CFI_LAUNCH_BENCH=null` (or `fake`, `kernel`) runs one mode only, e.g. to count instructions per launch
 //! under `valgrind --tool=callgrind --toggle-collect=cuLaunchKernel`.
 use super::fake_tests::{Fixture, context, stream};
 use super::*;
@@ -51,6 +53,13 @@ fn launch_host_benchmark() {
     let mut function = null_mut();
     let name = CString::new(NAME).unwrap();
     assert_eq!(unsafe { cuModuleGetFunction(&mut function, module, name.as_ptr()) }, Success);
+    let mut library = null_mut();
+    assert_eq!(
+        unsafe { library::cuLibraryLoadData(&mut library, source.as_ptr().cast(), std::ptr::null(), std::ptr::null(), 0, std::ptr::null(), std::ptr::null(), 0) },
+        Success
+    );
+    let mut library_kernel = null_mut();
+    assert_eq!(unsafe { library::cuLibraryGetKernel(&mut library_kernel, library, name.as_ptr()) }, Success);
     let mut pointers = [0u64; POINTERS];
     for pointer in &mut pointers {
         assert_eq!(unsafe { cuMemAlloc_v2(pointer, 256) }, Success);
@@ -58,28 +67,33 @@ fn launch_host_benchmark() {
     let mut scalars: Vec<u32> = (1..=SCALARS as u32).collect();
     let mut params: Vec<Opaque> = pointers.iter_mut().map(|p| (p as *mut u64).cast()).collect();
     params.extend(scalars.iter_mut().map(|s| (s as *mut u32).cast::<std::ffi::c_void>()));
-    let launch = || {
+    let launch = |handle: Opaque| {
         let result = unsafe {
-            cuLaunchKernel(function, 4, 1, 1, 32, 1, 1, 0, stream, params.as_ptr().cast_mut(), null_mut())
+            cuLaunchKernel(handle, 4, 1, 1, 32, 1, 1, 0, stream, params.as_ptr().cast_mut(), null_mut())
         };
         assert_eq!(result, Success);
     };
     println!("== cuLaunchKernel host cost, {} params, {LAUNCHES} launches x {REPS} reps", POINTERS + SCALARS);
     let only = std::env::var("CFI_LAUNCH_BENCH").ok();
-    for (label, null) in [("null driver", true), ("fake driver", false)] {
-        if only.as_deref().is_some_and(|only| only != if null { "null" } else { "fake" }) {
+    let modes = [
+        ("null driver", "null", true, function),
+        ("null driver, CUkernel", "kernel", true, library_kernel),
+        ("fake driver", "fake", false, function),
+    ];
+    for (label, mode, null, handle) in modes {
+        if only.as_deref().is_some_and(|only| only != mode) {
             continue;
         }
         set_null_driver(null);
         for _ in 0..2_000 {
-            launch();
+            launch(handle);
         }
         assert_eq!(cuStreamSynchronize(stream), Success);
         let mut samples = Vec::with_capacity(REPS);
         for _ in 0..REPS {
             let started = Instant::now();
             for _ in 0..LAUNCHES {
-                launch();
+                launch(handle);
             }
             samples.push(started.elapsed().as_nanos() as f64 / LAUNCHES as f64);
             assert_eq!(cuStreamSynchronize(stream), Success);
@@ -97,6 +111,7 @@ fn launch_host_benchmark() {
         assert_eq!(cuMemFree_v2(pointer), Success);
     }
     assert_eq!(cuModuleUnload(module), Success);
+    assert_eq!(library::cuLibraryUnload(library), Success);
     assert_eq!(cuStreamDestroy_v2(stream), Success);
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
 }
