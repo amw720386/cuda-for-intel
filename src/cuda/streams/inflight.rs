@@ -13,8 +13,9 @@
 //! (the 151936-row output head) neither forces a drain itself nor makes the next launch wait for it.
 //!
 //! Bound: the counted outstanding work stays within `limit`, so at most two launches larger than
-//! `limit / 2` are outstanding at once plus the one being appended; everything smaller counts in
-//! full. With the default limit that is a few hundred thousand work-groups for decode-shaped work,
+//! `limit / 2` are outstanding at once plus the one being appended, each at most `16 * limit`
+//! work-groups (larger launches count in full and wait for an empty stream); everything smaller
+//! counts in full. With the default limit that is a few hundred thousand work-groups for decode-shaped work,
 //! far below the roughly 14 million queued work-groups that hit OUT_OF_DEVICE_MEMORY; drain mode
 //! keeps at most `max(limit, one launch)`.
 use super::Fence;
@@ -23,6 +24,8 @@ use std::sync::Arc;
 
 /// Default cap on work-groups queued on one stream before the host waits.
 const DEFAULT_LIMIT: u64 = 65_536;
+/// Window mode counts a launch above this many limits in full.
+const HUGE_FACTOR: u64 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Config {
@@ -63,9 +66,14 @@ impl Config {
     }
 
     /// Work-groups a launch of `groups` counts for: all of them in drain mode, at most half the
-    /// limit in window mode.
+    /// limit in window mode, except that a launch above `HUGE_FACTOR * limit` counts in full (and so
+    /// waits for the stream to empty), so a few huge launches cannot approach the OOM threshold.
     pub fn counted(self, groups: u64) -> u64 {
-        if self.window { groups.min((self.limit / 2).max(1)) } else { groups }
+        if self.window && groups <= self.limit.saturating_mul(HUGE_FACTOR) {
+            groups.min((self.limit / 2).max(1))
+        } else {
+            groups
+        }
     }
 
     /// Whether `next` more counted work-groups must wait: outstanding plus the next launch would
@@ -172,6 +180,8 @@ mod tests {
         assert_eq!(config.counted(151_936), 32_768);
         assert_eq!(config.counted(14_336), 14_336);
         assert_eq!(drain(65_536).counted(151_936), 151_936);
+        assert_eq!(config.counted(16 * 65_536), 32_768);
+        assert_eq!(config.counted(16 * 65_536 + 1), 16 * 65_536 + 1);
         assert!(!config.needs_room(32_768, config.counted(151_936)));
         assert!(config.needs_room(32_769, config.counted(151_936)));
         assert!(config.needs_room(60_000, 14_336));

@@ -292,7 +292,9 @@ impl Stream {
         let result = append(list, signal.as_deref(), &waits);
         if defer {
             if let Err(error) = result {
-                // The open list may be half-written and holds earlier launches: fail the stream.
+                // The open list may be half-written and holds earlier launches: drop it unsubmitted
+                // and fail the stream.
+                self.deferred.as_mut().unwrap().abandon();
                 self.health.observe(&error);
                 let error = backend_error(error);
                 self.submitted();

@@ -11,6 +11,11 @@
 //!
 //! Appended lists are reset for reuse once the stream has completed (every host synchronization
 //! that observes the whole stream); more than `MAX_SUBMITTED` outstanding lists force a wait.
+//!
+//! Deferral delays when the GPU first sees a launch. CUDA gives no implicit ordering between a
+//! non-blocking stream and the legacy stream, so a host that only waits through the legacy stream
+//! (a synchronous cuMemcpy) does not flush a non-blocking stream; code that relied on such work
+//! having already run by then sees it start later (at the stream's next flush point).
 use super::{Api, CommandList, Context, CuResult, backend_error};
 use crate::level_zero::{DeviceHealth, Error};
 use std::sync::Arc;
@@ -68,6 +73,8 @@ pub(super) struct Deferred {
     submitted: Vec<CommandList>,
     /// Lists known complete; reset before reuse.
     idle: Vec<CommandList>,
+    /// Lists abandoned after a failed append: never submitted, only destroyed.
+    broken: Vec<CommandList>,
     health: Arc<DeviceHealth>,
     #[cfg(test)]
     pub flushes: usize,
@@ -82,6 +89,7 @@ impl Deferred {
             count: 0,
             submitted: Vec::new(),
             idle: Vec::new(),
+            broken: Vec::new(),
             health,
             #[cfg(test)]
             flushes: 0,
@@ -150,6 +158,15 @@ impl Deferred {
         Ok(())
     }
 
+    /// An append into the open list failed: it may be half-written, so it must never be submitted.
+    /// The launches buffered in it are lost (the caller fails the stream).
+    pub fn abandon(&mut self) {
+        if let Some(list) = self.open.take() {
+            self.broken.push(list);
+        }
+        self.count = 0;
+    }
+
     /// The stream's immediate list has completed everything appended so far.
     pub fn complete(&mut self) {
         self.idle.append(&mut self.submitted);
@@ -158,7 +175,7 @@ impl Deferred {
 
     /// Only after the stream has drained.
     pub fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
-        for lists in [&mut self.idle, &mut self.submitted] {
+        for lists in [&mut self.idle, &mut self.submitted, &mut self.broken] {
             while let Some(list) = lists.last() {
                 list.destroy(api).map_err(backend_error)?;
                 lists.pop();
@@ -311,6 +328,27 @@ mod fake_tests {
         assert_eq!(cuStreamSynchronize(s), Unknown);
         // Teardown reports the stream's error once and still releases everything.
         assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        assert_eq!(cuCtxDestroy_v2(ctx), InvalidContext);
+        assert_baseline();
+    }
+
+    #[test]
+    fn fake_deferred_failed_launch_list_is_never_submitted() {
+        let _fixture = Fixture::new();
+        let ctx = deferred_context(8);
+        let (s, f) = (stream(), function(module()));
+        let (device, _) = allocations();
+        for _ in 0..2 {
+            assert_eq!(launch(f, s, device), Success);
+        }
+        arm("zeCommandListAppendLaunchKernel", 0x7fff_fffe);
+        assert_eq!(launch(f, s, device), Unknown);
+        let before = fake::snapshot().ledger;
+        assert_eq!(cuCtxDestroy_v2(ctx), Unknown);
+        let after = fake::snapshot().ledger;
+        // Teardown destroyed the half-written list with its two launches instead of submitting it.
+        assert_eq!(after.submitted, before.submitted);
+        assert_eq!(after.discarded_recorded, before.discarded_recorded + 2);
         assert_eq!(cuCtxDestroy_v2(ctx), InvalidContext);
         assert_baseline();
     }
