@@ -493,6 +493,9 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
             }
             for kernel in library.entries.values().flatten() {
                 state.libraries.kernels.remove(kernel);
+                for context in state.contexts.values_mut() {
+                    context.library_functions.remove(kernel);
+                }
             }
             state.libraries.images.remove(&key);
             Ok(())

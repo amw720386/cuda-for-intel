@@ -218,6 +218,11 @@ fn fake_cuda_library_loads_in_each_context_and_retires_handles() {
     assert_eq!(launch(function, null_mut(), device), InvalidHandle);
     // The cached resolution must not outlive the library.
     assert_eq!(launch(kernel, null_mut(), device), InvalidHandle);
+    state(|state| {
+        assert!(state.contexts.values().all(|context| context.library_functions.is_empty()));
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(cuCtxDestroy_v2(second), Success);
     assert_eq!(cuCtxDestroy_v2(first), Success);
     assert_baseline();
