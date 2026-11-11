@@ -1085,3 +1085,89 @@ fn replay_dumped_launch() {
     }
     eprintln!("REPLAY total differing words: {total_bad}");
 }
+
+/// Ollama 0.40 `mul_mat_vec_q<type, ncols, false, small_k, false>` (stock PTX from a 0.40 dump in
+/// `CFI_GGML_PTX_DIR`; skipped for other dumps) against the substitution reference model, bit for
+/// bit (Q6_K: to 1e-10, see below): the native kernel is checked against the same model in
+/// `subst::tests`, so native and stock agree.
+/// Covers the small_k decomposition (rows per block = warps per block for one column).
+#[test]
+fn mmvq_fused_abi_stock_matches_reference_bitwise() {
+    use crate::subst::{MmvqAbi, probe, refs as sref};
+    if ptx_dir().is_none() {
+        return;
+    }
+    let mut ran = 0;
+    for ty in [sref::Q8_0, sref::Q4_0, sref::Q4_K, sref::Q6_K] {
+        for (ncols, small_k) in [(1u32, true), (1, false), (2, false), (8, false)] {
+            let name = format!(
+                "_Z13mul_mat_vec_qIL9ggml_type{ty}ELi{ncols}ELb0ELb{}ELb0EEvPKvS2_PKi31ggml_cuda_mm_fusion_args_devicePfj5uint3jjjS7_jjjS7_jjjj",
+                u32::from(small_k)
+            );
+            if !index().contains_key(&name) {
+                continue;
+            }
+            let abi = MmvqAbi::Fused { small_k };
+            // K below one block pass when small_k (ggml's trigger), 13 rows (not a multiple of the
+            // rows per block), two channels and two samples
+            let ncols_x = match (small_k, ty) {
+                (true, sref::Q4_K | sref::Q6_K) => 512,
+                (true, _) => 896,
+                _ => 2048,
+            };
+            let mut case = probe::mmvq_case(ty, ncols as usize, 13, ncols_x, 2, 1, 2, false, 0x0400 + u64::from(ty) + u64::from(ncols));
+            case.p.nwarps = abi.stock_nwarps(ty, ncols) as usize;
+            case.p.rpb = abi.rows_per_block(ty, ncols) as usize;
+            let want = case.reference(case.p.nwarps);
+            let kern = load_kernel(&name, true);
+            assert_eq!(kern.meta.max_threads, Some(case.p.nwarps as u32 * 32), "{name}: launch bounds");
+            let p = &case.p;
+            let mut gpu = Gpu::default();
+            // ggml's kernel reads every row of its last block, also past the matrix (only the
+            // store is bounded); in ggml those reads land in the padded tensor buffer.
+            let row_bytes = p.stride_row_x as usize * sref::traits(ty).unwrap().block_bytes;
+            let mut xpad = case.x.clone();
+            xpad.resize(case.x.len() + p.rpb * row_bytes, 0);
+            let (x, y) = (gpu.upload(&xpad), gpu.upload(&case.y));
+            let n = case.dst_len();
+            let dst = gpu.upload(&vec![0u8; n * 4]);
+            let w = |v: [u32; 3]| Arg::W(v.to_vec());
+            let args = vec![
+                Arg::P(x),
+                Arg::P(y),
+                Arg::P(0),
+                Arg::W(vec![0; 20]),
+                Arg::P(dst),
+                Arg::U(p.ncols_x as u32),
+                w([0; 3]),
+                Arg::U(p.stride_row_x),
+                Arg::U(p.stride_col_y),
+                Arg::U(p.stride_col_dst),
+                w(sref::fastdiv_values(p.channel_ratio)),
+                Arg::U(p.stride_channel_x),
+                Arg::U(p.stride_channel_y),
+                Arg::U(p.stride_channel_dst),
+                w(sref::fastdiv_values(p.sample_ratio)),
+                Arg::U(p.stride_sample_x),
+                Arg::U(p.stride_sample_y),
+                Arg::U(p.stride_sample_dst),
+                Arg::U(0),
+            ];
+            kern.run(&mut gpu, p.grid(), p.block(), &args).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let got = gpu.download_f32(dst, n);
+            let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
+            let nmse = sref::nmse(&got, &want);
+            if ty == sref::Q6_K {
+                // ggml raised VDR_Q6_K_Q8_1_MMVQ from 1 (v0.12.6, the order the reference and the
+                // native kernel follow) to 2: the lanes split a block differently, so the sums
+                // round differently. Same values to the last bits only.
+                assert!(nmse < 1e-10, "{name}: nmse {nmse} ({bad}/{n} differ)");
+            } else {
+                assert_eq!(bad, 0, "{name}: {bad}/{n} differ from the reference, nmse {nmse}");
+            }
+            assert!(want.iter().any(|v| *v != 0.0));
+            ran += 1;
+        }
+    }
+    assert_eq!(ran, 16, "expected every instantiation in a 0.40 dump");
+}
