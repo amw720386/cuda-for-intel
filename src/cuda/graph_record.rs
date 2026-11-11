@@ -9,6 +9,11 @@
 //! launch stream's immediate list. This is the extension Intel's SYCL graph support uses.
 //! Kernel substitution (`subst_hook`) is decided at record time exactly as at launch time.
 //!
+//! A list is also re-recorded after any `cuMemFree` in the context (or module-variable
+//! retirement): Intel's driver keeps the allocation set of a regular list's appends, and a pool
+//! may hand the freed address back as a new allocation. Frees in another (peer) context are not
+//! tracked, as the per-node validation never tracked them either.
+//!
 //! Recorded: kernel, device-to-device copy, memset and empty nodes (child graphs flattened).
 //! A graph with host-function, event or host-memory copy nodes, a stream with experimental
 //! batching, or a driver without the extension keeps the re-issue path, as does a graph
@@ -49,8 +54,10 @@ struct Recorded {
     groups: u64,
     /// Completion of the latest run; the list is destroyed only after it.
     last: Option<Arc<Fence>>,
-    /// `CudaContext::alloc_frees` when the nodes were last validated.
-    validated: u64,
+    /// `CudaContext::alloc_frees` when the list was recorded (after the nodes were validated).
+    /// Any later free re-records: a regular list keeps the allocation set of its appends, and a
+    /// pool can hand the freed address back as a different allocation.
+    frees: u64,
 }
 
 enum Slot {
@@ -95,11 +102,12 @@ impl Recordings {
         }
     }
 
-    /// Whether `exec` at `version` has a recorded list whose nodes were validated while the
-    /// context had freed `frees` allocations: no allocation went away since, so they still are.
+    /// Whether `exec` at `version` has a recorded list that stays usable while the context has
+    /// freed `frees` allocations. Its nodes were validated before recording and no allocation
+    /// went away since, so they still are valid.
     pub(super) fn validated(&self, exec: usize, version: u64, frees: u64) -> bool {
         matches!(self.live.get(&exec), Some(Slot::Ready(recorded))
-            if recorded.version == version && recorded.validated == frees)
+            if recorded.version == version && recorded.frees == frees)
     }
 
     /// Destroy retired lists whose last run finished.
@@ -179,7 +187,7 @@ pub(super) fn launch(
     let api = &runtime.api;
     context.graph_lists.collect(api)?;
     let reuse = match context.graph_lists.live.get(&exec) {
-        Some(Slot::Ready(recorded)) => recorded.version == version,
+        Some(Slot::Ready(recorded)) => recorded.version == version && recorded.frees == context.alloc_frees,
         Some(Slot::Unsupported(stale)) if *stale == version => {
             context.graph_lists.stats.reissued += 1;
             return Ok(false);
@@ -205,7 +213,7 @@ pub(super) fn launch(
                         list,
                         groups,
                         last: None,
-                        validated: context.alloc_frees,
+                        frees: context.alloc_frees,
                     }),
                 );
             }
@@ -236,7 +244,6 @@ pub(super) fn launch(
         .streams
         .launch_recorded(api, &context.backend, key, &recorded.list, recorded.groups)?;
     recorded.last = Some(fence);
-    recorded.validated = context.alloc_frees;
     context.graph_lists.stats.replayed += 1;
     Ok(true)
 }

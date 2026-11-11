@@ -245,6 +245,19 @@ fn module_unload_and_free_invalidate_recorded_graphs() {
     let exec2 = instantiate(capture(s, || chain(f, s, device, 4)));
     assert_eq!(cuGraphLaunch(exec2, s), Success);
     assert_eq!(cuStreamSynchronize(s), Success);
+    assert_eq!(stats().recorded, 2);
+    // Any free re-records (the address may come back as another allocation), even one the
+    // graph does not use.
+    let (spare, _) = allocations();
+    assert_eq!(cuGraphLaunch(exec2, s), Success);
+    assert_eq!(stats().recorded, 2, "a new allocation keeps the list");
+    assert_eq!(cuStreamSynchronize(s), Success);
+    assert_eq!(unsafe { cuMemFree_v2(spare) }, Success);
+    assert_eq!(cuGraphLaunch(exec2, s), Success);
+    assert_eq!(stats().recorded, 3);
+    assert_eq!(cuGraphLaunch(exec2, s), Success);
+    assert_eq!(stats().recorded, 3);
+    assert_eq!(cuStreamSynchronize(s), Success);
     assert_eq!(unsafe { cuMemFree_v2(device) }, Success);
     assert_eq!(cuGraphLaunch(exec2, s), InvalidValue);
     assert!(fake::snapshot().ledger.violations.is_empty());
