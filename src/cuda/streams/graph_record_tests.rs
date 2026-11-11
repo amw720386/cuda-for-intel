@@ -664,3 +664,60 @@ fn graph_recording_does_not_trust_the_argument_cache() {
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
     assert_baseline();
 }
+
+/// A failed immediate append of a recorded list must fail the stream like any other append: the
+/// driver may have taken the list, so the next launch must not append it again unawaited, and
+/// teardown must report the error and leak nothing.
+#[test]
+fn a_failed_recorded_append_fails_the_stream() {
+    for (submit, window) in [(None, None), (Some(8), None), (None, Some(64))] {
+        let _fixture = Fixture::new();
+        let ctx = submit_context(submit, window);
+        let _on = Recording::on();
+        let (s, f) = (stream(), function(module()));
+        let (device, _) = allocations();
+        let exec = instantiate(capture(s, || chain(f, s, device, 4)));
+        assert_eq!(cuGraphLaunch(exec, s), Success);
+        assert_eq!(cuStreamSynchronize(s), Success);
+        // nothing buffered: the next immediate append is the recorded list itself
+        crate::level_zero::fault::arm("zeCommandListImmediateAppendCommandListsExp", 0x7fff_fffe);
+        assert_ne!(cuGraphLaunch(exec, s), Success, "{submit:?} {window:?}");
+        assert_eq!(stats().replayed, 1, "{submit:?} {window:?}: a failed append is no replay");
+        assert_ne!(cuGraphLaunch(exec, s), Success, "{submit:?} {window:?}: the stream stays failed");
+        assert_ne!(launch(f, s, device), Success, "{submit:?} {window:?}: the stream stays failed");
+        assert_ne!(cuStreamSynchronize(s), Success, "{submit:?} {window:?}");
+        assert_eq!(cuGraphExecDestroy(exec), Success);
+        assert_ne!(cuCtxDestroy_v2(ctx), Success, "{submit:?} {window:?}: teardown reports the error");
+        assert_eq!(cuCtxDestroy_v2(ctx), InvalidContext);
+        assert_baseline();
+    }
+}
+
+/// The Ollama token pattern under deferred submission and the window: per-token input frees
+/// outside the graph keep the recorded list, and launches around each graph launch stay valid.
+#[test]
+fn ollama_pattern_under_deferred_submit_keeps_the_list() {
+    let _fixture = Fixture::new();
+    let ctx = submit_context(Some(4), Some(64));
+    let _on = Recording::on();
+    let (s, f) = (stream(), function(module()));
+    let (weights, host) = allocations();
+    let exec = instantiate(capture(s, || chain(f, s, weights, 8)));
+    for _ in 0..12 {
+        let mut input = 0;
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut input, 256) }, Success);
+        assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(input, host.cast_const().cast(), 4, s) }, Success);
+        assert_eq!(launch(f, s, input), Success);
+        assert_eq!(cuGraphLaunch(exec, s), Success);
+        assert_eq!(launch(f, s, input), Success);
+        assert_eq!(cuStreamSynchronize(s), Success);
+        assert_eq!(cuMemFree_v2(input), Success);
+    }
+    let stats = stats();
+    assert_eq!((stats.recorded, stats.replayed, stats.reissued), (1, 12, 0));
+    assert!(fake::snapshot().ledger.violations.is_empty(), "{:?}", fake::snapshot().ledger.violations);
+    assert_eq!(cuGraphExecDestroy(exec), Success);
+    assert_eq!(cuStreamDestroy_v2(s), Success);
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+}
