@@ -38,7 +38,11 @@ inflight0:CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS=0;\
 window:CUDA_FOR_INTEL_INFLIGHT=window;\
 batch16:CUDA_FOR_INTEL_BATCH_CAP=16,CUDA_FOR_INTEL_BATCH_US=250;\
 batch64:CUDA_FOR_INTEL_BATCH_CAP=64,CUDA_FOR_INTEL_BATCH_US=250;\
-batch256:CUDA_FOR_INTEL_BATCH_CAP=256,CUDA_FOR_INTEL_BATCH_US=1000";
+batch256:CUDA_FOR_INTEL_BATCH_CAP=256,CUDA_FOR_INTEL_BATCH_US=1000;\
+deferred16:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_SUBMIT_CAP=16;\
+deferred64:CUDA_FOR_INTEL_SUBMIT=deferred;\
+deferred256:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_SUBMIT_CAP=256;\
+deferred+window:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_INFLIGHT=window";
 
 /// Every variable any mode may set; cleared before each mode so modes do not leak into each other.
 const KNOWN_VARS: &[&str] = &[
@@ -150,7 +154,7 @@ fn hw_submit_modes() {
         "== submission modes: (a) 1000 trivial launches x 7, (b) launch+sync x 200, (c) decode chain of {} launches x {tokens} tokens",
         chain.len()
     );
-    println!("mode        | (a) host us/l | (a) done us/l | (b) launch+sync us | (c) ms/token | (c) host us/l | (c) done us/l");
+    println!("mode            | (a) host us/l | (a) done us/l | (b) launch+sync us | (c) ms/token | (c) host us/l | (c) done us/l");
     for (name, vars) in parse_modes(&spec) {
         for key in KNOWN_VARS {
             unsafe { std::env::remove_var(key) };
@@ -233,7 +237,7 @@ fn hw_submit_modes() {
             assert_eq!(out[j], (runs * per_token) as f32, "{name}: p[{j}] after {runs} chains");
         }
         println!(
-            "{name:11} | {:13.2} | {:13.2} | {:18.2} | {:12.3} | {:13.2} | {:13.2}",
+            "{name:15} | {:13.2} | {:13.2} | {:18.2} | {:12.3} | {:13.2} | {:13.2}",
             median(&mut host),
             median(&mut done),
             median(&mut trip),
