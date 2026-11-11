@@ -35,6 +35,8 @@ Placement was checked for every server: the log shows `offloaded 25/25 layers to
 | Vulkan | off | 7188 | 157.4 | 158.5 | 159.0 | 156.3 / 158.2 / 157.6 |
 | Vulkan | on | 8030 | 156.2 | 156.6 | 156.8 | 155.9 / 156.4 / 156.4 |
 
+Regenerate the rows from the raw JSON with `python -I scripts/bench-decode-vulkan.py --pool "FA off=<dir>/fa0_s1.json,<dir>/fa0_s2.json,<dir>/fa0_s3.json" "FA on=<dir>/fa1_s1.json,..."` (`<dir>` = `docs/hw-logs/vulkan-baseline-2026-11-10`); every measured request in the JSON has 631 prompt tokens.
+
 Output for variant 3 is the counting sequence `" 4, 5, 6, 7, 8, ..."` and is identical with FA off and on.
 
 For context, PR #18 reports the CUDA path on the same box and model (best of 3, warm, v0.12.6 on the shim) at 7351 / 45.7 (FA off) and

@@ -6,12 +6,43 @@ requests on fresh variants (3, 4, ...) that the KV prefix cache has never seen; 
 Verify placement yourself: the server log must show every layer offloaded, and the script prints
 /api/ps size vs size_vram.
 
+The run fails (exit 2) unless every measured request saw exactly 631 prompt tokens, so a tokenizer or
+model change cannot silently alter the request shape the CUDA numbers are compared against.
+
 usage: python -I scripts/bench-decode-vulkan.py HOST:PORT MODEL RUNS OUT.json
+       python -I scripts/bench-decode-vulkan.py --pool LABEL=A.json,B.json,... [LABEL=...]
+           pools the runs of several servers per label and prints the table row (n, prefill p50,
+           decode p50 / p95 / best, per-server decode p50), e.g. from docs/hw-logs/vulkan-baseline-2026-11-10/
 """
 import json
 import statistics
 import sys
 import urllib.request
+
+PROMPT_TOKENS = 631
+
+
+def quantile(values, q):
+    """Nearest-rank on the sorted values (index round(q * (n - 1))), as used in the hw-log tables."""
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, round(q * (len(ordered) - 1)))]
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "--pool":
+    print("| label | n | prefill p50 | decode p50 | decode p95 | decode best | per-server decode p50 |")
+    print("|---|---|---|---|---|---|---|")
+    for spec in sys.argv[2:]:
+        label, files = spec.split("=", 1)
+        prefill, decode, servers = [], [], []
+        for path in files.split(","):
+            with open(path, encoding="utf-8") as f:
+                runs = json.load(f)["runs"]
+            prefill += [r["prefill"] for r in runs]
+            decode += [r["decode"] for r in runs]
+            servers.append(statistics.median(r["decode"] for r in runs))
+        print(f"| {label} | {len(decode)} | {statistics.median(prefill):.0f} | {statistics.median(decode):.1f} | "
+              f"{quantile(decode, 0.95):.1f} | {max(decode):.1f} | {' / '.join(f'{x:.1f}' for x in servers)} |")
+    sys.exit(0)
 
 host, model, runs, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 
@@ -29,7 +60,7 @@ def long_prompt(words, variant):
     return f"{variant} " + " ".join(["lorem"] * words) + "\nCount from 1 to 300 separated by commas: 1, 2, 3,"
 
 
-words = 600 + (631 - gen(long_prompt(600, 1), 1)["prompt_eval_count"])
+words = 600 + (PROMPT_TOKENS - gen(long_prompt(600, 1), 1)["prompt_eval_count"])
 gen(long_prompt(words, 2), 8)
 rec = {"model": model, "words": words, "runs": []}
 for i in range(1, runs + 1):
@@ -44,4 +75,8 @@ with open(out, "w") as f:
 prefill = [x["prefill"] for x in rec["runs"]]
 decode = [x["decode"] for x in rec["runs"]]
 print(f"prompt_tokens={rec['runs'][0]['prompt_tokens']} prefill p50 {statistics.median(prefill):.1f} "
-      f"decode p50 {statistics.median(decode):.1f} min {min(decode):.1f} max {max(decode):.1f} ps {rec['ps']}")
+      f"decode p50 {statistics.median(decode):.1f} p95 {quantile(decode, 0.95):.1f} min {min(decode):.1f} "
+      f"max {max(decode):.1f} ps {rec['ps']}")
+wrong = sorted({x["prompt_tokens"] for x in rec["runs"]} - {PROMPT_TOKENS})
+if wrong:
+    sys.exit(f"measured requests saw {wrong} prompt tokens, not {PROMPT_TOKENS}: the request shape changed")
