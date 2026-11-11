@@ -34,3 +34,44 @@ Opt-in layer that replaces recognised ggml-cuda kernels with hand-written Intel-
 Shadow check (`CUDA_FOR_INTEL_SUBST_CHECK=30`, Llama-3.2-1B, mmq Q4_K and Q6_K plus mmvq): 120 of 120 launches bit-identical to the translated kernels.
 Both modes produce coherent output; greedy text diverges from `none` after about 20 tokens at near-ties (e.g. "fashion, cuisine," versus "fashion,"), the stream-k
 add-order effect described above. Reproduce with `scripts/bench-subst-ollama.ps1`; kernel-level log in `docs/hw-logs/hw-subst-mmq-types.log`.
+
+## Decode-fast mmvq (`CUDA_FOR_INTEL_MMVQ_FAST`, default on)
+
+* Why the stock-order kernel was slow: one 128-thread block per row with a shared-memory reduction, and ggml's per-thread split of
+  each quantized block (4 to 32 lanes per block, 2 to 8 bytes per lane, weights read as 16-bit halves). On the B390 that reaches
+  31-53 GB/s at decode shapes; the device read ceiling is 114 GB/s (`hw_perf_probe`: random data, 512 MiB; a memset-filled buffer
+  reads at 540 GB/s because it is served compressed, so never benchmark on memset data).
+* Variant (`src/subst/mmvq.rs`, `build_fast`): ncols_dst 1 only, one 32-lane subgroup per row, 4 rows per workgroup, no shared
+  memory or barrier; `wide` (Q8_0, Q4_K, Q6_K) gives each lane one 32-value group read as whole dwords from the 2-byte-aligned block
+  (aligned loads plus a funnel shift, never past the block); 2 accumulators per lane. The driver appends `nrows` to the stock 23
+  words. Integer sums are exact; only the float add order differs from stock (nmse vs the stock order < 1e-10 on the interpreter; the
+  host model `refs::mmvq_fast` is bit-exact).
+* Kernel numbers (`hw_subst_mmvq_decode_shapes`, weights rotated over enough copies to defeat the cache): output matrices 106-109 GB/s
+  (stock-order native 36-53), mid-size matrices 55-75 GB/s, small ones bounded by launch cost (4-25 us). Tables and end-to-end runs:
+  `docs/hw-logs/perf-mmvq-2026-11-09/`.
+* Default on: an unset or empty `CUDA_FOR_INTEL_MMVQ_FAST` (or `1`/`on`/`true`/`yes`/`auto`) selects the per-type default (4 rows, 1 warp,
+  unroll 2, `wide` for Q8_0 / Q4_K / Q6_K). `0`/`off`/`false`/`no`/`none` restores the stock-order kernel; `<rows>x<warps>x<unroll>[w]` picks
+  another shape; an unparsable or out-of-range shape also keeps the stock-order kernel and logs
+  `subst: CUDA_FOR_INTEL_MMVQ_FAST=... not understood` once to the export log. Only `ncols_dst` 1 is affected, and only where
+  `CUDA_FOR_INTEL_SUBST` selects the native mmvq (`auto` does). `CUDA_FOR_INTEL_SUBST_NWARPS` applies to the stock-order kernel only,
+  so set `CUDA_FOR_INTEL_MMVQ_FAST=0` with it to vary decode warps.
+* Caches: the per-context module key (`mmvq:t<ty>:c1:fast<r>x<w>x<u>[w]`) and the entry name (`cfi_mmvq_fast_t<ty>_r_w_u[_wide]`)
+  carry every shape knob, so fast, wide and stock-order variants never share a module; the driver-side native compile cache is keyed
+  by the SPIR-V words. `cfi-precompile` builds the same plan as the launch path (`subst::decide`), so it warms the fast variant by
+  default and the stock-order one under `CUDA_FOR_INTEL_MMVQ_FAST=0`. The PTX translation cache (`TRANSLATOR_VERSION`) is unaffected:
+  native kernels are generated, not translated. The kernels use no dynamic shared memory, so the dynamic-shared-window
+  specialisation (`CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE`) does not apply to them.
+* B390 end to end with the default (Qwen2.5-0.5B-Instruct Q8_0, pooled decode p50, 3 servers x 5 runs, `scripts/bench-decode.ps1`, owner run on PR #18): FA off 32.3 -> 44.2 tok/s,
+  FA on 37.7 -> 56.5 tok/s, the 48-token counting-prompt greedy text equal to CPU (the free-text story prompt diverges from CPU at near-tie logits, as it
+  already did for some models before; `docs/hw-logs/perf-mmvq-2026-11-09/README.md`, "Text"); log:
+  `docs/hw-logs/perf-mmvq-2026-11-09/owner-validation-2026-11-10.md`.
+
+## Native FlashAttention (`fattn`, default on)
+
+* In `auto` (switch off with `CUDA_FOR_INTEL_SUBST=auto,-fattn`), `flash_attn_ext_f16<D, D, ..., false, false>` (D 64 / 128, at
+  least 16 queries) runs a SIMT tile kernel (`src/subst/fattn.rs`): 16 queries per workgroup, K/V chunks in shared memory as packed f16,
+  online softmax per query, chunks whose mask is -inf for the whole tile skipped, f32 arithmetic. The paired `flash_attn_stream_k_fixup`
+  is skipped. Launches with sinks, ALiBi, softcap, fewer than 16 queries (decode) or unaligned K/V keep the translated kernel.
+* Accuracy: nmse 4e-14 against exact f64 attention on the device (`hw_subst_fattn_native_vs_reference`); the stock kernel rounds P to
+  f16, so native and translated differ at about 1e-3 relative. End to end, FA-on prefill +81-88 % on the three test models.
+* `CUDA_FOR_INTEL_FATTN_NW=8` (8 subgroups, 32 queries per workgroup) is an experiment switch.

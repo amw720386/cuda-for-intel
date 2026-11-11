@@ -113,7 +113,8 @@ try {
       $kc = "$Work\kc_llama_$var"; New-Item -ItemType Directory -Force $kc | Out-Null
       Set-ModeEnv 'auto' $kc
       if ($variants[$var]) { $env:CUDA_FOR_INTEL_SUBST = $variants[$var] }
-      if ($nwarps[$var]) { $env:CUDA_FOR_INTEL_SUBST_NWARPS = $nwarps[$var] }
+      # NWARPS shapes only the stock-order mmvq; decode (ncols 1) defaults to the fast variant, which ignores it
+      if ($nwarps[$var]) { $env:CUDA_FOR_INTEL_SUBST_NWARPS = $nwarps[$var]; $env:CUDA_FOR_INTEL_MMVQ_FAST = '0' }
       $env:PATH = "$runDir;$env:PATH"
       Push-Location $runDir
       Remove-Item cuda-for-intel-export.log -EA 0

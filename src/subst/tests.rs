@@ -145,7 +145,7 @@ fn quantize_q8_1_matches_reference() {
 #[test]
 fn device_probe_accepts_native_kernels_and_rejects_corrupt_ones() {
     use super::{Kernel, Plan, Switch, decide};
-    let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let plan = |kernel, key: &str| Plan { kernel, key: key.into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
         let p = plan(Kernel::Mmvq { ty, ncols: 3 }, "m");
         let words = p.build(true).unwrap();
@@ -211,7 +211,7 @@ fn switch_parsing_and_decisions() {
 #[test]
 fn geometry_mapping_rejects_unexpected_launches() {
     use super::{Kernel, Plan};
-    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let p = Plan { kernel: Kernel::Mmvq { ty: 8, ncols: 1 }, key: "k".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     assert_eq!(p.map_geometry([10, 1, 1], [32, 4, 1]), Some(([10, 1, 1], [32, 4, 1])));
     assert_eq!(p.map_geometry([10, 1, 1], [32, 2, 1]), None);
     let wide = Plan { nwarps: Some(8), ..p };
@@ -307,7 +307,7 @@ fn registry_accepts_every_stock_mmvq_instantiation() {
 fn mmq_q8_0_matches_reference() {
     let words = super::mmq::build(refs::Q8_0, true);
     validate(&words);
-    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     // ragged rows/cols, channels with a ratio, two samples, k not a multiple of the 4-block stage
     for (ncols_x, nrows, ncols, nch, ratio, nsamples) in [(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] {
         let case = probe::mmq_case(ncols_x, nrows, ncols, nch, ratio, nsamples, 5 + ncols as u64);
@@ -325,7 +325,7 @@ fn translated_stock_mmq_q8_0_matches_native_on_the_interpreter() {
     let entry = "_Z9mul_mat_qIL9ggml_type8ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     crate::ptx::set_dynamic_shared_bytes(65536);
     let Some((stock, params)) = translated("blob98.ptx", entry) else { return };
-    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     assert!(matches!(
         super::decide(entry, &params, &super::Switch::parse("mmq")),
         super::Decision::Substitute(_)
@@ -371,6 +371,16 @@ fn auto_policy_follows_the_measurements() {
         assert!(yes(ty, 1), "ncols 1 native for type {ty}");
     }
     assert!(yes(8, 2) && yes(2, 4) && yes(8, 8) && yes(12, 8) && yes(14, 2) && yes(14, 4));
+    // decode (ncols 1) takes the decode-fast mmvq unless CUDA_FOR_INTEL_MMVQ_FAST opts out
+    if std::env::var_os("CUDA_FOR_INTEL_MMVQ_FAST").is_none() {
+        for ty in [2u32, 8, 12, 14] {
+            let Decision::Substitute(p) = decide(&name(ty, 1), &mmvq_layout(), &auto) else { panic!("type {ty}") };
+            assert_eq!(p.fast, Some(super::mmvq_fast_default(ty)), "type {ty}");
+            assert_eq!(p.key, super::mmvq_key(ty, 1, p.fast, None));
+            let Decision::Substitute(p2) = decide(&name(ty, 2), &mmvq_layout(), &auto) else { panic!("type {ty}") };
+            assert_eq!(p2.fast, None, "ncols 2 keeps the stock-order kernel");
+        }
+    }
     assert!(matches!(decide("_Z13quantize_q8_1PKfPvxxxxxj5uint3", &quantize_layout(), &auto), Decision::Substitute(_)));
     let mmq = "_Z9mul_mat_qIL9ggml_type8ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     assert!(matches!(decide(mmq, &mmq_layout(), &auto), Decision::Substitute(_)), "mmq is in auto");
@@ -397,7 +407,7 @@ fn auto_policy_follows_the_measurements() {
 #[ignore = "slow: multi-tile stock mmq on the interpreter; mismatch under investigation"]
 fn translated_stock_mmq_q8_0_multi_tile_shapes() {
     crate::ptx::set_dynamic_shared_bytes(65536);
-    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+    let plan = super::Plan { kernel: super::Kernel::Mmq { ty: refs::Q8_0 }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
     let words = super::mmq::build(refs::Q8_0, true);
     let mut failed = false;
     // (ncols_x, nrows, ncols, mmq_x, nch, ratio, nsamples)
@@ -465,7 +475,7 @@ fn mmq_all_types_match_reference_bitwise() {
     for (ty, _) in MMQ_TYPES {
         let words = super::mmq::build(ty, true);
         validate(&words);
-        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
         let shapes: &[(usize, usize, usize, usize, usize, usize)] =
             if refs::mmq_groups(ty) == 1 { &[(256, 70, 40, 2, 1, 1), (384, 65, 9, 4, 2, 2), (128, 3, 1, 1, 1, 1)] } else { &[(512, 70, 40, 2, 1, 1), (256, 65, 9, 4, 2, 2), (768, 3, 1, 1, 1, 1)] };
         for &(ncols_x, nrows, ncols, nch, ratio, nsamples) in shapes {
@@ -487,7 +497,7 @@ fn translated_stock_mmq_all_types_match_native_on_the_interpreter() {
     for (ty, blob) in MMQ_TYPES {
         let entry = format!("_Z9mul_mat_qIL9ggml_type{ty}ELi8ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii");
         let Some((stock, params)) = translated(blob, &entry) else { return };
-        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0 };
+        let plan = super::Plan { kernel: super::Kernel::Mmq { ty }, key: "m".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
         assert!(matches!(super::decide(&entry, &params, &super::Switch::parse("mmq")), super::Decision::Substitute(_)), "type {ty}");
         let case = probe::mmq_case_ty(ty, 512, 70, 8, 1, 1, 1, 21 + u64::from(ty));
         let mut dev = Dev::default();
@@ -517,5 +527,163 @@ fn translated_stock_mmq_all_types_match_native_on_the_interpreter() {
         println!("mmq type {ty} native vs translated stock: nmse {nmse:.3e}, {bad} of {} bitwise differences", n);
         assert!(nmse < 1e-9, "type {ty}");
         assert_eq!(bad, 0, "type {ty}: not bit-identical");
+    }
+}
+
+fn run_fast(pr: &MmvqCase, f: mmvq::Fast) -> Vec<f32> {
+    let words = mmvq::build_fast(pr.p.ty, f, true);
+    let mut sim = Sim { dev: Dev::default(), words: &words };
+    pr.run_fast(&mut sim, f.rows, f.warps).unwrap()
+}
+
+fn fast(rows: u32, warps: u32, unroll: u32) -> mmvq::Fast {
+    mmvq::Fast { rows, warps, unroll, wide: false }
+}
+
+#[test]
+fn mmvq_fast_wide_matches_its_reference_bitwise() {
+    for ty in [refs::Q8_0, refs::Q4_K, refs::Q6_K] {
+        for (f, ncols_x) in [(fast(4, 1, 2), 1024usize), (fast(2, 2, 4), 2304), (fast(1, 4, 1), 512), (fast(4, 1, 8), 4864)] {
+            let ncols_x = if ty == refs::Q8_0 { ncols_x } else { ncols_x.div_ceil(256) * 256 };
+            let f = mmvq::Fast { wide: true, ..f };
+            for (nch, ratio, ns, ids) in [(1usize, 1u32, 1usize, false), (4, 2, 2, false), (5, 1, 1, true)] {
+                let pr = problem(ty, 1, 11, ncols_x, nch, ratio, ns, ids, 1234 + ncols_x as u64 + u64::from(ty));
+                let got = run_fast(&pr, f);
+                let want = pr.reference_fast(f);
+                let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
+                assert_eq!(bad, 0, "type {ty} {f:?} nch {nch} ids {ids}: {bad}/{} outputs differ", got.len());
+                let nmse = refs::nmse(&got, &pr.reference(4));
+                assert!(nmse < 1e-10, "type {ty} {f:?}: nmse vs stock {nmse}");
+            }
+        }
+        validate(&mmvq::build_fast(ty, mmvq::Fast { rows: 4, warps: 1, unroll: 4, wide: true }, true));
+        validate(&mmvq::build_fast(ty, mmvq::Fast { rows: 2, warps: 2, unroll: 2, wide: true }, false));
+    }
+    assert_eq!(super::mmvq_fast_from(Some("4x1x4w"), refs::Q8_0), Some(mmvq::Fast { rows: 4, warps: 1, unroll: 4, wide: true }));
+    assert_eq!(super::mmvq_fast_from(Some("4x1x4w"), refs::Q4_0), Some(fast(4, 1, 4)));
+}
+
+#[test]
+fn mmvq_fast_matches_its_reference_bitwise_and_stock_closely() {
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
+        // 11 rows (tail workgroup), 1024 / 2304 columns (partial last unrolled step)
+        for (f, ncols_x) in [(fast(4, 1, 2), 1024usize), (fast(2, 2, 1), 2304), (fast(8, 1, 3), 2304), (fast(1, 4, 4), 512), (fast(4, 2, 8), 2304)] {
+            let pr = problem(ty, 1, 11, ncols_x, 1, 1, 1, false, 31 + u64::from(ty) + u64::from(f.rows));
+            let got = run_fast(&pr, f);
+            let want = pr.reference_fast(f);
+            let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
+            assert_eq!(bad, 0, "type {ty} {f:?}: {bad}/{} outputs differ", got.len());
+            let stock = pr.reference(4);
+            let nmse = refs::nmse(&got, &stock);
+            assert!(nmse < 1e-10, "type {ty}: nmse vs stock order {nmse}");
+            assert!(want.iter().all(|v| *v != 0.0));
+        }
+    }
+}
+
+#[test]
+fn mmvq_fast_channels_samples_and_ids() {
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
+        for (nch, ratio, ns, ids) in [(4usize, 2u32, 2usize, false), (5, 1, 1, true)] {
+            for f in [fast(4, 1, 2), fast(2, 4, 2)] {
+                let pr = problem(ty, 1, 3, 512, nch, ratio, ns, ids, 77 + u64::from(ty));
+                let got = run_fast(&pr, f);
+                let want = pr.reference_fast(f);
+                assert!(got.iter().zip(&want).all(|(g, w)| g.to_bits() == w.to_bits()), "type {ty} nch {nch} ids {ids} {f:?}");
+                assert!(refs::nmse(&got, &pr.reference(4)) < 1e-10);
+            }
+        }
+    }
+}
+
+#[test]
+fn mmvq_fast_variants_validate_and_parse() {
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
+        validate(&mmvq::build_fast(ty, fast(4, 1, 2), true));
+        validate(&mmvq::build_fast(ty, fast(2, 4, 1), false));
+    }
+    let q8 = refs::Q8_0;
+    // unset (and empty) means the decode-fast default; `0` / `off` / `none` opt out
+    assert_eq!(super::mmvq_fast_from(None, q8), Some(super::mmvq_fast_default(q8)));
+    assert_eq!(super::mmvq_fast_from(Some(""), q8), Some(super::mmvq_fast_default(q8)));
+    assert_eq!(super::mmvq_fast_from(None, refs::Q4_0), Some(super::mmvq_fast_default(refs::Q4_0)));
+    assert!(super::mmvq_fast_default(q8).wide && !super::mmvq_fast_default(refs::Q4_0).wide);
+    assert_eq!(super::mmvq_fast_from(Some("0"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some(" OFF "), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("none"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("false"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("Yes"), q8), Some(super::mmvq_fast_default(q8)));
+    assert!(super::mmvq_fast_is_opt_out(" Off ") && !super::mmvq_fast_is_opt_out("4x1") && !super::mmvq_fast_is_opt_out(""));
+    assert_eq!(super::mmvq_fast_from(Some("1"), q8), Some(super::mmvq_fast_default(q8)));
+    // module keys and entry names stay distinct across fast / wide / stock-order variants
+    let (narrow, wide) = (fast(4, 1, 2), super::mmvq_fast_default(q8));
+    let keys = [
+        super::mmvq_key(q8, 1, Some(wide), None),
+        super::mmvq_key(q8, 1, Some(narrow), None),
+        super::mmvq_key(q8, 1, None, None),
+        super::mmvq_key(q8, 1, None, Some(8)),
+        super::mmvq_key(refs::Q4_0, 1, Some(narrow), None),
+    ];
+    for (i, a) in keys.iter().enumerate() {
+        assert!(keys[i + 1..].iter().all(|b| a != b), "duplicate mmvq key {a} in {keys:?}");
+    }
+    assert_ne!(mmvq::fast_entry_name(q8, wide), mmvq::fast_entry_name(q8, narrow));
+    assert_eq!(super::mmvq_fast_from(Some("8,1,3"), q8), Some(fast(8, 1, 3)));
+    assert_eq!(super::mmvq_fast_from(Some("2x4x1"), q8), Some(fast(2, 4, 1)));
+    assert_eq!(super::mmvq_fast_from(Some("3x1x1"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("4x1x9"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("4x2"), q8), None);
+}
+
+#[test]
+fn fattn_matches_exact_attention_on_the_interpreter() {
+    use super::fattn;
+    for d in [64u32, 128] {
+        let words = fattn::build(d);
+        validate(&words);
+        let plan = super::Plan { kernel: super::Kernel::Fattn { d }, key: "f".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+        for (nq, nh, nhk, nkv, ns, causal) in [(19usize, 4usize, 2usize, 70usize, 1usize, true), (16, 2, 1, 33, 2, true), (16, 2, 2, 32, 1, false), (17, 1, 1, 160, 1, true)] {
+            let case = probe::fattn_case(d as usize, nq, nh, nhk, nkv, ns, causal, 7 + nq as u64);
+            let mut sim = Sim { dev: Dev::default(), words: &words };
+            let got = case.run(&mut sim, &plan).unwrap();
+            let want = case.reference();
+            let nmse = refs::nmse(&got, &want);
+            assert!(nmse < 1e-10, "d {d} nq {nq} nh {nh}/{nhk} nkv {nkv} ns {ns}: nmse {nmse}");
+        }
+    }
+    // feature gates: sinks, ALiBi and softcap keep the translated kernel
+    let plan = super::Plan { kernel: super::Kernel::Fattn { d: 64 }, key: "f".into(), nwarps: None, layout_hash: 0, aux: 0, fast: None };
+    let case = probe::fattn_case(64, 16, 2, 2, 32, 1, true, 1);
+    let base = probe::launch_values(&case.args(16, 16, 16, 16, 16));
+    assert!(plan.map_launch([1, 1, 1], [32, 4, 1], &base).is_some());
+    for (i, v) in [(4usize, 64u64), (9, 1.0f32.to_bits() as u64), (13, 2.0f32.to_bits() as u64), (14, 128), (15, 1)] {
+        let mut bad = base.clone();
+        bad[i] = v;
+        assert!(plan.map_launch([1, 1, 1], [32, 4, 1], &bad).is_none(), "word {i}");
+    }
+}
+
+#[test]
+fn fattn_names_and_layout_are_recognised() {
+    use crate::ptx::Param;
+    let name = "_Z18flash_attn_ext_f16ILi64ELi64ELi32ELi1ELi4ELi2ELb0ELb0EEvPKcS1_S1_S1_S1_PKiPfP6float2ffffjfiiiiiiiiiiiiiliiliiiiil";
+    let mut params = vec![Param::GlobalPtr; 8];
+    params.extend(super::fattn::arg_sizes()[8..].iter().map(|&n| if n == 8 { Param::U64 } else { Param::U32 }));
+    params[8] = Param::F32;
+    let sw = super::Switch::parse("auto,fattn");
+    match super::decide(name, &params, &sw) {
+        super::Decision::Substitute(p) => assert_eq!(p.kernel, super::Kernel::Fattn { d: 64 }),
+        other => panic!("{other:?}"),
+    }
+    // in auto by default, removable with -fattn
+    assert!(matches!(super::decide(name, &params, &super::Switch::parse("auto")), super::Decision::Substitute(_)));
+    assert_eq!(super::decide(name, &params, &super::Switch::parse("auto,-fattn")), super::Decision::NotApplicable);
+    let softcap = name.replace("ELb0ELb0EE", "ELb1ELb0EE");
+    assert_eq!(super::decide(&softcap, &params, &sw), super::Decision::NotApplicable);
+    let fixup = "_Z25flash_attn_stream_k_fixupILi64ELi32ELi1EEvPfPK6float2iiii";
+    let fp = vec![Param::GlobalPtr, Param::GlobalPtr, Param::U32, Param::U32, Param::U32, Param::U32];
+    match super::decide(fixup, &fp, &sw) {
+        super::Decision::Substitute(p) => assert_eq!(p.kernel, super::Kernel::FattnFixup),
+        other => panic!("{other:?}"),
     }
 }

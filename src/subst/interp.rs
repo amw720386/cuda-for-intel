@@ -482,6 +482,15 @@ fn step(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, inst: &Instruction, shared_elem
                 inv.vecs.insert(inst.result_id.unwrap(), [v[0], v[1], v[2], 0]);
                 return Flow::Next;
             }
+            if let Some(&(ew, n)) = inst.result_type.and_then(|t| ctx.vector_of.get(&t)) {
+                let mut v = [0u64; 4];
+                for (k, slot) in v.iter_mut().enumerate().take(n as usize) {
+                    *slot = mem.read(addr + (k as u64) * u64::from(ew / 8), inv.index, (ew / 8) as usize);
+                }
+                inv.vecs.insert(inst.result_id.unwrap(), v);
+                inv.vec_types.insert(inst.result_id.unwrap(), inst.result_type.unwrap());
+                return Flow::Next;
+            }
             let bytes = (w.max(8) / 8) as usize;
             mem.read(addr, inv.index, bytes)
         }
@@ -659,6 +668,8 @@ fn step(ctx: &Ctx, inv: &mut Inv, mem: &mut Mem, inst: &Instruction, shared_elem
                 if a.is_nan() { b } else if b.is_nan() { a } else { a.min(b) }
             } else if op == C::sqrt as u32 {
                 arg(0).sqrt()
+            } else if op == C::exp as u32 {
+                arg(0).exp()
             } else {
                 // integer extended instructions
                 let a = |i: usize| get(inv, 2 + i).0;

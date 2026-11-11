@@ -264,7 +264,12 @@ fn hw_subst_native_vs_translated() {
                 std::env::set_var("CUDA_FOR_INTEL_SUBST", switch);
             }
             match nwarps {
-                Some(w) => std::env::set_var("CUDA_FOR_INTEL_SUBST_NWARPS", w.to_string()),
+                // NWARPS shapes the stock-order kernel only; ncols 1 would otherwise take the
+                // decode-fast default (`CUDA_FOR_INTEL_MMVQ_FAST`), which ignores it
+                Some(w) => {
+                    std::env::set_var("CUDA_FOR_INTEL_SUBST_NWARPS", w.to_string());
+                    std::env::set_var("CUDA_FOR_INTEL_MMVQ_FAST", "0");
+                }
                 None => std::env::remove_var("CUDA_FOR_INTEL_SUBST_NWARPS"),
             }
         }
@@ -276,6 +281,9 @@ fn hw_subst_native_vs_translated() {
         unsafe {
             std::env::remove_var("CUDA_FOR_INTEL_SUBST");
             std::env::remove_var("CUDA_FOR_INTEL_SUBST_NWARPS");
+            if nwarps.is_some() {
+                std::env::remove_var("CUDA_FOR_INTEL_MMVQ_FAST");
+            }
         }
         f
     };
@@ -829,4 +837,346 @@ fn hw_subst_quantize_fuzz() {
     // rounding tie (the native division is not correctly rounded there); measured 16 of 12.6M bytes.
     assert_eq!(total.1 + total.2, 0, "native quantize_q8_1 d/sum differ from the translated kernel");
     assert!(total.3 * 100_000 < total.0 * 32, "native quantize_q8_1 quant bytes differ more than 1e-5");
+}
+
+/// Decode-shape mmvq (ncols_dst 1) for the three test models: translated stock PTX, the stock-order
+/// native kernel and the decode-fast variants (`CUDA_FOR_INTEL_MMVQ_FAST`), each checked against
+/// the host reference and timed over enough weight copies that the matrix is not cache resident
+/// (decode streams every weight once per token). One GPU slot:
+///   set CFI_STOCK_GGML_DLL=<path>\ggml-cuda.dll
+///   cargo test --release --test gpu hw_subst_mmvq_decode -- --ignored --nocapture --test-threads=1
+/// Optional: CFI_SUBST_REPS (timed launches per variant, default 60), CFI_MMVQ_FAST_LIST
+/// (variants `rows x warps x unroll`, default `4x1x2,4x1x4,4x1x8,8x1x4,2x2x4,1x4x2,1x4x4,4x2x4`).
+#[test]
+#[ignore = "requires CFI_STOCK_GGML_DLL, a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn hw_subst_mmvq_decode_shapes() {
+    let path = std::env::var("CFI_STOCK_GGML_DLL").expect("CFI_STOCK_GGML_DLL");
+    let reps: usize = std::env::var("CFI_SUBST_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let variants: Vec<String> = std::env::var("CFI_MMVQ_FAST_LIST")
+        .unwrap_or_else(|_| "4x1x2,4x1x4,4x1x8,8x1x4,2x2x4,1x4x2,1x4x4,4x2x4".into())
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    let blobs = extract_all(&path);
+    let mmvq_blob = blobs.iter().find(|b| b.contains(".entry _Z13mul_mat_vec_qIL9ggml_type8ELi1E")).expect("mmvq blob");
+    let _ = std::fs::remove_file("cuda-for-intel-export.log");
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxSynchronize(),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLibraryLoadData(*mut Handle, *const c_void, *mut c_void, *mut c_void, u32, *mut c_void, *mut c_void, u32),
+        cuLibraryGetKernel(*mut Handle, Handle, *const c_char),
+        cuKernelGetFunction(*mut Handle, Handle),
+    );
+    let launch_fn = unsafe {
+        dll.get::<unsafe extern "system" fn(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut *mut c_void, *mut Handle) -> i32>(b"cuLaunchKernel\0")
+    }
+    .expect("cuLaunchKernel");
+    let api = Api { launch: *launch_fn, sync: *cuCtxSynchronize, alloc: *cuMemAlloc_v2, htod: *cuMemcpyHtoD_v2, dtoh: *cuMemcpyDtoH_v2 };
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
+    // one library per setting: substitution is decided when a kernel is first resolved
+    let resolve = |subst: &str, fast: Option<&str>, entry: &str| -> Handle {
+        let src = std::ffi::CString::new(mmvq_blob.as_str()).unwrap();
+        let mut library = null_mut();
+        assert_eq!(unsafe { cuLibraryLoadData(&mut library, src.as_ptr().cast(), null_mut(), null_mut(), 0, null_mut(), null_mut(), 0) }, 0);
+        unsafe {
+            std::env::set_var("CUDA_FOR_INTEL_SUBST", subst);
+            match fast {
+                Some(f) => std::env::set_var("CUDA_FOR_INTEL_MMVQ_FAST", f),
+                None => std::env::remove_var("CUDA_FOR_INTEL_MMVQ_FAST"),
+            }
+        }
+        let c = std::ffi::CString::new(entry).unwrap();
+        let mut kernel = null_mut();
+        assert_eq!(unsafe { cuLibraryGetKernel(&mut kernel, library, c.as_ptr()) }, 0);
+        let mut f = null_mut();
+        assert_eq!(unsafe { cuKernelGetFunction(&mut f, kernel) }, 0);
+        unsafe {
+            std::env::remove_var("CUDA_FOR_INTEL_SUBST");
+            std::env::remove_var("CUDA_FOR_INTEL_MMVQ_FAST");
+        }
+        f
+    };
+    // (label, type, rows, cols): Qwen2.5-0.5B Q8_0, Llama-3.2-1B Q4_K_M, Qwen2.5-1.5B Q4_K_M
+    let shapes: [(&str, u32, usize, usize); 14] = [
+        ("qwen05 q/o", refs::Q8_0, 896, 896),
+        ("qwen05 k/v", refs::Q8_0, 128, 896),
+        ("qwen05 gate/up", refs::Q8_0, 4864, 896),
+        ("qwen05 down", refs::Q8_0, 896, 4864),
+        ("qwen05 lm_head", refs::Q8_0, 151936, 896),
+        ("llama1b q/o", refs::Q4_K, 2048, 2048),
+        ("llama1b k", refs::Q4_K, 512, 2048),
+        ("llama1b gate/up", refs::Q4_K, 8192, 2048),
+        ("llama1b down", refs::Q6_K, 2048, 8192),
+        ("llama1b v", refs::Q6_K, 512, 2048),
+        ("llama1b lm_head", refs::Q6_K, 128256, 2048),
+        ("qwen15 gate/up", refs::Q4_K, 8960, 1536),
+        ("qwen15 down", refs::Q6_K, 1536, 8960),
+        ("qwen15 lm_head", refs::Q6_K, 151936, 1536),
+    ];
+    let mut failures = Vec::new();
+    let mut header = format!("{:16} {:5} {:>7} {:>6} {:>4} | {:>15} {:>15}", "shape", "type", "rows", "cols", "cps", "translated", "native");
+    for v in &variants {
+        header += &format!(" {:>15}", format!("f{v}"));
+    }
+    println!("== mul_mat_vec_q ncols_dst 1, us per launch / GB/s (weights + activations), {reps} launches");
+    println!("{header}");
+    for (label, ty, nrows, ncols_x) in shapes {
+        let entry = format!("_Z13mul_mat_vec_qIL9ggml_type{ty}ELi1EEvPKvS2_PKiPfj5uint3jjjS6_jjjS6_jjj");
+        let c = make_case(ty, 1, nrows, ncols_x, 1, 1, 1, false, 0xDEC0 + ty as u64 + nrows as u64);
+        let mut want = vec![0f32; nrows];
+        refs::mmvq(&c.p, &c.x, &c.y, None, &mut want);
+        // enough copies of the weights to exceed the last-level cache
+        let copies = (256usize << 20).div_ceil(c.x.len()).clamp(1, 64);
+        let xs: Vec<u64> = (0..copies).map(|_| upload(&api, &c.x)).collect();
+        let ya = upload(&api, &c.y);
+        let da = upload(&api, &vec![0u8; nrows * 4]);
+        let params: Vec<Vec<Vec<u8>>> = xs.iter().map(|&xa| mmvq_params(&c.p, xa, ya, 0, da)).collect();
+        let bytes = (c.x.len() + c.y.len()) as f64;
+        let mut cells = Vec::new();
+        let mut kinds: Vec<(String, &str, Option<String>)> = vec![("translated".into(), "none", None), ("native".into(), "mmvq", Some("0".into()))];
+        for v in &variants {
+            kinds.push((format!("fast {v}"), "mmvq", Some(v.clone())));
+        }
+        let mut native_out = Vec::new();
+        for (kind, subst, fast) in &kinds {
+            let f = resolve(subst, fast.as_deref(), &entry);
+            assert_eq!(launch(&api, f, c.p.grid(), c.p.block(), &params[0]), 0);
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            let got = floats(&download(&api, da, nrows * 4));
+            let nmse = refs::nmse(&got, &want);
+            if kind == "native" {
+                native_out = got.clone();
+            }
+            if !(nmse < 1e-9) {
+                failures.push(format!("{label} {kind}: nmse {nmse:.2e}"));
+            }
+            for i in 0..3 {
+                assert_eq!(launch(&api, f, c.p.grid(), c.p.block(), &params[i % copies]), 0);
+            }
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            let start = Instant::now();
+            for i in 0..reps {
+                assert_eq!(launch(&api, f, c.p.grid(), c.p.block(), &params[i % copies]), 0);
+            }
+            assert_eq!(unsafe { (api.sync)() }, 0);
+            let s = start.elapsed().as_secs_f64() / reps as f64;
+            cells.push(format!(" {:>15}", format!("{:.1}/{:.1}", s * 1e6, bytes / s / 1e9)));
+        }
+        let _ = native_out;
+        println!("{label:16} {:5} {nrows:7} {ncols_x:6} {copies:4} |{}", type_label(ty), cells.concat());
+    }
+    let log = std::fs::read_to_string("cuda-for-intel-export.log").unwrap_or_default();
+    let rejected: Vec<&str> = log.lines().filter(|l| l.contains("subst:") && (l.contains("rejected") || l.contains("failed"))).collect();
+    for l in &rejected {
+        println!("  {l}");
+    }
+    assert!(rejected.is_empty(), "native kernels rejected");
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// FlashAttention test problem in ggml's contiguous layouts (mirrors `src/subst/probe.rs`).
+struct FaCase {
+    d: usize,
+    nq: usize,
+    nh: usize,
+    nhk: usize,
+    nkv: usize,
+    nq_pad: usize,
+    scale: f32,
+    q: Vec<f32>,
+    k: Vec<u16>,
+    v: Vec<u16>,
+    mask: Vec<u16>,
+}
+
+/// Keys at `nvis..nkv` are padding (-inf); query `i` sees keys `j <= nvis - nq + i` (causal).
+#[allow(clippy::too_many_arguments)]
+fn fa_case(d: usize, nq: usize, nh: usize, nhk: usize, nkv: usize, nvis: usize, seed: u64) -> FaCase {
+    let mut rng = Rng(seed);
+    let q = (0..d * nq * nh).map(|_| rng.unit()).collect();
+    let k = (0..d * nkv * nhk).map(|_| refs::f32_to_f16(rng.unit())).collect();
+    let v = (0..d * nkv * nhk).map(|_| refs::f32_to_f16(rng.unit())).collect();
+    let nq_pad = nq.div_ceil(16) * 16;
+    let mut mask = vec![0u16; nkv * nq_pad];
+    for i in 0..nq_pad {
+        for j in 0..nkv {
+            mask[i * nkv + j] = if j < nvis && j + nq <= nvis + i { refs::f32_to_f16(rng.unit() * 0.5) } else { 0xfc00 };
+        }
+    }
+    FaCase { d, nq, nh, nhk, nkv, nq_pad, scale: 1.0 / (d as f32).sqrt(), q, k, v, mask }
+}
+
+impl FaCase {
+    fn reference(&self) -> Vec<f32> {
+        let (d, nq, nh, nkv) = (self.d, self.nq, self.nh, self.nkv);
+        let gqa = nh / self.nhk;
+        let mut out = vec![0f32; d * nh * nq];
+        for h in 0..nh {
+            let kh = h / gqa;
+            for i in 0..nq {
+                let qrow = &self.q[(h * nq + i) * d..][..d];
+                let sc: Vec<f64> = (0..nkv)
+                    .map(|j| {
+                        let krow = &self.k[(kh * nkv + j) * d..][..d];
+                        let dot: f64 = (0..d).map(|t| f64::from(qrow[t] * self.scale) * f64::from(refs::f16_to_f32(krow[t]))).sum();
+                        dot + f64::from(refs::f16_to_f32(self.mask[i * nkv + j]))
+                    })
+                    .collect();
+                let mx = sc.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let p: Vec<f64> = sc.iter().map(|x| (x - mx).exp()).collect();
+                let l: f64 = p.iter().sum();
+                for t in 0..d {
+                    let o: f64 = p.iter().enumerate().map(|(j, pj)| pj * f64::from(refs::f16_to_f32(self.v[(kh * nkv + j) * d + t]))).sum();
+                    out[(i * nh + h) * d + t] = (o / l) as f32;
+                }
+            }
+        }
+        out
+    }
+
+    /// The 37 launch words of `flash_attn_ext_f16`.
+    fn words(&self, q: u64, k: u64, v: u64, mask: u64, dst: u64) -> Vec<Vec<u8>> {
+        let (d, nq, nh, nkv, nhk, nqp) = (self.d as u32, self.nq as u32, self.nh as u32, self.nkv as u32, self.nhk as u32, self.nq_pad as u32);
+        let p = |x: u64| x.to_le_bytes().to_vec();
+        let u = |x: u32| x.to_le_bytes().to_vec();
+        let f = |x: f32| x.to_bits().to_le_bytes().to_vec();
+        vec![
+            p(q), p(k), p(v), p(mask), p(0), p(0), p(dst), p(0),
+            f(self.scale), f(0.0), f(1.0), f(1.0), u(0), f(0.0),
+            u(d), u(nq), u(nh), u(1), u(d * 4), u(d * 4 * nq), u(d * 4 * nq * nh),
+            u(d), u(nkv), u(nhk), u(1), u(d * 2), u(d * 2 * nkv), p(u64::from(d * 2 * nkv * nhk)),
+            u(d * 2), u(d * 2 * nkv), p(u64::from(d * 2 * nkv * nhk)),
+            u(nkv), u(nqp), u(1), u(nkv * 2), u(nkv * 2 * nqp), p(u64::from(nkv * 2 * nqp)),
+        ]
+    }
+}
+
+/// Native FlashAttention (`CUDA_FOR_INTEL_SUBST=fattn`, `flash_attn_ext_f16`) on the device against
+/// exact f64 attention at the test models' prefill and decode shapes, with kernel timing. One slot:
+///   set CFI_STOCK_GGML_DLL=<path>\ggml-cuda.dll
+///   cargo test --release --test gpu hw_subst_fattn -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore = "requires CFI_STOCK_GGML_DLL, a built nvcuda.dll and an Intel Level Zero GPU"]
+#[allow(non_snake_case)]
+fn hw_subst_fattn_native_vs_reference() {
+    use std::io::Write as _;
+    let path = std::env::var("CFI_STOCK_GGML_DLL").expect("CFI_STOCK_GGML_DLL");
+    let blobs = extract_all(&path);
+    // The driver keeps the export log open for the whole process: never delete it here (later lines
+    // would go to the unlinked file); count the lines this test adds instead.
+    let log_before = std::fs::read_to_string("cuda-for-intel-export.log").map(|l| l.len()).unwrap_or(0);
+    let dll = library();
+    symbols!(dll;
+        cuInit(u32),
+        cuCtxCreate_v2(*mut Handle, u32, i32),
+        cuCtxSynchronize(),
+        cuMemAlloc_v2(*mut u64, usize),
+        cuMemcpyHtoD_v2(u64, *const c_void, usize),
+        cuMemcpyDtoH_v2(*mut c_void, u64, usize),
+        cuLibraryLoadData(*mut Handle, *const c_void, *mut c_void, *mut c_void, u32, *mut c_void, *mut c_void, u32),
+        cuLibraryGetKernel(*mut Handle, Handle, *const c_char),
+        cuKernelGetFunction(*mut Handle, Handle),
+    );
+    let launch_fn = unsafe {
+        dll.get::<unsafe extern "system" fn(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut *mut c_void, *mut Handle) -> i32>(b"cuLaunchKernel\0")
+    }
+    .expect("cuLaunchKernel");
+    let api = Api { launch: *launch_fn, sync: *cuCtxSynchronize, alloc: *cuMemAlloc_v2, htod: *cuMemcpyHtoD_v2, dtoh: *cuMemcpyDtoH_v2 };
+    ok!(cuInit(0));
+    let mut context = null_mut();
+    ok!(cuCtxCreate_v2(&mut context, 0, test_device()));
+    // Some instantiations are architecture-guard stubs in this PTX (refused at load): try candidates.
+    let resolve = |entry: &str| -> Option<Handle> {
+        let blob = blobs.iter().find(|b| b.contains(&format!(".entry {entry}(")))?;
+        let src = std::ffi::CString::new(blob.as_str()).unwrap();
+        let mut library = null_mut();
+        assert_eq!(unsafe { cuLibraryLoadData(&mut library, src.as_ptr().cast(), null_mut(), null_mut(), 0, null_mut(), null_mut(), 0) }, 0);
+        unsafe { std::env::set_var("CUDA_FOR_INTEL_SUBST", "fattn") };
+        let c = std::ffi::CString::new(entry).unwrap();
+        let mut kernel = null_mut();
+        let ok = unsafe { cuLibraryGetKernel(&mut kernel, library, c.as_ptr()) } == 0;
+        let mut f = null_mut();
+        let ok = ok && unsafe { cuKernelGetFunction(&mut f, kernel) } == 0;
+        unsafe { std::env::remove_var("CUDA_FOR_INTEL_SUBST") };
+        ok.then_some(f)
+    };
+    // every non-softcap, non-MLA instantiation for head size d, the preferred template first
+    let entries_for = |d: u32, want: (u32, u32, u32, u32)| -> Vec<String> {
+        let prefix = format!(".entry _Z18flash_attn_ext_f16ILi{d}ELi{d}E");
+        let mut out: Vec<String> = Vec::new();
+        for b in &blobs {
+            let mut from = 0;
+            while let Some(i) = b[from..].find(&prefix) {
+                let start = from + i + 7;
+                let rest = &b[start..];
+                let name = &rest[..rest.find('(').unwrap_or(0)];
+                if name.contains("ELb0ELb0E") && !out.iter().any(|n| n == name) {
+                    out.push(name.to_string());
+                }
+                from = start;
+            }
+        }
+        let tag = format!("ELi{}ELi{}ELi{}ELi{}E", want.0, want.1, want.2, want.3);
+        out.sort_by_key(|n| !n.contains(&tag));
+        out
+    };
+    // (label, d, nq, nh, nh_kv, nkv, stock template (ncols1, ncols2, nwarps, ntiles))
+    let shapes = [
+        ("qwen05 prefill", 64usize, 631usize, 14usize, 2usize, 768usize, (32u32, 1u32, 4u32, 2u32)),
+        ("llama1b prefill", 64, 631, 32, 8, 768, (32, 1, 4, 2)),
+        ("qwen15 prefill", 128, 631, 12, 2, 768, (32, 1, 4, 2)),
+    ];
+    let mut failures = Vec::new();
+    println!("== flash_attn_ext_f16 native: nmse vs exact attention, ms per launch");
+    for (label, d, nq, nh, nhk, nkv, (c1, c2, nw, nt)) in shapes {
+        let Some((entry, f)) = entries_for(d as u32, (c1, c2, nw, nt)).into_iter().find_map(|e| resolve(&e).map(|f| (e, f))) else {
+            println!("{label}: no loadable stock instantiation, skipped");
+            continue;
+        };
+        let _ = entry;
+        let case = fa_case(d, nq, nh, nhk, nkv, 631, 0xfa + nq as u64);
+        let b16 = |v: &[u16]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        let qa = upload(&api, &case.q.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+        let ka = upload(&api, &b16(&case.k));
+        let va = upload(&api, &b16(&case.v));
+        let ma = upload(&api, &b16(&case.mask));
+        let n = d * nh * nq;
+        let da = upload(&api, &vec![0u8; n * 4]);
+        let words = case.words(qa, ka, va, ma, da);
+        // stock geometry is irrelevant to the native kernel (it maps its own grid)
+        assert_eq!(launch(&api, f, [8, 1, 1], [32, nw, 1], &words), 0);
+        assert_eq!(unsafe { (api.sync)() }, 0);
+        let got = floats(&download(&api, da, n * 4));
+        let want = case.reference();
+        let nmse = refs::nmse(&got, &want);
+        let reps = 20;
+        let start = Instant::now();
+        for _ in 0..reps {
+            assert_eq!(launch(&api, f, [8, 1, 1], [32, nw, 1], &words), 0);
+        }
+        assert_eq!(unsafe { (api.sync)() }, 0);
+        let ms = start.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        let flops = 4.0 * (d * nq * nh * nkv) as f64;
+        println!("{label:16} d {d:3} nq {nq:4} heads {nh}/{nhk} kv {nkv}: nmse {nmse:.2e}, {ms:.3} ms ({:.0} GFLOP/s dense)", flops / ms / 1e6);
+        let _ = std::io::stdout().flush();
+        if !(nmse < 1e-8) {
+            failures.push(format!("{label}: nmse {nmse:.2e}"));
+        }
+    }
+    let log = std::fs::read_to_string("cuda-for-intel-export.log").unwrap_or_default();
+    let new = log.get(log_before..).unwrap_or("");
+    for l in new.lines().filter(|l| l.contains("fattn")) {
+        println!("  {l}");
+    }
+    let rejected = new.lines().filter(|l| l.contains("subst: native fattn") && (l.contains("rejected") || l.contains("failed"))).count();
+    assert_eq!(rejected, 0, "native fattn was rejected");
+    assert!(failures.is_empty(), "{failures:?}");
 }
