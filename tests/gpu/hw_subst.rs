@@ -264,7 +264,12 @@ fn hw_subst_native_vs_translated() {
                 std::env::set_var("CUDA_FOR_INTEL_SUBST", switch);
             }
             match nwarps {
-                Some(w) => std::env::set_var("CUDA_FOR_INTEL_SUBST_NWARPS", w.to_string()),
+                // NWARPS shapes the stock-order kernel only; ncols 1 would otherwise take the
+                // decode-fast default (`CUDA_FOR_INTEL_MMVQ_FAST`), which ignores it
+                Some(w) => {
+                    std::env::set_var("CUDA_FOR_INTEL_SUBST_NWARPS", w.to_string());
+                    std::env::set_var("CUDA_FOR_INTEL_MMVQ_FAST", "0");
+                }
                 None => std::env::remove_var("CUDA_FOR_INTEL_SUBST_NWARPS"),
             }
         }
@@ -276,6 +281,9 @@ fn hw_subst_native_vs_translated() {
         unsafe {
             std::env::remove_var("CUDA_FOR_INTEL_SUBST");
             std::env::remove_var("CUDA_FOR_INTEL_SUBST_NWARPS");
+            if nwarps.is_some() {
+                std::env::remove_var("CUDA_FOR_INTEL_MMVQ_FAST");
+            }
         }
         f
     };
