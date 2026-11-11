@@ -42,7 +42,7 @@ impl Fixture {
                     runtime: fake::start(),
                     next_handle: 3,
                     stream_owners: HashMap::new(),
-                    contexts: HashMap::new(),
+                    contexts: HandleMap::default(),
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
                     libraries: library::Libraries::default(),

@@ -5,7 +5,7 @@ use super::*;
 #[derive(Default)]
 pub(super) struct Libraries {
     pub(in crate::cuda) images: HashMap<usize, Library>,
-    kernels: HashMap<usize, (usize, CString)>,
+    kernels: HandleMap<(usize, CString)>,
 }
 
 impl Libraries {

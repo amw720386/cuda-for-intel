@@ -118,10 +118,10 @@ struct CudaContext {
     /// Dynamic-shared-window variants of lazily translated kernels, keyed by (`CUfunction`, window
     /// bytes): `Some((child module, function, owning lazy module))`, or `None` when the kernel cannot
     /// be specialised.
-    dyn_variants: HashMap<(usize, u32), Option<(usize, usize, usize)>>,
+    dyn_variants: crate::ptx::fxhash::FxHashMap<(usize, u32), Option<(usize, usize, usize)>>,
     /// Allocation-table entries that belong to a module variable, not to cuMemAlloc.
     module_globals: BTreeSet<usize>,
-    functions: HashMap<usize, FunctionRef>,
+    functions: HandleMap<FunctionRef>,
     local_storage: HashMap<usize, export_table::ContextStorage>,
     /// Peer contexts this context enabled access to (see `devices::peer`).
     peer_access: BTreeSet<usize>,
@@ -180,10 +180,14 @@ struct LaunchMeta {
     label: Box<str>,
 }
 
+/// Tables keyed by API handles on the launch path: handles are small integers the driver hands
+/// out itself, so SipHash's flood resistance buys nothing and FxHash is several times cheaper.
+type HandleMap<V> = crate::ptx::fxhash::FxHashMap<usize, V>;
+
 struct State {
     runtime: Runtime,
     next_handle: usize,
-    contexts: HashMap<usize, CudaContext>,
+    contexts: HandleMap<CudaContext>,
     /// Explicit stream handle -> owning context key. Entries can go stale after a
     /// stream or context is destroyed, so every hit is re-validated.
     stream_owners: HashMap<usize, usize>,
@@ -375,7 +379,7 @@ pub extern "system" fn cuInit(flags: c_uint) -> CuResult {
                 *guard = Some(State {
                     runtime: rt,
                     next_handle: 3, // CUDA reserves stream values 0, 1 and 2.
-                    contexts: HashMap::new(),
+                    contexts: HandleMap::default(),
                     stream_owners: HashMap::new(),
                     incomplete_contexts: Vec::new(),
                     primary: HashMap::new(),
@@ -506,9 +510,9 @@ impl State {
                 modules: HashMap::new(),
                 library_modules: HashMap::new(),
                 entry_modules: HashMap::new(),
-                dyn_variants: HashMap::new(),
+                dyn_variants: Default::default(),
                 module_globals: BTreeSet::new(),
-                functions: HashMap::new(),
+                functions: HandleMap::default(),
                 local_storage: HashMap::new(),
                 peer_access: BTreeSet::new(),
                 subst: Default::default(),
@@ -1737,7 +1741,8 @@ fn validate_launch(
 /// dynamic shared memory still caps occupancy as if it used 64 KiB (`hw_slm_reservation_occupancy`:
 /// 4.4 to 7.2x slower). Only kernels whose full window is large (32 KiB or more in total) and
 /// launches needing at most 16 KiB qualify; everything else, and every failure to specialise,
-/// keeps `function`. Decisions, including "not possible", are cached per context, so the
+/// keeps `function`. Small-window kernels are rejected from their cached launch metadata;
+/// decisions for large windows, including "not possible", are cached per context, so the
 /// steady-state cost is one lookup; `CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE=0` turns it off.
 fn dynamic_shared_variant(state: &mut State, function: usize, requested: u32) -> Result<usize, CuResult> {
     const LARGE_WINDOW: u32 = 32 * 1024;
@@ -1748,13 +1753,17 @@ fn dynamic_shared_variant(state: &mut State, function: usize, requested: u32) ->
     let bytes = requested.max(library::MIN_DYNAMIC_VARIANT).next_power_of_two();
     let key = current().ok_or(InvalidContext)?;
     let context = state.contexts.get(&key).ok_or(ContextIsDestroyed)?;
-    if let Some(cached) = context.dyn_variants.get(&(function, bytes)) {
-        return Ok(cached.map_or(function, |(_, variant, _)| variant));
-    }
     let total = context
         .functions
         .get(&function)
         .map_or(0, |function| function.launch.shared_bytes);
+    if total < LARGE_WINDOW {
+        // Never specialised (the cached decision would be `None`): skip the cache.
+        return Ok(function);
+    }
+    if let Some(cached) = context.dyn_variants.get(&(function, bytes)) {
+        return Ok(cached.map_or(function, |(_, variant, _)| variant));
+    }
     let variant = if total >= LARGE_WINDOW && bytes <= MAX_VARIANT {
         let source = state.lazy_modules.iter().find_map(|(&lazy, module)| {
             module
@@ -2235,7 +2244,7 @@ fn system_available_bytes() -> Option<usize> {
     }
 }
 
-fn used_device_bytes(contexts: &HashMap<usize, CudaContext>, device: c_int) -> usize {
+fn used_device_bytes(contexts: &HandleMap<CudaContext>, device: c_int) -> usize {
     contexts
         .values()
         .filter(|context| context.device == device)
