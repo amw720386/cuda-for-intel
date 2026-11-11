@@ -292,7 +292,10 @@ struct PciProperties {
 /// `ZE_KERNEL_INDIRECT_ACCESS_FLAG_*` for `CUDA_FOR_INTEL_INDIRECT_ACCESS`: a comma list of `host`,
 /// `device`, `shared`, or `none`; unset or unparsable means all three (the default). Host indirect
 /// access marks every kernel as using system memory in the Intel runtime, which can add cache
-/// flushes per kernel; `device,shared` keeps ggml's device pointer tables working.
+/// flushes per kernel; `device,shared` keeps ggml's device pointer tables working. A measurement
+/// switch, not a tuning default: without `host`, a kernel that reaches pinned host USM through a
+/// pointer stored in memory (a pointer table in cuMemAllocHost memory) loses the residency
+/// guarantee for it. Direct kernel arguments are unaffected.
 fn indirect_access_flags(value: Option<&str>) -> u32 {
     const ALL: u32 = 0b111;
     let Some(value) = value else { return ALL };
