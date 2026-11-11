@@ -9,10 +9,16 @@
 //! launch stream's immediate list. This is the extension Intel's SYCL graph support uses.
 //! Kernel substitution (`subst_hook`) is decided at record time exactly as at launch time.
 //!
-//! A list is also re-recorded after any `cuMemFree` in the context (or module-variable
-//! retirement): Intel's driver keeps the allocation set of a regular list's appends, and a pool
-//! may hand the freed address back as a new allocation. Frees in another (peer) context are not
-//! tracked, as the per-node validation never tracked them either.
+//! A list is also re-recorded when memory it uses was freed: Intel's driver keeps the
+//! allocation set of a regular list's appends, and a pool may hand the freed address back as a
+//! new allocation. "Uses" means the allocations that contain a pointer-sized kernel argument or a
+//! copy or memset address of the graph, collected at record time. Frees of other memory keep the
+//! list: Ollama allocates and frees its per-token input buffers around every graph launch.
+//! The context keeps the last `FREE_LOG` frees; a list older than that is re-recorded. Frees in
+//! another (peer) context are not tracked, as the per-node validation never tracked them either.
+//!
+//! Every decision is counted and the first ones of each kind, then a summary every
+//! `SUMMARY_EVERY` launches, go to the export log as `graph record:` lines.
 //!
 //! Recorded: kernel, device-to-device copy, memset and empty nodes (child graphs flattened).
 //! A graph with host-function, event or host-memory copy nodes, a stream with experimental
@@ -54,10 +60,63 @@ struct Recorded {
     groups: u64,
     /// Completion of the latest run; the list is destroyed only after it.
     last: Option<Arc<Fence>>,
-    /// `CudaContext::alloc_frees` when the list was recorded (after the nodes were validated).
-    /// Any later free re-records: a regular list keeps the allocation set of its appends, and a
-    /// pool can hand the freed address back as a different allocation.
+    /// `CudaContext::alloc_frees` up to which no free touched `uses` (the nodes were validated
+    /// at that count). A later free of a used allocation re-records.
     frees: u64,
+    /// Allocations (base, length) the recorded commands name, sorted.
+    uses: Vec<(usize, usize)>,
+}
+
+/// Frees remembered per context for the overlap check.
+pub(super) const FREE_LOG: usize = 4096;
+/// Launches between two summary lines in the export log.
+const SUMMARY_EVERY: usize = 1000;
+/// Detailed log lines per kind of decision.
+const DETAIL_LINES: usize = 8;
+
+/// Frees of a context, for deciding whether a recorded list touches freed memory.
+#[derive(Default)]
+pub(super) struct FreeLog {
+    /// (free number, base, length) of the latest frees, oldest first.
+    entries: std::collections::VecDeque<(u64, usize, usize)>,
+}
+
+impl FreeLog {
+    pub(super) fn push(&mut self, number: u64, base: usize, length: usize) {
+        if self.entries.len() == FREE_LOG {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((number, base, length));
+    }
+
+    /// Whether a free numbered above `since` (up to `now`) overlaps one of `uses`. `None` when
+    /// the log no longer holds all of them.
+    pub(super) fn overlaps_since(&self, since: u64, now: u64, uses: &[(usize, usize)]) -> Option<bool> {
+        let retained = self.entries.front().map_or(now + 1, |&(number, _, _)| number);
+        if since + 1 < retained && since < now {
+            return None;
+        }
+        Some(self.entries.iter().filter(|&&(number, _, _)| number > since).any(|&(_, base, length)| {
+            uses.iter().any(|&(used, used_length)| {
+                base < used.saturating_add(used_length.max(1)) && used < base.saturating_add(length.max(1))
+            })
+        }))
+    }
+}
+
+/// Why a launch recorded a list or kept re-issuing nodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Event {
+    Replayed,
+    RecordedFirst,
+    RecordedChanged,
+    RecordedFreed,
+    RecordedFreeLogOverflow,
+    ReissuedNodes,
+    ReissuedBatchingStream,
+    ReissuedNoExtension,
+    ReissuedRecordFailed,
+    ReissuedCached,
 }
 
 enum Slot {
@@ -72,6 +131,7 @@ pub(super) struct Recordings {
     live: HashMap<usize, Slot>,
     retired: Vec<(CommandList, Option<Arc<Fence>>)>,
     pub(super) stats: Stats,
+    events: EventLog,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,6 +144,30 @@ pub(super) struct Stats {
     pub(super) reissued: usize,
     /// Launches that waited for the previous run of the same list.
     pub(super) waited: usize,
+    /// Frees of other memory that a recorded list survived.
+    pub(super) kept_after_free: usize,
+}
+
+#[derive(Default)]
+struct EventLog {
+    counts: HashMap<Event, usize>,
+    launches: usize,
+}
+
+impl EventLog {
+    fn note(&mut self, event: Event, detail: impl FnOnce() -> String) {
+        let count = self.counts.entry(event).or_insert(0);
+        *count += 1;
+        if *count <= DETAIL_LINES {
+            export_log_always(format_args!("graph record: {event:?} #{count}: {}", detail()));
+        }
+        self.launches += 1;
+        if self.launches % SUMMARY_EVERY == 0 {
+            let mut counts: Vec<_> = self.counts.iter().map(|(event, count)| format!("{event:?} {count}")).collect();
+            counts.sort();
+            export_log_always(format_args!("graph record: {} launches: {}", self.launches, counts.join(", ")));
+        }
+    }
 }
 
 impl Recordings {
@@ -143,14 +227,77 @@ impl Recordings {
     }
 }
 
-/// Whether every step can go into a regular list.
-fn recordable(steps: &[&Node]) -> bool {
-    steps.iter().any(|node| matches!(node, Node::Kernel(_)))
-        && steps.iter().all(|node| match node {
-            Node::Kernel(_) | Node::Fill(_) | Node::Empty => true,
-            Node::Copy(copy) => copy.kind == CopyKind::DeviceToDevice,
-            _ => false,
-        })
+/// [`unrecordable`] for the nodes of a graph (child graphs flattened).
+#[cfg(test)]
+pub(super) fn unrecordable_kinds(nodes: &[Node]) -> Option<String> {
+    let mut steps = Vec::new();
+    flatten(nodes, &mut steps);
+    unrecordable(&steps)
+}
+
+/// `None` when every step can go into a regular list, else the kinds of the steps that cannot.
+fn unrecordable(steps: &[&Node]) -> Option<String> {
+    let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
+    for node in steps {
+        let kind = match node {
+            Node::Kernel(_) | Node::Fill(_) | Node::Empty => continue,
+            Node::Copy(copy) => match copy.kind {
+                CopyKind::DeviceToDevice => continue,
+                CopyKind::HostToDevice => "host-to-device copy",
+                CopyKind::DeviceToHost => "device-to-host copy",
+            },
+            Node::Host(_) => "host function",
+            Node::EventRecord(_) => "event record",
+            Node::EventWait(_) => "event wait",
+            Node::Child(_) => "child graph",
+        };
+        *kinds.entry(kind).or_default() += 1;
+    }
+    if !steps.iter().any(|node| matches!(node, Node::Kernel(_))) {
+        *kinds.entry("no kernel").or_default() += 1;
+    }
+    (!kinds.is_empty()).then(|| format!("{} nodes, unrecordable: {kinds:?}", steps.len()))
+}
+
+/// The allocation (base, length) of `map` that contains `address`.
+fn containing(map: &BTreeMap<usize, usize>, address: usize) -> Option<(usize, usize)> {
+    map.range(..=address)
+        .next_back()
+        .filter(|&(&base, &length)| address < base.saturating_add(length.max(1)))
+        .map(|(&base, &length)| (base, length))
+}
+
+/// Allocations named by `steps`: every 8-byte kernel argument that points into one (pointer
+/// parameters and pointers passed as integers alike), and copy and memset addresses.
+fn used_allocations(context: &CudaContext, steps: &[&Node]) -> Vec<(usize, usize)> {
+    let lookup = |address: usize| {
+        containing(&context.allocations, address).or_else(|| containing(&context.host_allocations, address))
+    };
+    let mut uses = Vec::new();
+    for node in steps {
+        match node {
+            Node::Kernel(kernel) => {
+                for arg in kernel.args.iter().filter(|arg| arg.len() == 8) {
+                    let value = unsafe { arg.as_ptr().cast::<u64>().read_unaligned() } as usize;
+                    uses.extend(lookup(value));
+                }
+            }
+            Node::Copy(copy) => uses.extend([lookup(copy.dst), lookup(copy.src)].into_iter().flatten()),
+            Node::Fill(fill) => uses.extend(lookup(fill.dst)),
+            _ => {}
+        }
+    }
+    uses.sort_unstable();
+    uses.dedup();
+    uses
+}
+
+impl CudaContext {
+    /// Count a free of [`base`, `base + length`) for recorded graphs (`graph_record`).
+    pub(super) fn note_free(&mut self, base: usize, length: usize) {
+        self.alloc_frees += 1;
+        self.freed.push(self.alloc_frees, base, length);
+    }
 }
 
 fn supported(runtime: &Runtime, context: &CudaContext) -> bool {
@@ -186,26 +333,52 @@ pub(super) fn launch(
 ) -> Result<bool, CuResult> {
     let api = &runtime.api;
     context.graph_lists.collect(api)?;
-    let reuse = match context.graph_lists.live.get(&exec) {
-        Some(Slot::Ready(recorded)) => recorded.version == version && recorded.frees == context.alloc_frees,
+    let now = context.alloc_frees;
+    let reason = match context.graph_lists.live.get(&exec) {
+        None => Some(Event::RecordedFirst),
         Some(Slot::Unsupported(stale)) if *stale == version => {
             context.graph_lists.stats.reissued += 1;
+            context.graph_lists.events.note(Event::ReissuedCached, || format!("graph {exec:#x}"));
             return Ok(false);
         }
-        _ => false,
+        Some(Slot::Unsupported(_)) => Some(Event::RecordedChanged),
+        Some(Slot::Ready(recorded)) if recorded.version != version => Some(Event::RecordedChanged),
+        Some(Slot::Ready(recorded)) if recorded.frees != now => {
+            match context.freed.overlaps_since(recorded.frees, now, &recorded.uses) {
+                Some(true) => Some(Event::RecordedFreed),
+                None => Some(Event::RecordedFreeLogOverflow),
+                Some(false) => None,
+            }
+        }
+        Some(Slot::Ready(_)) => None,
     };
-    if !reuse {
+    if let Some(reason) = reason {
         context.graph_lists.retire(exec);
         let mut steps = Vec::new();
         flatten(nodes, &mut steps);
-        if !recordable(&steps) || !context.streams.is_immediate(key)? || !supported(runtime, context) {
+        let refused = if let Some(why) = unrecordable(&steps) {
+            Some((Event::ReissuedNodes, why))
+        } else if !context.streams.is_immediate(key)? {
+            Some((Event::ReissuedBatchingStream, "stream uses experimental batching".to_string()))
+        } else if !supported(runtime, context) {
+            Some((Event::ReissuedNoExtension, "no immediate-append extension".to_string()))
+        } else {
+            None
+        };
+        if let Some((event, why)) = refused {
             context.graph_lists.live.insert(exec, Slot::Unsupported(version));
             context.graph_lists.stats.reissued += 1;
+            context.graph_lists.events.note(event, || format!("graph {exec:#x}: {why}"));
             return Ok(false);
         }
+        let uses = used_allocations(context, &steps);
         match record(api, context, &steps, key) {
             Ok((list, groups)) => {
                 context.graph_lists.stats.recorded += 1;
+                let count = steps.len();
+                context.graph_lists.events.note(reason, || {
+                    format!("graph {exec:#x}: {count} nodes, {} allocations used, frees so far {now}", uses.len())
+                });
                 context.graph_lists.live.insert(
                     exec,
                     Slot::Ready(Recorded {
@@ -213,20 +386,30 @@ pub(super) fn launch(
                         list,
                         groups,
                         last: None,
-                        frees: context.alloc_frees,
+                        frees: now,
+                        uses,
                     }),
                 );
             }
             Err(error) => {
-                export_log_always(format_args!(
-                    "graph record: recording {} nodes failed ({error:?}); re-issuing them",
-                    steps.len()
-                ));
+                let count = steps.len();
                 context.graph_lists.live.insert(exec, Slot::Unsupported(version));
                 context.graph_lists.stats.reissued += 1;
+                context.graph_lists.events.note(Event::ReissuedRecordFailed, || {
+                    format!("graph {exec:#x}: recording {count} nodes failed ({error:?})")
+                });
                 return Ok(false);
             }
         }
+    } else {
+        // No free since recording touched memory this list uses.
+        if let Some(Slot::Ready(recorded)) = context.graph_lists.live.get_mut(&exec)
+            && recorded.frees != now
+        {
+            recorded.frees = now;
+            context.graph_lists.stats.kept_after_free += 1;
+        }
+        context.graph_lists.events.note(Event::Replayed, || format!("graph {exec:#x}"));
     }
     let Some(Slot::Ready(recorded)) = context.graph_lists.live.get_mut(&exec) else {
         return Err(Unknown);

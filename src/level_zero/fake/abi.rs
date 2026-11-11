@@ -217,7 +217,17 @@ fn allocate(ctx: Raw, device: Option<Raw>, bytes: usize, kind: Kind, out: *mut R
         } else {
             driver.get(ctx.addr(), Kind::Context)?;
         }
-        let id = driver.create(ctx.addr(), kind);
+        let id = match driver.reuse_address.take() {
+            Some(address) if !driver.objects.contains_key(&address) => {
+                let saved = driver.next;
+                driver.next = address - 0x10000;
+                let id = driver.create(ctx.addr(), kind);
+                driver.next = saved;
+                id
+            }
+            Some(_) => return Err("reused an address that is still allocated"),
+            None => driver.create(ctx.addr(), kind),
+        };
         driver
             .objects
             .get_mut(&id)

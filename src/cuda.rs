@@ -130,9 +130,10 @@ struct CudaContext {
     subst: subst_hook::Natives,
     /// Regular command lists recorded from executable graphs (`CUDA_FOR_INTEL_GRAPH_RECORD`).
     graph_lists: graph_record::Recordings,
-    /// Counts frees (`allocations` removals, host allocations): a graph recorded at the same
-    /// count names no freed memory; any other count re-records it (`graph_record`).
+    /// Counts frees (`allocations` removals, host allocations); with `freed`, recorded graphs
+    /// find out whether memory they use went away (`graph_record`).
     alloc_frees: u64,
+    freed: graph_record::FreeLog,
 }
 
 /// A PTX module whose kernels are translated one at a time on first lookup.
@@ -498,6 +499,7 @@ impl State {
                 subst: Default::default(),
                 graph_lists: Default::default(),
                 alloc_frees: 0,
+                freed: Default::default(),
             },
         );
         if trace::enabled() {
@@ -683,8 +685,9 @@ impl CudaContext {
             .free(api, base)
             .inspect_err(|error| self.backend.health.observe(error))
             .map_err(backend_error)?;
-        self.host_allocations.remove(&base);
-        self.alloc_frees += 1;
+        if let Some(length) = self.host_allocations.remove(&base) {
+            self.note_free(base, length);
+        }
         self.staging.retain(|&slot| slot != base);
         self.staging_next = self.staging_next.min(self.staging.len());
         Ok(())
@@ -698,8 +701,9 @@ impl CudaContext {
             .free(api, base)
             .inspect_err(|error| self.backend.health.observe(error))
             .map_err(backend_error)?;
-        self.allocations.remove(&base);
-        self.alloc_frees += 1;
+        if let Some(length) = self.allocations.remove(&base) {
+            self.note_free(base, length);
+        }
         Ok(())
     }
 

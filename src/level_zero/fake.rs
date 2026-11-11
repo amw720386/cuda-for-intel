@@ -147,6 +147,8 @@ struct Driver {
     paused: bool,
     waiters: usize,
     execute_result: Option<Status>,
+    /// Address the next allocation takes, as a real allocator may hand a freed one back.
+    reuse_address: Option<Id>,
     /// Fake device timestamp counter and its increment per timestamp write.
     clock: u64,
     clock_step: u64,
@@ -529,6 +531,12 @@ pub(crate) fn set_clock(start: u64, step: u64) {
 /// Override the size reported for module variables (`None` restores the default).
 pub(crate) fn set_global_size(size: Option<usize>) {
     lock().as_mut().unwrap().global_size = size;
+}
+
+/// The next device or host allocation gets `address` (which must be free), like a pool or
+/// driver handing a freed address back.
+pub(crate) fn reuse_address(address: usize) {
+    lock().as_mut().unwrap().reuse_address = Some(address);
 }
 
 pub(crate) fn fail_after_execute(status: Status) {

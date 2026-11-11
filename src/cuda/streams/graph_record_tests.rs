@@ -209,7 +209,7 @@ fn unrecordable_graphs_keep_reissuing() {
             assert_eq!(cuGraphLaunch(kernels, s), Success);
         }
         let expected = if policy.is_none() {
-            Stats { recorded: 1, replayed: 2, reissued: 2, waited: 0 }
+            Stats { recorded: 1, replayed: 2, reissued: 2, ..Stats::default() }
         } else {
             // Batching streams have no immediate list to append to.
             Stats { reissued: 4, ..Stats::default() }
@@ -246,17 +246,15 @@ fn module_unload_and_free_invalidate_recorded_graphs() {
     assert_eq!(cuGraphLaunch(exec2, s), Success);
     assert_eq!(cuStreamSynchronize(s), Success);
     assert_eq!(stats().recorded, 2);
-    // Any free re-records (the address may come back as another allocation), even one the
-    // graph does not use.
+    // Allocating, and freeing memory the graph does not use, keep the list.
     let (spare, _) = allocations();
     assert_eq!(cuGraphLaunch(exec2, s), Success);
     assert_eq!(stats().recorded, 2, "a new allocation keeps the list");
     assert_eq!(cuStreamSynchronize(s), Success);
     assert_eq!(cuMemFree_v2(spare), Success);
     assert_eq!(cuGraphLaunch(exec2, s), Success);
-    assert_eq!(stats().recorded, 3);
-    assert_eq!(cuGraphLaunch(exec2, s), Success);
-    assert_eq!(stats().recorded, 3);
+    assert_eq!(stats().recorded, 2, "an unrelated free keeps the list");
+    assert_eq!(stats().kept_after_free, 1);
     assert_eq!(cuStreamSynchronize(s), Success);
     assert_eq!(cuMemFree_v2(device), Success);
     assert_eq!(cuGraphLaunch(exec2, s), InvalidValue);
@@ -267,29 +265,28 @@ fn module_unload_and_free_invalidate_recorded_graphs() {
     assert_baseline();
 }
 
-/// The bug class from review: a graph names a pointer, the memory is freed and a new allocation
-/// takes its place (ggml's pool does this). The old list must not run again: the next launch
-/// validates against the new allocation table and records a fresh list.
+/// The bug class from review: a graph names a buffer, the buffer is freed and a new allocation
+/// takes the same address (ggml's pool, or the driver, can do this). The old list must not run
+/// again: the next launch validates against the new allocation table and records a fresh list.
 #[test]
-fn free_then_reallocate_rerecords() {
+fn free_then_reallocate_at_the_same_address_rerecords() {
     let _fixture = Fixture::new();
     let _on = Recording::on();
     let ctx = context(None);
     let (s, f) = (stream(), function(module()));
     let mut buffer = 0u64;
     assert_eq!(unsafe { cuMemAlloc_v2(&mut buffer, 256) }, Success);
-    let (scratch, _) = allocations();
-    // The graph names only `buffer`; `scratch` is unrelated memory that comes and goes.
     let exec = instantiate(capture(s, || chain(f, s, buffer, 6)));
     assert_eq!(cuGraphLaunch(exec, s), Success);
     assert_eq!(cuGraphLaunch(exec, s), Success);
     assert_eq!(stats(), Stats { recorded: 1, replayed: 2, ..Stats::default() });
     assert_eq!(cuStreamSynchronize(s), Success);
 
-    // Free and reallocate: whatever address the new allocation gets, the list is re-recorded.
-    assert_eq!(cuMemFree_v2(scratch), Success);
+    assert_eq!(cuMemFree_v2(buffer), Success);
+    fake::reuse_address(buffer as usize);
     let mut again = 0u64;
-    assert_eq!(unsafe { cuMemAlloc_v2(&mut again, 64) }, Success);
+    assert_eq!(unsafe { cuMemAlloc_v2(&mut again, 256) }, Success);
+    assert_eq!(again, buffer, "the fake handed the freed address back");
     let regular = regular_lists();
     assert_eq!(cuGraphLaunch(exec, s), Success);
     assert_eq!(stats(), Stats { recorded: 2, replayed: 3, ..Stats::default() });
@@ -299,25 +296,106 @@ fn free_then_reallocate_rerecords() {
     assert_eq!(stats(), Stats { recorded: 2, replayed: 4, ..Stats::default() });
     assert_eq!(regular_lists(), regular, "old list destroyed, new one live");
     assert_eq!(live_lists(), 1);
-
-    // A pinned host free counts too.
-    let mut host = null_mut();
-    assert_eq!(unsafe { cuMemHostAlloc(&mut host, 64, 0) }, Success);
-    assert_eq!(cuGraphLaunch(exec, s), Success);
-    assert_eq!(stats().recorded, 2);
-    assert_eq!(cuStreamSynchronize(s), Success);
-    assert_eq!(cuMemFreeHost(host), Success);
-    assert_eq!(cuGraphLaunch(exec, s), Success);
-    assert_eq!(stats().recorded, 3);
-
-    // Freeing the graph's own buffer makes the stale graph fail validation, as without recording.
-    assert_eq!(cuStreamSynchronize(s), Success);
-    assert_eq!(cuMemFree_v2(buffer), Success);
-    assert_eq!(cuGraphLaunch(exec, s), InvalidValue);
     assert!(fake::snapshot().ledger.violations.is_empty());
+    assert_eq!(cuStreamSynchronize(s), Success);
     assert_eq!(cuGraphExecDestroy(exec), Success);
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
     assert_baseline();
+}
+
+/// What ggml in Ollama does per decode token: allocate the token's input buffers, copy the inputs
+/// in (outside the graph), copy the CPY-indirection pointer table, launch the graph, synchronize,
+/// free the inputs. Every few tokens the KV length changes, ggml re-captures and calls
+/// cuGraphExecUpdate. The recorded list must survive the input frees and be re-recorded only on
+/// the updates.
+#[test]
+fn ollama_token_pattern_keeps_the_list_across_input_frees() {
+    let _fixture = Fixture::new();
+    let _on = Recording::on();
+    let ctx = context(None);
+    let (s, f) = (stream(), function(module()));
+    let (weights, host) = allocations();
+    let (table, _) = allocations();
+    let exec = instantiate(capture(s, || chain(f, s, weights, 20)));
+    let tokens = 24;
+    let update_every = 8;
+    for token in 0..tokens {
+        let mut input = 0u64;
+        assert_eq!(unsafe { cuMemAlloc_v2(&mut input, 64) }, Success);
+        assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(input, host, 16, s) }, Success);
+        assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(table, host, 16, s) }, Success);
+        if token > 0 && token % update_every == 0 {
+            let update = capture(s, || chain(f, s, weights, 20));
+            let mut info = std::mem::MaybeUninit::<ExecUpdateInfo>::zeroed();
+            assert_eq!(unsafe { cuGraphExecUpdate_v2(exec, update, info.as_mut_ptr()) }, Success);
+            assert_eq!(cuGraphDestroy(update), Success);
+        }
+        assert_eq!(cuGraphLaunch(exec, s), Success);
+        assert_eq!(cuStreamSynchronize(s), Success);
+        assert_eq!(cuMemFree_v2(input), Success);
+    }
+    let stats = stats();
+    assert_eq!(stats.recorded, 1 + (tokens - 1) / update_every, "{stats:?}");
+    assert_eq!(stats.replayed, tokens, "{stats:?}");
+    assert_eq!(stats.reissued, 0, "{stats:?}");
+    assert!(stats.kept_after_free >= tokens - stats.recorded, "{stats:?}");
+    assert_eq!(cuGraphExecDestroy(exec), Success);
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+}
+
+/// A capture holding host-to-device copies or host functions keeps re-issuing,
+/// and says why.
+#[test]
+fn unrecordable_nodes_are_named() {
+    use crate::cuda::graph_record::unrecordable_kinds;
+    let _fixture = Fixture::new();
+    let _on = Recording::on();
+    let ctx = context(None);
+    let (s, f) = (stream(), function(module()));
+    let (device, host) = allocations();
+    let mut e = null_mut();
+    assert_eq!(unsafe { super::events::cuEventCreate(&mut e, 2) }, Success);
+    unsafe extern "system" fn nothing(_: *mut c_void) {}
+    let graph = capture(s, || {
+        assert_eq!(launch(f, s, device), Success);
+        assert_eq!(unsafe { cuMemcpyHtoDAsync_v2(device, host, 16, s) }, Success);
+        assert_eq!(super::events::cuEventRecord(e, s), Success);
+        assert_eq!(unsafe { crate::cuda::graph_api::cuLaunchHostFunc(s, nothing as *mut c_void, null_mut()) }, Success);
+    });
+    let why = state(|state| Ok(unrecordable_kinds(&state.graphs.graphs[&graph.addr()].flatten()))).unwrap();
+    // An event recorded on the capturing stream itself adds no node (only cross-stream joins do).
+    assert!(why.as_deref().is_some_and(|why| why.contains("host-to-device copy") && why.contains("host function")), "{why:?}");
+    let exec = instantiate(graph);
+    for _ in 0..3 {
+        assert_eq!(cuGraphLaunch(exec, s), Success);
+    }
+    assert_eq!(stats(), Stats { reissued: 3, ..Stats::default() });
+    assert_eq!(cuStreamSynchronize(s), Success);
+    assert_eq!(cuGraphExecDestroy(exec), Success);
+    assert_eq!(cuGraphDestroy(graph), Success);
+    assert_eq!(super::events::cuEventDestroy_v2(e), Success);
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+}
+
+#[test]
+fn free_log_overlap_rules() {
+    use crate::cuda::graph_record::{FREE_LOG, FreeLog};
+    let mut log = FreeLog::default();
+    let uses = [(0x1000, 0x100), (0x5000, 0x10)];
+    log.push(1, 0x2000, 0x100);
+    assert_eq!(log.overlaps_since(0, 1, &uses), Some(false));
+    log.push(2, 0x10f0, 0x20);
+    assert_eq!(log.overlaps_since(0, 2, &uses), Some(true));
+    assert_eq!(log.overlaps_since(1, 2, &uses), Some(true));
+    assert_eq!(log.overlaps_since(2, 2, &uses), Some(false), "nothing freed since 2");
+    for number in 3..(3 + FREE_LOG as u64) {
+        log.push(number, 0x9000, 0x10);
+    }
+    let now = 2 + FREE_LOG as u64;
+    assert_eq!(log.overlaps_since(0, now, &uses), None, "older frees fell out of the log");
+    assert_eq!(log.overlaps_since(5, now, &uses), Some(false));
 }
 
 #[test]
