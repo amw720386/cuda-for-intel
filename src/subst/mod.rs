@@ -320,15 +320,17 @@ pub(crate) struct Plan {
     pub fast: Option<mmvq::Fast>,
 }
 
-/// `CUDA_FOR_INTEL_MMVQ_FAST`: `0`/`off` keeps the stock-order native mmvq; `1`/`on` selects the
-/// decode-fast variant with the per-type default; `<rows>x<warps>x<unroll>` (or comma separated)
-/// picks one shape for every type; a trailing `w` selects the whole-dword group loads (Q8_0, Q4_K,
-/// Q6_K; ignored for Q4_0).
+/// `CUDA_FOR_INTEL_MMVQ_FAST`: unset, empty, `1`/`on`/`auto` select the decode-fast variant with the
+/// per-type default (the default since B390 decode went 32.3 -> 44.2 tok/s FA-off and 37.7 -> 56.5
+/// FA-on with CPU-identical text, PR #18); `0`/`off`/`none` keeps the stock-order native mmvq;
+/// `<rows>x<warps>x<unroll>` (or comma separated) picks one shape for every type; a trailing `w`
+/// selects the whole-dword group loads (Q8_0, Q4_K, Q6_K; ignored for Q4_0). An unparsable or
+/// out-of-range shape keeps the stock-order kernel.
 pub(crate) fn mmvq_fast_from(text: Option<&str>, ty: u32) -> Option<mmvq::Fast> {
-    let text = text?.trim().to_ascii_lowercase();
+    let text = text.unwrap_or("").trim().to_ascii_lowercase();
     match text.as_str() {
-        "" | "0" | "off" | "none" => None,
-        "1" | "on" | "auto" => Some(mmvq_fast_default(ty)),
+        "0" | "off" | "none" => None,
+        "" | "1" | "on" | "auto" => Some(mmvq_fast_default(ty)),
         _ => {
             let (body, wide) = match text.strip_suffix('w') {
                 Some(b) => (b, true),
@@ -350,6 +352,16 @@ pub(crate) fn mmvq_fast_from(text: Option<&str>, ty: u32) -> Option<mmvq::Fast> 
 pub(crate) fn mmvq_fast_default(ty: u32) -> mmvq::Fast {
     let wide = matches!(ty, refs::Q8_0 | refs::Q4_K | refs::Q6_K);
     mmvq::Fast { rows: 4, warps: 1, unroll: 2, wide }
+}
+
+/// Per-context native module key of an mmvq plan: every knob that changes the generated SPIR-V
+/// (fast shape including `wide`, or the stock-order warp count) is part of it, so two variants
+/// never share a cached module.
+pub(crate) fn mmvq_key(ty: u32, ncols: u32, fast: Option<mmvq::Fast>, nwarps: Option<u32>) -> String {
+    match fast {
+        Some(f) => format!("mmvq:t{ty}:c{ncols}:fast{}x{}x{}{}", f.rows, f.warps, f.unroll, if f.wide { "w" } else { "" }),
+        None => format!("mmvq:t{ty}:c{ncols}:w{}", nwarps.unwrap_or(0)),
+    }
 }
 
 fn mmvq_fast_env(ty: u32) -> Option<mmvq::Fast> {
@@ -421,11 +433,7 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
         _ => None,
     };
     let key = match kernel {
-        Kernel::Mmvq { ty, ncols } if fast.is_some() => {
-            let f = fast.unwrap();
-            format!("mmvq:t{ty}:c{ncols}:fast{}x{}x{}{}", f.rows, f.warps, f.unroll, if f.wide { "w" } else { "" })
-        }
-        Kernel::Mmvq { ty, ncols } => format!("mmvq:t{ty}:c{ncols}:w{}", nwarps.unwrap_or(0)),
+        Kernel::Mmvq { ty, ncols } => mmvq_key(ty, ncols, fast, nwarps),
         Kernel::QuantizeQ81 => "quantize_q8_1".to_string(),
         Kernel::Mmq { ty } => format!("mmq:t{ty}"),
         Kernel::MmqFixup { ty } => format!("mmq_fixup:t{ty}"),

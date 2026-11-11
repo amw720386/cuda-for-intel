@@ -371,6 +371,16 @@ fn auto_policy_follows_the_measurements() {
         assert!(yes(ty, 1), "ncols 1 native for type {ty}");
     }
     assert!(yes(8, 2) && yes(2, 4) && yes(8, 8) && yes(12, 8) && yes(14, 2) && yes(14, 4));
+    // decode (ncols 1) takes the decode-fast mmvq unless CUDA_FOR_INTEL_MMVQ_FAST opts out
+    if std::env::var_os("CUDA_FOR_INTEL_MMVQ_FAST").is_none() {
+        for ty in [2u32, 8, 12, 14] {
+            let Decision::Substitute(p) = decide(&name(ty, 1), &mmvq_layout(), &auto) else { panic!("type {ty}") };
+            assert_eq!(p.fast, Some(super::mmvq_fast_default(ty)), "type {ty}");
+            assert_eq!(p.key, super::mmvq_key(ty, 1, p.fast, None));
+            let Decision::Substitute(p2) = decide(&name(ty, 2), &mmvq_layout(), &auto) else { panic!("type {ty}") };
+            assert_eq!(p2.fast, None, "ncols 2 keeps the stock-order kernel");
+        }
+    }
     assert!(matches!(decide("_Z13quantize_q8_1PKfPvxxxxxj5uint3", &quantize_layout(), &auto), Decision::Substitute(_)));
     let mmq = "_Z9mul_mat_qIL9ggml_type8ELi64ELb0EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii";
     assert!(matches!(decide(mmq, &mmq_layout(), &auto), Decision::Substitute(_)), "mmq is in auto");
@@ -593,9 +603,28 @@ fn mmvq_fast_variants_validate_and_parse() {
         validate(&mmvq::build_fast(ty, fast(2, 4, 1), false));
     }
     let q8 = refs::Q8_0;
-    assert_eq!(super::mmvq_fast_from(None, q8), None);
+    // unset (and empty) means the decode-fast default; `0` / `off` / `none` opt out
+    assert_eq!(super::mmvq_fast_from(None, q8), Some(super::mmvq_fast_default(q8)));
+    assert_eq!(super::mmvq_fast_from(Some(""), q8), Some(super::mmvq_fast_default(q8)));
+    assert_eq!(super::mmvq_fast_from(None, refs::Q4_0), Some(super::mmvq_fast_default(refs::Q4_0)));
+    assert!(super::mmvq_fast_default(q8).wide && !super::mmvq_fast_default(refs::Q4_0).wide);
     assert_eq!(super::mmvq_fast_from(Some("0"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some(" OFF "), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("none"), q8), None);
     assert_eq!(super::mmvq_fast_from(Some("1"), q8), Some(super::mmvq_fast_default(q8)));
+    // module keys and entry names stay distinct across fast / wide / stock-order variants
+    let (narrow, wide) = (fast(4, 1, 2), super::mmvq_fast_default(q8));
+    let keys = [
+        super::mmvq_key(q8, 1, Some(wide), None),
+        super::mmvq_key(q8, 1, Some(narrow), None),
+        super::mmvq_key(q8, 1, None, None),
+        super::mmvq_key(q8, 1, None, Some(8)),
+        super::mmvq_key(refs::Q4_0, 1, Some(narrow), None),
+    ];
+    for (i, a) in keys.iter().enumerate() {
+        assert!(keys[i + 1..].iter().all(|b| a != b), "duplicate mmvq key {a} in {keys:?}");
+    }
+    assert_ne!(mmvq::fast_entry_name(q8, wide), mmvq::fast_entry_name(q8, narrow));
     assert_eq!(super::mmvq_fast_from(Some("8,1,3"), q8), Some(fast(8, 1, 3)));
     assert_eq!(super::mmvq_fast_from(Some("2x4x1"), q8), Some(fast(2, 4, 1)));
     assert_eq!(super::mmvq_fast_from(Some("3x1x1"), q8), None);

@@ -49,7 +49,19 @@ add-order effect described above. Reproduce with `scripts/bench-subst-ollama.ps1
 * Kernel numbers (`hw_subst_mmvq_decode_shapes`, weights rotated over enough copies to defeat the cache): output matrices 106-109 GB/s
   (stock-order native 36-53), mid-size matrices 55-75 GB/s, small ones bounded by launch cost (4-25 us). Tables and end-to-end runs:
   `docs/hw-logs/perf-mmvq-2026-11-09/`.
-* `CUDA_FOR_INTEL_MMVQ_FAST=0` restores the stock-order kernel; `<rows>x<warps>x<unroll>[w]` picks another shape.
+* Default on: an unset or empty `CUDA_FOR_INTEL_MMVQ_FAST` (or `1`/`on`/`auto`) selects the per-type default (4 rows, 1 warp,
+  unroll 2, `wide` for Q8_0 / Q4_K / Q6_K). `0`/`off`/`none` restores the stock-order kernel; `<rows>x<warps>x<unroll>[w]` picks
+  another shape; an unparsable or out-of-range shape also keeps the stock-order kernel. Only `ncols_dst` 1 is affected, and only where
+  `CUDA_FOR_INTEL_SUBST` selects the native mmvq (`auto` does). `CUDA_FOR_INTEL_SUBST_NWARPS` applies to the stock-order kernel only,
+  so set `CUDA_FOR_INTEL_MMVQ_FAST=0` with it to vary decode warps.
+* Caches: the per-context module key (`mmvq:t<ty>:c1:fast<r>x<w>x<u>[w]`) and the entry name (`cfi_mmvq_fast_t<ty>_r_w_u[_wide]`)
+  carry every shape knob, so fast, wide and stock-order variants never share a module; the driver-side native compile cache is keyed
+  by the SPIR-V words. `cfi-precompile` builds the same plan as the launch path (`subst::decide`), so it warms the fast variant by
+  default and the stock-order one under `CUDA_FOR_INTEL_MMVQ_FAST=0`. The PTX translation cache (`TRANSLATOR_VERSION`) is unaffected:
+  native kernels are generated, not translated. The kernels use no dynamic shared memory, so the dynamic-shared-window
+  specialisation (`CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE`) does not apply to them.
+* B390 end to end with the default (Qwen2.5-0.5B-Instruct Q8_0, pooled decode p50, 3 servers x 5 runs, `scripts/bench-decode.ps1`, owner run on PR #18): FA off 32.3 -> 44.2 tok/s,
+  FA on 37.7 -> 56.5 tok/s, greedy text equal to CPU.
 
 ## Native FlashAttention (`fattn`, default on)
 
