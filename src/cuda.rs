@@ -1335,13 +1335,28 @@ pub unsafe extern "system" fn cuModuleLoad(out: *mut Opaque, path: *const c_char
     })
 }
 
+/// The PTX record of a fatbin that the load paths translate: the first one, or with
+/// `CFI_FATBIN_ARCH=cc` (or a number) the one a CUDA driver would pick for the reported compute
+/// capability, so that host code choosing paths by `cc` and device code agree.
+///
+/// # Safety
+/// Same contract as `cfi_fatbin::extract_ptx`.
+pub(crate) unsafe fn fatbin_ptx(image: *const u8) -> Option<Vec<u8>> {
+    let arch = cfi_fatbin::configured_arch(reported_cc());
+    if let Some(arch) = arch {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| export_log_always(format_args!("fatbin: preferring PTX for compute_{arch}")));
+    }
+    unsafe { cfi_fatbin::extract_ptx_for(image, arch) }
+}
+
 /// Load a module from a fatbin wrapper or frame (the private CUDART_INTERFACE
 /// path used by cudart 11.x): pick the PTX record and translate it.
 pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_void) -> CuResult {
     if out.is_null() || image.is_null() {
         return InvalidValue;
     }
-    let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx(image.cast()) }) else {
+    let Some(ptx) = (unsafe { fatbin_ptx(image.cast()) }) else {
         if let Some(message) = unsafe { cfi_fatbin::report_no_ptx("load_module_from_fatbin", image.cast()) } {
             export_log(format_args!("{message}"));
         }

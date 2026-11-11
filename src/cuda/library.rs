@@ -112,7 +112,7 @@ pub unsafe extern "system" fn cuLibraryLoadData(
         }
         let code = code.cast::<u8>();
         let bytes = match unsafe { code.read() } {
-            0xb1 | 0x50 => match unsafe { cfi_fatbin::extract_ptx(code) } {
+            0xb1 | 0x50 => match unsafe { super::fatbin_ptx(code) } {
                 Some(ptx) => ptx,
                 // SASS-only image: nothing here can run on this device, which is
                 // what a real driver reports for a cubin built for another arch.
