@@ -171,6 +171,8 @@ struct FunctionRef {
 
 struct LaunchMeta {
     params: Box<[Param]>,
+    /// `launch_args::plan(params)`.
+    slots: Box<[launch_args::Slot]>,
     /// Whether any parameter is `Param::Staged`.
     staged: bool,
     max_threads: Option<u32>,
@@ -1680,6 +1682,7 @@ fn module_function(
     let launch = std::sync::Arc::new(LaunchMeta {
         staged: entry.params.iter().any(|p| matches!(p, Param::Staged { .. })),
         params: entry.params.clone().into_boxed_slice(),
+        slots: launch_args::plan(&entry.params),
         max_threads: entry.max_threads,
         shared_bytes: entry.shared_bytes,
         subst: entry.subst.clone(),
@@ -1933,7 +1936,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let mut staged_pointers: Vec<Box<u64>> = Vec::new();
             let capturing = context.streams.capture(stream)?.is_some();
             let args = unsafe {
-                launch_args::read(params, kernel_params, extra, |address| {
+                launch_args::read_planned(&meta.slots, kernel_params, extra, |address| {
                     // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
                     // host USM and valid kernel arguments, like in CUDA's unified addressing.
                     let known = contains_range(&context.allocations, address as usize, 1)
