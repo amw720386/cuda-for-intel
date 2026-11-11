@@ -581,12 +581,11 @@ impl Streams {
         });
         // Never let the flag reach a later non-launch record if this one returned early.
         self.get_mut(key)?.defer_next = false;
-        if result.is_ok() {
-            let stream = self.get_mut(key)?;
-            let fence = if checkpoint { stream.tail() } else { None };
-            stream.window.launched(counted, fence);
-        }
-        result
+        let fence = result?;
+        self.get_mut(key)?
+            .window
+            .launched(counted, if checkpoint { fence } else { None });
+        Ok(())
     }
 
     /// Window mode: wait for the oldest checkpoints of `key` until `groups` more (counted) fit
@@ -647,10 +646,11 @@ impl Streams {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
-        self.record_signalled(api, context, key, false, append)
+        self.record_signalled(api, context, key, false, append).map(drop)
     }
 
     /// [`Self::record_ordered`], with a completion fence even when stream ordering needs none.
+    /// Returns the fence attached to the operation, if any.
     fn record_signalled(
         &mut self,
         api: &Api,
@@ -662,7 +662,7 @@ impl Streams {
             Option<&Fence>,
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
-    ) -> Result<(), CuResult> {
+    ) -> Result<Option<Arc<Fence>>, CuResult> {
         let blocking = self.get(key)?.blocking;
         self.collect_retired(api)?;
         let signal = if signalled || blocking && self.track_legacy {
@@ -671,7 +671,9 @@ impl Streams {
             None
         };
         let waits = self.legacy_waits(api, key, blocking)?;
-        self.get_mut(key)?.record(api, context, signal, waits, append)
+        self.get_mut(key)?
+            .record(api, context, signal.clone(), waits, append)
+            .map(|()| signal)
     }
 
     fn legacy_waits(
