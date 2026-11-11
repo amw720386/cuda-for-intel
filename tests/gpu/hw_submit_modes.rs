@@ -114,17 +114,36 @@ fn parse_modes(spec: &str) -> Vec<(String, Vec<(String, String)>)> {
         .filter(|mode| !mode.is_empty())
         .map(|mode| {
             let (name, vars) = mode.split_once(':').unwrap_or((mode, ""));
-            let vars = vars
-                .split(',')
-                .filter(|pair| !pair.is_empty())
-                .map(|pair| {
-                    let (key, value) = pair.split_once('=').expect("CFI_SUBMIT_MODES: VAR=value");
-                    (key.trim().to_owned(), value.trim().to_owned())
-                })
-                .collect();
+            // `VAR=a,b` values may contain commas: a piece without `=` continues the previous value.
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for piece in vars.split(',').filter(|piece| !piece.trim().is_empty()) {
+                match piece.split_once('=') {
+                    Some((key, value)) => pairs.push((key.trim().to_owned(), value.trim().to_owned())),
+                    None => {
+                        let last = pairs.last_mut().expect("CFI_SUBMIT_MODES: VAR=value");
+                        last.1.push(',');
+                        last.1.push_str(piece.trim());
+                    }
+                }
+            }
+            let vars = pairs;
             (name.trim().to_owned(), vars)
         })
         .collect()
+}
+
+#[test]
+fn submit_modes_parse_values_with_commas() {
+    let modes = parse_modes("base:;dev:CUDA_FOR_INTEL_INDIRECT_ACCESS=device,shared,CUDA_FOR_INTEL_SUBMIT=deferred");
+    assert_eq!(modes[0], ("base".to_owned(), vec![]));
+    assert_eq!(
+        modes[1].1,
+        [
+            ("CUDA_FOR_INTEL_INDIRECT_ACCESS".to_owned(), "device,shared".to_owned()),
+            ("CUDA_FOR_INTEL_SUBMIT".to_owned(), "deferred".to_owned())
+        ]
+    );
+    assert_eq!(parse_modes(DEFAULT_MODES).len(), DEFAULT_MODES.matches(';').count() + 1);
 }
 
 fn median(samples: &mut [f64]) -> f64 {
