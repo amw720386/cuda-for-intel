@@ -460,6 +460,11 @@ fn peer_access(driver: &Driver, device: Id, peer: Id) -> bool {
 }
 
 /// Fake device handle of the device described by `specs[index]` in `start_with`.
+/// See `abi::set_null_launch`.
+pub(crate) fn set_null_launch(api: &mut Api, on: bool) {
+    abi::set_null_launch(api, on);
+}
+
 pub(crate) fn device_handle(index: usize) -> usize {
     ids(index, 0).1
 }
