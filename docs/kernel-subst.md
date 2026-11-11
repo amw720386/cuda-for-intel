@@ -20,7 +20,7 @@ Opt-in layer that replaces recognised ggml-cuda kernels with hand-written Intel-
   Measured mmq speedup at 4096x4096x512 (one CTA per tile): Q8_0 2.97x, Q4_0 3.21x, Q5_0 2.17x, Q4_K 4.82x, Q5_K 4.80x, Q6_K 3.58x; all in `auto` (`auto,-mmq:q4_k` etc. to drop one).
   Q4_1/Q5_1 are not covered. Not done: DPAS (int8 XMX) variant.
 * Hardware: `tests/gpu/hw_subst.rs` (see its header for the command).
-* Debug: `CUDA_FOR_INTEL_SUBST_CHECK=<n>` reruns the translated kernel after the first n native mmvq/mmq launches of each variant into a scratch copy, logs `subst-check:` lines (nmse, shapes) to cuda-for-intel-export.log, and on mismatch restores the translated result and falls back to PTX for that variant.
+* Debug: `CUDA_FOR_INTEL_SUBST_CHECK=<n>` reruns the translated kernel after the first n native mmvq/mmq launches of each variant into a scratch copy, logs `subst-check:` lines (nmse, shapes) to cuda-for-intel-export.log, and on mismatch restores the translated result and falls back to PTX for that variant. It runs only for stream launches: kernels recorded into a CUDA graph's command list (`CUDA_FOR_INTEL_GRAPH_RECORD=1`) are substituted the same way but not shadow-checked.
 
 ## K-quant mmq end to end (stock Ollama v0.12.6, Arc, flash attention off, 631-token prompt, greedy, 48 tokens)
 

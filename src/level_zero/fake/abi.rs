@@ -57,6 +57,7 @@ fn list_create(ctx: Raw, device: Raw, ordinal: u32, mode: u32, out: *mut Raw) ->
                 mode,
                 closed: false,
                 commands: VecDeque::new(),
+                template: VecDeque::new(),
             },
         );
         unsafe { out.write(without_provenance_mut(id)) };
@@ -110,6 +111,7 @@ unsafe extern "system" fn list_reset(list: Raw) -> Status {
             return Err("reset a list without executing it");
         }
         list.closed = false;
+        list.template.clear();
         Ok(0)
     })
 }
@@ -129,11 +131,7 @@ unsafe extern "system" fn execute(queue: Raw, count: u32, lists: *mut Raw, fence
         if driver.get(id, Kind::List)?.parent != context || driver.pending_on(id) {
             return Err("executed a foreign or in-flight list");
         }
-        let list = driver.lists.get_mut(&id).ok_or("missing execute list")?;
-        if !list.closed || list.commands.is_empty() {
-            return Err("executed an open or empty list");
-        }
-        let commands = std::mem::take(&mut list.commands);
+        let commands = driver.executable(id)?;
         driver.submit(Submission {
             list: id,
             queue: queue.addr(),
@@ -141,6 +139,53 @@ unsafe extern "system" fn execute(queue: Raw, count: u32, lists: *mut Raw, fence
             commands,
         });
         Ok(driver.execute_result.take().unwrap_or(0))
+    })
+}
+
+/// `zeCommandListImmediateAppendCommandListsExp`: the regular lists' commands run on the
+/// immediate list in order. Each list stays in flight (cannot be reset or appended again) until
+/// its commands finish; a closed list can be appended again after that (graph replay).
+unsafe extern "system" fn append_lists(
+    immediate: Raw,
+    count: u32,
+    lists: *mut Raw,
+    signal: Raw,
+    wait_count: u32,
+    waits: *mut Raw,
+) -> Status {
+    call_driver(|driver| {
+        let target = driver.lists.get(&immediate.addr()).ok_or("append lists to missing list")?;
+        if target.mode == 0 {
+            return Err("appended lists to a regular list");
+        }
+        let context = driver.get(immediate.addr(), Kind::List)?.parent;
+        let ids: Vec<Id> = (0..count as usize)
+            .map(|index| unsafe { lists.add(index).read() }.addr())
+            .collect();
+        let mut commands = VecDeque::new();
+        if wait_count != 0 {
+            commands.push_back(marker(null_mut(), wait_count, waits));
+        }
+        for &id in &ids {
+            if driver.get(id, Kind::List)?.parent != context || driver.pending_on(id) {
+                return Err("appended a foreign or in-flight list");
+            }
+            for mut command in driver.executable(id)? {
+                command.resources.push(id);
+                commands.push_back(command);
+            }
+        }
+        if !signal.is_null() {
+            driver.get(signal.addr(), Kind::Event)?;
+            commands.push_back(marker(signal, 0, null_mut()));
+        }
+        driver.submit(Submission {
+            list: immediate.addr(),
+            queue: 0,
+            fence: 0,
+            commands,
+        });
+        Ok(0)
     })
 }
 
@@ -172,7 +217,17 @@ fn allocate(ctx: Raw, device: Option<Raw>, bytes: usize, kind: Kind, out: *mut R
         } else {
             driver.get(ctx.addr(), Kind::Context)?;
         }
-        let id = driver.create(ctx.addr(), kind);
+        let id = match driver.reuse_address.take() {
+            Some(address) if !driver.objects.contains_key(&address) => {
+                let saved = driver.next;
+                driver.next = address - 0x10000;
+                let id = driver.create(ctx.addr(), kind);
+                driver.next = saved;
+                id
+            }
+            Some(_) => return Err("reused an address that is still allocated"),
+            None => driver.create(ctx.addr(), kind),
+        };
         driver
             .objects
             .get_mut(&id)
@@ -413,6 +468,7 @@ unsafe extern "system" fn kernel_arg(
 ) -> Status {
     call_driver(|driver| {
         driver.get(kernel.addr(), Kind::Kernel)?;
+        driver.ledger.arg_sets += 1;
         let address = (size == size_of::<usize>())
             .then(|| unsafe { data.cast::<usize>().read_unaligned() })
             .and_then(|address| driver.allocation(address));
@@ -515,6 +571,7 @@ unsafe extern "system" fn can_access_peer(device: Raw, peer: Raw, out: *mut u8) 
 pub(super) fn api() -> Api {
     Api {
         can_access_peer: Some(can_access_peer),
+        append_lists: Some(append_lists),
         zeContextCreate: context_create,
         zeContextDestroy: context_destroy,
         zeCommandListCreateImmediate: list_immediate,

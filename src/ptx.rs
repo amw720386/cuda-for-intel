@@ -1,6 +1,7 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod ext;
 mod flow;
+mod indirect;
 mod uniform;
 pub(crate) mod fxhash;
 pub(crate) mod globals;
@@ -884,6 +885,9 @@ pub(crate) struct KernelMetadata {
     pub(crate) device_atomics: bool,
     pub(crate) fp32: bool,
     pub(crate) fp32_fma: bool,
+    /// Every global address derives from pointer-typed parameters (`ptx/indirect.rs`), so the
+    /// kernel needs no indirect USM access. False whenever unknown.
+    pub(crate) direct_access: bool,
 }
 
 #[derive(Debug)]
@@ -1260,7 +1264,9 @@ mod tests {
         while let Some(pos) = data[at..].windows(4).position(|w| w == magic) {
             let start = at + pos;
             at = start + 4;
-            let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx(data[start..].as_ptr()) }) else {
+            // CFI_FATBIN_ARCH=80 (a number) scans the compute_80 records instead of the first.
+            let arch = cfi_fatbin::configured_arch((0, 0));
+            let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx_for(data[start..].as_ptr(), arch) }) else {
                 continue;
             };
             let Ok(text) = String::from_utf8(ptx) else { continue };

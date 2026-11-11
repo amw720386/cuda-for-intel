@@ -20,6 +20,8 @@ pub(super) mod extra;
 #[cfg(all(test, windows))]
 mod batch_tests;
 mod batch_wake;
+mod deferred;
+mod inflight;
 mod cross_device;
 pub(super) mod events;
 pub(super) mod timing;
@@ -33,6 +35,8 @@ mod graph_api_tests;
 mod globals_tests;
 #[cfg(test)]
 mod graph_tests;
+#[cfg(test)]
+mod graph_record_tests;
 #[cfg(test)]
 mod timing_tests;
 #[cfg(test)]
@@ -78,11 +82,15 @@ enum Completion {
 struct Stream {
     immediate: Option<Arc<CommandList>>,
     batch: Option<Box<Batch>>,
+    /// `CUDA_FOR_INTEL_SUBMIT=deferred` on an immediate stream (see `deferred`).
+    deferred: Option<deferred::Deferred>,
+    /// Set by `Streams::launch` for the record call it makes: the append may be deferred.
+    defer_next: bool,
     blocking: bool,
     dirty: bool,
     generation: u64,
-    /// Work-groups appended since the stream last drained (see `inflight_limit`).
-    queued_groups: u64,
+    /// Work-groups queued and not known complete (see `inflight`).
+    window: inflight::Window,
     pending: VecDeque<Submission>,
     append_error: Option<CuResult>,
     capture: Option<Capture>,
@@ -95,6 +103,7 @@ impl Stream {
         context: &Context,
         blocking: bool,
         policy: Option<Policy>,
+        submit: Option<deferred::Config>,
         wake: &Arc<Wake>,
     ) -> Result<Self, CuResult> {
         let (immediate, batch) = match policy {
@@ -117,13 +126,18 @@ impl Stream {
                 None,
             ),
         };
+        let deferred = submit
+            .filter(|_| immediate.is_some())
+            .map(|config| deferred::Deferred::new(config, Arc::clone(&context.health)));
         Ok(Self {
             immediate,
             batch,
+            deferred,
+            defer_next: false,
             blocking,
             dirty: false,
             generation: 0,
-            queued_groups: 0,
+            window: inflight::Window::default(),
             pending: VecDeque::new(),
             append_error: None,
             capture: None,
@@ -168,6 +182,16 @@ impl Stream {
         if let Some(batch) = &mut self.batch {
             batch.flush(api)?;
         }
+        self.flush_deferred(api)
+    }
+
+    /// Submit launches buffered by deferred submission. A failure loses them, so it fails the stream.
+    fn flush_deferred(&mut self, api: &Api) -> Result<(), CuResult> {
+        if let (Some(deferred), Some(immediate)) = (&mut self.deferred, &self.immediate) {
+            deferred.flush(api, immediate).inspect_err(|&error| {
+                self.append_error.get_or_insert(error);
+            })?;
+        }
         Ok(())
     }
 
@@ -188,6 +212,7 @@ impl Stream {
 
     fn wait(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
         self.check()?;
+        self.flush_deferred(api)?;
         if let Some(batch) = &mut self.batch {
             if batch.buffered() {
                 return Err(NotReady);
@@ -208,6 +233,8 @@ impl Stream {
     }
 
     fn drain(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
+        // Teardown: wait for whatever reached the immediate list even if this flush fails.
+        let flushed = self.flush_deferred(api);
         if let Some(batch) = &mut self.batch {
             batch.drain(api, timeout)?;
         } else if self.dirty {
@@ -219,10 +246,13 @@ impl Stream {
                 .map_err(backend_error)?;
         }
         self.complete();
-        Ok(())
+        flushed
     }
 
     fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
+        if let Some(deferred) = &mut self.deferred {
+            deferred.destroy(api)?;
+        }
         if let Some(batch) = &mut self.batch {
             batch.destroy(api)
         } else {
@@ -246,22 +276,48 @@ impl Stream {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
+        let defer = std::mem::take(&mut self.defer_next)
+            && signal.is_none()
+            && waits.is_empty()
+            && self.deferred.is_some();
         if let Some(capture) = &mut self.capture {
             return Err(capture.invalidate());
         }
         self.check()?;
-        let list = match &mut self.batch {
-            Some(batch) => batch.recording(api, context)?,
-            None => self.immediate.as_ref().unwrap(),
+        if !defer {
+            // Anything else on the stream runs after the launches buffered so far.
+            self.flush_deferred(api)?;
+        }
+        let list = match (&mut self.batch, &mut self.deferred) {
+            (Some(batch), _) => batch.recording(api, context)?,
+            (None, Some(deferred)) if defer => deferred.recording(api, context)?,
+            (None, _) => self.immediate.as_ref().unwrap(),
         };
         let result = append(list, signal.as_deref(), &waits);
+        if defer {
+            if let Err(error) = result {
+                // The open list may be half-written and holds earlier launches: drop it unsubmitted
+                // and fail the stream.
+                self.deferred.as_mut().unwrap().abandon();
+                self.health.observe(&error);
+                let error = backend_error(error);
+                self.submitted();
+                self.append_error = Some(error);
+                return Err(error);
+            }
+            self.submitted();
+            if self.deferred.as_mut().unwrap().appended() {
+                self.flush_deferred(api)?;
+            }
+            return Ok(());
+        }
         let submission = signal.map(|completion| Submission {
             completion,
             _waits: waits,
         });
         if let Err(error) = result {
             let attempted_append = matches!(&error, crate::level_zero::Error::Driver(call, _)
-                if call.starts_with("zeCommandListAppend"));
+                if call.starts_with("zeCommandListAppend") || call.starts_with("zeCommandListImmediateAppend"));
             let fatal = error.device_lost();
             self.health.observe(&error);
             let error = backend_error(error);
@@ -290,7 +346,10 @@ impl Stream {
     }
 
     fn complete(&mut self) {
-        self.queued_groups = 0;
+        self.window.complete();
+        if let Some(deferred) = &mut self.deferred {
+            deferred.complete();
+        }
         self.pending.clear();
         self.dirty = false;
     }
@@ -313,6 +372,8 @@ pub(super) struct Streams {
     /// Events recorded while their stream was capturing: event -> (capture, stream, op sequence).
     pub(super) captured: HashMap<usize, (Capture, usize, u64)>,
     policy: Option<Policy>,
+    submit: Option<deferred::Config>,
+    inflight: inflight::Config,
     wake: Arc<Wake>,
     worker: Option<JoinHandle<Result<(), CuResult>>>,
     event_waiters: Arc<()>,
@@ -332,10 +393,35 @@ impl Streams {
             .and_then(|policy| policy.delay)
             .map(|_| batch::spawn(owner, Arc::clone(&wake)))
             .transpose()?;
-        let legacy = Stream::new(api, context, true, policy, &wake)?;
+        let submit = deferred::Config::configured(api);
+        let legacy = Stream::new(api, context, true, policy, submit, &wake)?;
+        let inflight = inflight::Config::configured();
+        if std::env::var_os("CUDA_FOR_INTEL_LOG_SUBMIT").is_some() {
+            // Lets benchmarks show which submission settings a context actually uses.
+            let submit = policy.map_or_else(
+                || submit.map_or_else(|| "immediate".to_owned(), |config| format!("deferred cap {}", config.cap)),
+                |policy| {
+                    format!(
+                        "batch cap {} delay {:?} high-resolution {}",
+                        policy.cap, policy.delay, policy.high_resolution
+                    )
+                },
+            );
+            eprintln!(
+                "cuda-for-intel: context submit={submit} inflight limit={} mode={} indirect-access={} no-indirect={} cache-config={} sched-hint={}",
+                inflight.limit,
+                if inflight.window { "window" } else { "drain" },
+                std::env::var("CUDA_FOR_INTEL_INDIRECT_ACCESS").unwrap_or_else(|_| "all".into()),
+                std::env::var_os("CUDA_FOR_INTEL_NO_INDIRECT").is_some(),
+                std::env::var("CUDA_FOR_INTEL_CACHE_CONFIG").unwrap_or_else(|_| "default".into()),
+                std::env::var("CUDA_FOR_INTEL_SCHED_HINT").unwrap_or_else(|_| "default".into()),
+            );
+        }
         Ok(Self {
             legacy: Some(legacy),
             policy,
+            submit,
+            inflight,
             wake,
             worker,
             live: super::HandleMap::default(),
@@ -487,19 +573,49 @@ impl Streams {
         // Level Zero rejects further appends with OUT_OF_DEVICE_MEMORY when too much large-grid
         // work is queued and unfinished, so bound the outstanding work-groups per stream.
         let groups: u64 = geometry.0.iter().map(|&g| u64::from(g)).product();
-        let limit = inflight_group_limit();
-        let queued = self.get(key)?.queued_groups;
-        if limit != 0 && queued != 0 && should_drain(queued, groups, limit) {
-            self.wait_stream(api, key, u64::MAX)?;
+        let config = self.inflight;
+        let counted = config.counted(groups);
+        if config.needs_room(self.get(key)?.window.queued(), counted) {
+            if config.window {
+                self.make_room(api, key, counted)?;
+            } else {
+                self.wait_stream(api, key, u64::MAX)?;
+            }
         }
-        let result = self.record_ordered(api, context, key, |list, signal, waits| {
+        let checkpoint = self.get(key)?.window.wants_checkpoint(config, counted);
+        self.get_mut(key)?.defer_next = true;
+        let result = self.record_signalled(api, context, key, checkpoint, |list, signal, waits| {
             list.launch(api, kernel, geometry, args, signal, waits)
         });
-        if result.is_ok() {
-            let stream = self.get_mut(key)?;
-            stream.queued_groups = stream.queued_groups.saturating_add(groups);
+        // Never let the flag reach a later non-launch record if this one returned early.
+        self.get_mut(key)?.defer_next = false;
+        let fence = result?;
+        self.get_mut(key)?
+            .window
+            .launched(counted, if checkpoint { fence } else { None });
+        Ok(())
+    }
+
+    /// Window mode: wait for the oldest checkpoints of `key` until `groups` more (counted) fit
+    /// under the limit, so the stream keeps the rest of its queue running. Without a checkpoint to
+    /// wait for, fall back to a full drain. A failed wait has already dropped its checkpoint, so a
+    /// later call falls back to the drain, which reports the error again.
+    fn make_room(&mut self, api: &Api, key: usize, groups: u64) -> Result<(), CuResult> {
+        let config = self.inflight;
+        let stream = self.get_mut(key)?;
+        // A batching stream may still hold its checkpoint in an unsubmitted list.
+        stream.flush(api)?;
+        while config.needs_room(stream.window.queued(), groups) {
+            let Some((at, fence)) = stream.window.oldest() else {
+                return self.wait_stream(api, key, u64::MAX);
+            };
+            fence
+                .synchronize(api.event_wait_fn())
+                .inspect_err(|error| stream.health.observe(error))
+                .map_err(backend_error)?;
+            stream.window.retire(at);
         }
-        result
+        Ok(())
     }
 
     pub(super) unsafe fn copy(
@@ -538,15 +654,72 @@ impl Streams {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
+        self.record_signalled(api, context, key, false, append).map(drop)
+    }
+
+    /// [`Self::record_ordered`], with a completion fence even when stream ordering needs none.
+    /// Returns the fence attached to the operation, if any.
+    fn record_signalled(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        signalled: bool,
+        append: impl FnOnce(
+            &CommandList,
+            Option<&Fence>,
+            &[Arc<Fence>],
+        ) -> Result<(), crate::level_zero::Error>,
+    ) -> Result<Option<Arc<Fence>>, CuResult> {
         let blocking = self.get(key)?.blocking;
         self.collect_retired(api)?;
-        let signal = if blocking && self.track_legacy {
+        let signal = if signalled || blocking && self.track_legacy {
             Some(self.next_fence(api, context)?)
         } else {
             None
         };
         let waits = self.legacy_waits(api, key, blocking)?;
-        self.get_mut(key)?.record(api, context, signal, waits, append)
+        self.get_mut(key)?
+            .record(api, context, signal.clone(), waits, append)
+            .map(|()| signal)
+    }
+
+    /// Whether `key` appends to an immediate command list (no experimental batching), so a
+    /// recorded regular list can run in its order.
+    pub(super) fn is_immediate(&self, key: usize) -> Result<bool, CuResult> {
+        Ok(self.get(key)?.immediate.is_some())
+    }
+
+    /// Run the closed regular list `recorded` (holding `groups` work-groups) in the order of
+    /// stream `key`, under the in-flight bound. Returns the event that signals its completion.
+    /// Launches buffered by deferred submission are flushed first (`Stream::record`).
+    pub(super) fn launch_recorded(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        recorded: &CommandList,
+        groups: u64,
+    ) -> Result<Arc<Fence>, CuResult> {
+        let config = self.inflight;
+        let counted = config.counted(groups);
+        if config.needs_room(self.get(key)?.window.queued(), counted) {
+            if config.window {
+                self.make_room(api, key, counted)?;
+            } else {
+                self.wait_stream(api, key, u64::MAX)?;
+            }
+        }
+        // `defer_next` stays false: Stream::record flushes the deferred submit list first.
+        let signal = self.record_signalled(api, context, key, true, |list, signal, waits| {
+            list.append_lists(api, recorded, signal, waits)
+        })?;
+        let fence = signal.ok_or(Unknown)?;
+        // The completion doubles as a window checkpoint in window mode.
+        self.get_mut(key)?
+            .window
+            .launched(counted, config.window.then(|| Arc::clone(&fence)));
+        Ok(fence)
     }
 
     fn legacy_waits(
@@ -570,6 +743,8 @@ impl Streams {
         } else if blocking {
             let legacy = self.get_mut(0)?;
             legacy.flush(api)?;
+            // tail() is the last legacy op only because every blocking-stream op carries a fence
+            // once track_legacy is on (window checkpoints on non-blocking streams are never read here).
             Ok(legacy.tail().into_iter().collect())
         } else {
             Ok(Vec::new())
@@ -718,6 +893,7 @@ pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> Cu
                 &context.backend,
                 flags == 0,
                 streams.policy,
+                streams.submit,
                 &streams.wake,
             )?;
             streams.live.insert(key, stream);
@@ -859,6 +1035,16 @@ fn synchronize_with(
                 })
             {
                 stream.complete();
+            } else if let Some(batch) = &stream.batch
+                && !batch.buffered()
+                && batch.tail().is_some_and(|tail| {
+                    lists.iter().any(|completion| {
+                        matches!(completion, Completion::Regular(fence) if Arc::ptr_eq(fence, tail))
+                    })
+                })
+            {
+                // Nothing was submitted after the awaited list: its window checkpoints are done.
+                stream.window.complete();
             }
         }
         drop(lists);
@@ -1045,39 +1231,5 @@ mod tests {
         .unwrap();
         assert_eq!(cuStreamDestroy_v2(idle), Success);
         assert_eq!(cuCtxDestroy_v2(context), Success);
-    }
-}
-
-/// Default cap on work-groups queued on one stream before waiting for it to drain.
-const DEFAULT_MAX_INFLIGHT_GROUPS: u64 = 65_536;
-
-/// `CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS`: 0 disables the window.
-fn inflight_group_limit() -> u64 {
-    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        std::env::var("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_INFLIGHT_GROUPS)
-    })
-}
-
-fn should_drain(queued: u64, next: u64, limit: u64) -> bool {
-    queued.saturating_add(next) > limit
-}
-
-#[cfg(test)]
-mod inflight_window_tests {
-    use super::*;
-
-    #[test]
-    fn drains_only_when_outstanding_groups_would_exceed_the_limit() {
-        assert!(!should_drain(0, 14_336, 65_536));
-        assert!(!should_drain(14_336 * 3, 14_336, 65_536));
-        assert!(should_drain(14_336 * 4, 14_336, 65_536));
-        assert!(!should_drain(60_000, 1, 65_536));
-        assert!(should_drain(u64::MAX, 1, 65_536));
-        // many tiny launches still queue deeply
-        assert!(!should_drain(50_000, 1, 65_536));
     }
 }

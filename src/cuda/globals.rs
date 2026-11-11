@@ -68,8 +68,11 @@ impl CudaContext {
     /// Retire every global range of a module that is being unloaded.
     pub(super) fn retire_module_globals(&mut self, module_key: usize) {
         if let Some(module) = self.modules.get(&module_key) {
-            for address in module.globals.values().filter_map(|global| global.address) {
-                self.allocations.remove(&address);
+            let addresses: Vec<usize> = module.globals.values().filter_map(|global| global.address).collect();
+            for address in addresses {
+                if let Some(length) = self.allocations.remove(&address) {
+                    self.note_free(address, length);
+                }
                 self.module_globals.remove(&address);
             }
         }

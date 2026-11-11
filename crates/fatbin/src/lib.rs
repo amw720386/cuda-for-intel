@@ -13,6 +13,44 @@ const COMPRESSION_MASK: u64 = 0xb000;
 /// The pointer must address a readable fatbin frame or version-one wrapper
 /// and its referenced frame. The declared frame bytes must be readable.
 pub unsafe fn extract_ptx(image: *const u8) -> Option<Vec<u8>> {
+    unsafe { extract_ptx_for(image, None) }
+}
+
+/// Like [`extract_ptx`], but with `arch` (`major * 10 + minor`, for example 80) it prefers the
+/// PTX record built for exactly that virtual architecture, then the highest one below it, as the
+/// CUDA driver picks PTX for a device of that compute capability; then the first record.
+/// `None` takes the first record.
+///
+/// # Safety
+/// Same contract as [`extract_ptx`].
+pub unsafe fn extract_ptx_for(image: *const u8, arch: Option<u32>) -> Option<Vec<u8>> {
+    let records = unsafe { frame_records(image) }?;
+    match arch {
+        None => extract_records(records),
+        Some(arch) => extract_records_for(records, arch),
+    }
+}
+
+/// The PTX architecture `CFI_FATBIN_ARCH` selects for a device that reports compute
+/// capability `reported` (`(major, minor)`): unset, empty or `first` keeps the first PTX record
+/// (`None`); `cc` follows the reported capability; a number such as `80` names the architecture.
+pub fn configured_arch(reported: (u32, u32)) -> Option<u32> {
+    arch_setting(std::env::var("CFI_FATBIN_ARCH").ok().as_deref(), reported)
+}
+
+fn arch_setting(value: Option<&str>, (major, minor): (u32, u32)) -> Option<u32> {
+    match value.map(str::trim) {
+        None | Some("" | "first" | "0") => None,
+        Some("cc") => Some(major * 10 + minor),
+        Some(number) => number.parse().ok(),
+    }
+}
+
+/// The record bytes of the frame `image` points at (directly or through a wrapper).
+///
+/// # Safety
+/// Same contract as [`extract_ptx`].
+unsafe fn frame_records<'a>(image: *const u8) -> Option<&'a [u8]> {
     if image.is_null() {
         return None;
     }
@@ -40,8 +78,7 @@ pub unsafe fn extract_ptx(image: *const u8) -> Option<Vec<u8>> {
     if header_size < header.len() || !(1..=MAX_SIZE).contains(&file_size) {
         return None;
     }
-    let records = unsafe { std::slice::from_raw_parts(frame.add(header_size), file_size) };
-    extract_records(records)
+    Some(unsafe { std::slice::from_raw_parts(frame.add(header_size), file_size) })
 }
 
 /// One-line description of the records in a fatbin, for diagnostics.
@@ -418,6 +455,46 @@ fn extract_records(mut records: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// PTX records in order: (architecture, record bytes from its header on, payload).
+fn ptx_records(mut records: &[u8]) -> Vec<(u32, &[u8], &[u8])> {
+    let mut found = Vec::new();
+    while records.len() >= 64 {
+        let (Some(kind), Some(revision), Some(header), Some(payload), Some(arch)) = (
+            field(records, 0).map(u16::from_le_bytes),
+            field(records, 2).map(u16::from_le_bytes),
+            field(records, 4).map(|b| u32::from_le_bytes(b) as usize),
+            field(records, 8).map(|b| u32::from_le_bytes(b) as usize),
+            field(records, 28).map(u32::from_le_bytes),
+        ) else {
+            break;
+        };
+        if header < 64 || revision != 0x101 {
+            break;
+        }
+        let Some(end) = header.checked_add(payload) else { break };
+        let Some(contents) = records.get(header..end) else { break };
+        if kind == 1 {
+            found.push((arch, records, contents));
+        }
+        let Some(rest) = records.get(end..) else { break };
+        records = rest;
+    }
+    found
+}
+
+fn extract_records_for(records: &[u8], arch: u32) -> Option<Vec<u8>> {
+    let found = ptx_records(records);
+    let mut order: Vec<usize> = (0..found.len()).filter(|&i| found[i].0 == arch).collect();
+    let mut below: Vec<usize> = (0..found.len()).filter(|&i| found[i].0 < arch).collect();
+    below.sort_by_key(|&i| std::cmp::Reverse(found[i].0));
+    order.extend(below);
+    order.extend(0..found.len());
+    order
+        .into_iter()
+        .find_map(|i| decode_ptx(found[i].1, found[i].2))
+        .or_else(|| extract_records(records))
+}
+
 fn decode_ptx(header: &[u8], payload: &[u8]) -> Option<Vec<u8>> {
     let compressed = u32::from_le_bytes(field(header, 16)?) as usize;
     let flags = u64::from_le_bytes(field(header, 40)?);
@@ -535,6 +612,81 @@ mod tests {
         assert!(m.contains("+PTX") && !m.contains("cfi-run"), "{m}");
         let c = cubin_message("x", 80, Some("cudnn_ops64_9.dll"));
         assert!(c.contains("cudnn_ops64_9.dll carries SASS only") && c.contains("cfi-run"), "{c}");
+    }
+
+    fn ptx_record(arch: u32) -> Vec<u8> {
+        let ptx = format!(".version 8.8\n.target sm_{arch}\n.address_size 64\n");
+        let payload = ptx.len().next_multiple_of(8);
+        let mut r = vec![0u8; 64 + payload];
+        r[..2].copy_from_slice(&1u16.to_le_bytes());
+        r[2..4].copy_from_slice(&0x101u16.to_le_bytes());
+        r[4..8].copy_from_slice(&64u32.to_le_bytes());
+        r[8..12].copy_from_slice(&(payload as u32).to_le_bytes());
+        r[28..32].copy_from_slice(&arch.to_le_bytes());
+        r[56..64].copy_from_slice(&(ptx.len() as u64).to_le_bytes());
+        r[64..64 + ptx.len()].copy_from_slice(ptx.as_bytes());
+        r
+    }
+
+    fn target(ptx: Option<Vec<u8>>) -> String {
+        let text = String::from_utf8(ptx.expect("a PTX record")).unwrap();
+        text.lines().find_map(|l| l.strip_prefix(".target ")).unwrap().to_string()
+    }
+
+    /// Ollama's cuda_v13 ggml-cuda.dll order: 75-virtual first, then 80, 86, 89, 90, 120.
+    fn ollama_like_records() -> Vec<u8> {
+        let mut records = record(2, 52);
+        for arch in [75, 80, 86, 89, 90, 120] {
+            records.extend(ptx_record(arch));
+        }
+        records
+    }
+
+    #[test]
+    fn arch_selection_prefers_exact_then_highest_below_then_first() {
+        let records = ollama_like_records();
+        assert_eq!(target(extract_records(&records)), "sm_75", "default is the first PTX record");
+        assert_eq!(target(extract_records_for(&records, 80)), "sm_80");
+        assert_eq!(target(extract_records_for(&records, 86)), "sm_86");
+        assert_eq!(target(extract_records_for(&records, 87)), "sm_86", "highest below 8.7");
+        assert_eq!(target(extract_records_for(&records, 100)), "sm_90");
+        assert_eq!(target(extract_records_for(&records, 75)), "sm_75");
+        assert_eq!(target(extract_records_for(&records, 61)), "sm_75", "nothing below: first record");
+    }
+
+    #[test]
+    fn arch_selection_skips_undecodable_records() {
+        let mut broken = ptx_record(80);
+        broken[64..72].copy_from_slice(b"garbage!");
+        let mut records = ptx_record(75);
+        records.extend(broken);
+        assert_eq!(target(extract_records_for(&records, 80)), "sm_75");
+    }
+
+    #[test]
+    fn arch_selection_through_a_frame_pointer() {
+        let records = ollama_like_records();
+        let mut frame = vec![0u8; 16];
+        frame[..4].copy_from_slice(&FRAME_MAGIC.to_le_bytes());
+        frame[4..6].copy_from_slice(&1u16.to_le_bytes());
+        frame[6..8].copy_from_slice(&16u16.to_le_bytes());
+        frame[8..16].copy_from_slice(&(records.len() as u64).to_le_bytes());
+        frame.extend(records);
+        let ptr = frame.as_ptr();
+        assert_eq!(target(unsafe { extract_ptx(ptr) }), "sm_75");
+        assert_eq!(target(unsafe { extract_ptx_for(ptr, None) }), "sm_75");
+        assert_eq!(target(unsafe { extract_ptx_for(ptr, Some(80)) }), "sm_80");
+    }
+
+    #[test]
+    fn arch_setting_values() {
+        assert_eq!(arch_setting(None, (8, 0)), None);
+        assert_eq!(arch_setting(Some(""), (8, 0)), None);
+        assert_eq!(arch_setting(Some("first"), (8, 6)), None);
+        assert_eq!(arch_setting(Some("cc"), (8, 6)), Some(86));
+        assert_eq!(arch_setting(Some("cc"), (7, 5)), Some(75));
+        assert_eq!(arch_setting(Some(" 80 "), (7, 5)), Some(80));
+        assert_eq!(arch_setting(Some("bogus"), (7, 5)), None);
     }
 
     #[test]

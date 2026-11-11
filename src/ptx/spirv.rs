@@ -3315,6 +3315,7 @@ impl<'a> Emitter<'a> {
     fn emit_entry(&mut self, mut entry: Entry<'a>) -> Result<KernelMetadata, Error> {
         self.current_entry = entry.name.to_string();
         super::flow::prune_unreachable(&mut entry.blocks);
+        let direct_access = super::indirect::direct_access(&entry.params, &entry.blocks);
         let flow = Flow::analyze(&entry.blocks)?;
         self.declarations = entry.registers;
         self.registers.clear();
@@ -3550,6 +3551,7 @@ impl<'a> Emitter<'a> {
             device_atomics: self.device_atomics,
             fp32: self.fp32,
             fp32_fma: self.fp32_fma,
+            direct_access,
         })
     }
 }

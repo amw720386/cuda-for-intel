@@ -189,6 +189,26 @@ impl CommandList {
         })
     }
 
+    /// Append closed regular `list` to this immediate list
+    /// (`zeCommandListImmediateAppendCommandListsExp`). The caller checks `api.append_lists`.
+    pub(crate) fn append_lists(
+        &self,
+        api: &Api,
+        list: &CommandList,
+        signal: Option<&Fence>,
+        waits: &[Arc<Fence>],
+    ) -> Result<(), Error> {
+        let append = api
+            .append_lists
+            .ok_or(Error::Driver("zeCommandListImmediateAppendCommandListsExp", 0x78000001))?;
+        let mut events = WaitEvents::new(waits)?;
+        let mut handle = list.0.0;
+        let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
+        call("zeCommandListImmediateAppendCommandListsExp", || unsafe {
+            append(self.0.0, 1, &mut handle, signal, events.count, events.ptr())
+        })
+    }
+
     pub(crate) fn queue_barrier(&self, api: &Api) -> Result<(), Error> {
         call("zeCommandListAppendBarrier", || unsafe {
             (api.zeCommandListAppendBarrier)(self.0.0, null_mut(), 0, null_mut())
