@@ -221,15 +221,22 @@ impl CommandList {
         waits: &[Arc<Fence>],
     ) -> Result<(), Error> {
         let kernel = kernel.0;
-        let ([x, y, z], [bx, by, bz]) = geometry;
-        call("zeKernelSetGroupSize", || unsafe {
-            (api.zeKernelSetGroupSize)(kernel, bx, by, bz)
-        })?;
-        for (index, value) in args.iter().enumerate() {
-            call("zeKernelSetArgumentValue", || unsafe {
-                (api.zeKernelSetArgumentValue)(kernel, index as u32, value.size, value.value)
-            })?;
-        }
+        let ([x, y, z], block) = geometry;
+        super::arg_cache::apply(
+            kernel,
+            block,
+            args,
+            |[bx, by, bz]| {
+                call("zeKernelSetGroupSize", || unsafe {
+                    (api.zeKernelSetGroupSize)(kernel, bx, by, bz)
+                })
+            },
+            |index, size, value| {
+                call("zeKernelSetArgumentValue", || unsafe {
+                    (api.zeKernelSetArgumentValue)(kernel, index, size, value)
+                })
+            },
+        )?;
         let mut events = WaitEvents::new(waits)?;
         let groups = GroupCount { x, y, z };
         let signal = signal.map_or(null_mut(), |fence| fence.handle.0);
