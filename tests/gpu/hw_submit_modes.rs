@@ -45,7 +45,9 @@ batch256:CUDA_FOR_INTEL_BATCH_CAP=256,CUDA_FOR_INTEL_BATCH_US=1000;\
 deferred16:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_SUBMIT_CAP=16;\
 deferred64:CUDA_FOR_INTEL_SUBMIT=deferred;\
 deferred256:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_SUBMIT_CAP=256;\
-deferred+window:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_INFLIGHT=window";
+deferred+window:CUDA_FOR_INTEL_SUBMIT=deferred,CUDA_FOR_INTEL_INFLIGHT=window;\
+indirect-dev:CUDA_FOR_INTEL_INDIRECT_ACCESS=device,shared;\
+noindirect:CUDA_FOR_INTEL_NO_INDIRECT=1";
 
 /// Every variable any mode may set; cleared before each mode so modes do not leak into each other.
 const KNOWN_VARS: &[&str] = &[
@@ -56,6 +58,8 @@ const KNOWN_VARS: &[&str] = &[
     "CUDA_FOR_INTEL_INFLIGHT",
     "CUDA_FOR_INTEL_SUBMIT",
     "CUDA_FOR_INTEL_SUBMIT_CAP",
+    "CUDA_FOR_INTEL_INDIRECT_ACCESS",
+    "CUDA_FOR_INTEL_NO_INDIRECT",
 ];
 
 const LAYERS: usize = 24;
