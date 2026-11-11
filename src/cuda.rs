@@ -1740,14 +1740,15 @@ fn dynamic_shared_variant(state: &mut State, function: usize, requested: u32) ->
 
 /// Translates `name` of lazy module `lazy` with its dynamic shared window cut to `bytes` and
 /// installs it in context `key`. `None` keeps the default kernel: no dynamic window, a source that
-/// reads `%dynamic_smem_size` (the translator folds it to the default window), module variables,
+/// reads `%dynamic_smem_size`, `%total_smem_size` or `%aggr_smem_size` (the translator folds them to
+/// the default window), module variables,
 /// or a translation or build the entry path cannot do.
 fn lazy_dynamic_variant(state: &mut State, key: usize, lazy: usize, name: &CStr, bytes: u32) -> Result<Option<(usize, usize, usize)>, CuResult> {
     let started = std::time::Instant::now();
     let module = state.lazy_modules.get(&lazy).ok_or(InvalidHandle)?;
     let entry_name = name.to_string_lossy();
-    if module.raw.contains("dynamic_smem_size") {
-        export_log(format_args!("dynamic shared variant skipped: {entry_name}: module reads %dynamic_smem_size"));
+    if library::reads_shared_size_register(&module.raw) {
+        export_log(format_args!("dynamic shared variant skipped: {entry_name}: module reads a shared-size special register"));
         return Ok(None);
     }
     let cache_key = xcache::key(&module.raw, &format!("{entry_name}#dyn{bytes}"));
@@ -1765,12 +1766,18 @@ fn lazy_dynamic_variant(state: &mut State, key: usize, lazy: usize, name: &CStr,
                     }
                 },
             };
+            // Narrow the cached prepared text first (its module index is already built), then
+            // resize the small copy and translate it without indexing it again.
+            let Some(narrowed) = ptx::narrow_prepared(prepared, &entry_name) else {
+                export_log(format_args!("dynamic shared variant skipped: {entry_name}: entry not found in the prepared module"));
+                return Ok(None);
+            };
             let names = library::extern_shared_names(&module.raw);
-            let Some(text) = library::resize_dynamic_window(prepared, &entry_name, bytes, &names) else {
+            let Some(text) = library::resize_dynamic_window(&narrowed, &entry_name, bytes, &names) else {
                 export_log(format_args!("dynamic shared variant skipped: {entry_name}: no dynamic window in the prepared entry"));
                 return Ok(None);
             };
-            match ptx::translate_prepared_entry(&text, &entry_name) {
+            match ptx::translate_narrowed_entry(&text, &entry_name) {
                 Ok(translated) => {
                     xcache::put(cache_key, &translated);
                     translated

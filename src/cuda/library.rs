@@ -379,6 +379,16 @@ pub(super) fn dynamic_variants_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE").as_deref() != Some(std::ffi::OsStr::new("0")))
 }
 
+/// Special registers the translator folds to the default dynamic window at prepare time
+/// (`tier3`, `parse`, `inline`): a kernel that reads one would see the full window size while a
+/// specialised variant's array is smaller.
+const SHARED_SIZE_REGISTERS: [&str; 3] = ["dynamic_smem_size", "total_smem_size", "aggr_smem_size"];
+
+/// Whether PTX `raw` reads a shared-memory-size special register anywhere (checked module-wide).
+pub(super) fn reads_shared_size_register(raw: &str) -> bool {
+    SHARED_SIZE_REGISTERS.iter().any(|register| raw.contains(register))
+}
+
 /// Names of the module-level `.extern .shared NAME[]` arrays of a PTX module. `normalize` turns
 /// each into a sized `.shared` declaration (the dynamic window) inside every entry that uses it.
 pub(super) fn extern_shared_names(raw: &str) -> Vec<&str> {
@@ -466,12 +476,43 @@ pub extern "system" fn cuLibraryUnload(library: Opaque) -> CuResult {
 
 #[cfg(test)]
 mod dynamic_window_tests {
-    use super::{extern_shared_names, resize_dynamic_window};
+    use super::{extern_shared_names, reads_shared_size_register, resize_dynamic_window};
 
     const RAW: &str = ".extern .shared .align 16 .b8 dyn[];\n.extern .shared .align 8 .b8 data_x[];\n.shared .align 4 .b8 st[64];\n";
     const MODULE: &str = ".visible .entry a(.param .u64 p)\n{\n.shared .align 4 .b8 st [ 65520 ] ;\n.shared .align 16 .b8 dyn [ 65520 ] ;\nret;\n}\n\
 .visible .entry ab(.param .u64 p)\n{\n.shared .align 8 .b8 data_x [ 61440 ] ;\nret;\n}\n\
 .visible .entry b (.param .u64 p)\n{\nret;\n}\n";
+
+    #[test]
+    fn every_shared_size_register_blocks_specialisation() {
+        for register in ["%dynamic_smem_size", "%total_smem_size", "%aggr_smem_size"] {
+            let raw = format!("{RAW}.visible .entry k()\n{{\n.reg .b32 %r1;\nmov.u32 %r1, {register};\nret;\n}}\n");
+            assert!(reads_shared_size_register(&raw), "{register}");
+        }
+        assert!(!reads_shared_size_register(RAW));
+    }
+
+    #[test]
+    fn a_variant_translates_from_the_narrowed_entry() {
+        // Narrowing first and translating the narrowed text gives the same kernel as the full
+        // module; resizing the narrowed text cuts only the dynamic window.
+        let raw = ".version 7.0\n.target sm_80\n.address_size 64\n.extern .shared .align 16 .b8 smem[];\n\
+.visible .entry other(.param .u64 o)\n{\n.reg .b64 %rd<2>;\nld.param.u64 %rd1, [o];\nret;\n}\n\
+.visible .entry k(.param .u64 out)\n{\n.reg .b32 %r<4>;\n.reg .b64 %rd<4>;\n\
+ld.param.u64 %rd1, [out];\ncvta.to.global.u64 %rd2, %rd1;\nmov.u32 %r1, %tid.x;\nmov.u32 %r2, smem;\nshl.b32 %r3, %r1, 2;\n\
+add.s32 %r2, %r2, %r3;\nst.shared.u32 [%r2], %r1;\nbar.sync 0;\nld.shared.u32 %r3, [%r2];\nst.global.u32 [%rd2], %r3;\nret;\n}\n";
+        let prepared = crate::ptx::prepare_module(raw).unwrap();
+        let full = crate::ptx::translate_prepared_entry(&prepared, "k").unwrap();
+        let narrowed = crate::ptx::narrow_prepared(&prepared, "k").unwrap();
+        assert!(!narrowed.contains(".entry other"));
+        let same = crate::ptx::translate_narrowed_entry(&narrowed, "k").unwrap();
+        assert_eq!(same.words, full.words);
+        let window = full.kernels[0].shared_bytes;
+        assert!(window > 4096, "default window {window}");
+        let resized = resize_dynamic_window(&narrowed, "k", 4096, &extern_shared_names(raw)).unwrap();
+        let variant = crate::ptx::translate_narrowed_entry(&resized, "k").unwrap();
+        assert_eq!(variant.kernels[0].shared_bytes, 4096);
+    }
 
     #[test]
     fn finds_module_level_extern_shared_names() {
