@@ -86,8 +86,10 @@ What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a transl
 - **Third-party companion DLL.** Programs that use the genuine NVIDIA CUDA Runtime (stock Ollama, CUDA 12/13 samples, PyTorch) need NVIDIA's signed
   `nvcudart_hybrid64.dll` in `CUDA_FOR_INTEL_HYBRID_DIR`. It is proprietary, not distributed here, and you obtain it yourself ([docs/ollama.md](docs/ollama.md)).
 - **First run is slow.** Large kernels (quantised matrix multiplication in ggml, big ATen modules) take minutes to compile; later runs use the caches. `cfi-precompile` (`scripts\cfi.ps1 precompile`) fills both caches ahead of time ([docs/precompile.md](docs/precompile.md)).
-- **Speed.** Correctness first: the GPU path is currently slower than the CPU backend for the Qwen2.5-0.5B decode measured in the logs
-  (logging off: 30 to 46 tok/s decode on the GPU vs 119 tok/s on the CPU backend, see [docs/hw-logs/perf-matrix.md](docs/hw-logs/perf-matrix.md); llama-bench tg128 18.3 tok/s with large variance). Do not expect native-Vulkan speed.
+- **Speed.** Qwen2.5-0.5B Q8_0 decode on an Arc B390 with stock Ollama v0.12.6 is about 61 tok/s (flash attention off) and 62 tok/s (on),
+  greedy text equal to the CPU backend; stock Ollama's own Vulkan backend reaches about 157 tok/s on the same machine and model, so expect
+  roughly 2.5x below native Vulkan ([docs/hw-logs/vulkan-baseline-2026-11-10.md](docs/hw-logs/vulkan-baseline-2026-11-10.md); decode numbers in the
+  `CUDA_FOR_INTEL_INFLIGHT` row and the decode table below). Prefill is close to Vulkan. Older measurements: [docs/hw-logs/perf-matrix.md](docs/hw-logs/perf-matrix.md).
 - **Flash attention** kernels (`flash_attn_ext_*`) do not all translate (87 entries in the stock Ollama scan); disable flash attention.
 - **No NCCL, cuFFT, cuSOLVER.** cuDNN is a partial shim: 2-D convolution and batch norm run on it (enabled by `cfi_torch.install()`, [docs/pytorch.md](docs/pytorch.md); hardware gate pending); everything else (3-D/fp64 convolution, RNN, CTC) falls back to PyTorch's native kernels ([docs/cudnn-shim.md](docs/cudnn-shim.md)).
 - **Not implemented:** SASS execution, VMM (`cuMemCreate` family reports no capability), multi-GPU peer access, conditional and memory-allocation graph nodes,
