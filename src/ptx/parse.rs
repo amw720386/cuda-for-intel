@@ -2379,16 +2379,63 @@ fn entry_span(source: &str, name: &str) -> Option<(usize, usize)> {
 
 /// A module made of the module-scope statements that precede `name` plus that entry alone.
 /// `None` when the text is not in normalised form (callers then use the whole module).
+///
+/// Module-scope `.global`/`.const` variables whose name does not occur in the entry's text (nor,
+/// transitively, in the text of another kept declaration) are left out: ggml repeats ~100 KB of
+/// IQ-quant lookup tables (`iq2s_grid`, `iq1s_grid_gpu`, ...) in every module, and re-parsing them
+/// for every entry was most of the per-entry parse time. A variable the entry does not name is
+/// discarded after parsing anyway (`translate_prepared_entry` keeps only those its body uses), so
+/// the result is unchanged; the substring test can only keep more than necessary.
 pub(super) fn narrow_to_entry(source: &str, name: &str) -> Option<String> {
     let index = module_index(source)?;
     let (line_start, _, end) = *index.entries.get(name)?;
+    let body = &source[line_start..end];
+    let lines: Vec<(usize, usize)> = index.scope.iter().copied().take_while(|(from, _)| *from < line_start).collect();
+    let names: Vec<Option<&str>> = lines.iter().map(|&(from, to)| module_variable_name(&source[from..to])).collect();
+    let mut keep: Vec<bool> = names.iter().map(|n| n.is_none_or(|n| body.contains(n))).collect();
+    // Initialisers may take the address of another variable (`generic(table)`): keep those too.
+    loop {
+        let mut grew = false;
+        for i in 0..lines.len() {
+            if keep[i] {
+                continue;
+            }
+            let Some(var) = names[i] else { continue };
+            if (0..lines.len()).any(|j| keep[j] && names[j].is_some() && source[lines[j].0..lines[j].1].contains(var)) {
+                keep[i] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     let mut out = String::new();
-    for &(from, to) in index.scope.iter().take_while(|(from, _)| *from < line_start) {
-        out.push_str(&source[from..to]);
+    for (&(from, to), kept) in lines.iter().zip(&keep) {
+        if *kept {
+            out.push_str(&source[from..to]);
+        }
     }
     out.push_str(&source[line_start..end]);
     out.push('\n');
     Some(out)
+}
+
+/// The name declared by a one-line module-scope `.global`/`.const` variable statement
+/// (`[.visible] .global .align 8 .b8 iq2s_grid[8192] = {...};`), or `None` for any other line.
+fn module_variable_name(line: &str) -> Option<&str> {
+    let text = line.trim();
+    let text = text.strip_prefix(".visible ").unwrap_or(text).trim_start();
+    if !(text.starts_with(".global ") || text.starts_with(".const ")) || !text.ends_with(';') {
+        return None;
+    }
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let token = text
+        .split_whitespace()
+        .skip(1)
+        .find(|t| !t.starts_with('.') && !t.as_bytes()[0].is_ascii_digit())?;
+    let len = token.bytes().take_while(|&b| ident(b)).count();
+    (len > 0 && !token.as_bytes()[0].is_ascii_digit()).then(|| &token[..len])
 }
 
 pub(super) fn parse_named<'a>(source: &'a str, name: &str) -> Result<Entry<'a>, Error> {

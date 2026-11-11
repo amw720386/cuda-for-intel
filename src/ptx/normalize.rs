@@ -284,12 +284,17 @@ fn decl_insert_position(out: &[String], open: usize) -> usize {
 }
 
 /// `[ %rd1 + 8 ]` -> `[ %rd1+8 ]` (the parser expects one address token).
-fn merge_addresses(tokens: Vec<String>) -> Vec<String> {
+///
+/// Tokens are moved into the output rather than cloned (a copy of every token of the module was
+/// 12% of `normalize::run` on stock ggml-cuda). The look-ahead only reads tokens after `i`, which
+/// have not been moved yet.
+fn merge_addresses(mut tokens: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(tokens.len());
     let mut i = 0;
     while i < tokens.len() {
-        out.push(tokens[i].clone());
-        if tokens[i] == "[" {
+        let open = tokens[i] == "[";
+        out.push(std::mem::take(&mut tokens[i]));
+        if open {
             if let Some(close) = tokens[i + 1..].iter().take(8).position(|t| t == "]") {
                 let inner = &tokens[i + 1..i + 1 + close];
                 if close > 1 && !inner.iter().any(|t| matches!(t.as_str(), "," | "{" | "}" | ";")) {
@@ -569,22 +574,44 @@ fn immediate(text: &str) -> Option<u64> {
 
 /// `0h3C00` / `0d3FF0000000000000` float literals become plain hex integers.
 fn literal(token: &str) -> String {
-    let hex = |body: &str, digits: usize| body.len() == digits && body.bytes().all(|b| b.is_ascii_hexdigit());
-    if let Some(body) = token.strip_prefix("0h").or_else(|| token.strip_prefix("0H")) {
-        if hex(body, 4) {
-            return format!("0x{body}");
-        }
-    }
-    if let Some(body) = token.strip_prefix("0d").or_else(|| token.strip_prefix("0D")) {
-        if hex(body, 16) {
-            return format!("0x{body}");
-        }
-    }
-    token.to_owned()
+    let mut out = String::with_capacity(token.len());
+    push_literal(&mut out, token);
+    out
 }
 
+/// Appends `token` to `out`, spelling PTX's `0hXXXX` (f16) and `0dXXXXXXXXXXXXXXXX` (f64) bit
+/// literals as `0x...`.
+fn push_literal(out: &mut String, token: &str) {
+    let hex = |body: &str, digits: usize| body.len() == digits && body.bytes().all(|b| b.is_ascii_hexdigit());
+    if let Some(body) = token.strip_prefix("0h").or_else(|| token.strip_prefix("0H"))
+        && hex(body, 4)
+    {
+        out.push_str("0x");
+        out.push_str(body);
+        return;
+    }
+    if let Some(body) = token.strip_prefix("0d").or_else(|| token.strip_prefix("0D"))
+        && hex(body, 16)
+    {
+        out.push_str("0x");
+        out.push_str(body);
+        return;
+    }
+    out.push_str(token);
+}
+
+/// The statement's tokens joined by single spaces, with [`literal`] spelling. Built in one string:
+/// a `String` per token plus a `Vec` and a `join` for every statement that passes through
+/// unchanged was a fifth of `normalize::run`'s main loop on stock ggml-cuda.
 fn plain(stmt: &[String]) -> String {
-    stmt.iter().map(|t| literal(t)).collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(stmt.iter().map(|t| t.len() + 1).sum());
+    for (i, token) in stmt.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        push_literal(&mut out, token);
+    }
+    out
 }
 
 fn rewrite(ctx: &mut Ctx, stmt: &[String]) -> Vec<String> {
@@ -1761,5 +1788,31 @@ mod load_pair_tests {
                 assert_eq!(b, want, "merged nc={nc} rev={reversed} off={off}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod plain_tests {
+    use super::*;
+
+    #[test]
+    fn plain_matches_the_token_join() {
+        let reference = |stmt: &[String]| stmt.iter().map(|t| literal(t)).collect::<Vec<_>>().join(" ");
+        let cases: &[&[&str]] = &[
+            &[],
+            &["ret", ";"],
+            &["mov.b16", "%h1", ",", "0h3C00", ";"],
+            &["mov.f64", "%fd1", ",", "0d3FF0000000000000", ";"],
+            &["mov.b16", "%h1", ",", "0hXYZW", ";"],
+            &["mov.b16", "%h1", ",", "0H3c00", ";", "0D3ff0000000000000", "0d12", "0h12345"],
+            &["@", "!", "%p1", "bra", "$L__BB0_2", ";"],
+        ];
+        for case in cases {
+            let stmt: Vec<String> = case.iter().map(|t| t.to_string()).collect();
+            assert_eq!(plain(&stmt), reference(&stmt), "{case:?}");
+        }
+        assert_eq!(literal("0h3C00"), "0x3C00");
+        assert_eq!(literal("0d3FF0000000000000"), "0x3FF0000000000000");
+        assert_eq!(literal("0hXYZW"), "0hXYZW");
     }
 }

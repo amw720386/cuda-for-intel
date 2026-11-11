@@ -1336,15 +1336,24 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
         return None;
     }
     let mut lines = Vec::new();
-    let mut operands = inst.operands.clone();
     let mut changed = false;
     if family == "mov" && inst.operands.len() == 2 {
-        let src = inst.operand(1).replace(' ', "");
-        let (base, off) = match src.find('+') {
-            Some(at) => (src[..at].to_owned(), src[at + 1..].parse::<i64>().ok()?),
-            None => (src.clone(), 0),
+        // Borrowed unless the operand has spaces to drop: this runs for every `mov` of a module
+        // with locals, shared arrays or globals (nearly every ggml module), and allocating here
+        // for each one was a large share of `tier3::rewrite`.
+        let raw = inst.operand(1);
+        let unspaced;
+        let src: &str = if raw.contains(' ') {
+            unspaced = raw.replace(' ', "");
+            &unspaced
+        } else {
+            raw
         };
-        if let Some((_, o)) = ctx.t3.locals.iter().find(|(n, _)| *n == base) {
+        let (base, off) = match src.find('+') {
+            Some(at) => (&src[..at], src[at + 1..].parse::<i64>().ok()?),
+            None => (src, 0),
+        };
+        if let Some((_, o)) = ctx.t3.locals.iter().find(|(n, _)| n.as_str() == base) {
             let o = i64::from(*o) + off;
             let dst = inst.operand(0).to_owned();
             lines.push(render(&inst.guard, "mov.u64", &[dst.clone(), "__t3_local".into()]));
@@ -1353,9 +1362,9 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
             }
             return Some(lines);
         }
-        if ctx.t3.module_globals.contains(&base) && (off != 0 || inst.op != "mov.u64") {
+        if ctx.t3.module_globals.iter().any(|g| g.as_str() == base) && (off != 0 || inst.op != "mov.u64") {
             let dst = inst.operand(0).to_owned();
-            let mut lines = vec![render(&inst.guard, "mov.u64", &[dst.clone(), base])];
+            let mut lines = vec![render(&inst.guard, "mov.u64", &[dst.clone(), base.to_owned()])];
             if off != 0 {
                 lines.push(render(&inst.guard, "add.u64", &[dst.clone(), dst, off.to_string()]));
             }
@@ -1366,6 +1375,8 @@ fn symbol_operands(ctx: &mut Ctx, inst: &Inst) -> Option<Vec<String>> {
     if !matches!(family, "ld" | "ldu" | "st" | "atom" | "red") {
         return None;
     }
+    // Copied only for the memory families that may rewrite an operand.
+    let mut operands = inst.operands.clone();
     for operand in &mut operands {
         let Some((base, off)) = bracket_symbol(operand) else { continue };
         if let Some((_, o)) = ctx.t3.locals.iter().find(|(n, _)| *n == base) {

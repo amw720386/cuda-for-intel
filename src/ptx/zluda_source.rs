@@ -67,34 +67,160 @@ pub(crate) fn prefix_regs(src: &str) -> String {
     names.dedup();
     if names.is_empty() { return src.to_string(); }
     names.sort_by_key(|n| std::cmp::Reverse(n.0.len()));
-    let isid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
-    let mut out = String::new();
+    rewrite_bare(src, &names)
+}
+
+/// Prefixes every occurrence of a bare register name (longest names first; a range name also
+/// matches `name<` and `name<digits>`) with `%`, outside `//` comments.
+///
+/// nvcc output reaches this too: cuda_fp16's inline asm declares `{.reg .f16 low,high; ...}` and
+/// calls declare `.reg .b32 temp_param_reg;`, so `has_bare_regs` is true for real ggml modules
+/// (10,496 `low,high` scopes in the largest stock one). This works on bytes, copies lines that
+/// contain no name unchanged and copies the text between matches in slices. The earlier
+/// per-character version, which also collected each name into a fresh `Vec<char>` at every
+/// position, took 459 ms of the 1.2 s prepare of a 9 MB module. Matches only start at char
+/// boundaries (a name's first byte is never a UTF-8 continuation byte), so the output is identical
+/// to the char-level rule; `tests::byte_rewrite_matches_char_reference` checks that.
+fn rewrite_bare(src: &str, names: &[(String, bool)]) -> String {
+    let isid = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut out = String::with_capacity(src.len() + src.len() / 16);
     for l in src.lines() {
         let code = l.split("//").next().unwrap();
+        if !names.iter().any(|(n, _)| code.contains(n.as_str())) {
+            out.push_str(l);
+            out.push('\n');
+            continue;
+        }
         let comment = &l[code.len()..];
-        let chars: Vec<char> = code.chars().collect();
-        let mut i = 0;
-        let mut res = String::new();
-        while i < chars.len() {
-            let prev_ok = i == 0 || !(isid(chars[i - 1]) || chars[i - 1] == '%' || chars[i - 1] == '.');
+        let b = code.as_bytes();
+        let (mut i, mut copied) = (0usize, 0usize);
+        while i < b.len() {
+            let prev_ok = i == 0 || !(isid(b[i - 1]) || b[i - 1] == b'%' || b[i - 1] == b'.');
             let mut hit = None;
             if prev_ok {
-                for (n, range) in &names {
-                    let nc: Vec<char> = n.chars().collect();
-                    if !chars[i..].starts_with(&nc) { continue; }
-                    let mut end = i + nc.len();
+                for (n, range) in names {
+                    let nb = n.as_bytes();
+                    if !b[i..].starts_with(nb) {
+                        continue;
+                    }
+                    let mut end = i + nb.len();
                     if *range {
-                        if chars.get(end) == Some(&'<') { hit = Some(nc.len()); break; }
-                        let digits = chars[end..].iter().take_while(|c| c.is_ascii_digit()).count();
-                        if digits == 0 { continue; }
+                        if b.get(end) == Some(&b'<') {
+                            hit = Some(nb.len());
+                            break;
+                        }
+                        let digits = b[end..].iter().take_while(|c| c.is_ascii_digit()).count();
+                        if digits == 0 {
+                            continue;
+                        }
                         end += digits;
                     }
-                    if chars.get(end).map_or(true, |c| !isid(*c)) { hit = Some(end - i); break; }
+                    if b.get(end).is_none_or(|c| !isid(*c)) {
+                        hit = Some(end - i);
+                        break;
+                    }
                 }
             }
-            if let Some(len) = hit { res.push('%'); res.extend(&chars[i..i + len]); i += len; } else { res.push(chars[i]); i += 1; }
+            if let Some(len) = hit {
+                out.push_str(&code[copied..i]);
+                out.push('%');
+                out.push_str(&code[i..i + len]);
+                i += len;
+                copied = i;
+            } else {
+                i += 1;
+            }
         }
-        out.push_str(&res); out.push_str(comment); out.push('\n');
+        out.push_str(&code[copied..]);
+        out.push_str(comment);
+        out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The original per-character rewrite, kept as the reference for `rewrite_bare`.
+    fn rewrite_bare_reference(src: &str, names: &[(String, bool)]) -> String {
+        let isid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+        let mut out = String::new();
+        for l in src.lines() {
+            let code = l.split("//").next().unwrap();
+            let comment = &l[code.len()..];
+            let chars: Vec<char> = code.chars().collect();
+            let mut i = 0;
+            let mut res = String::new();
+            while i < chars.len() {
+                let prev_ok = i == 0 || !(isid(chars[i - 1]) || chars[i - 1] == '%' || chars[i - 1] == '.');
+                let mut hit = None;
+                if prev_ok {
+                    for (n, range) in names {
+                        let nc: Vec<char> = n.chars().collect();
+                        if !chars[i..].starts_with(&nc) {
+                            continue;
+                        }
+                        let mut end = i + nc.len();
+                        if *range {
+                            if chars.get(end) == Some(&'<') {
+                                hit = Some(nc.len());
+                                break;
+                            }
+                            let digits = chars[end..].iter().take_while(|c| c.is_ascii_digit()).count();
+                            if digits == 0 {
+                                continue;
+                            }
+                            end += digits;
+                        }
+                        if chars.get(end).is_none_or(|c| !isid(*c)) {
+                            hit = Some(end - i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(len) = hit {
+                    res.push('%');
+                    res.extend(&chars[i..i + len]);
+                    i += len;
+                } else {
+                    res.push(chars[i]);
+                    i += 1;
+                }
+            }
+            out.push_str(&res);
+            out.push_str(comment);
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn byte_rewrite_matches_char_reference() {
+        let names = |v: &[(&str, bool)]| v.iter().map(|(n, r)| (n.to_string(), *r)).collect::<Vec<_>>();
+        let cases: &[(&str, &[(&str, bool)])] = &[
+            // nvcc's fp16 unpack and call scratch register.
+            (
+                "{\n.reg .f16 low,high;\nmov.b32 {low,high}, %r1;\n}\n.reg .b32 temp_param_reg;\nst.param.b32 [p], temp_param_reg; // temp_param_reg low\n",
+                &[("temp_param_reg", false), ("high", false), ("low", false)],
+            ),
+            // Range names: `t<3>` declares t0..t2; `t` alone, `t<` and longer identifiers.
+            ("add.u32 t0, t1, t12;\nmov.u32 tx, t;\n.reg .u32 t<3>;\nmov.u32 %t1, .t2, t2$a, _t1, t2;\n", &[("t", true)]),
+            // A name that prefixes another, `$` and `_` boundaries, already prefixed or after '.'.
+            ("mov.u32 abc, ab; mov.u32 ab$, %ab, .ab, ab_c, (ab), [ab+4], ab\n", &[("abc", false), ("ab", false)]),
+            // Non-ASCII text around names, CRLF line ends, empty lines, no trailing newline.
+            ("// é low\r\nmov low, é low ;\r\n\r\n\nlowé low\tlow", &[("low", false)]),
+            // A range name and a plain name of the same text.
+            ("mov.u32 v, v0, v<2>, v12x, xv;\n", &[("v", false), ("v", true)]),
+            ("", &[("x", false)]),
+        ];
+        for (src, n) in cases {
+            let n = names(n);
+            assert_eq!(rewrite_bare(src, &n), rewrite_bare_reference(src, &n), "input {src:?}");
+        }
+        // And through the full entry point on nvcc-shaped text.
+        let src = cases[0].0;
+        assert!(has_bare_regs(src));
+        assert!(prefix_regs(src).contains("mov.b32 {%low,%high}, %r1;"));
+    }
 }

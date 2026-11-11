@@ -140,7 +140,7 @@ pub(super) fn expand(statements: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
     let module = Module { funcs, declared, address_taken: address_taken.into_iter().map(|(_, n)| n).collect() };
     let mut counter = 0usize;
     let mut budget = MAX_STATEMENTS;
-    expand_stmts(&rest, &module, 0, &mut counter, &mut budget)
+    expand_stmts(rest, &module, 0, &mut counter, &mut budget)
 }
 
 /// Names of defined functions used as values in `stmt` (`mov.u64 %rd, f`, `.global .u64 t[] = {f}`).
@@ -304,8 +304,12 @@ struct Frame {
     slots: HashMap<String, HashMap<u64, String>>,
 }
 
+/// Expands calls in `stmts`. The statements are taken by value: one that passes through unchanged
+/// is moved to the output instead of cloned (copying every statement of the module was most of
+/// `inline::expand` on stock ggml-cuda). Only the statement just read is moved; the look-ahead
+/// reads the next one, which is still in place.
 fn expand_stmts(
-    stmts: &[Stmt],
+    mut stmts: Vec<Stmt>,
     module: &Module,
     depth: usize,
     counter: &mut usize,
@@ -383,7 +387,7 @@ fn expand_stmts(
                 vec![call.target.as_str()]
             };
             if call.pointer.is_none() && !module.funcs.contains_key(&call.target) {
-                if let Some(special) = special_call(&call, &mut i, stmts, &mut frame, &mut out) {
+                if let Some(special) = special_call(&call, &mut i, &stmts, &mut frame, &mut out) {
                     special?;
                     continue;
                 }
@@ -476,7 +480,7 @@ fn expand_stmts(
             out.push(replaced);
             continue;
         }
-        out.push(stmt.clone());
+        out.push(std::mem::take(&mut stmts[i - 1]));
     }
     Ok(out)
 }
@@ -495,7 +499,7 @@ fn inline_one(
 ) -> Result<Vec<Stmt>, Error> {
     *counter += 1;
     let id = *counter;
-    let body = expand_stmts(&func.body, module, depth + 1, counter, budget)?;
+    let body = expand_stmts(func.body.clone(), module, depth + 1, counter, budget)?;
     inline_body(func, call, frame, retmap, &body, id)
 }
 

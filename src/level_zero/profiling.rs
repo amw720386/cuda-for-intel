@@ -73,6 +73,27 @@ pub(super) fn operation_signal(signal: Raw) -> Raw {
     }
 }
 
+/// Runtime variant of [`operation_signal`] for `CFI_GPU_PROFILE`: an armed event is used only when
+/// the operation has no signal of its own, so stream ordering is never changed; otherwise the event
+/// stays armed and the caller's [`OperationEvents::disarm`] reports it as unused.
+#[cfg(windows)]
+pub(super) fn runtime_signal(signal: Raw) -> Raw {
+    if !signal.is_null() {
+        return signal;
+    }
+    let event = NEXT_EVENT.with(|next| next.replace(null_mut()));
+    if event.is_null() { signal } else { event }
+}
+
+/// Undoes [`runtime_signal`] after a failed append: the event was never attached, so it goes back
+/// to this thread's slot for a fallback launch, or for [`OperationEvents::disarm`] to report unused.
+#[cfg(windows)]
+pub(super) fn runtime_unsignal(original: Raw, used: Raw) {
+    if original.is_null() && !used.is_null() {
+        NEXT_EVENT.with(|next| next.set(used));
+    }
+}
+
 #[cfg(windows)]
 #[repr(C)]
 #[derive(Default)]
@@ -164,6 +185,25 @@ impl OperationEvents {
 
     pub(crate) fn arm(&self, index: usize) {
         NEXT_EVENT.with(|next| assert!(next.replace(self.events[index]).is_null()));
+    }
+
+    /// Arms slot `index` for the next launch on this thread (`CFI_GPU_PROFILE`; see [`runtime_signal`]).
+    pub(crate) fn arm_runtime(&self, index: usize) {
+        NEXT_EVENT.with(|next| next.set(self.events[index]));
+    }
+
+    /// Waits up to `timeout` ns for slot `index` to complete (`CFI_GPU_PROFILE` slot reuse).
+    pub(crate) fn wait_runtime(&self, api: &Api, index: usize, timeout: u64) -> Result<(), Error> {
+        self.wait(index, api.zeEventHostSynchronize, timeout)
+    }
+
+    /// Non-blocking completion check of slot `index`.
+    pub(crate) fn ready(&self, api: &Api, index: usize) -> bool {
+        unsafe { (api.zeEventQueryStatus)(self.events[index]) == 0 }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.events.len()
     }
 
     pub(crate) fn disarm() -> bool {
