@@ -8,7 +8,7 @@
 # Ignored without a marker: loopback/any-address, Intel driver versions (32.0.x.y), the placeholder
 # profile names C:\Users\USER|user|<user>|Public|Default, semantic versions such as v0.1.0, and
 # commit-attribution addresses, which are public by design: GitHub noreply addresses
-# (<id>+<user>@users.noreply.github.com) and noreply@anthropic.com (the Co-Authored-By trailers CLAUDE.md prescribes).
+# (<id>+<user>@users.noreply.github.com) and noreply@anthropic.com (Co-Authored-By trailers).
 # Output is masked (file:line and pattern class only, never the matched text); exit 1 when anything is found.
 set -u
 B='(^|[^0-9A-Za-z_.])'   # left boundary (replaces \b)

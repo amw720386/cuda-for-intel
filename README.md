@@ -75,7 +75,7 @@ Everything in this table was run, and the evidence is linked. "Untested" means n
 | Target | Status | Evidence |
 | --- | --- | --- |
 | Windows x64, Intel Arc B390 (Xe3, PCI `8086:b080`, driver 32.0.101.9033) | Primary target. Everything below was verified here. | [docs/hw-logs/](docs/hw-logs/README.md) |
-| Windows x64, Intel Iris Xe (Alder Lake, PCI `8086:46a8`, driver 32.0.101.7085) | Driver API tests, vector add, reduction, RMSNorm, ggml residual add, genuine CUDA Runtime 13.0.88 kernel; stock Ollama enumerates it as CUDA0. Nothing newer (PyTorch, stock model generation, XMX) has been run on it. | [docs/milestone-12.md](docs/milestone-12.md), [docs/milestone-13.md](docs/milestone-13.md), [docs/agent-handoff.md](docs/agent-handoff.md) |
+| Windows x64, Intel Iris Xe (Alder Lake, PCI `8086:46a8`, driver 32.0.101.7085) | Driver API tests, vector add, reduction, RMSNorm, ggml residual add, genuine CUDA Runtime 13.0.88 kernel; stock Ollama enumerates it as CUDA0. Nothing newer (PyTorch, stock model generation, XMX) has been run on it. | [docs/milestone-12.md](docs/milestone-12.md), [docs/milestone-13.md](docs/milestone-13.md) |
 | Windows x64, Intel Arc 140V (Lunar Lake, Xe2, PCI `8086:64a0`, driver 32.0.101.9175) | Stock Ollama decode (table above), full GPU suite 117 of 118 on a translator branch, where the one failure also fails on main. Needs a current Intel driver: 32.0.101.5564 does not load with Memory Integrity on, because its catalog certificate has expired. | [decode-2026-11-11.md](docs/hw-logs/decode-2026-11-11.md) |
 | Other Intel GPUs (Arc A-series, other Arc B-series, Data Center) | Untested. | |
 | XMX (DPAS) GEMM path | Needs Xe2/Xe3 with `SPV_INTEL_subgroup_matrix_multiply_accumulate`; verified on Arc B390 only (`tests/gpu/hw_xmx_gemm.rs`, [log](docs/hw-logs/xmx-2026-11-09.txt)); end to end no clear gain: Qwen2.5-0.5B prefill +9 % in one run and -3 % in another (single runs, within run-to-run noise). Other GPUs fall back to the tiled PTX GEMM. | commit `57b9fa5`, `tests/gpu/hw_xmx_gemm.rs` (no committed log) |
@@ -313,7 +313,7 @@ Set `CUDA_FOR_INTEL_TRACE=1` and `CUDA_FOR_INTEL_LOG=1` first; most failures nam
 | Contributing, tests, GPU lock | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Compatibility, troubleshooting, release checklist | [compatibility](docs/compatibility.md), [troubleshooting](docs/troubleshooting.md), [release checklist](docs/release-checklist.md) |
 | Hardware logs | [docs/hw-logs/](docs/hw-logs/README.md) |
-| Development history | [milestone 12](docs/milestone-12.md), [13](docs/milestone-13.md), [14](docs/milestone-14.md), [agent handoff](docs/agent-handoff.md), [PTX gap report](docs/ptx-gap-report.md) |
+| Development history | [milestone 12](docs/milestone-12.md), [13](docs/milestone-13.md), [14](docs/milestone-14.md), [PTX gap report](docs/ptx-gap-report.md) |
 
 ## References and license
 

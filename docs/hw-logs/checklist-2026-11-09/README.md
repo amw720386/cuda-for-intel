@@ -31,4 +31,4 @@ qwen: decode median LD16=1 vs 0: +10.1 %; prefill +2.6 %
 
 Token identity: these runs predate the response-text field; run_all run 3 stage 8 has LD16=0 and LD16=1 both equal to the CPU backend's 48-token text on all three models. `hw_cublas_batched` with LD16=1: 3 passed, 3 of 3 runs (no launch failure). Ladder L2+L5 with LD16=1: pass 3 of 3 (L5 13.4 to 13.7 s).
 
-Verdict: the >= 10 % reproducible decode gain needed to make LD16 default-on is not there (Llama is slower), so it stays opt-in. The README's earlier "+35 % decode" claim (claims-audit row 10) stays removed.
+Verdict: the >= 10 % reproducible decode gain needed to make LD16 default-on is not there (Llama is slower), so it stays opt-in. The README's earlier "+35 % decode" claim stays removed.
