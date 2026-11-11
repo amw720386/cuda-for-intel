@@ -295,7 +295,9 @@ struct PciProperties {
 /// flushes per kernel; `device,shared` keeps ggml's device pointer tables working. A measurement
 /// switch, not a tuning default: without `host`, a kernel that reaches pinned host USM through a
 /// pointer stored in memory (a pointer table in cuMemAllocHost memory) loses the residency
-/// guarantee for it. Direct kernel arguments are unaffected.
+/// guarantee for it. Only arguments the translator types as global pointers (PTX `cvta.to.global` of
+/// the parameter) are tracked by the driver; a `.u64` parameter used as a generic address relies on
+/// indirect access too.
 fn indirect_access_flags(value: Option<&str>) -> u32 {
     const ALL: u32 = 0b111;
     let Some(value) = value else { return ALL };
