@@ -61,6 +61,8 @@ fn parse_container(source: &str) -> Result<Translation, Error> {
                 device_atomics: false,
                 fp32: false,
                 fp32_fma: false,
+                // Precompiled SPIR-V: no PTX to analyse.
+                direct_access: false,
             });
         } else if let Some(rest) = line.strip_prefix("//THREADS ") {
             let threads = rest.trim().parse().map_err(|_| Error::new("bad THREADS line"))?;

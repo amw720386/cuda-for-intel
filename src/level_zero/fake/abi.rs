@@ -144,6 +144,56 @@ unsafe extern "system" fn execute(queue: Raw, count: u32, lists: *mut Raw, fence
     })
 }
 
+/// `zeCommandListImmediateAppendCommandListsExp`: the regular lists' commands run on the
+/// immediate list in order. Each list stays in flight (cannot be reset) until its commands finish.
+unsafe extern "system" fn append_lists(
+    immediate: Raw,
+    count: u32,
+    lists: *mut Raw,
+    signal: Raw,
+    wait_count: u32,
+    waits: *mut Raw,
+) -> Status {
+    call_driver(|driver| {
+        let target = driver.lists.get(&immediate.addr()).ok_or("append lists to missing list")?;
+        if target.mode == 0 {
+            return Err("appended lists to a regular list");
+        }
+        let context = driver.get(immediate.addr(), Kind::List)?.parent;
+        let ids: Vec<Id> = (0..count as usize)
+            .map(|index| unsafe { lists.add(index).read() }.addr())
+            .collect();
+        let mut commands = VecDeque::new();
+        if wait_count != 0 {
+            commands.push_back(marker(null_mut(), wait_count, waits));
+        }
+        for &id in &ids {
+            if driver.get(id, Kind::List)?.parent != context || driver.pending_on(id) {
+                return Err("appended a foreign or in-flight list");
+            }
+            let list = driver.lists.get_mut(&id).ok_or("missing appended list")?;
+            if list.mode != 0 || !list.closed || list.commands.is_empty() {
+                return Err("appended an open, empty or immediate list");
+            }
+            for mut command in std::mem::take(&mut list.commands) {
+                command.resources.push(id);
+                commands.push_back(command);
+            }
+        }
+        if !signal.is_null() {
+            driver.get(signal.addr(), Kind::Event)?;
+            commands.push_back(marker(signal, 0, null_mut()));
+        }
+        driver.submit(Submission {
+            list: immediate.addr(),
+            queue: 0,
+            fence: 0,
+            commands,
+        });
+        Ok(0)
+    })
+}
+
 unsafe extern "system" fn module_create(
     ctx: Raw,
     device: Raw,
@@ -515,6 +565,7 @@ unsafe extern "system" fn can_access_peer(device: Raw, peer: Raw, out: *mut u8) 
 pub(super) fn api() -> Api {
     Api {
         can_access_peer: Some(can_access_peer),
+        append_lists: Some(append_lists),
         zeContextCreate: context_create,
         zeContextDestroy: context_destroy,
         zeCommandListCreateImmediate: list_immediate,

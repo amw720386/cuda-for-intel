@@ -290,7 +290,67 @@ struct PciProperties {
     bandwidth: i64,
 }
 
+/// `ZE_CACHE_CONFIG_FLAG_LARGE_SLM` (1) or `_LARGE_DATA` (2).
+fn cache_config_flags(value: &str) -> Option<u32> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "large_slm" | "slm" => Some(1),
+        "large_data" | "data" => Some(2),
+        _ => None,
+    }
+}
+
+/// `ZE_SCHEDULING_HINT_EXP_FLAG_OLDEST_FIRST` (1), `_ROUND_ROBIN` (2), `_STALL_BASED_ROUND_ROBIN` (4).
+fn scheduling_hint_flags(value: &str) -> Option<u32> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "oldest" | "oldest_first" => Some(1),
+        "rr" | "round_robin" => Some(2),
+        "stall" | "stall_based_round_robin" => Some(4),
+        _ => None,
+    }
+}
+
+/// Report a rejected hint (per kernel) when `CUDA_FOR_INTEL_LOG_SUBMIT` is set.
+fn log_hint(call: &str, status: Status) {
+    if status != 0 && std::env::var_os("CUDA_FOR_INTEL_LOG_SUBMIT").is_some() {
+        eprintln!("cuda-for-intel: {call} returned {status:#x}");
+    }
+}
+
+/// `CUDA_FOR_INTEL_INDIRECT_ACCESS=auto`: kernels the translator proved direct declare none, all
+/// others keep every kind.
+fn indirect_access_auto(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("auto"))
+}
+
+/// `ZE_KERNEL_INDIRECT_ACCESS_FLAG_*` for `CUDA_FOR_INTEL_INDIRECT_ACCESS`: a comma list of `host`,
+/// `device`, `shared`, or `none`; unset or unparsable means all three (the default). Host indirect
+/// access marks every kernel as using system memory in the Intel runtime, which can add cache
+/// flushes per kernel; `device,shared` keeps ggml's device pointer tables working. A measurement
+/// switch, not a tuning default: without `host`, a kernel that reaches pinned host USM through a
+/// pointer stored in memory (a pointer table in cuMemAllocHost memory) loses the residency
+/// guarantee for it. Only arguments the translator types as global pointers (PTX `cvta.to.global` of
+/// the parameter) are tracked by the driver; a `.u64` parameter used as a generic address relies on
+/// indirect access too.
+fn indirect_access_flags(value: Option<&str>) -> u32 {
+    const ALL: u32 = 0b111;
+    let Some(value) = value else { return ALL };
+    let mut flags = 0;
+    for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+        flags |= match part.to_ascii_lowercase().as_str() {
+            "host" => 1,
+            "device" => 2,
+            "shared" => 4,
+            "none" => 0,
+            "all" | "auto" => ALL,
+            _ => return ALL,
+        };
+    }
+    flags
+}
+
 type GetPci = unsafe extern "system" fn(Raw, *mut PciProperties) -> Status;
+/// `zeCommandListImmediateAppendCommandListsExp(immediate, count, lists, signal, wait count, waits)`
+pub(crate) type AppendLists = unsafe extern "system" fn(Raw, u32, *mut Raw, Raw, u32, *mut Raw) -> Status;
 /// `zeDeviceCanAccessPeer(device, peer, *mut ze_bool_t)`
 type CanAccessPeer = unsafe extern "system" fn(Raw, Raw, *mut u8) -> Status;
 
@@ -301,6 +361,8 @@ macro_rules! loader_api {
             $( $name: unsafe extern "system" fn($($arg),*) -> Status, )+
             get_pci: Option<GetPci>,
             can_access_peer: Option<CanAccessPeer>,
+            /// Experimental immediate-list extension; `None` when the loader lacks it.
+            pub(crate) append_lists: Option<AppendLists>,
             #[cfg(not(test))]
             _library: Library,
             #[cfg(test)]
@@ -329,6 +391,10 @@ macro_rules! loader_api {
                         .ok().map(|symbol| *symbol),
                     can_access_peer: unsafe { library.get::<CanAccessPeer>(b"zeDeviceCanAccessPeer\0") }
                         .ok().map(|symbol| *symbol),
+                    append_lists: unsafe {
+                        library.get::<AppendLists>(b"zeCommandListImmediateAppendCommandListsExp\0")
+                    }
+                    .ok().map(|symbol| *symbol),
                     #[cfg(not(test))]
                     _library: library,
                     #[cfg(test)]
@@ -347,6 +413,7 @@ macro_rules! loader_api {
                     }, )+
                     get_pci: None,
                     can_access_peer: None,
+                    append_lists: None,
                     _library: None,
                 }
             }
@@ -357,11 +424,48 @@ macro_rules! loader_api {
                 self._library.is_none()
             }
 
+            /// Experimental per-kernel hints for small-launch tuning, all off by default:
+            /// `CUDA_FOR_INTEL_CACHE_CONFIG=large_slm|large_data` (`zeKernelSetCacheConfig`) and
+            /// `CUDA_FOR_INTEL_SCHED_HINT=oldest|rr|stall` (`zeKernelSchedulingHintExp`). Failures
+            /// are ignored: they are hints, and a driver may not support them.
+            fn apply_kernel_hints(&self, kernel: Raw) {
+                #[cfg(not(test))]
+                let library = Some(&self._library);
+                #[cfg(test)]
+                let library = self._library.as_ref();
+                let Some(library) = library else { return };
+                if let Some(flags) = std::env::var("CUDA_FOR_INTEL_CACHE_CONFIG").ok().as_deref().and_then(cache_config_flags) {
+                    type SetCacheConfig = unsafe extern "system" fn(Raw, u32) -> Status;
+                    if let Ok(set) = unsafe { library.get::<SetCacheConfig>(b"zeKernelSetCacheConfig\0") } {
+                        let status = unsafe { set(kernel, flags) };
+                        log_hint("zeKernelSetCacheConfig", status);
+                    }
+                }
+                if let Some(flags) = std::env::var("CUDA_FOR_INTEL_SCHED_HINT").ok().as_deref().and_then(scheduling_hint_flags) {
+                    #[repr(C)]
+                    struct HintDesc {
+                        header: Header,
+                        flags: u32,
+                    }
+                    type SchedulingHint = unsafe extern "system" fn(Raw, *mut HintDesc) -> Status;
+                    if let Ok(set) = unsafe { library.get::<SchedulingHint>(b"zeKernelSchedulingHintExp\0") } {
+                        // ZE_STRUCTURE_TYPE_SCHEDULING_HINT_EXP_DESC
+                        let mut desc = HintDesc { header: Header::new(0x0002_0004), flags };
+                        let status = unsafe { set(kernel, &mut desc) };
+                        log_hint("zeKernelSchedulingHintExp", status);
+                    }
+                }
+            }
+
             /// Declare that the kernel may dereference device/host/shared USM pointers it was not
             /// given as arguments (pointer tables, linked structures), as ggml's batched GEMM does.
             /// Without this the driver need not keep those allocations resident for the dispatch.
-            fn set_indirect_access(&self, kernel: Raw) {
+            fn set_indirect_access(&self, kernel: Raw, direct: bool) {
                 if std::env::var_os("CUDA_FOR_INTEL_NO_INDIRECT").is_some() {
+                    return;
+                }
+                let setting = std::env::var("CUDA_FOR_INTEL_INDIRECT_ACCESS").ok();
+                if direct && indirect_access_auto(setting.as_deref()) {
                     return;
                 }
                 #[cfg(not(test))]
@@ -370,9 +474,12 @@ macro_rules! loader_api {
                 let library = self._library.as_ref();
                 let Some(library) = library else { return };
                 type SetIndirect = unsafe extern "system" fn(Raw, u32) -> Status;
+                let flags = indirect_access_flags(setting.as_deref());
+                if flags == 0 {
+                    return;
+                }
                 if let Ok(set) = unsafe { library.get::<SetIndirect>(b"zeKernelSetIndirectAccess\0") } {
-                    // ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST | DEVICE | SHARED
-                    let _ = unsafe { set(kernel, 0b111) };
+                    let _ = unsafe { set(kernel, flags) };
                 }
             }
 
@@ -657,7 +764,15 @@ pub(crate) struct Module {
 }
 
 impl Module {
+    /// Create a kernel that declares full indirect access (unknown provenance).
     pub(crate) fn create_kernel(&mut self, api: &Api, name: &CStr) -> Result<Handle, Error> {
+        self.create_kernel_with(api, name, false)
+    }
+
+    /// `direct`: the translator proved the kernel addresses only pointer-typed arguments
+    /// (`KernelMetadata::direct_access`); with `CUDA_FOR_INTEL_INDIRECT_ACCESS=auto` it then
+    /// declares no indirect access.
+    pub(crate) fn create_kernel_with(&mut self, api: &Api, name: &CStr, direct: bool) -> Result<Handle, Error> {
         let desc = KernelDesc {
             header: Header::new(0x1d),
             flags: 0,
@@ -667,7 +782,8 @@ impl Module {
         call("zeKernelCreate", || unsafe {
             (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
         })?;
-        api.set_indirect_access(kernel);
+        api.set_indirect_access(kernel, direct);
+        api.apply_kernel_hints(kernel);
         api.log_kernel_properties(kernel, name);
         let kernel = Handle(kernel);
         self.kernels.push(kernel);
@@ -1397,6 +1513,29 @@ mod build_flag_tests {
     fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> String {
         move |k| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_string()).unwrap_or_default()
     }
+    #[test]
+    fn indirect_access_flags_parse() {
+        use super::indirect_access_flags as flags;
+        assert_eq!(flags(None), 0b111);
+        assert_eq!(flags(Some("all")), 0b111);
+        assert_eq!(flags(Some("device")), 0b010);
+        assert_eq!(flags(Some("Device, shared")), 0b110);
+        assert_eq!(flags(Some("host,device,shared")), 0b111);
+        assert_eq!(flags(Some("none")), 0);
+        assert_eq!(flags(Some("bogus")), 0b111);
+        assert_eq!(flags(Some("auto")), 0b111);
+        assert!(super::indirect_access_auto(Some(" Auto")));
+        assert!(!super::indirect_access_auto(Some("device")));
+        assert!(!super::indirect_access_auto(None));
+        assert_eq!(super::cache_config_flags("Large_Data"), Some(2));
+        assert_eq!(super::cache_config_flags("slm"), Some(1));
+        assert_eq!(super::cache_config_flags("x"), None);
+        assert_eq!(super::scheduling_hint_flags("rr"), Some(2));
+        assert_eq!(super::scheduling_hint_flags("stall"), Some(4));
+        assert_eq!(super::scheduling_hint_flags("oldest"), Some(1));
+        assert_eq!(super::scheduling_hint_flags(""), None);
+    }
+
     #[test]
     fn correctly_rounded_div_is_default() {
         assert_eq!(compose_build_flags(10, &env(&[])), CORRECT_DIV_FLAG);

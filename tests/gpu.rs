@@ -132,6 +132,8 @@ mod hw_translator_edge;
 mod hw_blas_l12;
 #[path = "gpu/hw_launch_host.rs"]
 mod hw_launch_host;
+#[path = "gpu/hw_submit_modes.rs"]
+mod hw_submit_modes;
 
 macro_rules! symbols {
     ($library:ident; $( $name:ident($($arg:ty),*) ),+ $(,)?) => {

@@ -157,6 +157,8 @@ struct CudaEntry {
     /// SPIR-V workgroup shared buffer size (bytes); bounds CUDA dynamic shared launches.
     shared_bytes: u32,
     function: Option<(usize, Handle)>,
+    /// The translator proved the kernel needs no indirect USM access (`ptx/indirect.rs`).
+    direct_access: bool,
     /// Native replacement chosen when the module was installed (`CUDA_FOR_INTEL_SUBST`).
     subst: Option<std::sync::Arc<crate::subst::Plan>>,
 }
@@ -1289,6 +1291,7 @@ fn install_translation(
                 max_threads: kernel.max_threads,
                 shared_bytes: kernel.shared_bytes,
                 function: None,
+                direct_access: kernel.direct_access,
             },
         );
     }
@@ -1679,7 +1682,7 @@ fn module_function(
     let function = reserve_handle(next)?;
     let kernel = module
         .backend
-        .create_kernel(api, name)
+        .create_kernel_with(api, name, entry.direct_access)
         .inspect_err(|error| context.backend.health.observe(error))
         .map_err(backend_error)?;
     entry.function = Some((function, kernel));

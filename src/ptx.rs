@@ -1,6 +1,7 @@
 ﻿//! PTX subset to OpenCL-environment SPIR-V.
 mod ext;
 mod flow;
+mod indirect;
 mod uniform;
 pub(crate) mod fxhash;
 pub(crate) mod globals;
@@ -884,6 +885,9 @@ pub(crate) struct KernelMetadata {
     pub(crate) device_atomics: bool,
     pub(crate) fp32: bool,
     pub(crate) fp32_fma: bool,
+    /// Every global address derives from pointer-typed parameters (`ptx/indirect.rs`), so the
+    /// kernel needs no indirect USM access. False whenever unknown.
+    pub(crate) direct_access: bool,
 }
 
 #[derive(Debug)]

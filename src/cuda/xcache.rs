@@ -14,13 +14,13 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Bump when the translator's output for the same PTX can change.
-const TRANSLATOR_VERSION: u32 = 7;
+const TRANSLATOR_VERSION: u32 = 8;
 
 /// NUL-terminated build description read by `scripts/cfi-doctor.ps1`. The translator number is
 /// spelled out literally; `build_info_matches_translator_version` keeps it in sync.
-static BUILD_INFO: &[u8] = concat!("cfi-version=", env!("CARGO_PKG_VERSION"), ";translator=7\0").as_bytes();
+static BUILD_INFO: &[u8] = concat!("cfi-version=", env!("CARGO_PKG_VERSION"), ";translator=8\0").as_bytes();
 
-/// Returns a static NUL-terminated string such as `cfi-version=0.1.0;translator=7`.
+/// Returns a static NUL-terminated string such as `cfi-version=0.1.0;translator=8`.
 /// No allocation, no device access: safe to call right after `LoadLibrary`.
 #[unsafe(no_mangle)]
 pub extern "C" fn cfi_build_info() -> *const std::ffi::c_char {
@@ -237,6 +237,7 @@ pub(crate) fn get(key: u64) -> Option<Translation> {
             device_atomics: flags & 1 != 0,
             fp32: flags & 2 != 0,
             fp32_fma: flags & 4 != 0,
+            direct_access: flags & 8 != 0,
         });
     }
     Some(Translation { words, kernels, globals: Vec::new() })
@@ -262,7 +263,7 @@ pub(crate) fn put(key: u64, t: &Translation) {
         }
         w.u32(k.shared_bytes);
         w.u32(k.max_threads.unwrap_or(0));
-        w.u32(u32::from(k.device_atomics) | u32::from(k.fp32) << 1 | u32::from(k.fp32_fma) << 2);
+        w.u32(u32::from(k.device_atomics) | u32::from(k.fp32) << 1 | u32::from(k.fp32_fma) << 2 | u32::from(k.direct_access) << 3);
     }
     let sum = checksum(&w.0);
     w.0.extend_from_slice(&sum.to_le_bytes());
@@ -299,6 +300,7 @@ mod tests {
                 device_atomics: true,
                 fp32: false,
                 fp32_fma: true,
+                direct_access: true,
             }],
             globals: Vec::new(),
         };
@@ -310,6 +312,7 @@ mod tests {
         assert_eq!(back.kernels[0].params, t.kernels[0].params);
         assert_eq!(back.kernels[0].max_threads, Some(128));
         assert!(back.kernels[0].device_atomics && back.kernels[0].fp32_fma && !back.kernels[0].fp32);
+        assert!(back.kernels[0].direct_access);
         assert_ne!(key("module text", "k2"), k);
         // Corrupt the file: must be a miss, not a wrong answer.
         let p = path(k).unwrap();
