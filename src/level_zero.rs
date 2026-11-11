@@ -290,6 +290,8 @@ struct PciProperties {
 }
 
 type GetPci = unsafe extern "system" fn(Raw, *mut PciProperties) -> Status;
+/// `zeCommandListImmediateAppendCommandListsExp(immediate, count, lists, signal, wait count, waits)`
+pub(crate) type AppendLists = unsafe extern "system" fn(Raw, u32, *mut Raw, Raw, u32, *mut Raw) -> Status;
 /// `zeDeviceCanAccessPeer(device, peer, *mut ze_bool_t)`
 type CanAccessPeer = unsafe extern "system" fn(Raw, Raw, *mut u8) -> Status;
 
@@ -300,6 +302,8 @@ macro_rules! loader_api {
             $( $name: unsafe extern "system" fn($($arg),*) -> Status, )+
             get_pci: Option<GetPci>,
             can_access_peer: Option<CanAccessPeer>,
+            /// Experimental immediate-list extension; `None` when the loader lacks it.
+            pub(crate) append_lists: Option<AppendLists>,
             #[cfg(not(test))]
             _library: Library,
             #[cfg(test)]
@@ -328,6 +332,10 @@ macro_rules! loader_api {
                         .ok().map(|symbol| *symbol),
                     can_access_peer: unsafe { library.get::<CanAccessPeer>(b"zeDeviceCanAccessPeer\0") }
                         .ok().map(|symbol| *symbol),
+                    append_lists: unsafe {
+                        library.get::<AppendLists>(b"zeCommandListImmediateAppendCommandListsExp\0")
+                    }
+                    .ok().map(|symbol| *symbol),
                     #[cfg(not(test))]
                     _library: library,
                     #[cfg(test)]
@@ -346,6 +354,7 @@ macro_rules! loader_api {
                     }, )+
                     get_pci: None,
                     can_access_peer: None,
+                    append_lists: None,
                     _library: None,
                 }
             }

@@ -20,6 +20,7 @@ pub(super) mod extra;
 #[cfg(all(test, windows))]
 mod batch_tests;
 mod batch_wake;
+mod deferred;
 mod inflight;
 mod cross_device;
 pub(super) mod events;
@@ -77,6 +78,10 @@ enum Completion {
 struct Stream {
     immediate: Option<Arc<CommandList>>,
     batch: Option<Box<Batch>>,
+    /// `CUDA_FOR_INTEL_SUBMIT=deferred` on an immediate stream (see `deferred`).
+    deferred: Option<deferred::Deferred>,
+    /// Set by `Streams::launch` for the record call it makes: the append may be deferred.
+    defer_next: bool,
     blocking: bool,
     dirty: bool,
     generation: u64,
@@ -94,6 +99,7 @@ impl Stream {
         context: &Context,
         blocking: bool,
         policy: Option<Policy>,
+        submit: Option<deferred::Config>,
         wake: &Arc<Wake>,
     ) -> Result<Self, CuResult> {
         let (immediate, batch) = match policy {
@@ -116,9 +122,14 @@ impl Stream {
                 None,
             ),
         };
+        let deferred = submit
+            .filter(|_| immediate.is_some())
+            .map(|config| deferred::Deferred::new(config, Arc::clone(&context.health)));
         Ok(Self {
             immediate,
             batch,
+            deferred,
+            defer_next: false,
             blocking,
             dirty: false,
             generation: 0,
@@ -167,6 +178,16 @@ impl Stream {
         if let Some(batch) = &mut self.batch {
             batch.flush(api)?;
         }
+        self.flush_deferred(api)
+    }
+
+    /// Submit launches buffered by deferred submission. A failure loses them, so it fails the stream.
+    fn flush_deferred(&mut self, api: &Api) -> Result<(), CuResult> {
+        if let (Some(deferred), Some(immediate)) = (&mut self.deferred, &self.immediate) {
+            deferred.flush(api, immediate).inspect_err(|&error| {
+                self.append_error.get_or_insert(error);
+            })?;
+        }
         Ok(())
     }
 
@@ -187,6 +208,7 @@ impl Stream {
 
     fn wait(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
         self.check()?;
+        self.flush_deferred(api)?;
         if let Some(batch) = &mut self.batch {
             if batch.buffered() {
                 return Err(NotReady);
@@ -207,6 +229,8 @@ impl Stream {
     }
 
     fn drain(&mut self, api: &Api, timeout: u64) -> Result<(), CuResult> {
+        // Teardown: wait for whatever reached the immediate list even if this flush fails.
+        let flushed = self.flush_deferred(api);
         if let Some(batch) = &mut self.batch {
             batch.drain(api, timeout)?;
         } else if self.dirty {
@@ -218,10 +242,13 @@ impl Stream {
                 .map_err(backend_error)?;
         }
         self.complete();
-        Ok(())
+        flushed
     }
 
     fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
+        if let Some(deferred) = &mut self.deferred {
+            deferred.destroy(api)?;
+        }
         if let Some(batch) = &mut self.batch {
             batch.destroy(api)
         } else {
@@ -245,15 +272,39 @@ impl Stream {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
+        let defer = std::mem::take(&mut self.defer_next)
+            && signal.is_none()
+            && waits.is_empty()
+            && self.deferred.is_some();
         if let Some(capture) = &mut self.capture {
             return Err(capture.invalidate());
         }
         self.check()?;
-        let list = match &mut self.batch {
-            Some(batch) => batch.recording(api, context)?,
-            None => self.immediate.as_ref().unwrap(),
+        if !defer {
+            // Anything else on the stream runs after the launches buffered so far.
+            self.flush_deferred(api)?;
+        }
+        let list = match (&mut self.batch, &mut self.deferred) {
+            (Some(batch), _) => batch.recording(api, context)?,
+            (None, Some(deferred)) if defer => deferred.recording(api, context)?,
+            (None, _) => self.immediate.as_ref().unwrap(),
         };
         let result = append(list, signal.as_deref(), &waits);
+        if defer {
+            if let Err(error) = result {
+                // The open list may be half-written and holds earlier launches: fail the stream.
+                self.health.observe(&error);
+                let error = backend_error(error);
+                self.submitted();
+                self.append_error = Some(error);
+                return Err(error);
+            }
+            self.submitted();
+            if self.deferred.as_mut().unwrap().appended() {
+                self.flush_deferred(api)?;
+            }
+            return Ok(());
+        }
         let submission = signal.map(|completion| Submission {
             completion,
             _waits: waits,
@@ -290,6 +341,9 @@ impl Stream {
 
     fn complete(&mut self) {
         self.window.complete();
+        if let Some(deferred) = &mut self.deferred {
+            deferred.complete();
+        }
         self.pending.clear();
         self.dirty = false;
     }
@@ -312,6 +366,7 @@ pub(super) struct Streams {
     /// Events recorded while their stream was capturing: event -> (capture, stream, op sequence).
     pub(super) captured: HashMap<usize, (Capture, usize, u64)>,
     policy: Option<Policy>,
+    submit: Option<deferred::Config>,
     inflight: inflight::Config,
     wake: Arc<Wake>,
     worker: Option<JoinHandle<Result<(), CuResult>>>,
@@ -332,12 +387,13 @@ impl Streams {
             .and_then(|policy| policy.delay)
             .map(|_| batch::spawn(owner, Arc::clone(&wake)))
             .transpose()?;
-        let legacy = Stream::new(api, context, true, policy, &wake)?;
+        let submit = deferred::Config::configured(api);
+        let legacy = Stream::new(api, context, true, policy, submit, &wake)?;
         let inflight = inflight::Config::configured();
         if std::env::var_os("CUDA_FOR_INTEL_LOG_SUBMIT").is_some() {
             // Lets benchmarks show which submission settings a context actually uses.
             let submit = policy.map_or_else(
-                || "immediate".to_owned(),
+                || submit.map_or_else(|| "immediate".to_owned(), |config| format!("deferred cap {}", config.cap)),
                 |policy| {
                     format!(
                         "batch cap {} delay {:?} high-resolution {}",
@@ -354,6 +410,7 @@ impl Streams {
         Ok(Self {
             legacy: Some(legacy),
             policy,
+            submit,
             inflight,
             wake,
             worker,
@@ -516,9 +573,12 @@ impl Streams {
             }
         }
         let checkpoint = self.get(key)?.window.wants_checkpoint(config, counted);
+        self.get_mut(key)?.defer_next = true;
         let result = self.record_signalled(api, context, key, checkpoint, |list, signal, waits| {
             list.launch(api, kernel, geometry, args, signal, waits)
         });
+        // Never let the flag reach a later non-launch record if this one returned early.
+        self.get_mut(key)?.defer_next = false;
         if result.is_ok() {
             let stream = self.get_mut(key)?;
             let fence = if checkpoint { stream.tail() } else { None };
@@ -783,6 +843,7 @@ pub unsafe extern "system" fn cuStreamCreate(out: *mut Opaque, flags: u32) -> Cu
                 &context.backend,
                 flags == 0,
                 streams.policy,
+                streams.submit,
                 &streams.wake,
             )?;
             streams.live.insert(key, stream);
