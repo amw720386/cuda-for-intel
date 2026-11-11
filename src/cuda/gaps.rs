@@ -758,6 +758,36 @@ fn side_base(memory: c_uint, host: usize, device: u64) -> Result<(MemoryType, us
     ))
 }
 
+/// Check every device side of a strided copy as a whole before any row is issued, so a copy
+/// that leaves its allocation fails with INVALID_VALUE and copies nothing (as CUDA does).
+/// A device side must lie in one allocation of some context (peer memory is fine). A unified
+/// side whose first byte is device memory must stay inside that allocation, rather than be
+/// taken for host memory.
+fn validate_device_spans(plan: &math::Plan, dst: (MemoryType, usize), src: (MemoryType, usize)) -> Result<(), CuResult> {
+    if plan.is_empty() {
+        return Ok(());
+    }
+    for (side, source) in [(dst, false), (src, true)] {
+        let (memory, base) = side;
+        if !matches!(memory, MemoryType::Device | MemoryType::Unified) {
+            continue;
+        }
+        let (start, len) = plan.span(source).ok_or(InvalidValue)?;
+        let first = base.checked_add(start).ok_or(InvalidValue)?;
+        state(|state| {
+            let me = current();
+            let owned = super::devices::peer::owner_of(state, me, first, len).is_some();
+            let starts_on_device = super::devices::peer::owner_of(state, me, first, 1).is_some();
+            match memory {
+                MemoryType::Device if !owned => Err(InvalidValue),
+                MemoryType::Unified if starts_on_device && !owned => Err(InvalidValue),
+                _ => Ok(()),
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// Run a validated strided copy one contiguous row at a time.
 unsafe fn run_plan(
     plan: math::Plan,
@@ -897,7 +927,10 @@ unsafe fn copy_2d(copy: *const Memcpy2D, stream: Option<Opaque>) -> CuResult {
         1,
     );
     match plan {
-        Some(plan) => unsafe { run_plan(plan, dst, src, stream) },
+        Some(plan) => match validate_device_spans(&plan, dst, src) {
+            Ok(()) => unsafe { run_plan(plan, dst, src, stream) },
+            Err(error) => error,
+        },
         None => InvalidValue,
     }
 }
@@ -945,7 +978,10 @@ unsafe fn copy_3d(copy: *const Memcpy3D, stream: Option<Opaque>) -> CuResult {
         copy.depth,
     );
     match plan {
-        Some(plan) => unsafe { run_plan(plan, dst, src, stream) },
+        Some(plan) => match validate_device_spans(&plan, dst, src) {
+            Ok(()) => unsafe { run_plan(plan, dst, src, stream) },
+            Err(error) => error,
+        },
         None => InvalidValue,
     }
 }

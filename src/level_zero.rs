@@ -18,7 +18,8 @@ mod streams;
 pub(crate) use streams::WaitFn;
 pub(crate) use streams::KernelArg;
 pub(crate) use streams::{CommandList, Fence, Fences, RegionShape};
-#[cfg(test)]
+// Kernel timestamp events: hardware tests, and the opt-in CFI_GPU_PROFILE runtime profiler.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod profiling;
 
 type Raw = *mut c_void;
@@ -444,6 +445,12 @@ macro_rules! loader_api {
             #[cfg(all(test, windows))]
             fn library(&self) -> &Library {
                 self._library.as_ref().expect("hardware profiling requires the native loader")
+            }
+
+            /// The native loader (`CFI_GPU_PROFILE` resolves optional timestamp entry points).
+            #[cfg(all(not(test), windows))]
+            fn library(&self) -> &Library {
+                &self._library
             }
         }
     };
