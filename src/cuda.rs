@@ -121,7 +121,7 @@ struct CudaContext {
     dyn_variants: HashMap<(usize, u32), Option<(usize, usize, usize)>>,
     /// Allocation-table entries that belong to a module variable, not to cuMemAlloc.
     module_globals: BTreeSet<usize>,
-    functions: HashMap<usize, (usize, CString)>,
+    functions: HashMap<usize, FunctionRef>,
     local_storage: HashMap<usize, export_table::ContextStorage>,
     /// Peer contexts this context enabled access to (see `devices::peer`).
     peer_access: BTreeSet<usize>,
@@ -156,6 +156,28 @@ struct CudaEntry {
     function: Option<(usize, Handle)>,
     /// Native replacement chosen when the module was installed (`CUDA_FOR_INTEL_SUBST`).
     subst: Option<std::sync::Arc<crate::subst::Plan>>,
+}
+
+/// A `CUfunction`: its module entry plus a copy of what every launch needs, so the launch path
+/// takes it with one lookup instead of hashing the kernel name and cloning its parameter list.
+/// Entries are inserted and removed together with `CudaEntry::function`, whose fields never
+/// change while the function exists.
+struct FunctionRef {
+    module: usize,
+    name: CString,
+    kernel: Handle,
+    launch: std::sync::Arc<LaunchMeta>,
+}
+
+struct LaunchMeta {
+    params: Box<[Param]>,
+    /// Whether any parameter is `Param::Staged`.
+    staged: bool,
+    max_threads: Option<u32>,
+    shared_bytes: u32,
+    subst: Option<std::sync::Arc<crate::subst::Plan>>,
+    /// The kernel name for logs and profilers (`to_string_lossy` of `FunctionRef::name`).
+    label: Box<str>,
 }
 
 struct State {
@@ -1651,7 +1673,15 @@ fn module_function(
         .inspect_err(|error| context.backend.health.observe(error))
         .map_err(backend_error)?;
     entry.function = Some((function, kernel));
-    context.functions.insert(function, (module_key, name.to_owned()));
+    let launch = std::sync::Arc::new(LaunchMeta {
+        staged: entry.params.iter().any(|p| matches!(p, Param::Staged { .. })),
+        params: entry.params.clone().into_boxed_slice(),
+        max_threads: entry.max_threads,
+        shared_bytes: entry.shared_bytes,
+        subst: entry.subst.clone(),
+        label: name.to_string_lossy().into(),
+    });
+    context.functions.insert(function, FunctionRef { module: module_key, name: name.to_owned(), kernel, launch });
     Ok(function)
 }
 
@@ -1724,8 +1754,7 @@ fn dynamic_shared_variant(state: &mut State, function: usize, requested: u32) ->
     let total = context
         .functions
         .get(&function)
-        .and_then(|(module, name)| context.modules.get(module)?.entries.get(name))
-        .map_or(0, |entry| entry.shared_bytes);
+        .map_or(0, |function| function.launch.shared_bytes);
     let variant = if total >= LARGE_WINDOW && bytes <= MAX_VARIANT {
         let source = state.lazy_modules.iter().find_map(|(&lazy, module)| {
             module
@@ -1745,7 +1774,7 @@ fn dynamic_shared_variant(state: &mut State, function: usize, requested: u32) ->
         None
     };
     if total >= LARGE_WINDOW
-        && let Some((_, name)) = state.contexts.get(&key).and_then(|context| context.functions.get(&function))
+        && let Some(FunctionRef { name, .. }) = state.contexts.get(&key).and_then(|context| context.functions.get(&function))
     {
         export_log(format_args!(
             "dynamic shared: {} requested {requested} B, window {total} B -> {}",
@@ -1858,7 +1887,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
     kernel_params: *mut Opaque,
     extra: *mut Opaque,
 ) -> CuResult {
-    let mut launched = String::new();
+    let mut launched: Option<std::sync::Arc<LaunchMeta>> = None;
     let result = trace::call("cuLaunchKernel", || {
         status(state(|state| {
             let mut function = function.addr();
@@ -1871,18 +1900,13 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let context = state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?;
             context.check_live()?;
             let stream = context.streams.launch_key(stream)?;
-            let (module_key, name) = context
-                .functions
-                .get(&function)
-                .ok_or(InvalidHandle)?;
-            let (module_key, name) = (module_key.clone(), name.clone());
-            let (module_key, name) = (&module_key, &name);
-            let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
-            let entry = module.entries.get(name).ok_or(InvalidHandle)?;
-            let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
-            let params = entry.params.clone();
-            let (entry_shared, entry_threads) = (entry.shared_bytes, entry.max_threads);
-            let subst_plan = entry.subst.clone();
+            let target = context.functions.get(&function).ok_or(InvalidHandle)?;
+            let (kernel, launch) = (target.kernel, std::sync::Arc::clone(&target.launch));
+            let meta = &*launch;
+            let name = &*meta.label;
+            let params = &*meta.params;
+            let (entry_shared, entry_threads) = (meta.shared_bytes, meta.max_threads);
+            let subst_plan = meta.subst.as_ref();
             // Dynamic shared is backed by a SPIR-V workgroup array sized at translate time.
             // NVIDIA allows a non-zero sharedMemBytes launch even when the kernel has no
             // `extern __shared__` / `.shared` (GGML mmf passes 128B unused); ignore it.
@@ -1891,14 +1915,6 @@ pub unsafe extern "system" fn cuLaunchKernel(
             }
             let grid = [grid_x, grid_y, grid_z];
             let block = [block_x, block_y, block_z];
-            if entry.shared_bytes != 0 && shared_bytes > entry.shared_bytes {
-                export_log_always(format_args!(
-                    "cuLaunchKernel rejected {}: dynamic shared {shared_bytes} > translated {} grid={grid:?} block={block:?}",
-                    name.to_string_lossy(),
-                    entry.shared_bytes
-                ));
-                return Err(InvalidValue);
-            }
             validate_launch(
                 &runtime.devices[context.device as usize].info,
                 grid,
@@ -1908,7 +1924,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
             let mut staged_pointers: Vec<Box<u64>> = Vec::new();
             let capturing = context.streams.capture(stream)?.is_some();
             let args = unsafe {
-                launch_args::read(&params, kernel_params, extra, |address| {
+                launch_args::read(params, kernel_params, extra, |address| {
                     // Pinned host allocations (cuMemAllocHost/cuMemHostAlloc) are Level Zero
                     // host USM and valid kernel arguments, like in CUDA's unified addressing.
                     let known = contains_range(&context.allocations, address as usize, 1)
@@ -1917,11 +1933,11 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 })
             };
             let args = match args {
-                Ok(args) if params.iter().any(|p| matches!(p, crate::ptx::Param::Staged { .. })) => {
+                Ok(args) if meta.staged => {
                     if context.streams.capture(stream)?.is_some() {
                         return Err(NotSupported);
                     }
-                    let (collapsed, keep) = launch_args::collapse_staged(&params, args, |data| {
+                    let (collapsed, keep) = launch_args::collapse_staged(params, args, |data| {
                         context.stage_bytes(&runtime.api, data)
                     })?;
                     staged_pointers = keep;
@@ -1931,7 +1947,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 Err(error) => {
                     export_log(format_args!(
                         "cuLaunchKernel args rejected for {} ({} params)",
-                        name.to_string_lossy(),
+                        name,
                         params.len()
                     ));
                     return Err(error);
@@ -1939,19 +1955,19 @@ pub unsafe extern "system" fn cuLaunchKernel(
             };
             if trace::enabled() {
                 let mut text = String::new();
-                for (arg, param) in args.iter().zip(&params) {
+                for (arg, param) in args.iter().zip(params) {
                     let size = param.size().min(16);
                     let bytes = unsafe { std::slice::from_raw_parts(arg.value.cast::<u8>(), size) };
                     text.push_str(&format!(" [{}]", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()));
                 }
                 trace::record(format_args!(
                     "launch {} grid={grid:?} block={block:?} shared={shared_bytes} args={text}",
-                    name.to_string_lossy().chars().take(60).collect::<String>()
+                    name.chars().take(60).collect::<String>()
                 ));
             }
             // Optional launch dump for soft_max bring-up (CUDA_FOR_INTEL_DUMP_LAUNCH=1).
             if dump_launch_enabled()
-                && name.to_string_lossy().contains("soft_max")
+                && name.contains("soft_max")
             {
                 let mut summary = format!(
                     "soft_max launch args={} shared_bytes={shared_bytes} grid={grid:?} block={block:?}",
@@ -1995,23 +2011,25 @@ pub unsafe extern "system" fn cuLaunchKernel(
             }
             let timed = trace::kernel_profile_enabled().then(std::time::Instant::now);
             let cfi_prof = cfiprof::enabled().then(std::time::Instant::now);
-            launched = name.to_string_lossy().into_owned();
+            if sync_launch_enabled() {
+                launched = Some(std::sync::Arc::clone(&launch));
+            }
             let copyback = if copyback::enabled() {
-                copyback::before(&runtime.api, context, stream, &launched, &params, &args)
+                copyback::before(&runtime.api, context, stream, name, params, &args)
             } else {
                 None
             };
             #[cfg(windows)]
             let gpu_slot = if gpuprof::enabled() {
                 let info = &runtime.devices[context.device as usize].info;
-                gpuprof::before(&runtime.api, info, &context.backend, key, &launched)
+                gpuprof::before(&runtime.api, info, &context.backend, key, name)
             } else {
                 None
             };
             let launch_result = subst_hook::launch(
                 &runtime.api,
                 context,
-                subst_plan.as_ref(),
+                subst_plan,
                 kernel,
                 stream,
                 (grid, block),
@@ -2021,7 +2039,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
             gpuprof::after(&runtime.api, gpu_slot, launch_result.is_ok());
             if let Some(pending) = copyback {
                 launch_result?;
-                copyback::after(&runtime.api, context, stream, pending, &launched, (grid, block), &args);
+                copyback::after(&runtime.api, context, stream, pending, name, (grid, block), &args);
                 return Ok(());
             }
             if let Some(started) = cfi_prof {
@@ -2030,7 +2048,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 let submitted = started.elapsed().as_nanos() as u64;
                 context.streams.wait_stream(&runtime.api, stream, u64::MAX)?;
                 let total = started.elapsed().as_nanos() as u64;
-                cfiprof::record_kernel(&launched, submitted, total.saturating_sub(submitted));
+                cfiprof::record_kernel(name, submitted, total.saturating_sub(submitted));
                 return Ok(());
             }
             if let Some(started) = timed {
@@ -2038,7 +2056,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 // GPU time plus a constant submission latency; use it to rank kernels only.
                 launch_result?;
                 context.streams.wait_stream(&runtime.api, stream, u64::MAX)?;
-                trace::kernel_record(&launched, started.elapsed().as_nanos() as u64, grid, block);
+                trace::kernel_record(name, started.elapsed().as_nanos() as u64, grid, block);
                 return Ok(());
             }
             launch_result
@@ -2046,11 +2064,14 @@ pub unsafe extern "system" fn cuLaunchKernel(
     });
     // Debug aid (CUDA_FOR_INTEL_SYNC_LAUNCH=1): wait after every launch so a device fault is
     // attributed to the kernel that caused it instead of the next stream synchronize.
-    if result == Success && !launched.is_empty() && sync_launch_enabled() {
+    if result == Success
+        && let Some(launched) = launched.filter(|launched| !launched.label.is_empty())
+    {
         let waited = streams::cuStreamSynchronize(stream);
         if waited != Success {
             eprintln!(
-                "CUDA for Intel: kernel {launched} grid={:?} block={:?} faulted: {waited:?}",
+                "CUDA for Intel: kernel {} grid={:?} block={:?} faulted: {waited:?}",
+                launched.label,
                 [grid_x, grid_y, grid_z],
                 [block_x, block_y, block_z]
             );
