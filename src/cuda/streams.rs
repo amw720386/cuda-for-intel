@@ -404,11 +404,13 @@ impl Streams {
                 },
             );
             eprintln!(
-                "cuda-for-intel: context submit={submit} inflight limit={} mode={} indirect-access={} no-indirect={}",
+                "cuda-for-intel: context submit={submit} inflight limit={} mode={} indirect-access={} no-indirect={} cache-config={} sched-hint={}",
                 inflight.limit,
                 if inflight.window { "window" } else { "drain" },
                 std::env::var("CUDA_FOR_INTEL_INDIRECT_ACCESS").unwrap_or_else(|_| "all".into()),
                 std::env::var_os("CUDA_FOR_INTEL_NO_INDIRECT").is_some(),
+                std::env::var("CUDA_FOR_INTEL_CACHE_CONFIG").unwrap_or_else(|_| "default".into()),
+                std::env::var("CUDA_FOR_INTEL_SCHED_HINT").unwrap_or_else(|_| "default".into()),
             );
         }
         Ok(Self {

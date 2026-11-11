@@ -289,6 +289,32 @@ struct PciProperties {
     bandwidth: i64,
 }
 
+/// `ZE_CACHE_CONFIG_FLAG_LARGE_SLM` (1) or `_LARGE_DATA` (2).
+fn cache_config_flags(value: &str) -> Option<u32> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "large_slm" | "slm" => Some(1),
+        "large_data" | "data" => Some(2),
+        _ => None,
+    }
+}
+
+/// `ZE_SCHEDULING_HINT_EXP_FLAG_OLDEST_FIRST` (1), `_ROUND_ROBIN` (2), `_STALL_BASED_ROUND_ROBIN` (4).
+fn scheduling_hint_flags(value: &str) -> Option<u32> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "oldest" | "oldest_first" => Some(1),
+        "rr" | "round_robin" => Some(2),
+        "stall" | "stall_based_round_robin" => Some(4),
+        _ => None,
+    }
+}
+
+/// Report a rejected hint (per kernel) when `CUDA_FOR_INTEL_LOG_SUBMIT` is set.
+fn log_hint(call: &str, status: Status) {
+    if status != 0 && std::env::var_os("CUDA_FOR_INTEL_LOG_SUBMIT").is_some() {
+        eprintln!("cuda-for-intel: {call} returned {status:#x}");
+    }
+}
+
 /// `CUDA_FOR_INTEL_INDIRECT_ACCESS=auto`: kernels the translator proved direct declare none, all
 /// others keep every kind.
 fn indirect_access_auto(value: Option<&str>) -> bool {
@@ -395,6 +421,39 @@ macro_rules! loader_api {
             #[cfg(test)]
             pub(crate) fn is_fake(&self) -> bool {
                 self._library.is_none()
+            }
+
+            /// Experimental per-kernel hints for small-launch tuning, all off by default:
+            /// `CUDA_FOR_INTEL_CACHE_CONFIG=large_slm|large_data` (`zeKernelSetCacheConfig`) and
+            /// `CUDA_FOR_INTEL_SCHED_HINT=oldest|rr|stall` (`zeKernelSchedulingHintExp`). Failures
+            /// are ignored: they are hints, and a driver may not support them.
+            fn apply_kernel_hints(&self, kernel: Raw) {
+                #[cfg(not(test))]
+                let library = Some(&self._library);
+                #[cfg(test)]
+                let library = self._library.as_ref();
+                let Some(library) = library else { return };
+                if let Some(flags) = std::env::var("CUDA_FOR_INTEL_CACHE_CONFIG").ok().as_deref().and_then(cache_config_flags) {
+                    type SetCacheConfig = unsafe extern "system" fn(Raw, u32) -> Status;
+                    if let Ok(set) = unsafe { library.get::<SetCacheConfig>(b"zeKernelSetCacheConfig\0") } {
+                        let status = unsafe { set(kernel, flags) };
+                        log_hint("zeKernelSetCacheConfig", status);
+                    }
+                }
+                if let Some(flags) = std::env::var("CUDA_FOR_INTEL_SCHED_HINT").ok().as_deref().and_then(scheduling_hint_flags) {
+                    #[repr(C)]
+                    struct HintDesc {
+                        header: Header,
+                        flags: u32,
+                    }
+                    type SchedulingHint = unsafe extern "system" fn(Raw, *mut HintDesc) -> Status;
+                    if let Ok(set) = unsafe { library.get::<SchedulingHint>(b"zeKernelSchedulingHintExp\0") } {
+                        // ZE_STRUCTURE_TYPE_SCHEDULING_HINT_EXP_DESC
+                        let mut desc = HintDesc { header: Header::new(0x0002_0004), flags };
+                        let status = unsafe { set(kernel, &mut desc) };
+                        log_hint("zeKernelSchedulingHintExp", status);
+                    }
+                }
             }
 
             /// Declare that the kernel may dereference device/host/shared USM pointers it was not
@@ -722,6 +781,7 @@ impl Module {
             (api.zeKernelCreate)(self.handle.0, &desc, &mut kernel)
         })?;
         api.set_indirect_access(kernel, direct);
+        api.apply_kernel_hints(kernel);
         api.log_kernel_properties(kernel, name);
         let kernel = Handle(kernel);
         self.kernels.push(kernel);
@@ -1454,6 +1514,13 @@ mod build_flag_tests {
         assert!(super::indirect_access_auto(Some(" Auto")));
         assert!(!super::indirect_access_auto(Some("device")));
         assert!(!super::indirect_access_auto(None));
+        assert_eq!(super::cache_config_flags("Large_Data"), Some(2));
+        assert_eq!(super::cache_config_flags("slm"), Some(1));
+        assert_eq!(super::cache_config_flags("x"), None);
+        assert_eq!(super::scheduling_hint_flags("rr"), Some(2));
+        assert_eq!(super::scheduling_hint_flags("stall"), Some(4));
+        assert_eq!(super::scheduling_hint_flags("oldest"), Some(1));
+        assert_eq!(super::scheduling_hint_flags(""), None);
     }
 
     #[test]
