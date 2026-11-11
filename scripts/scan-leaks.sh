@@ -6,7 +6,9 @@
 #        scripts/scan-leaks.sh staged     scan only the staged diff additions
 # Lines containing the marker `leak-ok` are ignored (use for documentation placeholders).
 # Ignored without a marker: loopback/any-address, Intel driver versions (32.0.x.y), the placeholder
-# profile names C:\Users\USER|user|<user>|Public|Default, semantic versions such as v0.1.0.
+# profile names C:\Users\USER|user|<user>|Public|Default, semantic versions such as v0.1.0, and
+# commit-attribution addresses, which are public by design: GitHub noreply addresses
+# (<id>+<user>@users.noreply.github.com) and noreply@anthropic.com (the Co-Authored-By trailers CLAUDE.md prescribes).
 # Output is masked (file:line and pattern class only, never the matched text); exit 1 when anything is found.
 set -u
 B='(^|[^0-9A-Za-z_.])'   # left boundary (replaces \b)
@@ -24,6 +26,8 @@ strip_ok() {
   sed -E \
     -e 's/127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.[0-9]+//g' \
     -e 's/32\.0\.[0-9]+\.[0-9]+//g' \
+    -e 's/([0-9]+[+])?[A-Za-z0-9-]+@users[.]noreply[.]github[.]com//g' \
+    -e 's/noreply@anthropic[.]com//g' \
     -e 's/C:\\{1,2}Users\\{1,2}(USER|user|<user>|%USERNAME%|Public|Default|All Users)([^A-Za-z0-9._-]|$)/PLACEHOLDER\2/g'
 }
 
