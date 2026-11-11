@@ -317,7 +317,7 @@ impl Stream {
         });
         if let Err(error) = result {
             let attempted_append = matches!(&error, crate::level_zero::Error::Driver(call, _)
-                if call.starts_with("zeCommandListAppend"));
+                if call.starts_with("zeCommandListAppend") || call.starts_with("zeCommandListImmediateAppend"));
             let fatal = error.device_lost();
             self.health.observe(&error);
             let error = backend_error(error);

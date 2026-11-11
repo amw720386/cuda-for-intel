@@ -498,3 +498,76 @@ fn graph_launch_host_cost_reissue_vs_recorded() {
     assert_eq!(cuGraphExecDestroy(exec), Success);
     assert_eq!(cuCtxDestroy_v2(ctx), Success);
 }
+
+// ---- recorded graphs with l0-submit's deferred submission and in-flight window ----
+
+/// A context whose streams use `CUDA_FOR_INTEL_SUBMIT=deferred` (cap `submit`) and/or
+/// `CUDA_FOR_INTEL_INFLIGHT=window` (limit `window`).
+fn submit_context(submit: Option<usize>, window: Option<u64>) -> Opaque {
+    super::deferred::TEST_CONFIG.set(Some(submit.map(|cap| super::deferred::Config { cap })));
+    if let Some(limit) = window {
+        super::inflight::TEST_CONFIG.set(Some(super::inflight::Config { limit, window: true }));
+    }
+    let ctx = context(None);
+    super::deferred::TEST_CONFIG.set(None);
+    super::inflight::TEST_CONFIG.set(None);
+    ctx
+}
+
+/// (launches buffered in the deferred submit list, window checkpoints) of `stream`.
+fn submit_state(stream: Opaque) -> (usize, usize) {
+    let key = stream_key(stream).unwrap();
+    with_context(|_, context| {
+        let stream = context.streams.get(key)?;
+        Ok((stream.deferred.as_ref().map_or(0, |d| d.buffered()), stream.window.checkpoints()))
+    })
+    .unwrap()
+}
+
+/// Recorded graphs under deferred submit, the window and both: buffered launches are flushed
+/// before the list, window checkpoints stay bounded, and a failed list append fails the stream
+/// once (sticky, like every other failed append) without leaking or appending a list twice.
+/// Written by the reviewer-2 teammate; the window case fails without the sticky append error.
+#[test]
+fn recorded_graphs_under_deferred_submit_and_window() {
+    for (submit, window) in [(Some(8), None), (None, Some(64)), (Some(4), Some(64))] {
+        let _fixture = Fixture::new();
+        let ctx = submit_context(submit, window);
+        let _rec = Recording::on();
+        let (st, f) = (stream(), function(module()));
+        let (device, host) = allocations();
+        let exec = instantiate(capture(st, || {
+            for _ in 0..6 {
+                assert_eq!(launch(f, st, device), Success);
+            }
+            assert_eq!(unsafe { cuMemcpyDtoDAsync_v2(device + 8, device, 8, st) }, Success);
+        }));
+        for _ in 0..20 {
+            for _ in 0..3 {
+                assert_eq!(launch(f, st, device), Success);
+            }
+            assert_eq!(cuGraphLaunch(exec, st), Success, "{submit:?} {window:?}");
+            assert_eq!(submit_state(st).0, 0, "buffered launches were flushed before the list");
+            assert_eq!(launch(f, st, device), Success);
+        }
+        assert!(submit_state(st).1 <= 64, "window checkpoints stay bounded");
+        assert_eq!(unsafe { cuMemcpyDtoHAsync_v2(host, device, 4, st) }, Success);
+        assert_eq!(cuStreamSynchronize(st), Success);
+        assert_eq!(stats().recorded, 1);
+        assert_eq!(stats().replayed, 20);
+        // the immediate append fails: buffered launches (if any) and the list are lost once,
+        // the stream is failed, and teardown releases everything
+        assert_eq!(launch(f, st, device), Success);
+        let before = fake::snapshot().ledger.submitted;
+        crate::level_zero::fault::arm("zeCommandListImmediateAppendCommandListsExp", 0x7fff_fffe);
+        assert_ne!(cuGraphLaunch(exec, st), Success, "{submit:?} {window:?}");
+        assert_eq!(stats().replayed, 20, "a failed append is not counted as a replay");
+        assert_ne!(cuGraphLaunch(exec, st), Success, "the stream stays failed {submit:?} {window:?}");
+        assert_ne!(cuStreamSynchronize(st), Success);
+        let after = fake::snapshot().ledger.submitted;
+        assert!(after - before <= 1, "nothing appended twice after the failure: {before} -> {after}");
+        assert_eq!(cuGraphExecDestroy(exec), Success);
+        assert_ne!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+}
