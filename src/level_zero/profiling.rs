@@ -85,6 +85,15 @@ pub(super) fn runtime_signal(signal: Raw) -> Raw {
     if event.is_null() { signal } else { event }
 }
 
+/// Undoes [`runtime_signal`] after a failed append: the event was never attached, so it goes back
+/// to this thread's slot for a fallback launch, or for [`OperationEvents::disarm`] to report unused.
+#[cfg(windows)]
+pub(super) fn runtime_unsignal(original: Raw, used: Raw) {
+    if original.is_null() && !used.is_null() {
+        NEXT_EVENT.with(|next| next.set(used));
+    }
+}
+
 #[cfg(windows)]
 #[repr(C)]
 #[derive(Default)]
