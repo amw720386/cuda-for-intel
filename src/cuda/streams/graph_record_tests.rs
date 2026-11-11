@@ -620,3 +620,47 @@ fn recorded_graphs_keep_stream_order_under_deferred_submit() {
         assert_baseline();
     }
 }
+
+/// `zeKernelSetArgumentValue` calls so far.
+fn arg_sets() -> usize {
+    fake::snapshot().ledger.arg_sets
+}
+
+/// The kernel argument cache (#43) and graph recording: a recording sets every argument even
+/// when immediate launches left the same values cached, the immediate launches after it set
+/// theirs again, a replay sets nothing, and the device runs the right values in order.
+#[test]
+fn graph_recording_does_not_trust_the_argument_cache() {
+    let _fixture = Fixture::new();
+    let ctx = context(None);
+    let _rec = Recording::on();
+    let f = function(module());
+    let (p, other) = (device_buffer(), device_buffer());
+    let ns = stream();
+    assert_eq!(launch(f, ns, p), Success);
+    let before = arg_sets();
+    assert_eq!(launch(f, ns, p), Success);
+    assert_eq!(arg_sets(), before, "an identical relaunch is served from the cache");
+    let exec = instantiate(capture(ns, || {
+        assert_eq!(launch(f, ns, p), Success);
+        assert_eq!(launch(f, ns, other), Success);
+        assert_eq!(launch(f, ns, p), Success);
+    }));
+    executed();
+    // Recording: the first launch sets its argument although `p` was cached.
+    let before = arg_sets();
+    assert_eq!(cuGraphLaunch(exec, ns), Success);
+    assert_eq!(arg_sets() - before, 3, "every recorded launch sets its argument");
+    let before = arg_sets();
+    assert_eq!(launch(f, ns, other), Success);
+    assert_eq!(launch(f, ns, other), Success);
+    assert_eq!(arg_sets() - before, 1, "set once after the recording, then cached");
+    assert_eq!(cuGraphLaunch(exec, ns), Success);
+    assert_eq!(arg_sets() - before, 1, "a replay sets nothing");
+    assert_eq!(cuStreamSynchronize(ns), Success);
+    assert_eq!(executed(), [p, other, p, other, other, p, other, p]);
+    assert_eq!(cuGraphExecDestroy(exec), Success);
+    assert_eq!(cuStreamDestroy_v2(ns), Success);
+    assert_eq!(cuCtxDestroy_v2(ctx), Success);
+    assert_baseline();
+}

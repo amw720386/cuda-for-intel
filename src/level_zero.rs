@@ -8,6 +8,12 @@ use std::sync::{
 };
 
 mod arg_cache;
+
+/// Drops every cached kernel argument value (`arg_cache`), so the next launch of each kernel sets
+/// all of its arguments again. Graph recording calls this around a recording into a regular list.
+pub(crate) fn invalidate_arg_cache() {
+    arg_cache::memory_freed();
+}
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(test)]

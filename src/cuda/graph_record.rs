@@ -372,7 +372,14 @@ pub(super) fn launch(
             return Ok(false);
         }
         let uses = used_allocations(context, &steps);
-        match record(api, context, &steps, key) {
+        // Level Zero captures kernel arguments at append, so cached values would be correct here
+        // too, but recording is rare and must not depend on what immediate launches left in the
+        // argument cache: drop it so every recorded launch sets all of its arguments, and drop
+        // it again so the next immediate launches do not rely on state the recording changed.
+        crate::level_zero::invalidate_arg_cache();
+        let recorded = record(api, context, &steps, key);
+        crate::level_zero::invalidate_arg_cache();
+        match recorded {
             Ok((list, groups)) => {
                 context.graph_lists.stats.recorded += 1;
                 let count = steps.len();

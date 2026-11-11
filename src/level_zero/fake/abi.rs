@@ -468,6 +468,7 @@ unsafe extern "system" fn kernel_arg(
 ) -> Status {
     call_driver(|driver| {
         driver.get(kernel.addr(), Kind::Kernel)?;
+        driver.ledger.arg_sets += 1;
         let address = (size == size_of::<usize>())
             .then(|| unsafe { data.cast::<usize>().read_unaligned() })
             .and_then(|address| driver.allocation(address));

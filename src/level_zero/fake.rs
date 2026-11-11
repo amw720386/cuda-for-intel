@@ -124,6 +124,8 @@ pub(crate) struct Ledger {
     pub submitted: usize,
     pub completed: usize,
     pub discarded_recorded: usize,
+    /// `zeKernelSetArgumentValue` calls that reached the driver.
+    pub arg_sets: usize,
     pub violations: Vec<&'static str>,
 }
 
