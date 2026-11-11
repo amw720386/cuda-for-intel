@@ -70,6 +70,7 @@ impl CudaContext {
         if let Some(module) = self.modules.get(&module_key) {
             for address in module.globals.values().filter_map(|global| global.address) {
                 self.allocations.remove(&address);
+                self.alloc_frees += 1;
                 self.module_globals.remove(&address);
             }
         }

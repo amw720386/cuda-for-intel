@@ -32,6 +32,8 @@ mod globals_tests;
 #[cfg(test)]
 mod graph_tests;
 #[cfg(test)]
+mod graph_record_tests;
+#[cfg(test)]
 mod timing_tests;
 #[cfg(test)]
 mod copy_validation_tests;
@@ -536,15 +538,63 @@ impl Streams {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
+        self.record_signalled(api, context, key, false, append).map(|_| ())
+    }
+
+    /// [`Self::record_ordered`], with a completion signal on the operation also when stream
+    /// ordering needs none (`signalled`). Returns the signal attached, if any.
+    fn record_signalled(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        signalled: bool,
+        append: impl FnOnce(
+            &CommandList,
+            Option<&Fence>,
+            &[Arc<Fence>],
+        ) -> Result<(), crate::level_zero::Error>,
+    ) -> Result<Option<Arc<Fence>>, CuResult> {
         let blocking = self.get(key)?.blocking;
         self.collect_retired(api)?;
-        let signal = if blocking && self.track_legacy {
+        let signal = if signalled || (blocking && self.track_legacy) {
             Some(self.next_fence(api, context)?)
         } else {
             None
         };
         let waits = self.legacy_waits(api, key, blocking)?;
-        self.get_mut(key)?.record(api, context, signal, waits, append)
+        self.get_mut(key)?
+            .record(api, context, signal.clone(), waits, append)
+            .map(|()| signal)
+    }
+
+    /// Whether `key` appends to an immediate command list (no experimental batching), so a
+    /// recorded regular list can run in its order.
+    pub(super) fn is_immediate(&self, key: usize) -> Result<bool, CuResult> {
+        Ok(self.get(key)?.immediate.is_some())
+    }
+
+    /// Run the closed regular list `recorded` (holding `groups` work-groups) in the order of
+    /// stream `key`. Returns the event that signals its completion.
+    pub(super) fn launch_recorded(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        recorded: &CommandList,
+        groups: u64,
+    ) -> Result<Arc<Fence>, CuResult> {
+        let limit = inflight_group_limit();
+        let queued = self.get(key)?.queued_groups;
+        if limit != 0 && queued != 0 && should_drain(queued, groups, limit) {
+            self.wait_stream(api, key, u64::MAX)?;
+        }
+        let signal = self.record_signalled(api, context, key, true, |list, signal, waits| {
+            list.append_lists(api, recorded, signal, waits)
+        })?;
+        let stream = self.get_mut(key)?;
+        stream.queued_groups = stream.queued_groups.saturating_add(groups);
+        signal.ok_or(Unknown)
     }
 
     fn legacy_waits(

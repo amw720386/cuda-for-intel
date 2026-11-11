@@ -2,7 +2,7 @@
 //! launches native replacements for recognised ggml kernels, with the translated kernel as the
 //! fallback for every failure.
 use super::*;
-use crate::level_zero::KernelArg;
+use crate::level_zero::{CommandList, KernelArg};
 use crate::subst::{self, Decision, Plan, Switch, probe};
 use std::sync::Arc;
 
@@ -58,6 +58,42 @@ fn probe_enabled() -> bool {
     std::env::var_os("CUDA_FOR_INTEL_SUBST_PROBE").as_deref() != Some(std::ffi::OsStr::new("0"))
 }
 
+/// Where a launch goes: appended to a stream, or recorded into a regular command list that a
+/// graph launch later runs on `stream` (`graph_record`). Substitution decisions are the same.
+#[derive(Clone, Copy)]
+pub(super) enum Target<'a> {
+    Stream(usize),
+    List { list: &'a CommandList, stream: usize },
+}
+
+impl Target<'_> {
+    /// The stream that runs the work (and any first-use validation of a native kernel).
+    fn stream(self) -> usize {
+        match self {
+            Target::Stream(stream) | Target::List { stream, .. } => stream,
+        }
+    }
+
+    fn issue(
+        self,
+        api: &Api,
+        context: &mut CudaContext,
+        kernel: Handle,
+        geometry: ([u32; 3], [u32; 3]),
+        args: &[KernelArg],
+    ) -> Result<(), CuResult> {
+        match self {
+            Target::Stream(stream) => context.streams.launch(api, &context.backend, kernel, stream, geometry, args),
+            Target::List { list, .. } => {
+                list.launch(api, kernel, geometry, args, None, &[]).map_err(|error| {
+                    context.backend.health.observe(&error);
+                    backend_error(error)
+                })
+            }
+        }
+    }
+}
+
 /// Launches `translated` or, when a validated native kernel exists for `plan` and the launch
 /// has the expected shape, the native replacement.
 pub(super) fn launch(
@@ -69,6 +105,20 @@ pub(super) fn launch(
     geometry: ([u32; 3], [u32; 3]),
     args: &[KernelArg],
 ) -> Result<(), CuResult> {
+    launch_to(api, context, plan, translated, Target::Stream(stream), geometry, args)
+}
+
+/// [`launch`] into `target`.
+pub(super) fn launch_to(
+    api: &Api,
+    context: &mut CudaContext,
+    plan: Option<&Arc<Plan>>,
+    translated: Handle,
+    target: Target<'_>,
+    geometry: ([u32; 3], [u32; 3]),
+    args: &[KernelArg],
+) -> Result<(), CuResult> {
+    let stream = target.stream();
     if let Some(plan) = plan {
         let needs_values = matches!(plan.kernel, subst::Kernel::Mmq { .. } | subst::Kernel::MmqFixup { .. });
         let vals: Vec<u64> = if needs_values { arg_values(args) } else { Vec::new() };
@@ -95,12 +145,15 @@ pub(super) fn launch(
         } else if let Some(mapped) = plan.map_launch(geometry.0, geometry.1, &vals)
             && let Some(kernel) = native(api, context, plan, stream)
         {
-            match context.streams.launch(api, &context.backend, kernel, stream, mapped, args) {
+            match target.issue(api, context, kernel, mapped, args) {
                 Ok(()) => {
                     if matches!(plan.kernel, subst::Kernel::Mmq { .. }) {
                         context.subst.pending_fixup = Some((vals[4], vals[5]));
                     }
-                    shadow_check(api, context, plan, translated, stream, geometry, args);
+                    // The check reads the destination right after the launch: stream launches only.
+                    if matches!(target, Target::Stream(_)) {
+                        shadow_check(api, context, plan, translated, stream, geometry, args);
+                    }
                     return Ok(());
                 }
                 Err(error) => {
@@ -110,7 +163,7 @@ pub(super) fn launch(
             }
         }
     }
-    context.streams.launch(api, &context.backend, translated, stream, geometry, args)
+    target.issue(api, context, translated, geometry, args)
 }
 
 /// Launch words as integers (pointers as addresses).
