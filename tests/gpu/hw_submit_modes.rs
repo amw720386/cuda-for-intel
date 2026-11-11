@@ -5,7 +5,9 @@
 //!   (b) launch + cuStreamSynchronize round trip;
 //!   (c) a decode-shaped chain of 702 launches per "token" (Qwen2.5-0.5B layer pattern: many 1-19 block element-wise
 //!       launches, 128/896/4864-block matrix-vector shapes, one 151936-block lm_head), ending like ggml's decode step with
-//!       an async 4-byte device-to-host copy and cuStreamSynchronize; ms/token, host us/launch and us/launch to completion.
+//!       an async 4-byte device-to-host copy and cuStreamSynchronize; ms/token, host us/launch and us/launch to completion;
+//!   (d) chain (c) with an event record, a wait on it from a second stream and a 4-byte DtoH copy after every layer, so
+//!       deferred and batched modes are measured with realistic flush points.
 //!
 //! The kernel only lets thread 0 of each block add 1.0 to `p[blockIdx.x]`, so the cost is dispatch, not bandwidth; the
 //! chain is verified exactly afterwards (`p[j]` counts the launches whose grid exceeds `j`).
@@ -144,6 +146,9 @@ fn hw_submit_modes() {
         cuMemcpyDtoH_v2(*mut c_void, u64, usize),
         cuMemcpyDtoHAsync_v2(*mut c_void, u64, usize, Handle),
         cuLaunchKernel(Handle, u32, u32, u32, u32, u32, u32, u32, Handle, *mut Handle, *mut Handle),
+        cuEventCreate(*mut Handle, u32),
+        cuEventRecord(Handle, Handle),
+        cuStreamWaitEvent(Handle, Handle, u32),
     );
     ok!(cuInit(0));
     let spec = std::env::var("CFI_SUBMIT_MODES").unwrap_or_else(|_| DEFAULT_MODES.to_owned());
@@ -151,10 +156,10 @@ fn hw_submit_modes() {
     let chain = decode_chain();
     let blocks = LM_HEAD as usize;
     println!(
-        "== submission modes: (a) 1000 trivial launches x 7, (b) launch+sync x 200, (c) decode chain of {} launches x {tokens} tokens",
+        "== submission modes: (a) 1000 trivial launches x 7, (b) launch+sync x 200, (c) decode chain of {} launches x {tokens} tokens, (d) the same with an event record, a cross-stream wait and a 4-byte DtoH copy after every layer (29 launches)",
         chain.len()
     );
-    println!("mode            | (a) host us/l | (a) done us/l | (b) launch+sync us | (c) ms/token | (c) host us/l | (c) done us/l");
+    println!("mode            | (a) host us/l | (a) done us/l | (b) launch+sync us | (c) ms/token | (c) host us/l | (c) done us/l | (d) ms/token | (d) done us/l");
     for (name, vars) in parse_modes(&spec) {
         for key in KNOWN_VARS {
             unsafe { std::env::remove_var(key) };
@@ -179,6 +184,12 @@ fn hw_submit_modes() {
         ok!(cuMemAlloc_v2(&mut buffer, blocks * 4));
         let mut pinned = null_mut();
         ok!(cuMemAllocHost_v2(&mut pinned, 4));
+        let mut side_pinned = null_mut();
+        ok!(cuMemAllocHost_v2(&mut side_pinned, 4));
+        let mut side = null_mut();
+        ok!(cuStreamCreate(&mut side, 1));
+        let mut marker = null_mut();
+        ok!(cuEventCreate(&mut marker, 2)); // CU_EVENT_DISABLE_TIMING
         let launch = |grid: u32, block: u32, n: u32| {
             let mut pointer = buffer;
             let mut count = n;
@@ -210,42 +221,56 @@ fn hw_submit_modes() {
             trip.push(start.elapsed().as_secs_f64() * 1e6);
         }
 
-        // (c) decode-shaped chain, verified exactly.
-        ok!(cuMemsetD8Async(buffer, 0, blocks * 4, stream));
-        let (mut token_ms, mut chain_host, mut chain_done) = (Vec::new(), Vec::new(), Vec::new());
-        let runs = tokens + 2;
-        for run in 0..runs {
-            let start = Instant::now();
-            for &(grid, block) in &chain {
-                launch(grid, block, grid);
+        // (c) decode-shaped chain and (d) the same with ggml-like flush points, verified exactly.
+        let decode = |flush_points: bool| {
+            ok!(cuMemsetD8Async(buffer, 0, blocks * 4, stream));
+            let (mut token_ms, mut chain_host, mut chain_done) = (Vec::new(), Vec::new(), Vec::new());
+            let runs = tokens + 2;
+            for run in 0..runs {
+                let start = Instant::now();
+                for (index, &(grid, block)) in chain.iter().enumerate() {
+                    launch(grid, block, grid);
+                    if flush_points && index % 29 == 28 {
+                        ok!(cuEventRecord(marker, stream));
+                        ok!(cuStreamWaitEvent(side, marker, 0));
+                        ok!(cuMemcpyDtoHAsync_v2(side_pinned, buffer, 4, stream));
+                    }
+                }
+                let issued = start.elapsed();
+                ok!(cuMemcpyDtoHAsync_v2(pinned, buffer, 4, stream));
+                ok!(cuStreamSynchronize(stream));
+                ok!(cuStreamSynchronize(side));
+                let total = start.elapsed();
+                assert_eq!(unsafe { pinned.cast::<f32>().read() }, ((run + 1) * chain.len()) as f32, "{name}: chain lost a launch");
+                if run >= 2 {
+                    token_ms.push(total.as_secs_f64() * 1e3);
+                    chain_host.push(issued.as_secs_f64() * 1e6 / chain.len() as f64);
+                    chain_done.push(total.as_secs_f64() * 1e6 / chain.len() as f64);
+                }
             }
-            let issued = start.elapsed();
-            ok!(cuMemcpyDtoHAsync_v2(pinned, buffer, 4, stream));
-            ok!(cuStreamSynchronize(stream));
-            let total = start.elapsed();
-            assert_eq!(unsafe { pinned.cast::<f32>().read() }, ((run + 1) * chain.len()) as f32, "{name}: chain lost a launch");
-            if run >= 2 {
-                token_ms.push(total.as_secs_f64() * 1e3);
-                chain_host.push(issued.as_secs_f64() * 1e6 / chain.len() as f64);
-                chain_done.push(total.as_secs_f64() * 1e6 / chain.len() as f64);
+            let mut out = vec![0f32; blocks];
+            ok!(cuMemcpyDtoH_v2(out.as_mut_ptr().cast(), buffer, blocks * 4));
+            for j in [0usize, 1, 3, 4, 13, 18, 19, 127, 128, 895, 896, 4863, 4864, blocks - 1] {
+                let per_token = chain.iter().filter(|&&(grid, _)| grid as usize > j).count();
+                assert_eq!(out[j], (runs * per_token) as f32, "{name}: p[{j}] after {runs} chains");
             }
-        }
-        let mut out = vec![0f32; blocks];
-        ok!(cuMemcpyDtoH_v2(out.as_mut_ptr().cast(), buffer, blocks * 4));
-        for j in [0usize, 1, 3, 4, 13, 18, 19, 127, 128, 895, 896, 4863, 4864, blocks - 1] {
-            let per_token = chain.iter().filter(|&&(grid, _)| grid as usize > j).count();
-            assert_eq!(out[j], (runs * per_token) as f32, "{name}: p[{j}] after {runs} chains");
-        }
+            (median(&mut token_ms), median(&mut chain_host), median(&mut chain_done))
+        };
+        let (token_ms, chain_host, chain_done) = decode(false);
+        let (flush_ms, _, flush_done) = decode(true);
         println!(
-            "{name:15} | {:13.2} | {:13.2} | {:18.2} | {:12.3} | {:13.2} | {:13.2}",
+            "{name:15} | {:13.2} | {:13.2} | {:18.2} | {:12.3} | {:13.2} | {:13.2} | {:12.3} | {:13.2}",
             median(&mut host),
             median(&mut done),
             median(&mut trip),
-            median(&mut token_ms),
-            median(&mut chain_host),
-            median(&mut chain_done),
+            token_ms,
+            chain_host,
+            chain_done,
+            flush_ms,
+            flush_done,
         );
         ok!(cuMemFreeHost(pinned));
+        ok!(cuMemFreeHost(side_pinned));
         ok!(cuCtxDestroy_v2(ctx));
     }
     for key in KNOWN_VARS.iter().chain(&["CUDA_FOR_INTEL_LOG_SUBMIT"]) {
