@@ -485,6 +485,7 @@ loader_api! {
     zeModuleBuildLogDestroy(Raw),
     zeKernelCreate(Raw, *const KernelDesc, *mut Raw),
     zeKernelDestroy(Raw),
+    // Called only through arg_cache::apply, which skips values the kernel already holds.
     zeKernelSetGroupSize(Raw, u32, u32, u32),
     zeKernelSetArgumentValue(Raw, u32, usize, *const c_void),
     zeCommandListAppendLaunchKernel(Raw, Raw, *const GroupCount, Raw, u32, *mut Raw),
@@ -706,9 +707,14 @@ impl Module {
             })?;
             self.kernels.pop();
         }
-        call("zeModuleDestroy", || unsafe {
+        // The module's globals die with it, and their addresses may be arguments of kernels in
+        // other modules: drop cached argument values on both sides of the destroy.
+        arg_cache::memory_freed();
+        let destroyed = call("zeModuleDestroy", || unsafe {
             (api.zeModuleDestroy)(self.handle.0)
-        })
+        });
+        arg_cache::memory_freed();
+        destroyed
     }
 }
 
@@ -865,13 +871,16 @@ impl Context {
     }
 
     pub(crate) fn free(&self, api: &Api, address: usize) -> Result<(), Error> {
+        // Before and after: no value recorded around the free survives it.
         arg_cache::memory_freed();
-        call("zeMemFree", || unsafe {
+        let freed = call("zeMemFree", || unsafe {
             (api.zeMemFree)(
                 self.handle.0,
                 std::ptr::with_exposed_provenance_mut(address),
             )
-        })
+        });
+        arg_cache::memory_freed();
+        freed
     }
 
     pub(crate) unsafe fn copy(

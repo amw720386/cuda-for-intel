@@ -9,6 +9,15 @@
 //! values (a new allocation at a freed address must be re-set). Only 1, 2, 4 and 8-byte values
 //! are cached; ggml passes nothing wider. Entries are dropped when the
 //! kernel or its context is destroyed, before the handle can be reused.
+//! Module destruction counts as a free (module globals can be arguments of other modules'
+//! kernels).
+//!
+//! This relies on the driver resolving pointer arguments when they are set and capturing every
+//! argument at append time, as the Level Zero specification and Intel's driver do. Only group
+//! size and argument values are tracked: other kernel state (`zeKernelSetIndirectAccess`,
+//! `zeKernelSetCacheConfig`) is set at kernel creation and never cached. Every argument and
+//! group-size call must go through `apply`: a direct `zeKernelSetArgumentValue` or
+//! `zeKernelSetGroupSize` elsewhere would desync the cache.
 //! `CUDA_FOR_INTEL_ARG_CACHE=0` turns the cache off.
 use super::{Error, Raw};
 use crate::ptx::fxhash::FxHashMap;

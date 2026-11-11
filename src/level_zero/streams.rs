@@ -222,6 +222,7 @@ impl CommandList {
     ) -> Result<(), Error> {
         let kernel = kernel.0;
         let ([x, y, z], block) = geometry;
+        // The only caller of zeKernelSetGroupSize / zeKernelSetArgumentValue (see arg_cache).
         super::arg_cache::apply(
             kernel,
             block,

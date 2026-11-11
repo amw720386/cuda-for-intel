@@ -13,11 +13,11 @@ thread_local! {
     static LOCAL: RefCell<Vec<Fault>> = const { RefCell::new(Vec::new()) };
 }
 static WORKER: Mutex<Option<Fault>> = Mutex::new(None);
-/// Set once a worker fault or pause was ever armed: until then `status` skips the
-/// `thread::current()` name check, which otherwise costs every native call of every test.
 /// Faults armed by `nth` on any thread and not consumed yet: while zero, `status` skips the
 /// thread-local lookup.
 static LOCAL_ARMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Set once a worker fault or pause was ever armed: until then `status` skips the
+/// `thread::current()` name check, which otherwise costs every native call of every test.
 static WORKER_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 type Pause = (mpsc::Sender<()>, mpsc::Receiver<()>);
 static PAUSE_EXECUTE: Mutex<Option<Pause>> = Mutex::new(None);
