@@ -20,6 +20,7 @@ pub(super) mod extra;
 #[cfg(all(test, windows))]
 mod batch_tests;
 mod batch_wake;
+mod inflight;
 mod cross_device;
 pub(super) mod events;
 pub(super) mod timing;
@@ -79,8 +80,8 @@ struct Stream {
     blocking: bool,
     dirty: bool,
     generation: u64,
-    /// Work-groups appended since the stream last drained (see `inflight_limit`).
-    queued_groups: u64,
+    /// Work-groups queued and not known complete (see `inflight`).
+    window: inflight::Window,
     pending: VecDeque<Submission>,
     append_error: Option<CuResult>,
     capture: Option<Capture>,
@@ -121,7 +122,7 @@ impl Stream {
             blocking,
             dirty: false,
             generation: 0,
-            queued_groups: 0,
+            window: inflight::Window::default(),
             pending: VecDeque::new(),
             append_error: None,
             capture: None,
@@ -288,7 +289,7 @@ impl Stream {
     }
 
     fn complete(&mut self) {
-        self.queued_groups = 0;
+        self.window.complete();
         self.pending.clear();
         self.dirty = false;
     }
@@ -311,6 +312,7 @@ pub(super) struct Streams {
     /// Events recorded while their stream was capturing: event -> (capture, stream, op sequence).
     pub(super) captured: HashMap<usize, (Capture, usize, u64)>,
     policy: Option<Policy>,
+    inflight: inflight::Config,
     wake: Arc<Wake>,
     worker: Option<JoinHandle<Result<(), CuResult>>>,
     event_waiters: Arc<()>,
@@ -331,9 +333,28 @@ impl Streams {
             .map(|_| batch::spawn(owner, Arc::clone(&wake)))
             .transpose()?;
         let legacy = Stream::new(api, context, true, policy, &wake)?;
+        let inflight = inflight::Config::configured();
+        if std::env::var_os("CUDA_FOR_INTEL_LOG_SUBMIT").is_some() {
+            // Lets benchmarks show which submission settings a context actually uses.
+            let submit = policy.map_or_else(
+                || "immediate".to_owned(),
+                |policy| {
+                    format!(
+                        "batch cap {} delay {:?} high-resolution {}",
+                        policy.cap, policy.delay, policy.high_resolution
+                    )
+                },
+            );
+            eprintln!(
+                "cuda-for-intel: context submit={submit} inflight limit={} mode={}",
+                inflight.limit,
+                if inflight.window { "window" } else { "drain" }
+            );
+        }
         Ok(Self {
             legacy: Some(legacy),
             policy,
+            inflight,
             wake,
             worker,
             live: HashMap::new(),
@@ -485,19 +506,45 @@ impl Streams {
         // Level Zero rejects further appends with OUT_OF_DEVICE_MEMORY when too much large-grid
         // work is queued and unfinished, so bound the outstanding work-groups per stream.
         let groups: u64 = geometry.0.iter().map(|&g| u64::from(g)).product();
-        let limit = inflight_group_limit();
-        let queued = self.get(key)?.queued_groups;
-        if limit != 0 && queued != 0 && should_drain(queued, groups, limit) {
-            self.wait_stream(api, key, u64::MAX)?;
+        let config = self.inflight;
+        if config.needs_room(self.get(key)?.window.queued(), groups) {
+            if config.window {
+                self.make_room(api, key, groups)?;
+            } else {
+                self.wait_stream(api, key, u64::MAX)?;
+            }
         }
-        let result = self.record_ordered(api, context, key, |list, signal, waits| {
+        let checkpoint = self.get(key)?.window.wants_checkpoint(config, groups);
+        let result = self.record_signalled(api, context, key, checkpoint, |list, signal, waits| {
             list.launch(api, kernel, geometry, args, signal, waits)
         });
         if result.is_ok() {
             let stream = self.get_mut(key)?;
-            stream.queued_groups = stream.queued_groups.saturating_add(groups);
+            let fence = if checkpoint { stream.tail() } else { None };
+            stream.window.launched(groups, fence);
         }
         result
+    }
+
+    /// Window mode: wait for the oldest checkpoints of `key` until `groups` more fit under the
+    /// limit, so the stream keeps the rest of its queue running. Without a checkpoint to wait
+    /// for (one launch larger than the interval), fall back to a full drain.
+    fn make_room(&mut self, api: &Api, key: usize, groups: u64) -> Result<(), CuResult> {
+        let config = self.inflight;
+        let stream = self.get_mut(key)?;
+        // A batching stream may still hold its checkpoint in an unsubmitted list.
+        stream.flush(api)?;
+        while config.needs_room(stream.window.queued(), groups) {
+            let Some((at, fence)) = stream.window.oldest() else {
+                return self.wait_stream(api, key, u64::MAX);
+            };
+            fence
+                .synchronize(api.event_wait_fn())
+                .inspect_err(|error| stream.health.observe(error))
+                .map_err(backend_error)?;
+            stream.window.retire(at);
+        }
+        Ok(())
     }
 
     pub(super) unsafe fn copy(
@@ -536,9 +583,25 @@ impl Streams {
             &[Arc<Fence>],
         ) -> Result<(), crate::level_zero::Error>,
     ) -> Result<(), CuResult> {
+        self.record_signalled(api, context, key, false, append)
+    }
+
+    /// [`Self::record_ordered`], with a completion fence even when stream ordering needs none.
+    fn record_signalled(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        signalled: bool,
+        append: impl FnOnce(
+            &CommandList,
+            Option<&Fence>,
+            &[Arc<Fence>],
+        ) -> Result<(), crate::level_zero::Error>,
+    ) -> Result<(), CuResult> {
         let blocking = self.get(key)?.blocking;
         self.collect_retired(api)?;
-        let signal = if blocking && self.track_legacy {
+        let signal = if signalled || blocking && self.track_legacy {
             Some(self.next_fence(api, context)?)
         } else {
             None
@@ -1043,39 +1106,5 @@ mod tests {
         .unwrap();
         assert_eq!(cuStreamDestroy_v2(idle), Success);
         assert_eq!(cuCtxDestroy_v2(context), Success);
-    }
-}
-
-/// Default cap on work-groups queued on one stream before waiting for it to drain.
-const DEFAULT_MAX_INFLIGHT_GROUPS: u64 = 65_536;
-
-/// `CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS`: 0 disables the window.
-fn inflight_group_limit() -> u64 {
-    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        std::env::var("CUDA_FOR_INTEL_MAX_INFLIGHT_GROUPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_INFLIGHT_GROUPS)
-    })
-}
-
-fn should_drain(queued: u64, next: u64, limit: u64) -> bool {
-    queued.saturating_add(next) > limit
-}
-
-#[cfg(test)]
-mod inflight_window_tests {
-    use super::*;
-
-    #[test]
-    fn drains_only_when_outstanding_groups_would_exceed_the_limit() {
-        assert!(!should_drain(0, 14_336, 65_536));
-        assert!(!should_drain(14_336 * 3, 14_336, 65_536));
-        assert!(should_drain(14_336 * 4, 14_336, 65_536));
-        assert!(!should_drain(60_000, 1, 65_536));
-        assert!(should_drain(u64::MAX, 1, 65_536));
-        // many tiny launches still queue deeply
-        assert!(!should_drain(50_000, 1, 65_536));
     }
 }
