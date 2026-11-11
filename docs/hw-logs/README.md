@@ -13,3 +13,5 @@ Final tree (all feature branches, tier2/tier3 translator, copy-queue fix): 215 l
 (the 3-minute-plus `hw_stock_ggml_kernels_compile` is skipped in routine runs), and
 `gated_forge_copy_queue_timestamps` now passes in 0.5 s (test-lib-copyqueue.log).
 See ollama-stock-v0.12.6.md for the stock Ollama first-token run.
+
+See vulkan-baseline-2026-11-10.md for the stock Ollama Vulkan and CPU reference numbers (same request shape and Q8_0 file as `scripts/bench-decode.ps1`).

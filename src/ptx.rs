@@ -1012,7 +1012,19 @@ pub(crate) fn translate_prepared_entry(prepared: &str, name: &str) -> Result<Tra
     // every entry of a multi-megabyte module (the result is the same: other entries cannot
     // influence this one).
     let narrowed = parse::narrow_to_entry(prepared, name);
-    let (entries, vars) = parse::parse_module(narrowed.as_deref().unwrap_or(prepared))?;
+    translate_narrowed_entry(narrowed.as_deref().unwrap_or(prepared), name)
+}
+
+/// The module-scope statements of normalised `prepared` that precede `name`, plus that entry
+/// alone (what [`translate_prepared_entry`] parses). `None` when the text is not normalised.
+pub(crate) fn narrow_prepared(prepared: &str, name: &str) -> Option<String> {
+    parse::narrow_to_entry(prepared, name)
+}
+
+/// [`translate_prepared_entry`] for text that is already narrowed to `name`: it is parsed as is,
+/// without building (and caching) a module index for it.
+pub(crate) fn translate_narrowed_entry(narrowed: &str, name: &str) -> Result<Translation, Error> {
+    let (entries, vars) = parse::parse_module(narrowed)?;
     let entry = entries
         .into_iter()
         .find(|entry| entry.name == name)

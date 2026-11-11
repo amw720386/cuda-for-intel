@@ -113,6 +113,10 @@ struct CudaContext {
     library_modules: HashMap<usize, usize>,
     /// Per-kernel modules of libraries, keyed by library and kernel name (lazy compilation).
     entry_modules: HashMap<(usize, CString), usize>,
+    /// Dynamic-shared-window variants of lazily translated kernels, keyed by (`CUfunction`, window
+    /// bytes): `Some((child module, function, owning lazy module))`, or `None` when the kernel cannot
+    /// be specialised.
+    dyn_variants: HashMap<(usize, u32), Option<(usize, usize, usize)>>,
     /// Allocation-table entries that belong to a module variable, not to cuMemAlloc.
     module_globals: BTreeSet<usize>,
     functions: HashMap<usize, (usize, CString)>,
@@ -478,6 +482,7 @@ impl State {
                 modules: HashMap::new(),
                 library_modules: HashMap::new(),
                 entry_modules: HashMap::new(),
+                dyn_variants: HashMap::new(),
                 module_globals: BTreeSet::new(),
                 functions: HashMap::new(),
                 local_storage: HashMap::new(),
@@ -1545,7 +1550,11 @@ pub extern "system" fn cuModuleUnload(module: Opaque) -> CuResult {
         if state(|state| Ok(state.libraries.images.contains_key(&module.addr()))).unwrap_or(false) {
             return InvalidHandle;
         }
-        let lazy = state(|state| Ok(state.lazy_modules.remove(&module.addr()))).unwrap_or(None);
+        let lazy = state(|state| {
+            drop_dynamic_variants(state, module.addr())?;
+            Ok(state.lazy_modules.remove(&module.addr()))
+        })
+        .unwrap_or(None);
         if let Some(lazy) = lazy {
             return status(state(|state| {
                 for ((ctx, _), (child, _)) in lazy.children.iter() {
@@ -1669,6 +1678,152 @@ fn validate_launch(
     Ok(())
 }
 
+/// Picks a variant of a lazily translated kernel (`cuModuleLoad*` of PTX, or a library, which is
+/// a lazy module too) whose dynamic shared window is cut to the launch's `requested` bytes, rounded
+/// up to a power of two of at least 1 KiB.
+///
+/// Every `extern __shared__` kernel is translated with the device-wide window (64 KiB on the Arc
+/// B390), and a workgroup reserves its whole shared array, so a kernel launched with a few KiB of
+/// dynamic shared memory still caps occupancy as if it used 64 KiB (`hw_slm_reservation_occupancy`:
+/// 4.4 to 7.2x slower). Only kernels whose full window is large (32 KiB or more in total) and
+/// launches needing at most 16 KiB qualify; everything else, and every failure to specialise,
+/// keeps `function`. Decisions, including "not possible", are cached per context, so the
+/// steady-state cost is one lookup; `CUDA_FOR_INTEL_DYN_SHARED_SPECIALIZE=0` turns it off.
+fn dynamic_shared_variant(state: &mut State, function: usize, requested: u32) -> Result<usize, CuResult> {
+    const LARGE_WINDOW: u32 = 32 * 1024;
+    const MAX_VARIANT: u32 = 16 * 1024;
+    if !library::dynamic_variants_enabled() {
+        return Ok(function);
+    }
+    let bytes = requested.max(library::MIN_DYNAMIC_VARIANT).next_power_of_two();
+    let key = current().ok_or(InvalidContext)?;
+    let context = state.contexts.get(&key).ok_or(ContextIsDestroyed)?;
+    if let Some(cached) = context.dyn_variants.get(&(function, bytes)) {
+        return Ok(cached.map_or(function, |(_, variant, _)| variant));
+    }
+    let total = context
+        .functions
+        .get(&function)
+        .and_then(|(module, name)| context.modules.get(module)?.entries.get(name))
+        .map_or(0, |entry| entry.shared_bytes);
+    let variant = if total >= LARGE_WINDOW && bytes <= MAX_VARIANT {
+        let source = state.lazy_modules.iter().find_map(|(&lazy, module)| {
+            module
+                .children
+                .iter()
+                .find(|((context, _), (_, child_function))| *context == key && *child_function == function)
+                .map(|((_, name), _)| (lazy, name.clone()))
+        });
+        match source {
+            Some((lazy, name)) => lazy_dynamic_variant(state, key, lazy, &name, bytes)?,
+            None => {
+                export_log(format_args!("dynamic shared variant skipped: function {function:#x} has no lazy source"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if total >= LARGE_WINDOW
+        && let Some((_, name)) = state.contexts.get(&key).and_then(|context| context.functions.get(&function))
+    {
+        export_log(format_args!(
+            "dynamic shared: {} requested {requested} B, window {total} B -> {}",
+            name.to_string_lossy(),
+            if variant.is_some() { format!("variant {bytes} B") } else { "full window".into() }
+        ));
+    }
+    let context = state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?;
+    context.dyn_variants.insert((function, bytes), variant);
+    Ok(variant.map_or(function, |(_, variant, _)| variant))
+}
+
+/// Translates `name` of lazy module `lazy` with its dynamic shared window cut to `bytes` and
+/// installs it in context `key`. `None` keeps the default kernel: no dynamic window, a source that
+/// reads `%dynamic_smem_size`, `%total_smem_size` or `%aggr_smem_size` (the translator folds them to
+/// the default window), module variables,
+/// or a translation or build the entry path cannot do.
+fn lazy_dynamic_variant(state: &mut State, key: usize, lazy: usize, name: &CStr, bytes: u32) -> Result<Option<(usize, usize, usize)>, CuResult> {
+    let started = std::time::Instant::now();
+    let module = state.lazy_modules.get(&lazy).ok_or(InvalidHandle)?;
+    let entry_name = name.to_string_lossy();
+    if library::reads_shared_size_register(&module.raw) {
+        export_log(format_args!("dynamic shared variant skipped: {entry_name}: module reads a shared-size special register"));
+        return Ok(None);
+    }
+    let cache_key = xcache::key(&module.raw, &format!("{entry_name}#dyn{bytes}"));
+    let raw_len = module.raw.len();
+    let translated = match xcache::get(cache_key) {
+        Some(hit) => hit,
+        None => {
+            let prepared = match module.prepared.get() {
+                Some(prepared) => prepared,
+                None => match ptx::prepare_module(&module.raw) {
+                    Ok(prepared) => module.prepared.get_or_init(|| prepared),
+                    Err(error) => {
+                        export_log(format_args!("dynamic shared variant skipped: {entry_name}: prepare failed: {error}"));
+                        return Ok(None);
+                    }
+                },
+            };
+            // Narrow the cached prepared text first (its module index is already built), then
+            // resize the small copy and translate it without indexing it again.
+            let Some(narrowed) = ptx::narrow_prepared(prepared, &entry_name) else {
+                export_log(format_args!("dynamic shared variant skipped: {entry_name}: entry not found in the prepared module"));
+                return Ok(None);
+            };
+            let names = library::extern_shared_names(&module.raw);
+            let Some(text) = library::resize_dynamic_window(&narrowed, &entry_name, bytes, &names) else {
+                export_log(format_args!("dynamic shared variant skipped: {entry_name}: no dynamic window in the prepared entry"));
+                return Ok(None);
+            };
+            match ptx::translate_narrowed_entry(&text, &entry_name) {
+                Ok(translated) => {
+                    xcache::put(cache_key, &translated);
+                    translated
+                }
+                Err(error) => {
+                    export_log(format_args!("dynamic shared variant fell back: {entry_name} ({bytes} B): {error}"));
+                    return Ok(None);
+                }
+            }
+        }
+    };
+    if !translated.globals.is_empty() {
+        export_log(format_args!("dynamic shared variant skipped: {entry_name}: uses module variables"));
+        return Ok(None);
+    }
+    let context = state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?;
+    context.check_live()?;
+    let child = match install_translation(&state.runtime, context, &mut state.next_handle, translated, raw_len, started.elapsed()) {
+        Ok(child) => child,
+        Err(InvalidPtx | NotSupported) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let function = module_function(&state.runtime.api, context, &mut state.next_handle, child, name)?;
+    export_log(format_args!("dynamic shared variant built: {entry_name} window {bytes} B ({} ms)", started.elapsed().as_millis()));
+    Ok(Some((child, function, lazy)))
+}
+
+/// Unloads the dynamic-shared variants built from lazy module (or library) `source`.
+pub(super) fn drop_dynamic_variants(state: &mut State, source: usize) -> Result<(), CuResult> {
+    for context in state.contexts.values_mut() {
+        let keys: Vec<_> = context
+            .dyn_variants
+            .iter()
+            .filter(|(_, variant)| variant.is_some_and(|(_, _, owner)| owner == source))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            if let Some(Some((child, _, _))) = context.dyn_variants.remove(&key) {
+                context.streams.wait_all(&state.runtime.api)?;
+                context.unload(&state.runtime.api, child)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn cuLaunchKernel(
     function: Opaque,
@@ -1690,6 +1845,7 @@ pub unsafe extern "system" fn cuLaunchKernel(
             if state.libraries.contains_kernel(function) {
                 function = library::kernel_function(state, function)?;
             }
+            function = dynamic_shared_variant(state, function, shared_bytes)?;
             let runtime = &state.runtime;
             let key = current().ok_or(InvalidContext)?;
             let context = state.contexts.get_mut(&key).ok_or(ContextIsDestroyed)?;
