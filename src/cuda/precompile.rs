@@ -2,8 +2,8 @@
 //!
 //! The first launch of every kernel normally pays PTX -> SPIR-V translation plus the Intel
 //! compiler. This walks executables, DLLs, fatbins and `.ptx` files, extracts the PTX record
-//! the runtime would pick from every fatbin frame (`cfi_fatbin::extract_ptx`, the same call
-//! the load paths use), translates every entry on all cores into the SPIR-V cache (`xcache`)
+//! the runtime would pick from every fatbin frame (`fatbin_ptx`, the same call the load paths
+//! use, so `CFI_FATBIN_ARCH` must match the application's), translates every entry on all cores into the SPIR-V cache (`xcache`)
 //! and builds each module into the Level Zero native-binary cache (`native_cache`).
 //!
 //! Cache correctness: nothing here has a key of its own. Each entry uses the key the lazy
@@ -293,7 +293,7 @@ pub(crate) fn scan_image(bytes: &[u8]) -> (Vec<Vec<u8>>, usize) {
         }
         frames += 1;
         // SAFETY: the frame header and the `file_size` record bytes it declares lie inside `bytes`.
-        if let Some(ptx) = unsafe { cfi_fatbin::extract_ptx(bytes[at..].as_ptr()) } {
+        if let Some(ptx) = unsafe { super::fatbin_ptx(bytes[at..].as_ptr()) } {
             found.push(ptx);
         }
         at += total.unwrap().next_multiple_of(4).max(4);

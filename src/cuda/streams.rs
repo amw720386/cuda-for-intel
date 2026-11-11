@@ -36,6 +36,8 @@ mod globals_tests;
 #[cfg(test)]
 mod graph_tests;
 #[cfg(test)]
+mod graph_record_tests;
+#[cfg(test)]
 mod timing_tests;
 #[cfg(test)]
 mod copy_validation_tests;
@@ -680,6 +682,44 @@ impl Streams {
         self.get_mut(key)?
             .record(api, context, signal.clone(), waits, append)
             .map(|()| signal)
+    }
+
+    /// Whether `key` appends to an immediate command list (no experimental batching), so a
+    /// recorded regular list can run in its order.
+    pub(super) fn is_immediate(&self, key: usize) -> Result<bool, CuResult> {
+        Ok(self.get(key)?.immediate.is_some())
+    }
+
+    /// Run the closed regular list `recorded` (holding `groups` work-groups) in the order of
+    /// stream `key`, under the in-flight bound. Returns the event that signals its completion.
+    /// Launches buffered by deferred submission are flushed first (`Stream::record`).
+    pub(super) fn launch_recorded(
+        &mut self,
+        api: &Api,
+        context: &Context,
+        key: usize,
+        recorded: &CommandList,
+        groups: u64,
+    ) -> Result<Arc<Fence>, CuResult> {
+        let config = self.inflight;
+        let counted = config.counted(groups);
+        if config.needs_room(self.get(key)?.window.queued(), counted) {
+            if config.window {
+                self.make_room(api, key, counted)?;
+            } else {
+                self.wait_stream(api, key, u64::MAX)?;
+            }
+        }
+        // `defer_next` stays false: Stream::record flushes the deferred submit list first.
+        let signal = self.record_signalled(api, context, key, true, |list, signal, waits| {
+            list.append_lists(api, recorded, signal, waits)
+        })?;
+        let fence = signal.ok_or(Unknown)?;
+        // The completion doubles as a window checkpoint in window mode.
+        self.get_mut(key)?
+            .window
+            .launched(counted, config.window.then(|| Arc::clone(&fence)));
+        Ok(fence)
     }
 
     fn legacy_waits(

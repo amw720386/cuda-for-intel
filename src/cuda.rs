@@ -18,6 +18,7 @@ mod export_table;
 mod gap_math;
 mod gaps;
 mod graph_api;
+mod graph_record;
 mod globals;
 mod graphs;
 #[cfg(windows)]
@@ -130,6 +131,12 @@ struct CudaContext {
     peer_access: BTreeSet<usize>,
     /// Validated native kernel substitutions (empty unless `CUDA_FOR_INTEL_SUBST` is set).
     subst: subst_hook::Natives,
+    /// Regular command lists recorded from executable graphs (`CUDA_FOR_INTEL_GRAPH_RECORD`).
+    graph_lists: graph_record::Recordings,
+    /// Counts frees (`allocations` removals, host allocations); with `freed`, recorded graphs
+    /// find out whether memory they use went away (`graph_record`).
+    alloc_frees: u64,
+    freed: graph_record::FreeLog,
 }
 
 /// A PTX module whose kernels are translated one at a time on first lookup.
@@ -524,6 +531,9 @@ impl State {
                 local_storage: HashMap::new(),
                 peer_access: BTreeSet::new(),
                 subst: Default::default(),
+                graph_lists: Default::default(),
+                alloc_frees: 0,
+                freed: Default::default(),
             },
         );
         if trace::enabled() {
@@ -661,6 +671,7 @@ impl CudaContext {
 
     fn destroy(&mut self, api: &Api) -> Result<(), CuResult> {
         self.streams.drain_for_teardown(api)?;
+        self.graph_lists.destroy(api)?;
         self.streams.release_timestamps(api, &self.backend)?;
         self.streams.destroy(api)?;
         while let Some(&key) = self.modules.keys().next() {
@@ -708,7 +719,9 @@ impl CudaContext {
             .free(api, base)
             .inspect_err(|error| self.backend.health.observe(error))
             .map_err(backend_error)?;
-        self.host_allocations.remove(&base);
+        if let Some(length) = self.host_allocations.remove(&base) {
+            self.note_free(base, length);
+        }
         self.staging.retain(|&slot| slot != base);
         self.staging_next = self.staging_next.min(self.staging.len());
         Ok(())
@@ -722,11 +735,16 @@ impl CudaContext {
             .free(api, base)
             .inspect_err(|error| self.backend.health.observe(error))
             .map_err(backend_error)?;
-        self.allocations.remove(&base);
+        if let Some(length) = self.allocations.remove(&base) {
+            self.note_free(base, length);
+        }
         Ok(())
     }
 
     fn unload(&mut self, api: &Api, key: usize) -> Result<(), CuResult> {
+        // Recorded graphs may name this module's kernels; callers drained the streams.
+        self.graph_lists.retire_all();
+        self.graph_lists.collect(api)?;
         self.retire_module_globals(key);
         let module = self.modules.get_mut(&key).ok_or(InvalidHandle)?;
         // A failed module destroy can follow a successful kernel destroy.
@@ -1357,13 +1375,28 @@ pub unsafe extern "system" fn cuModuleLoad(out: *mut Opaque, path: *const c_char
     })
 }
 
+/// The PTX record of a fatbin that the load paths translate: the first one, or with
+/// `CFI_FATBIN_ARCH=cc` (or a number) the one a CUDA driver would pick for the reported compute
+/// capability, so that host code choosing paths by `cc` and device code agree.
+///
+/// # Safety
+/// Same contract as `cfi_fatbin::extract_ptx`.
+pub(crate) unsafe fn fatbin_ptx(image: *const u8) -> Option<Vec<u8>> {
+    let arch = cfi_fatbin::configured_arch(reported_cc());
+    if let Some(arch) = arch {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| export_log_always(format_args!("fatbin: preferring PTX for compute_{arch}")));
+    }
+    unsafe { cfi_fatbin::extract_ptx_for(image, arch) }
+}
+
 /// Load a module from a fatbin wrapper or frame (the private CUDART_INTERFACE
 /// path used by cudart 11.x): pick the PTX record and translate it.
 pub(crate) unsafe fn load_module_from_fatbin(out: *mut Opaque, image: *const c_void) -> CuResult {
     if out.is_null() || image.is_null() {
         return InvalidValue;
     }
-    let Some(ptx) = (unsafe { cfi_fatbin::extract_ptx(image.cast()) }) else {
+    let Some(ptx) = (unsafe { fatbin_ptx(image.cast()) }) else {
         if let Some(message) = unsafe { cfi_fatbin::report_no_ptx("load_module_from_fatbin", image.cast()) } {
             export_log(format_args!("{message}"));
         }

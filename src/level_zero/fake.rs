@@ -79,7 +79,7 @@ pub(crate) enum Kind {
     DeviceAllocation,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Command {
     resources: Vec<Id>,
     waits: Vec<Id>,
@@ -105,6 +105,9 @@ struct List {
     mode: u32,
     closed: bool,
     commands: VecDeque<Command>,
+    /// Commands of a closed regular list after its first execution: a regular list can run
+    /// again until it is reset.
+    template: VecDeque<Command>,
 }
 
 struct Object {
@@ -144,6 +147,8 @@ struct Driver {
     paused: bool,
     waiters: usize,
     execute_result: Option<Status>,
+    /// Address the next allocation takes, as a real allocator may hand a freed one back.
+    reuse_address: Option<Id>,
     /// Fake device timestamp counter and its increment per timestamp write.
     clock: u64,
     clock_step: u64,
@@ -275,6 +280,32 @@ impl Driver {
             }
         }
         Ok(0)
+    }
+
+    /// Commands of the closed regular list `id` for one more execution.
+    fn executable(&mut self, id: Id) -> DriverResult<VecDeque<Command>> {
+        let list = self.lists.get_mut(&id).ok_or("missing execute list")?;
+        if !list.closed || list.mode != 0 {
+            return Err("appended an open, empty or immediate list");
+        }
+        if !list.commands.is_empty() {
+            list.template = std::mem::take(&mut list.commands);
+        }
+        if list.template.is_empty() {
+            return Err("executed an open or empty list");
+        }
+        let commands = list.template.clone();
+        if commands.iter().any(|command| {
+            command.resources.iter().any(|id| !self.objects.contains_key(id))
+                || command
+                    .waits
+                    .iter()
+                    .chain((command.signal != 0).then_some(&command.signal))
+                    .any(|id| !self.objects.contains_key(id))
+        }) {
+            return Err("executed a list referencing a destroyed resource");
+        }
+        Ok(commands)
     }
 
     fn submit(&mut self, job: Submission) {
@@ -509,6 +540,12 @@ pub(crate) fn set_clock(start: u64, step: u64) {
 /// Override the size reported for module variables (`None` restores the default).
 pub(crate) fn set_global_size(size: Option<usize>) {
     lock().as_mut().unwrap().global_size = size;
+}
+
+/// The next device or host allocation gets `address` (which must be free), like a pool or
+/// driver handing a freed address back.
+pub(crate) fn reuse_address(address: usize) {
+    lock().as_mut().unwrap().reuse_address = Some(address);
 }
 
 pub(crate) fn fail_after_execute(status: Status) {

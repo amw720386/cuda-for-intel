@@ -210,6 +210,7 @@ impl Dag {
             context: self.context,
             nodes: order.iter().map(|&i| self.entries[i].node.clone()).collect(),
             ids: order.iter().map(|&i| self.entries[i].id).collect(),
+            version: next_exec_version(),
         }
     }
 
@@ -242,6 +243,15 @@ pub(super) struct Exec {
     pub(super) context: usize,
     pub(super) nodes: Arc<[Node]>,
     pub(super) ids: Arc<[usize]>,
+    /// Unique per content: every change of `nodes` takes a new value, so a command list
+    /// recorded from this graph (`graph_record`) is stale when the versions differ.
+    pub(super) version: u64,
+}
+
+static EXEC_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_exec_version() -> u64 {
+    EXEC_VERSION.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Exec {
@@ -250,6 +260,7 @@ impl Exec {
         let mut nodes = self.nodes.to_vec();
         nodes[index] = node;
         self.nodes = nodes.into();
+        self.version = next_exec_version();
         Ok(())
     }
 
@@ -735,6 +746,37 @@ impl Kernel {
         Ok(())
     }
 
+    /// Append this launch to the regular list `list` that later runs on `stream`, with the
+    /// same substitution as a replay.
+    pub(super) fn record(
+        &self,
+        api: &Api,
+        context: &mut CudaContext,
+        list: &crate::level_zero::CommandList,
+        stream: usize,
+    ) -> Result<(), CuResult> {
+        let entry = self.entry(context)?;
+        let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
+        let subst_plan = entry.subst.clone();
+        let args: Vec<_> = self
+            .args
+            .iter()
+            .map(|arg| KernelArg {
+                value: arg.as_ptr().cast(),
+                size: arg.len(),
+            })
+            .collect();
+        super::subst_hook::launch_to(
+            api,
+            context,
+            subst_plan.as_ref(),
+            kernel,
+            super::subst_hook::Target::List { list, stream },
+            self.geometry,
+            &args,
+        )
+    }
+
     fn replay(&self, api: &Api, context: &mut CudaContext, stream: usize) -> Result<(), CuResult> {
         let entry = self.entry(context)?;
         let (_, kernel) = entry.function.ok_or(InvalidHandle)?;
@@ -1104,12 +1146,15 @@ pub unsafe extern "system" fn cuGraphInstantiateWithParams(
 pub extern "system" fn cuGraphExecDestroy(graph: Opaque) -> CuResult {
     trace::call("cuGraphExecDestroy", || {
         status(state(|state| {
-            state
+            let exec = state
                 .graphs
                 .executable
                 .remove(&graph.addr())
-                .map(|_| ())
-                .ok_or(InvalidHandle)
+                .ok_or(InvalidHandle)?;
+            if let Some(context) = state.contexts.get_mut(&exec.context) {
+                context.graph_lists.retire(graph.addr());
+            }
+            Ok(())
         }))
     })
 }
@@ -1146,6 +1191,7 @@ fn exec_update(exec: Opaque, graph: Opaque) -> (CuResult, c_int) {
         }
         old.nodes = new.nodes;
         old.ids = new.ids;
+        old.version = new.version;
         Ok(())
     });
     (status_of(outcome), result)
@@ -1216,7 +1262,7 @@ pub extern "system" fn cuGraphUpload(graph: Opaque, stream: Opaque) -> CuResult 
     })
 }
 
-fn flatten<'a>(nodes: &'a [Node], steps: &mut Vec<&'a Node>) {
+pub(super) fn flatten<'a>(nodes: &'a [Node], steps: &mut Vec<&'a Node>) {
     for node in nodes {
         match node {
             Node::Child(children) => flatten(children, steps),
@@ -1243,6 +1289,7 @@ pub(super) fn call_host(stream: Opaque, host: HostFn) -> CuResult {
 #[unsafe(no_mangle)]
 pub extern "system" fn cuGraphLaunch(graph: Opaque, stream: Opaque) -> CuResult {
     trace::call("cuGraphLaunch", || {
+        let exec_handle = graph.addr();
         let prepared = state(|state| {
             let graph = state
                 .graphs
@@ -1258,12 +1305,23 @@ pub extern "system" fn cuGraphLaunch(graph: Opaque, stream: Opaque) -> CuResult 
                 .ok_or(ContextIsDestroyed)?;
             context.check_live()?;
             let key = context.streams.launch_key(stream)?;
-            for node in &*graph.nodes {
-                node.validate(context)?;
+            // A recorded graph whose nodes and the allocations they name are unchanged since
+            // its last launch needs no second walk over every node.
+            if !(super::graph_record::enabled()
+                && context.graph_lists.validated(exec_handle, graph.version, context.alloc_frees))
+            {
+                for node in &*graph.nodes {
+                    node.validate(context)?;
+                }
             }
             if let Some(capture) = context.streams.capture(key)? {
                 // Launching into a capturing stream adds the graph as a child node.
                 capture.push(key, Node::Child(Arc::clone(&graph.nodes)))?;
+                return Ok(None);
+            }
+            if super::graph_record::enabled()
+                && super::graph_record::launch(&state.runtime, context, exec_handle, graph.version, &graph.nodes, key)?
+            {
                 return Ok(None);
             }
             Ok(Some((graph.context, key, Arc::clone(&graph.nodes))))

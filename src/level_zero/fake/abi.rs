@@ -57,6 +57,7 @@ fn list_create(ctx: Raw, device: Raw, ordinal: u32, mode: u32, out: *mut Raw) ->
                 mode,
                 closed: false,
                 commands: VecDeque::new(),
+                template: VecDeque::new(),
             },
         );
         unsafe { out.write(without_provenance_mut(id)) };
@@ -110,6 +111,7 @@ unsafe extern "system" fn list_reset(list: Raw) -> Status {
             return Err("reset a list without executing it");
         }
         list.closed = false;
+        list.template.clear();
         Ok(0)
     })
 }
@@ -129,11 +131,7 @@ unsafe extern "system" fn execute(queue: Raw, count: u32, lists: *mut Raw, fence
         if driver.get(id, Kind::List)?.parent != context || driver.pending_on(id) {
             return Err("executed a foreign or in-flight list");
         }
-        let list = driver.lists.get_mut(&id).ok_or("missing execute list")?;
-        if !list.closed || list.commands.is_empty() {
-            return Err("executed an open or empty list");
-        }
-        let commands = std::mem::take(&mut list.commands);
+        let commands = driver.executable(id)?;
         driver.submit(Submission {
             list: id,
             queue: queue.addr(),
@@ -145,7 +143,8 @@ unsafe extern "system" fn execute(queue: Raw, count: u32, lists: *mut Raw, fence
 }
 
 /// `zeCommandListImmediateAppendCommandListsExp`: the regular lists' commands run on the
-/// immediate list in order. Each list stays in flight (cannot be reset) until its commands finish.
+/// immediate list in order. Each list stays in flight (cannot be reset or appended again) until
+/// its commands finish; a closed list can be appended again after that (graph replay).
 unsafe extern "system" fn append_lists(
     immediate: Raw,
     count: u32,
@@ -171,11 +170,7 @@ unsafe extern "system" fn append_lists(
             if driver.get(id, Kind::List)?.parent != context || driver.pending_on(id) {
                 return Err("appended a foreign or in-flight list");
             }
-            let list = driver.lists.get_mut(&id).ok_or("missing appended list")?;
-            if list.mode != 0 || !list.closed || list.commands.is_empty() {
-                return Err("appended an open, empty or immediate list");
-            }
-            for mut command in std::mem::take(&mut list.commands) {
+            for mut command in driver.executable(id)? {
                 command.resources.push(id);
                 commands.push_back(command);
             }
@@ -222,7 +217,17 @@ fn allocate(ctx: Raw, device: Option<Raw>, bytes: usize, kind: Kind, out: *mut R
         } else {
             driver.get(ctx.addr(), Kind::Context)?;
         }
-        let id = driver.create(ctx.addr(), kind);
+        let id = match driver.reuse_address.take() {
+            Some(address) if !driver.objects.contains_key(&address) => {
+                let saved = driver.next;
+                driver.next = address - 0x10000;
+                let id = driver.create(ctx.addr(), kind);
+                driver.next = saved;
+                id
+            }
+            Some(_) => return Err("reused an address that is still allocated"),
+            None => driver.create(ctx.addr(), kind),
+        };
         driver
             .objects
             .get_mut(&id)
