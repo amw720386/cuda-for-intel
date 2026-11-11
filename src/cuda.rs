@@ -31,6 +31,8 @@ mod stubs;
 mod subst_hook;
 mod texture;
 mod cfiprof;
+#[cfg(windows)]
+mod gpuprof;
 mod trace;
 
 pub(crate) fn profile_on() -> bool {
@@ -1981,6 +1983,13 @@ pub unsafe extern "system" fn cuLaunchKernel(
             } else {
                 None
             };
+            #[cfg(windows)]
+            let gpu_slot = if gpuprof::enabled() {
+                let info = &runtime.devices[context.device as usize].info;
+                gpuprof::before(&runtime.api, info, &context.backend, key, &launched)
+            } else {
+                None
+            };
             let launch_result = subst_hook::launch(
                 &runtime.api,
                 context,
@@ -1990,6 +1999,8 @@ pub unsafe extern "system" fn cuLaunchKernel(
                 (grid, block),
                 &args,
             );
+            #[cfg(windows)]
+            gpuprof::after(&runtime.api, gpu_slot, launch_result.is_ok());
             if let Some(pending) = copyback {
                 launch_result?;
                 copyback::after(&runtime.api, context, stream, pending, &launched, (grid, block), &args);
