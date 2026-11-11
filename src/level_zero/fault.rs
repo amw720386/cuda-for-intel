@@ -13,6 +13,12 @@ thread_local! {
     static LOCAL: RefCell<Vec<Fault>> = const { RefCell::new(Vec::new()) };
 }
 static WORKER: Mutex<Option<Fault>> = Mutex::new(None);
+/// Set once a worker fault or pause was ever armed: until then `status` skips the
+/// `thread::current()` name check, which otherwise costs every native call of every test.
+/// Faults armed by `nth` on any thread and not consumed yet: while zero, `status` skips the
+/// thread-local lookup.
+static LOCAL_ARMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static WORKER_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 type Pause = (mpsc::Sender<()>, mpsc::Receiver<()>);
 static PAUSE_EXECUTE: Mutex<Option<Pause>> = Mutex::new(None);
 
@@ -22,6 +28,7 @@ pub(crate) fn arm(call: &'static str, status: Status) {
 
 pub(crate) fn nth(call: &'static str, occurrence: usize, status: Status) {
     assert!(occurrence != 0);
+    LOCAL_ARMED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     LOCAL.with_borrow_mut(|faults| {
         faults.push(Fault {
             call,
@@ -36,6 +43,7 @@ pub(crate) fn consumed() -> bool {
 }
 
 pub(crate) fn arm_worker(call: &'static str, status: Status) {
+    WORKER_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(
         WORKER
             .lock()
@@ -50,6 +58,7 @@ pub(crate) fn arm_worker(call: &'static str, status: Status) {
 }
 
 pub(crate) fn pause_worker_execute() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    WORKER_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
     let (entered, observed) = mpsc::channel();
     let (resume, paused) = mpsc::channel();
     assert!(
@@ -63,9 +72,11 @@ pub(crate) fn pause_worker_execute() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
 }
 
 pub(crate) fn status(call: &str) -> Option<Status> {
-    if let Some(status) = LOCAL.with_borrow_mut(|faults| {
+    if LOCAL_ARMED.load(std::sync::atomic::Ordering::SeqCst) != 0
+        && let Some(status) = LOCAL.with_borrow_mut(|faults| {
         let index = faults.iter().position(|fault| fault.call == call)?;
         if faults[index].skip == 0 {
+            LOCAL_ARMED.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             Some(faults.remove(index).status)
         } else {
             faults[index].skip -= 1;
@@ -74,7 +85,9 @@ pub(crate) fn status(call: &str) -> Option<Status> {
     }) {
         return Some(status);
     }
-    if std::thread::current().name() != Some("cuda-batch") {
+    if !WORKER_ARMED.load(std::sync::atomic::Ordering::SeqCst)
+        || std::thread::current().name() != Some("cuda-batch")
+    {
         return None;
     }
     if call == "zeCommandQueueExecuteCommandLists"
