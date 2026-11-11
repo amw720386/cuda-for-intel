@@ -289,6 +289,27 @@ struct PciProperties {
     bandwidth: i64,
 }
 
+/// `ZE_KERNEL_INDIRECT_ACCESS_FLAG_*` for `CUDA_FOR_INTEL_INDIRECT_ACCESS`: a comma list of `host`,
+/// `device`, `shared`, or `none`; unset or unparsable means all three (the default). Host indirect
+/// access marks every kernel as using system memory in the Intel runtime, which can add cache
+/// flushes per kernel; `device,shared` keeps ggml's device pointer tables working.
+fn indirect_access_flags(value: Option<&str>) -> u32 {
+    const ALL: u32 = 0b111;
+    let Some(value) = value else { return ALL };
+    let mut flags = 0;
+    for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+        flags |= match part.to_ascii_lowercase().as_str() {
+            "host" => 1,
+            "device" => 2,
+            "shared" => 4,
+            "none" => 0,
+            "all" => ALL,
+            _ => return ALL,
+        };
+    }
+    flags
+}
+
 type GetPci = unsafe extern "system" fn(Raw, *mut PciProperties) -> Status;
 /// `zeCommandListImmediateAppendCommandListsExp(immediate, count, lists, signal, wait count, waits)`
 pub(crate) type AppendLists = unsafe extern "system" fn(Raw, u32, *mut Raw, Raw, u32, *mut Raw) -> Status;
@@ -378,9 +399,12 @@ macro_rules! loader_api {
                 let library = self._library.as_ref();
                 let Some(library) = library else { return };
                 type SetIndirect = unsafe extern "system" fn(Raw, u32) -> Status;
+                let flags = indirect_access_flags(std::env::var("CUDA_FOR_INTEL_INDIRECT_ACCESS").ok().as_deref());
+                if flags == 0 {
+                    return;
+                }
                 if let Ok(set) = unsafe { library.get::<SetIndirect>(b"zeKernelSetIndirectAccess\0") } {
-                    // ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST | DEVICE | SHARED
-                    let _ = unsafe { set(kernel, 0b111) };
+                    let _ = unsafe { set(kernel, flags) };
                 }
             }
 
@@ -1393,6 +1417,18 @@ mod build_flag_tests {
     fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> String {
         move |k| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_string()).unwrap_or_default()
     }
+    #[test]
+    fn indirect_access_flags_parse() {
+        use super::indirect_access_flags as flags;
+        assert_eq!(flags(None), 0b111);
+        assert_eq!(flags(Some("all")), 0b111);
+        assert_eq!(flags(Some("device")), 0b010);
+        assert_eq!(flags(Some("Device, shared")), 0b110);
+        assert_eq!(flags(Some("host,device,shared")), 0b111);
+        assert_eq!(flags(Some("none")), 0);
+        assert_eq!(flags(Some("bogus")), 0b111);
+    }
+
     #[test]
     fn correctly_rounded_div_is_default() {
         assert_eq!(compose_build_flags(10, &env(&[])), CORRECT_DIV_FLAG);
