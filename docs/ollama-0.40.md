@@ -27,7 +27,7 @@ parameter layout (`src/subst`). Three of them changed signature in 0.40:
 | `quantize_q8_1` | `PKfPvxxxxxj5uint3` | unchanged | substituted |
 | `mul_mat_vec_q` (decode) | `<type, ncols>`, 23 words | `<type, ncols, has_fusion, small_k, halve_iters>`, 80-byte fusion struct after `ids`, trailing `ids_stride`: 44 words | **ported** |
 | `mul_mat_vec_q` with fusion | none | gate dot product + GLU, row biases, shared expert | **ported for bias-only and SwiGLU epilogues without MoE** (Qwen/Llama q/k/v and FFN gate/up); GEGLU, SWIGLU_OAI/CLAMP, NVFP4 scales, MoE ids and shared experts stay on the translated kernel, decided per launch |
-| `mul_mat_q` + `stream_k_fixup` (prefill) | `<type, mmq_x, need_check>` | `<type, mmq_x, need_check, ggml_prec, fused_glu>`, gate and GLU arguments | translated stock kernel; native port open |
+| `mul_mat_q` + `stream_k_fixup` (prefill) | `<type, mmq_x, need_check>`, 23 words (fixup 13) | `<type, mmq_x, need_check, ggml_prec, has_fusion>`, `x_gate`, `y_scale`, GLU op and uint3 fastdiv triples: 39 words (fixup 21) | **ported** for `ggml_prec` 30 (q8_1 activations) without fusion; the fused gate path, `ggml_prec` 40 (FP4 activations), MoE ids and scaled activations stay translated |
 | `flash_attn_ext_f16` (#18) | 0.12.6 template | changed | translated stock kernel |
 
 `mul_mat_vec_q` details for 0.40, compiled for compute_75 (what a reported 7.5 selects, the
@@ -49,9 +49,17 @@ parameter layout (`src/subst`). Three of them changed signature in 0.40:
   differently and rounds differently (NMSE about 1e-14 against the v0.12.6-order native kernel).
   The other types are bit for bit.
 
-Tests (no GPU): `cargo test --lib -- fused_abi small_k_native fused_native fusion_launch`; with
+`mul_mat_q` details: the hook maps the 39 words to the legacy 23 (`mmq_legacy_words`: the
+plain value of each `{mp, L, d}` triple is `d`, `ncols_x = blocks_per_ne00 * qk`, the trailing
+stream-k triple is dropped), so the same native module per type serves both ABIs; the stock
+fixup is skipped after a native launch for both layouts. The activation tile layout is unchanged:
+translated 0.40 stock `mul_mat_q` equals the native kernel and the host reference bit for bit for
+Q4_0, Q5_0, Q8_0, Q4_K, Q5_K and Q6_K (`translated_stock_0_40_mmq_matches_native`, one tile).
+
+Tests (no GPU): `cargo test --lib -- fused_abi small_k_native fused_native fusion_launch mmq_v040`; with
 the 0.40 PTX extracted locally (never committed) as `blob40.ptx` in a directory `D`:
 `CFI_STOCK_PTX_DIR_040=D CFI_GGML_PTX_DIR=D cargo test --release --lib -- stock_0_40 mmvq_fused`
+(with the six 0.40 `mul_mat_q` modules in `D` too)
 (the registry accepts all 52 supported instantiations, 12 of them fused; stock 0.40 output equals
 the reference bit for bit without fusion except Q6_K, and to NMSE < 1e-10 with the fused epilogue,
 where the stock kernel's expf is NVIDIA's ex2.approx sequence; the native kernels equal the same
@@ -64,5 +72,5 @@ reference).
    native `mul_mat_vec_q` (including `:fused` keys) taken, tokens match the CPU backend, then
    `scripts/bench-decode.ps1` against the Vulkan rows of the baseline with the same request, with
    fusion on (default) and with `GGML_CUDA_DISABLE_FUSION=1` (more launches per token).
-2. Native `mul_mat_q` for the 0.40 signature (prefill), then FlashAttention.
-3. Q6_K in 0.40's `vdr` 2 order, for bit-identical output with the stock kernel.
+2. FlashAttention for the 0.40 signature (#18's native kernel).
+3. Q6_K mat-vec in 0.40's `vdr` 2 order, for bit-identical output with the stock kernel.
