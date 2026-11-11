@@ -7,8 +7,9 @@ Report your own results with the compatibility issue template (it asks for `scri
 
 | GPU | Driver | Status |
 | --- | --- | --- |
-| Intel Arc B390 (Xe3) | 32.0.101.9033 | **Tested.** All results in this repository come from this part. |
-| Other Arc B-series, Arc A-series, Lunar Lake, Iris Xe, data-center parts | any | Untested by the current release. Older notes for an Iris Xe laptop are in [milestone-12.md](milestone-12.md); do not assume the current features work there. |
+| Intel Arc B390 (Xe3) | 32.0.101.9033 | **Tested, primary target.** Most results in this repository come from this part. |
+| Arc 140V (Lunar Lake, Xe2) | 32.0.101.9175 | Stock Ollama decode measured ([decode-2026-11-11.md](hw-logs/decode-2026-11-11.md)). Driver 32.0.101.5564 does not load with Memory Integrity on, because its catalog certificate has expired. |
+| Other Arc B-series, Arc A-series, Iris Xe, data-center parts | any | Untested by the current release. Older notes for an Iris Xe laptop are in [milestone-12.md](milestone-12.md); do not assume the current features work there. |
 | Machines with two Intel GPUs | any | Untested. |
 | Non-Intel GPUs | n/a | Not a goal. |
 
@@ -46,10 +47,10 @@ though the Level Zero loader code compiles there. macOS builds and runs library 
 
 - Experimental. Do not use for anything where wrong output matters.
 - Windows only. SASS-only binaries cannot run.
-- XMX gives no demonstrated end-to-end speed-up; the GPU path is currently slower than the CPU backend for small models.
+- XMX gives no demonstrated end-to-end speed-up. Decode with stock Ollama on the Arc B390 is about 61 tok/s for Qwen2.5-0.5B Q8_0, roughly 2.5x below Ollama's Vulkan backend ([decode-2026-11-11.md](hw-logs/decode-2026-11-11.md)).
 - First run of a model compiles kernels, taking minutes; caches make later runs fast.
 - Greedy output can differ from the CPU backend at near-ties; K-quant models diverge earlier (expected).
 - About 6 percent of probed PyTorch 2.13 kernels fail to translate.
-- Not all `flash_attn_ext_*` kernels translate: disable flash attention.
+- Not all `flash_attn_ext_*` kernels translate. Qwen2.5 and Llama 3.2 run with flash attention on; disable it if another model fails.
 - Architecture-guard stub kernels in PTX built for another architecture report error 209.
 - Only one GPU model has ever been tested.
