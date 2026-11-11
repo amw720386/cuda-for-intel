@@ -3,6 +3,7 @@
 //! Every mode runs in a fresh context (the submission settings are read when a context is created):
 //!   (a) 1000 back-to-back trivial launches (1 block of 32 threads): host us/launch to enqueue, us/launch to completion;
 //!   (b) launch + cuStreamSynchronize round trip;
+//!   (e) (a) spread round-robin over four non-blocking streams (no in-order dependency between consecutive launches);
 //!   (c) a decode-shaped chain of 702 launches per "token" (Qwen2.5-0.5B layer pattern: many 1-19 block element-wise
 //!       launches, 128/896/4864-block matrix-vector shapes, one 151936-block lm_head), ending like ggml's decode step with
 //!       an async 4-byte device-to-host copy and cuStreamSynchronize; ms/token, host us/launch and us/launch to completion;
@@ -159,7 +160,7 @@ fn hw_submit_modes() {
         "== submission modes: (a) 1000 trivial launches x 7, (b) launch+sync x 200, (c) decode chain of {} launches x {tokens} tokens, (d) the same with an event record, a cross-stream wait and a 4-byte DtoH copy after every layer (29 launches)",
         chain.len()
     );
-    println!("mode            | (a) host us/l | (a) done us/l | (b) launch+sync us | (c) ms/token | (c) host us/l | (c) done us/l | (d) ms/token | (d) done us/l");
+    println!("mode            | (a) host us/l | (a) done us/l | (b) launch+sync us | (c) ms/token | (c) host us/l | (c) done us/l | (d) ms/token | (d) done us/l | (e) 4-stream done us/l");
     for (name, vars) in parse_modes(&spec) {
         for key in KNOWN_VARS {
             unsafe { std::env::remove_var(key) };
@@ -212,6 +213,36 @@ fn hw_submit_modes() {
             ok!(cuStreamSynchronize(stream));
             done.push(start.elapsed().as_secs_f64() * 1e6 / 1000.0);
         }
+        // (e) the same trivial launches spread round-robin over four streams: no in-order dependency
+        // between consecutive launches, so the difference to (a) is the cost of the per-kernel
+        // in-order barrier on one list.
+        let mut lanes = [null_mut(); 4];
+        for lane in &mut lanes {
+            ok!(cuStreamCreate(lane, 1));
+        }
+        ok!(cuMemsetD8Async(buffer, 0, 16, stream));
+        ok!(cuStreamSynchronize(stream));
+        let lane_launch = |lane: usize| {
+            let mut pointer = buffer + 4 * lane as u64;
+            let mut count = 1u32;
+            let mut params: [*mut c_void; 2] = [(&raw mut pointer).cast(), (&raw mut count).cast()];
+            ok!(cuLaunchKernel(function, 1, 1, 1, 32, 1, 1, 0, lanes[lane], params.as_mut_ptr(), null_mut()));
+        };
+        let mut spread = Vec::new();
+        for _ in 0..7 {
+            let start = Instant::now();
+            for index in 0..1000 {
+                lane_launch(index % 4);
+            }
+            for lane in lanes {
+                ok!(cuStreamSynchronize(lane));
+            }
+            spread.push(start.elapsed().as_secs_f64() * 1e6 / 1000.0);
+        }
+        let mut lane_counts = [0f32; 4];
+        ok!(cuMemcpyDtoH_v2(lane_counts.as_mut_ptr().cast(), buffer, 16));
+        assert_eq!(lane_counts, [1750.0; 4], "{name}: four-stream launches lost an increment");
+
         // (b) round trip.
         let mut trip = Vec::new();
         for _ in 0..200 {
@@ -259,7 +290,7 @@ fn hw_submit_modes() {
         let (token_ms, chain_host, chain_done) = decode(false);
         let (flush_ms, _, flush_done) = decode(true);
         println!(
-            "{name:15} | {:13.2} | {:13.2} | {:18.2} | {:12.3} | {:13.2} | {:13.2} | {:12.3} | {:13.2}",
+            "{name:15} | {:13.2} | {:13.2} | {:18.2} | {:12.3} | {:13.2} | {:13.2} | {:12.3} | {:13.2} | {:13.2}",
             median(&mut host),
             median(&mut done),
             median(&mut trip),
@@ -268,6 +299,7 @@ fn hw_submit_modes() {
             chain_done,
             flush_ms,
             flush_done,
+            median(&mut spread),
         );
         ok!(cuMemFreeHost(pinned));
         ok!(cuMemFreeHost(side_pinned));
