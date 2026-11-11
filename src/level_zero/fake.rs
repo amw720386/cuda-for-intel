@@ -79,7 +79,7 @@ pub(crate) enum Kind {
     DeviceAllocation,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Command {
     resources: Vec<Id>,
     waits: Vec<Id>,
@@ -105,6 +105,9 @@ struct List {
     mode: u32,
     closed: bool,
     commands: VecDeque<Command>,
+    /// Commands of a closed regular list after its first execution: a regular list can run
+    /// again until it is reset.
+    template: VecDeque<Command>,
 }
 
 struct Object {
@@ -275,6 +278,32 @@ impl Driver {
             }
         }
         Ok(0)
+    }
+
+    /// Commands of the closed regular list `id` for one more execution.
+    fn executable(&mut self, id: Id) -> DriverResult<VecDeque<Command>> {
+        let list = self.lists.get_mut(&id).ok_or("missing execute list")?;
+        if !list.closed || list.mode != 0 {
+            return Err("appended an open, empty or immediate list");
+        }
+        if !list.commands.is_empty() {
+            list.template = std::mem::take(&mut list.commands);
+        }
+        if list.template.is_empty() {
+            return Err("executed an open or empty list");
+        }
+        let commands = list.template.clone();
+        if commands.iter().any(|command| {
+            command.resources.iter().any(|id| !self.objects.contains_key(id))
+                || command
+                    .waits
+                    .iter()
+                    .chain((command.signal != 0).then_some(&command.signal))
+                    .any(|id| !self.objects.contains_key(id))
+        }) {
+            return Err("executed a list referencing a destroyed resource");
+        }
+        Ok(commands)
     }
 
     fn submit(&mut self, job: Submission) {
