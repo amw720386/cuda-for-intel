@@ -85,6 +85,38 @@ unsafe fn packed_buffer(extra: *const Opaque) -> Result<(Opaque, usize), CuResul
     Err(InvalidValue)
 }
 
+/// One parameter's place in the CUDA argument layout, computed once per function.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Slot {
+    /// Byte range of the parameter in a packed (`CU_LAUNCH_PARAM_BUFFER_POINTER`) buffer.
+    start: usize,
+    end: usize,
+    /// Size of the native argument (a scalar or pointer).
+    size: usize,
+    /// Native 4-byte words of a `Words`/`Staged` aggregate, `None` for a scalar or pointer.
+    words: Option<usize>,
+    pointer: bool,
+}
+
+/// The argument layout of `params` (see `read_planned`).
+pub(super) fn plan(params: &[Param]) -> Box<[Slot]> {
+    layout(params)
+        .map(|(param, range)| {
+            let words = match param {
+                Param::Words { .. } | Param::Staged { .. } => Some(param.host_words()),
+                _ => None,
+            };
+            Slot {
+                start: range.start,
+                end: range.end,
+                size: param.size(),
+                words,
+                pointer: param == Param::GlobalPtr,
+            }
+        })
+        .collect()
+}
+
 /// The caller must keep the buffers readable through the native argument-setting calls.
 pub(super) unsafe fn read(
     params: &[Param],
@@ -92,8 +124,18 @@ pub(super) unsafe fn read(
     extra: *const Opaque,
     valid_pointer: impl Fn(u64) -> bool,
 ) -> Result<Vec<KernelArg>, CuResult> {
+    unsafe { read_planned(&plan(params), kernel_params, extra, valid_pointer) }
+}
+
+/// `read` with the layout precomputed by `plan`.
+pub(super) unsafe fn read_planned(
+    slots: &[Slot],
+    kernel_params: *const Opaque,
+    extra: *const Opaque,
+    valid_pointer: impl Fn(u64) -> bool,
+) -> Result<Vec<KernelArg>, CuResult> {
     let packed = if extra.is_null() {
-        if kernel_params.is_null() && !params.is_empty() {
+        if kernel_params.is_null() && !slots.is_empty() {
             return Err(InvalidValue);
         }
         None
@@ -103,13 +145,13 @@ pub(super) unsafe fn read(
         }
         Some(unsafe { packed_buffer(extra)? })
     };
-    let mut args = Vec::with_capacity(params.len());
-    for (index, (param, range)) in layout(params).enumerate() {
+    let mut args = Vec::with_capacity(slots.len());
+    for (index, slot) in slots.iter().enumerate() {
         let value = if let Some((buffer, size)) = packed {
-            if range.end > size {
+            if slot.end > size {
                 return Err(InvalidValue);
             }
-            unsafe { buffer.byte_add(range.start) }
+            unsafe { buffer.byte_add(slot.start) }
         } else {
             unsafe { kernel_params.add(index).read_unaligned() }
         };
@@ -119,7 +161,7 @@ pub(super) unsafe fn read(
         if value.is_null() {
             return Err(InvalidValue);
         }
-        if param == Param::GlobalPtr {
+        if slot.pointer {
             let address = unsafe { value.cast::<u64>().read_unaligned() };
             if address != 0 && !valid_pointer(address) {
                 return Err(InvalidValue);
@@ -127,17 +169,12 @@ pub(super) unsafe fn read(
         }
         // Pass raw byte ranges directly. A CUDA aggregate may contain padding
         // whose bytes were never initialized by the caller.
-        match param {
-            Param::Words { .. } | Param::Staged { .. } => {
-                args.extend((0..param.host_words()).map(|index| KernelArg {
-                    value: unsafe { value.byte_add(index * 4) },
-                    size: 4,
-                }));
-            }
-            _ => args.push(KernelArg {
-                value,
-                size: param.size(),
-            }),
+        match slot.words {
+            None => args.push(KernelArg { value, size: slot.size }),
+            Some(words) => args.extend((0..words).map(|index| KernelArg {
+                value: unsafe { value.byte_add(index * 4) },
+                size: 4,
+            })),
         }
     }
     Ok(args)

@@ -49,7 +49,7 @@ fn with_function<T>(
         let key = current().ok_or(InvalidContext)?;
         let context = state.contexts.get(&key).ok_or(ContextIsDestroyed)?;
         context.check_live()?;
-        let (module, name) = context.functions.get(&function).ok_or(InvalidHandle)?;
+        let FunctionRef { module, name, .. } = context.functions.get(&function).ok_or(InvalidHandle)?;
         let module = context.modules.get(module).ok_or(InvalidHandle)?;
         let entry = module.entries.get(name).ok_or(InvalidHandle)?;
         action(&state.runtime.devices[context.device as usize].info, entry)

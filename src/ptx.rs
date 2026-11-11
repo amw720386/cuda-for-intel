@@ -2,7 +2,7 @@
 mod ext;
 mod flow;
 mod uniform;
-mod fxhash;
+pub(crate) mod fxhash;
 pub(crate) mod globals;
 mod inline;
 mod normalize;

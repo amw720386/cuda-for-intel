@@ -711,7 +711,7 @@ impl Kernel {
     }
 
     fn entry<'a>(&self, context: &'a CudaContext) -> Result<&'a CudaEntry, CuResult> {
-        let (module, name) = context.functions.get(&self.function).ok_or(InvalidHandle)?;
+        let FunctionRef { module, name, .. } = context.functions.get(&self.function).ok_or(InvalidHandle)?;
         let module = context.modules.get(module).ok_or(InvalidHandle)?;
         module.entries.get(name).ok_or(InvalidHandle)
     }

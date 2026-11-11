@@ -560,3 +560,37 @@ pub(super) fn api() -> Api {
         ..Api::stub()
     }
 }
+
+unsafe extern "system" fn null_group_size(_: Raw, _: u32, _: u32, _: u32) -> Status {
+    0
+}
+
+unsafe extern "system" fn null_kernel_arg(_: Raw, _: u32, _: usize, _: *const c_void) -> Status {
+    0
+}
+
+unsafe extern "system" fn null_append_kernel(
+    _: Raw,
+    _: Raw,
+    _: *const GroupCount,
+    _: Raw,
+    _: u32,
+    _: *mut Raw,
+) -> Status {
+    0
+}
+
+/// Swaps the three per-launch entry points between the lifecycle model and no-op stubs, so a
+/// host-path benchmark can time the frontend without the model's bookkeeping. Only valid while
+/// the launches record no completion signal (a non-blocking stream).
+pub(super) fn set_null_launch(api: &mut Api, on: bool) {
+    if on {
+        api.zeKernelSetGroupSize = null_group_size;
+        api.zeKernelSetArgumentValue = null_kernel_arg;
+        api.zeCommandListAppendLaunchKernel = null_append_kernel;
+    } else {
+        api.zeKernelSetGroupSize = group_size;
+        api.zeKernelSetArgumentValue = kernel_arg;
+        api.zeCommandListAppendLaunchKernel = append_kernel;
+    }
+}

@@ -364,6 +364,10 @@ pub(crate) fn start() -> Runtime {
 }
 
 pub(crate) fn start_with(specs: &[DeviceSpec]) -> Runtime {
+    // Fake handle ids restart at every start: drop argument-cache entries a previous test left
+    // behind (for example by not destroying its context) so a reused id starts clean.
+    super::arg_cache::forget_all();
+    super::arg_cache::memory_freed();
     let table: Vec<(Id, Id, u32)> = specs
         .iter()
         .enumerate()
@@ -457,6 +461,11 @@ pub(crate) fn start_with(specs: &[DeviceSpec]) -> Runtime {
 /// True when `zeDeviceCanAccessPeer(device, peer)` is true in the fake topology.
 fn peer_access(driver: &Driver, device: Id, peer: Id) -> bool {
     driver.peers.contains(&(device, peer))
+}
+
+/// See `abi::set_null_launch`.
+pub(crate) fn set_null_launch(api: &mut Api, on: bool) {
+    abi::set_null_launch(api, on);
 }
 
 /// Fake device handle of the device described by `specs[index]` in `start_with`.

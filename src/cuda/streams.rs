@@ -26,6 +26,8 @@ pub(super) mod timing;
 #[cfg(test)]
 mod fake_tests;
 #[cfg(test)]
+mod launch_bench;
+#[cfg(test)]
 mod graph_api_tests;
 #[cfg(test)]
 mod globals_tests;
@@ -303,7 +305,7 @@ impl Stream {
 
 pub(super) struct Streams {
     legacy: Option<Stream>,
-    live: HashMap<usize, Stream>,
+    live: super::HandleMap<Stream>,
     retired: Vec<Stream>,
     fences: Fences,
     events: HashMap<usize, Option<Recording>>,
@@ -336,7 +338,7 @@ impl Streams {
             policy,
             wake,
             worker,
-            live: HashMap::new(),
+            live: super::HandleMap::default(),
             retired: Vec::new(),
             fences: Fences::default(),
             events: HashMap::new(),

@@ -7,6 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+mod arg_cache;
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(test)]
@@ -484,6 +485,7 @@ loader_api! {
     zeModuleBuildLogDestroy(Raw),
     zeKernelCreate(Raw, *const KernelDesc, *mut Raw),
     zeKernelDestroy(Raw),
+    // Called only through arg_cache::apply, which skips values the kernel already holds.
     zeKernelSetGroupSize(Raw, u32, u32, u32),
     zeKernelSetArgumentValue(Raw, u32, usize, *const c_void),
     zeCommandListAppendLaunchKernel(Raw, Raw, *const GroupCount, Raw, u32, *mut Raw),
@@ -699,14 +701,20 @@ impl Module {
 
     pub(crate) fn destroy(&mut self, api: &Api) -> Result<(), Error> {
         while let Some(kernel) = self.kernels.last() {
+            arg_cache::forget(kernel.0);
             call("zeKernelDestroy", || unsafe {
                 (api.zeKernelDestroy)(kernel.0)
             })?;
             self.kernels.pop();
         }
-        call("zeModuleDestroy", || unsafe {
+        // The module's globals die with it, and their addresses may be arguments of kernels in
+        // other modules: drop cached argument values on both sides of the destroy.
+        arg_cache::memory_freed();
+        let destroyed = call("zeModuleDestroy", || unsafe {
             (api.zeModuleDestroy)(self.handle.0)
-        })
+        });
+        arg_cache::memory_freed();
+        destroyed
     }
 }
 
@@ -825,6 +833,7 @@ impl Context {
             })?;
             self.commands = None;
         }
+        arg_cache::forget_all();
         call("zeContextDestroy", || unsafe {
             (api.zeContextDestroy)(self.handle.0)
         })
@@ -862,12 +871,16 @@ impl Context {
     }
 
     pub(crate) fn free(&self, api: &Api, address: usize) -> Result<(), Error> {
-        call("zeMemFree", || unsafe {
+        // Before and after: no value recorded around the free survives it.
+        arg_cache::memory_freed();
+        let freed = call("zeMemFree", || unsafe {
             (api.zeMemFree)(
                 self.handle.0,
                 std::ptr::with_exposed_provenance_mut(address),
             )
-        })
+        });
+        arg_cache::memory_freed();
+        freed
     }
 
     pub(crate) unsafe fn copy(

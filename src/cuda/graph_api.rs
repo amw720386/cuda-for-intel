@@ -600,7 +600,7 @@ fn kernel_node(state: &mut State, owner: usize, params: &KernelNodeParams, v2: b
     }
     let runtime = &state.runtime;
     let context = state.contexts.get(&owner).ok_or(ContextIsDestroyed)?;
-    let (module_key, name) = context.functions.get(&function).ok_or(InvalidHandle)?;
+    let FunctionRef { module: module_key, name, .. } = context.functions.get(&function).ok_or(InvalidHandle)?;
     let module = context.modules.get(module_key).ok_or(InvalidHandle)?;
     let entry = module.entries.get(name).ok_or(InvalidHandle)?;
     entry.function.ok_or(InvalidHandle)?;
@@ -917,7 +917,7 @@ fn with_node<T>(
 /// Contiguous argument blocks for each kernel parameter, rebuilt from the
 /// stored 4-byte words and scalars.
 fn kernel_param_blocks(context: &CudaContext, kernel: &Kernel) -> Result<Vec<Box<[u8]>>, CuResult> {
-    let (module, name) = context.functions.get(&kernel.function).ok_or(InvalidHandle)?;
+    let FunctionRef { module, name, .. } = context.functions.get(&kernel.function).ok_or(InvalidHandle)?;
     let entry = context
         .modules
         .get(module)
