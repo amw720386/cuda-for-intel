@@ -269,6 +269,10 @@ fn containing(map: &BTreeMap<usize, usize>, address: usize) -> Option<(usize, us
 
 /// Allocations named by `steps`: every 8-byte kernel argument that points into one (pointer
 /// parameters and pointers passed as integers alike), and copy and memset addresses.
+/// A pointer inside an aggregate (`.b8` array) parameter is not scanned: such kernels always keep
+/// indirect USM access (the indirect-access analysis never treats `.b8` parameters as direct
+/// pointers, so even `INDIRECT_ACCESS=auto` leaves them indirect), and staged parameters are
+/// refused under capture.
 fn used_allocations(context: &CudaContext, steps: &[&Node]) -> Vec<(usize, usize)> {
     let lookup = |address: usize| {
         containing(&context.allocations, address).or_else(|| containing(&context.host_allocations, address))
