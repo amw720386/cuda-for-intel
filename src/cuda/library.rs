@@ -244,6 +244,32 @@ pub unsafe extern "system" fn cuKernelGetFunction(out: *mut Opaque, kernel: Opaq
 }
 
 pub(super) fn kernel_function(state: &mut State, kernel: usize) -> Result<usize, CuResult> {
+    // Steady state: the kernel was resolved in this context before and its function is still
+    // loaded (function handles are never reused, so a live one is the same translation).
+    // Keep the slow path's per-call side effects on the translator switches; with
+    // CUDA_FOR_INTEL_TRACE=1 always take the slow path so its trace lines stay.
+    if !trace::enabled()
+        && state.libraries.kernels.contains_key(&kernel)
+        && let Some(key) = current()
+        && let Some(context) = state.contexts.get_mut(&key)
+        && let Some(&function) = context.library_functions.get(&kernel)
+        && context.functions.contains_key(&function)
+    {
+        ptx::set_lenient_undefined(true);
+        super::probe_dot_product(&state.runtime, context);
+        return Ok(function);
+    }
+    let function = resolve_kernel_function(state, kernel)?;
+    if let Some(key) = current()
+        && let Some(context) = state.contexts.get_mut(&key)
+        && context.functions.contains_key(&function)
+    {
+        context.library_functions.insert(kernel, function);
+    }
+    Ok(function)
+}
+
+fn resolve_kernel_function(state: &mut State, kernel: usize) -> Result<usize, CuResult> {
     let (library, name) = state.libraries.kernels.get(&kernel).ok_or(InvalidHandle)?;
     let (library, name) = (*library, name.clone());
     if trace::enabled() {

@@ -122,6 +122,9 @@ struct CudaContext {
     /// Allocation-table entries that belong to a module variable, not to cuMemAlloc.
     module_globals: BTreeSet<usize>,
     functions: HandleMap<FunctionRef>,
+    /// Library `CUkernel` -> this context's function, as `library::kernel_function` resolved it.
+    /// A hit is used only while the function still exists (see `kernel_function`).
+    library_functions: HandleMap<usize>,
     local_storage: HashMap<usize, export_table::ContextStorage>,
     /// Peer contexts this context enabled access to (see `devices::peer`).
     peer_access: BTreeSet<usize>,
@@ -515,6 +518,7 @@ impl State {
                 dyn_variants: Default::default(),
                 module_globals: BTreeSet::new(),
                 functions: HandleMap::default(),
+                library_functions: HandleMap::default(),
                 local_storage: HashMap::new(),
                 peer_access: BTreeSet::new(),
                 subst: Default::default(),

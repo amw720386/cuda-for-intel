@@ -208,12 +208,16 @@ fn fake_cuda_library_loads_in_each_context_and_retires_handles() {
     assert_ne!(first_function, function);
     let (device, _) = allocations();
     assert_eq!(launch(kernel, null_mut(), device), Success);
+    // Second launch: served by the context's resolved-kernel cache.
+    assert_eq!(launch(kernel, null_mut(), device), Success);
     assert_eq!(cuLibraryUnload(library), Success);
     assert_eq!(
         unsafe { cuKernelGetFunction(&mut function, kernel) },
         InvalidHandle
     );
     assert_eq!(launch(function, null_mut(), device), InvalidHandle);
+    // The cached resolution must not outlive the library.
+    assert_eq!(launch(kernel, null_mut(), device), InvalidHandle);
     assert_eq!(cuCtxDestroy_v2(second), Success);
     assert_eq!(cuCtxDestroy_v2(first), Success);
     assert_baseline();
