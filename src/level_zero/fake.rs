@@ -161,6 +161,8 @@ struct Driver {
     peers: Vec<(Id, Id)>,
     /// Every memory copy appended: (device handle, destination, source, bytes).
     copies: Vec<(Id, usize, usize, usize)>,
+    /// Allocations each kernel command referenced, in the order the commands executed.
+    executed_kernels: Vec<Vec<Id>>,
     /// Device each command list was created for.
     list_device: BTreeMap<Id, Id>,
 }
@@ -339,6 +341,23 @@ impl Driver {
                     unsafe { (command.stamp as *mut u64).write_volatile(self.clock) };
                     self.clock = self.clock.wrapping_add(self.clock_step);
                 }
+                if command
+                    .resources
+                    .first()
+                    .is_some_and(|id| self.objects.get(id).is_some_and(|object| object.kind == Kind::Kernel))
+                {
+                    let memory = command
+                        .resources
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            self.objects.get(id).is_some_and(|object| {
+                                matches!(object.kind, Kind::DeviceAllocation | Kind::HostAllocation)
+                            })
+                        })
+                        .collect();
+                    self.executed_kernels.push(memory);
+                }
                 self.signal(command.signal);
                 self.ledger.completed += 1;
             }
@@ -507,6 +526,12 @@ pub(crate) fn device_handle(index: usize) -> usize {
 /// Memory copies appended so far: (device handle, destination, source, bytes).
 pub(crate) fn copy_log() -> Vec<(usize, usize, usize, usize)> {
     lock().as_ref().map(|d| d.copies.clone()).unwrap_or_default()
+}
+
+/// Takes the log of executed kernel commands: the allocations each one referenced, in execution
+/// order.
+pub(crate) fn take_executed_kernels() -> Vec<Vec<usize>> {
+    lock().as_mut().map(|d| std::mem::take(&mut d.executed_kernels)).unwrap_or_default()
 }
 
 pub(crate) fn finish() {

@@ -571,3 +571,52 @@ fn recorded_graphs_under_deferred_submit_and_window() {
         assert_baseline();
     }
 }
+
+fn device_buffer() -> u64 {
+    let mut p = 0;
+    assert_eq!(unsafe { cuMemAlloc_v2(&mut p, 64) }, Success);
+    p
+}
+
+/// The buffer each executed kernel launched with (its first allocation), in execution order.
+fn executed() -> Vec<u64> {
+    fake::take_executed_kernels().into_iter().map(|memory| memory[0] as u64).collect()
+}
+
+/// Recorded graphs under `CUDA_FOR_INTEL_SUBMIT=deferred`: launches buffered in the deferred
+/// submit list before a graph run before it, and launches after it run after it, on the device,
+/// whether the submit list is open, empty or flushed in between (window on and off).
+#[test]
+fn recorded_graphs_keep_stream_order_under_deferred_submit() {
+    for (submit, window) in [(Some(8), None), (Some(4), Some(64)), (None, Some(64))] {
+        let _fixture = Fixture::new();
+        let ctx = submit_context(submit, window);
+        let _rec = Recording::on();
+        let (st, f) = (stream(), function(module()));
+        let (before, inside, after) = (device_buffer(), device_buffer(), device_buffer());
+        let exec = instantiate(capture(st, || {
+            for _ in 0..3 {
+                assert_eq!(launch(f, st, inside), Success);
+            }
+        }));
+        executed();
+        let mut want = Vec::new();
+        for round in 0..6 {
+            // 0..=5 launches before the graph: an empty, open or just-flushed submit list
+            for _ in 0..round {
+                assert_eq!(launch(f, st, before), Success);
+                want.push(before);
+            }
+            assert_eq!(cuGraphLaunch(exec, st), Success, "{submit:?} {window:?}");
+            want.extend([inside; 3]);
+            assert_eq!(launch(f, st, after), Success);
+            want.push(after);
+        }
+        assert_eq!(cuStreamSynchronize(st), Success);
+        assert_eq!(executed(), want, "{submit:?} {window:?}");
+        assert_eq!((stats().recorded, stats().replayed), (1, 6));
+        assert_eq!(cuGraphExecDestroy(exec), Success);
+        assert_eq!(cuCtxDestroy_v2(ctx), Success);
+        assert_baseline();
+    }
+}
