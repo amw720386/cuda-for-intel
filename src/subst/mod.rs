@@ -320,17 +320,18 @@ pub(crate) struct Plan {
     pub fast: Option<mmvq::Fast>,
 }
 
-/// `CUDA_FOR_INTEL_MMVQ_FAST`: unset, empty, `1`/`on`/`auto` select the decode-fast variant with the
-/// per-type default (the default since B390 decode went 32.3 -> 44.2 tok/s FA-off and 37.7 -> 56.5
-/// FA-on with CPU-identical text, PR #18); `0`/`off`/`none` keeps the stock-order native mmvq;
+/// `CUDA_FOR_INTEL_MMVQ_FAST`: unset, empty, `1`/`on`/`true`/`yes`/`auto` select the decode-fast
+/// variant with the per-type default (the default since B390 decode went 32.3 -> 44.2 tok/s FA-off
+/// and 37.7 -> 56.5 FA-on, docs/hw-logs/perf-mmvq-2026-11-09/owner-validation-2026-11-10.md);
+/// `0`/`off`/`false`/`no`/`none` keeps the stock-order native mmvq;
 /// `<rows>x<warps>x<unroll>` (or comma separated) picks one shape for every type; a trailing `w`
 /// selects the whole-dword group loads (Q8_0, Q4_K, Q6_K; ignored for Q4_0). An unparsable or
-/// out-of-range shape keeps the stock-order kernel.
+/// out-of-range shape keeps the stock-order kernel (`mmvq_fast_env` logs it once).
 pub(crate) fn mmvq_fast_from(text: Option<&str>, ty: u32) -> Option<mmvq::Fast> {
     let text = text.unwrap_or("").trim().to_ascii_lowercase();
     match text.as_str() {
-        "0" | "off" | "none" => None,
-        "" | "1" | "on" | "auto" => Some(mmvq_fast_default(ty)),
+        t if mmvq_fast_is_opt_out(t) => None,
+        "" | "1" | "on" | "true" | "yes" | "auto" => Some(mmvq_fast_default(ty)),
         _ => {
             let (body, wide) = match text.strip_suffix('w') {
                 Some(b) => (b, true),
@@ -365,7 +366,24 @@ pub(crate) fn mmvq_key(ty: u32, ncols: u32, fast: Option<mmvq::Fast>, nwarps: Op
 }
 
 fn mmvq_fast_env(ty: u32) -> Option<mmvq::Fast> {
-    mmvq_fast_from(std::env::var("CUDA_FOR_INTEL_MMVQ_FAST").ok().as_deref(), ty)
+    let text = std::env::var("CUDA_FOR_INTEL_MMVQ_FAST").ok();
+    let fast = mmvq_fast_from(text.as_deref(), ty);
+    if fast.is_none() && text.as_deref().is_some_and(|t| !mmvq_fast_is_opt_out(t)) {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::cuda::export_log_always(format_args!(
+                "subst: CUDA_FOR_INTEL_MMVQ_FAST={:?} not understood; using the stock-order mmvq",
+                text.unwrap_or_default()
+            ));
+        }
+    }
+    fast
+}
+
+/// The explicit opt-out values of `CUDA_FOR_INTEL_MMVQ_FAST` (anything else that yields no shape is
+/// a typo, logged by `mmvq_fast_env`).
+pub(crate) fn mmvq_fast_is_opt_out(text: &str) -> bool {
+    matches!(text.trim().to_ascii_lowercase().as_str(), "0" | "off" | "false" | "no" | "none")
 }
 
 #[derive(Debug, Eq, PartialEq)]

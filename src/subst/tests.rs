@@ -583,7 +583,7 @@ fn mmvq_fast_matches_its_reference_bitwise_and_stock_closely() {
 
 #[test]
 fn mmvq_fast_channels_samples_and_ids() {
-    for ty in [refs::Q8_0, refs::Q4_K, refs::Q6_K] {
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
         for (nch, ratio, ns, ids) in [(4usize, 2u32, 2usize, false), (5, 1, 1, true)] {
             for f in [fast(4, 1, 2), fast(2, 4, 2)] {
                 let pr = problem(ty, 1, 3, 512, nch, ratio, ns, ids, 77 + u64::from(ty));
@@ -611,6 +611,9 @@ fn mmvq_fast_variants_validate_and_parse() {
     assert_eq!(super::mmvq_fast_from(Some("0"), q8), None);
     assert_eq!(super::mmvq_fast_from(Some(" OFF "), q8), None);
     assert_eq!(super::mmvq_fast_from(Some("none"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("false"), q8), None);
+    assert_eq!(super::mmvq_fast_from(Some("Yes"), q8), Some(super::mmvq_fast_default(q8)));
+    assert!(super::mmvq_fast_is_opt_out(" Off ") && !super::mmvq_fast_is_opt_out("4x1") && !super::mmvq_fast_is_opt_out(""));
     assert_eq!(super::mmvq_fast_from(Some("1"), q8), Some(super::mmvq_fast_default(q8)));
     // module keys and entry names stay distinct across fast / wide / stock-order variants
     let (narrow, wide) = (fast(4, 1, 2), super::mmvq_fast_default(q8));
