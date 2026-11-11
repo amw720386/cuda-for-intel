@@ -17,10 +17,12 @@ const POINTERS: usize = 3;
 const SCALARS: usize = 21;
 const LAUNCHES: usize = 20_000;
 const REPS: usize = 15;
+/// A ggml-length mangled name: name hashing and copies scale with it.
+const NAME: &str = "_Z13mul_mat_vec_qIL9ggml_type12ELi1ELb0EEvPKvS2_PKiPfjjjjjjjjjjjjjjjjjjjjj";
 
-/// `k(.u64 p0, .u64 p1, .u64 p2, .u32 s1 .. s21)`: `p0[tid] = s21`, ggml's parameter shape.
+/// `NAME(.u64 p0, .u64 p1, .u64 p2, .u32 s1 .. s21)`: `p0[tid] = s21`, ggml's parameter shape.
 fn kernel() -> String {
-    let mut s = String::from(".version 8.0\n.target sm_80\n.address_size 64\n.visible .entry k(");
+    let mut s = format!(".version 8.0\n.target sm_80\n.address_size 64\n.visible .entry {NAME}(");
     let params: Vec<String> = (0..POINTERS)
         .map(|i| format!(".param .u64 k_p{i}"))
         .chain((1..=SCALARS).map(|i| format!(".param .u32 k_s{i}")))
@@ -47,7 +49,8 @@ fn launch_host_benchmark() {
     let mut module = null_mut();
     assert_eq!(unsafe { cuModuleLoadData(&mut module, source.as_ptr().cast()) }, Success);
     let mut function = null_mut();
-    assert_eq!(unsafe { cuModuleGetFunction(&mut function, module, c"k".as_ptr()) }, Success);
+    let name = CString::new(NAME).unwrap();
+    assert_eq!(unsafe { cuModuleGetFunction(&mut function, module, name.as_ptr()) }, Success);
     let mut pointers = [0u64; POINTERS];
     for pointer in &mut pointers {
         assert_eq!(unsafe { cuMemAlloc_v2(pointer, 256) }, Success);
