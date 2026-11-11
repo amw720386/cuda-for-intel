@@ -584,15 +584,20 @@ pub(crate) fn decide(name: &str, params: &[Param], switch: &Switch) -> Decision 
     }
     .filter(|w| w.is_power_of_two() && (1..=32).contains(w));
     let fast = match kernel {
-        // the decode-fast kernel has no fused epilogue
-        Kernel::Mmvq { abi: MmvqAbi::Fused { fusion: true, .. }, .. } => None,
         Kernel::Mmvq { ty, ncols: 1, .. } => mmvq_fast_env(ty),
         _ => None,
     };
     let key = match kernel {
-        Kernel::Mmvq { ty, ncols, .. } if fast.is_some() => {
+        Kernel::Mmvq { ty, ncols, abi } if fast.is_some() => {
             let f = fast.unwrap();
-            format!("mmvq:t{ty}:c{ncols}:fast{}x{}x{}{}", f.rows, f.warps, f.unroll, if f.wide { "w" } else { "" })
+            format!(
+                "mmvq:t{ty}:c{ncols}:fast{}x{}x{}{}{}",
+                f.rows,
+                f.warps,
+                f.unroll,
+                if f.wide { "w" } else { "" },
+                if matches!(abi, MmvqAbi::Fused { fusion: true, .. }) { ":fused" } else { "" }
+            )
         }
         Kernel::Mmvq { ty, ncols, abi } => format!(
             "mmvq:t{ty}:c{ncols}:w{}:r{}{}",
@@ -622,8 +627,9 @@ impl Plan {
 
     pub(crate) fn entry_name(&self) -> String {
         match self.kernel {
-            Kernel::Mmvq { ty, .. } if self.fast.is_some() => {
-                mmvq::fast_entry_name(ty, self.fast.unwrap())
+            Kernel::Mmvq { ty, abi, .. } if self.fast.is_some() => {
+                let fused = matches!(abi, MmvqAbi::Fused { fusion: true, .. });
+                format!("{}{}", mmvq::fast_entry_name(ty, self.fast.unwrap()), if fused { "_f" } else { "" })
             }
             Kernel::Mmvq { ty, ncols, abi } => format!(
                 "cfi_mmvq_t{}_c{}_w{}_r{}{}",
@@ -645,8 +651,9 @@ impl Plan {
     pub(crate) fn build(&self, dot: bool) -> Result<Vec<u32>, String> {
         let plan = self.clone();
         std::panic::catch_unwind(move || match plan.kernel {
-            Kernel::Mmvq { ty, .. } if plan.fast.is_some() => {
-                mmvq::build_fast(ty, plan.fast.unwrap(), dot)
+            Kernel::Mmvq { ty, abi, .. } if plan.fast.is_some() => {
+                let fused = matches!(abi, MmvqAbi::Fused { fusion: true, .. });
+                mmvq::build_fast_with(ty, plan.fast.unwrap(), dot, fused)
             }
             Kernel::Mmvq { ty, ncols, abi } => {
                 let nwarps = plan.nwarps_for(abi.stock_nwarps(ty, ncols));

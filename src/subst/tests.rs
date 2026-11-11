@@ -1026,3 +1026,39 @@ fn translated_stock_0_40_mmq_matches_native() {
         assert_eq!(ran, MMQ_TYPES.len());
     }
 }
+
+/// The decode-fast kernel with ggml's fused epilogue (bias only, SwiGLU gate, both) against the
+/// fast reference composed with the epilogue, bit for bit, wide and narrow, with tail rows.
+#[test]
+fn fused_fast_mmvq_matches_reference() {
+    use super::probe::Fusion;
+    for ty in [refs::Q8_0, refs::Q4_0, refs::Q4_K, refs::Q6_K] {
+        let wide = matches!(ty, refs::Q8_0 | refs::Q4_K | refs::Q6_K);
+        for f in [mmvq::Fast { rows: 4, warps: 1, unroll: 2, wide }, mmvq::Fast { rows: 2, warps: 2, unroll: 1, wide: false }] {
+            for (gate, x_bias, gate_bias) in [(false, true, false), (true, false, false), (true, true, true)] {
+                let ncols_x = if matches!(ty, refs::Q4_K | refs::Q6_K) { 1024 } else { 896 };
+                let seed = 0x7a + u64::from(ty) + u64::from(f.rows);
+                let pr = problem(ty, 1, 11, ncols_x, 2, 1, 2, false, seed);
+                let mut rng = refs::Rng(seed ^ 0x55);
+                let nblocks = pr.x.len() / refs::traits(ty).unwrap().block_bytes;
+                let n = pr.dst_len();
+                let fu = Fusion {
+                    gate: gate.then(|| refs::random_blocks(ty, nblocks, &mut rng)),
+                    x_bias: x_bias.then(|| (0..n).map(|_| rng.unit()).collect()),
+                    gate_bias: gate_bias.then(|| (0..n).map(|_| rng.unit()).collect()),
+                };
+                let words = mmvq::build_fast_with(ty, f, true, true);
+                validate(&words);
+                let mut sim = Sim { dev: Dev::default(), words: &words };
+                let got = pr.run_fast_fusion(&mut sim, f, &fu).unwrap();
+                let want = pr.reference_fast_fusion(f, &fu);
+                let bad = got.iter().zip(&want).filter(|(g, w)| g.to_bits() != w.to_bits()).count();
+                let nmse = refs::nmse(&got, &want);
+                assert!(bad == 0 || nmse < 1e-12, "type {ty} {f:?} gate {gate} bias {x_bias}/{gate_bias}: {bad}/{n} differ, nmse {nmse}");
+                // against the stock-order fused reference: same values to rounding
+                let stock = pr.reference_fusion(pr.p.nwarps, &fu);
+                assert!(refs::nmse(&got, &stock) < 1e-9, "type {ty} {f:?}: vs stock order");
+            }
+        }
+    }
+}

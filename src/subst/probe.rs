@@ -21,6 +21,20 @@ pub(crate) trait Device {
     fn run(&mut self, grid: [u32; 3], block: [u32; 3], args: &[PArg]) -> Result<(), String>;
 }
 
+/// ggml's epilogue on per-row sums: `+ x_bias`, then with a gate `* silu(gate + gate_bias)`
+/// (`ggml_cuda_op_silu_single`: `x / (1 + expf(-x))`).
+fn epilogue(mut out: Vec<f32>, gate_sum: Option<&[f32]>, f: &Fusion) -> Vec<f32> {
+    for (i, v) in out.iter_mut().enumerate() {
+        let mut r = *v + f.x_bias.as_ref().map_or(0.0, |b| b[i]);
+        if let Some(gs) = gate_sum {
+            let g = gs[i] + f.gate_bias.as_ref().map_or(0.0, |b| b[i]);
+            r *= g / (1.0 + (-g).exp());
+        }
+        *v = r;
+    }
+    out
+}
+
 /// Inputs of ggml's fused mmvq epilogue (`ggml_cuda_mm_fusion_args_device`): a gate matrix with
 /// the main matrix's layout, and biases with the destination's layout.
 #[derive(Clone, Default)]
@@ -122,26 +136,36 @@ impl MmvqCase {
     /// Host reference of ggml's fused epilogue: `sum + x_bias`, and with a gate matrix
     /// `* silu(gate_sum + gate_bias)` (SwiGLU), each sum in ggml's order.
     pub fn reference_fusion(&self, nwarps: usize, f: &Fusion) -> Vec<f32> {
-        let mut out = self.reference(nwarps);
-        let gate_sum = f.gate.as_ref().map(|g| {
-            let mut gc = MmvqCase { p: self.p.clone(), x: g.clone(), y: self.y.clone(), ids: self.ids.clone() };
-            gc.p.nwarps = nwarps;
-            gc.reference(nwarps)
-        });
-        for (i, v) in out.iter_mut().enumerate() {
-            let mut r = *v + f.x_bias.as_ref().map_or(0.0, |b| b[i]);
-            if let Some(gs) = &gate_sum {
-                let g = gs[i] + f.gate_bias.as_ref().map_or(0.0, |b| b[i]);
-                r *= g / (1.0 + (-g).exp());
-            }
-            *v = r;
-        }
-        out
+        let main = self.reference(nwarps);
+        let gate_sum = f.gate.as_ref().map(|g| self.with_x(g).reference(nwarps));
+        epilogue(main, gate_sum.as_deref(), f)
+    }
+
+    /// `reference_fusion` for the decode-fast variant (its own accumulation order).
+    pub fn reference_fast_fusion(&self, fast: super::mmvq::Fast, f: &Fusion) -> Vec<f32> {
+        let main = self.reference_fast(fast);
+        let gate_sum = f.gate.as_ref().map(|g| self.with_x(g).reference_fast(fast));
+        epilogue(main, gate_sum.as_deref(), f)
+    }
+
+    fn with_x(&self, x: &[u8]) -> MmvqCase {
+        MmvqCase { p: self.p.clone(), x: x.to_vec(), y: self.y.clone(), ids: self.ids.clone() }
     }
 
     /// Runs a native fused kernel (`FUSION_ARGS`): the legacy words, then `x_bias`, `gate`,
     /// `gate_bias` (0 when absent) and `glu_op` SwiGLU.
     pub fn run_fusion(&self, dev: &mut impl Device, nwarps: usize, f: &Fusion) -> Result<Vec<f32>, String> {
+        let extra = self.fusion_args(dev, f)?;
+        self.run_with_extra(dev, nwarps, None, &extra)
+    }
+
+    /// The decode-fast fused kernel: legacy words, the fusion words, then `nrows`.
+    pub fn run_fast_fusion(&self, dev: &mut impl Device, fast: super::mmvq::Fast, f: &Fusion) -> Result<Vec<f32>, String> {
+        let extra = self.fusion_args(dev, f)?;
+        self.run_with_extra(dev, 0, Some((fast.rows, fast.warps)), &extra)
+    }
+
+    fn fusion_args(&self, dev: &mut impl Device, f: &Fusion) -> Result<[PArg; 4], String> {
         let mut upload = |data: Option<Vec<u8>>| -> Result<u64, String> {
             match data {
                 Some(b) => {
@@ -153,13 +177,12 @@ impl MmvqCase {
             }
         };
         let f32s = |v: &Option<Vec<f32>>| v.as_ref().map(|v| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
-        let extra = [
+        Ok([
             PArg::Ptr(upload(f32s(&f.x_bias))?),
             PArg::Ptr(upload(f.gate.clone())?),
             PArg::Ptr(upload(f32s(&f.gate_bias))?),
             PArg::U32(super::mmvq::GLU_SWIGLU),
-        ];
-        self.run_with_extra(dev, nwarps, None, &extra)
+        ])
     }
 
     fn run_with(&self, dev: &mut impl Device, nwarps: usize, fast_rows: Option<(u32, u32)>) -> Result<Vec<f32>, String> {
@@ -220,6 +243,7 @@ impl MmvqCase {
         ];
         if let Some((rows, warps)) = fast_rows {
             let mut fa = args.to_vec();
+            fa.extend_from_slice(extra);
             fa.push(u(p.nrows_x as u32));
             let g = p.grid();
             // the decode-fast kernel covers nrows_x rows whatever the stock rows per block

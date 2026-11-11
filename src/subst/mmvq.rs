@@ -679,13 +679,35 @@ pub(crate) const FAST_ARGS: [Arg; 24] = {
 /// Launch: block `[32, rows * warps, 1]`, grid `[ceil(nrows / rows), channels, samples]`; the
 /// driver appends `nrows` after the 23 stock words.
 pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
+    build_fast_with(ty, f, dot, false)
+}
+
+/// Argument slots of the fused decode-fast variant: the legacy 23 words, the four fusion words
+/// (`x_bias`, `gate`, `gate_bias`, `glu_op`, as for `FUSION_ARGS`), then `nrows`.
+pub(crate) const FAST_FUSION_ARGS: [Arg; 28] = {
+    let mut a = [Arg::U32; 28];
+    a[0] = Arg::Ptr;
+    a[1] = Arg::Ptr;
+    a[2] = Arg::Ptr;
+    a[3] = Arg::Ptr;
+    a[23] = Arg::Ptr;
+    a[24] = Arg::Ptr;
+    a[25] = Arg::Ptr;
+    a
+};
+
+/// The decode-fast kernel, with ggml's fused epilogue when `fusion` (bias and SwiGLU gate,
+/// as in `build`): the gate matrix is read in the same loop with its own accumulators.
+pub(crate) fn build_fast_with(ty: u32, f: Fast, dot: bool, fusion: bool) -> Vec<u32> {
     let Fast { rows, warps, unroll, wide } = f;
     let t = refs::traits(ty).expect("unsupported type");
     assert!(!wide || matches!(ty, Q8_0 | Q4_K | Q6_K), "no wide variant for type {ty}");
     assert!((1..=8).contains(&unroll) && warps.is_power_of_two() && warps <= 8);
-    let name = fast_entry_name(ty, f);
-    let shared = if warps > 1 { rows * warps } else { 0 };
-    let mut kb = Kb::new(&name, &FAST_ARGS, shared, true, dot);
+    let name = format!("{}{}", fast_entry_name(ty, f), if fusion { "_f" } else { "" });
+    let slots = if warps > 1 { rows * warps } else { 0 };
+    let shared = if fusion { 2 * slots } else { slots };
+    let args: &[Arg] = if fusion { &FAST_FUSION_ARGS } else { &FAST_ARGS };
+    let mut kb = Kb::new(&name, args, shared, true, dot);
     let p = kb.params.clone();
     let (vx, vy, ids, dst) = (p[0], p[1], p[2], p[3]);
     let (ncols_x, nch_y) = (p[4], [p[5], p[6], p[7]]);
@@ -694,7 +716,7 @@ pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
     let smr = [p[17], p[18], p[19]];
     let (ssx, ssy, ssd) = (p[20], p[21], p[22]);
     let srx = p[8];
-    let nrows = p[23];
+    let nrows = if fusion { p[27] } else { p[23] };
     let oz = kb.shrc(ncols_x, 31);
     kb.opaque_zero = Some(oz);
     let ones = kb.opaque_const(0x0101_0101);
@@ -703,6 +725,14 @@ pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
     let vy = kb.ptr_to_u64(vy);
     let ids = kb.ptr_to_u64(ids);
     let dst = kb.ptr_to_u64(dst);
+    let fused = if fusion {
+        let (xb, g, gb) = (kb.ptr_to_u64(p[23]), kb.ptr_to_u64(p[24]), kb.ptr_to_u64(p[25]));
+        let z = kb.c64(0);
+        let ug = kb.ne(g, z);
+        Some((xb, g, gb, ug))
+    } else {
+        None
+    };
 
     let lane = kb.local_id(0);
     let sg = kb.local_id(1);
@@ -765,6 +795,12 @@ pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
             kb.var(Ty::F32, z)
         })
         .collect();
+    let gaccs: Vec<_> = (0..if fusion { unroll } else { 0 })
+        .map(|_| {
+            let z = kb.cf(0.0);
+            kb.var(Ty::F32, z)
+        })
+        .collect();
     let tid = {
         let a = kb.shlc(wi, 5);
         kb.add(a, lane)
@@ -773,20 +809,27 @@ pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
         let m = kb.andc(tid, tpb - 1);
         if wide { m } else { kb.mulc(m, t.vdr as u32) }
     };
-    let one_block = |kb: &mut Kb, k: V, slot: super::spv::Var| {
+    let one_block = |kb: &mut Kb, k: V, u: usize| {
         let kby = kb.mulc(k, (t.qk / 32) as u32);
         let kby = if wide { kb.add(kby, kqs) } else { kby };
         let ya = kb.addr(y_base, kby, 36);
         let xi = kb.add(kbx_offset, k);
-        let xa = kb.addr(vx, xi, t.block_bytes as u32);
-        let acc = kb.get(slot);
-        let r = if wide {
-            wide_dot(kb, ty, xa, ya, kqs, ones, acc)
-        } else {
-            let xd = load_x(kb, ty, &Row { x: xa, y: xa, ones, bias }, kqs);
-            dot_y(kb, ty, &Row { x: xa, y: ya, ones, bias }, &xd, kqs, acc)
+        let dot_into = |kb: &mut Kb, matrix: V, slot: super::spv::Var| {
+            let xa = kb.addr(matrix, xi, t.block_bytes as u32);
+            let acc = kb.get(slot);
+            let r = if wide {
+                wide_dot(kb, ty, xa, ya, kqs, ones, acc)
+            } else {
+                let xd = load_x(kb, ty, &Row { x: xa, y: xa, ones, bias }, kqs);
+                dot_y(kb, ty, &Row { x: xa, y: ya, ones, bias }, &xd, kqs, acc)
+            };
+            kb.set(slot, r);
         };
-        kb.set(slot, r);
+        dot_into(kb, vx, accs[u]);
+        if let Some((_, gate, _, use_gate)) = fused {
+            let slot = gaccs[u];
+            kb.if_(use_gate, |kb| dot_into(kb, gate, slot));
+        }
     };
     let body = |kb: &mut Kb| {
         let start = kb.shrc(tid, log2(tpb));
@@ -798,12 +841,11 @@ pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
             },
             |kb| {
                 let k = kb.get(kbx);
-                one_block(kb, k, accs[0]);
+                one_block(kb, k, 0);
                 for u in 1..unroll {
                     let ku = kb.addc(k, u * step);
                     let inb = kb.ult(ku, blocks_per_row_x);
-                    let slot = accs[u as usize];
-                    kb.if_(inb, |kb| one_block(kb, ku, slot));
+                    kb.if_(inb, |kb| one_block(kb, ku, u as usize));
                 }
                 let n = kb.addc(k, unroll * step);
                 kb.set(kbx, n);
@@ -815,19 +857,31 @@ pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
     } else {
         kb.if_(valid, body);
     }
-    let mut v = kb.get(accs[0]);
-    for u in 1..unroll {
-        let o = kb.get(accs[u as usize]);
-        v = kb.fadd(v, o);
-    }
-    for mask in [16u32, 8, 4, 2, 1] {
-        let o = kb.shfl_xor_f(v, mask);
-        v = kb.fadd(v, o);
-    }
+    // unrolled accumulators in order, then the subgroup butterfly (same for the gate sums)
+    let lane_sum = |kb: &mut Kb, acc: &[super::spv::Var]| {
+        let mut v = kb.get(acc[0]);
+        for a in &acc[1..] {
+            let o = kb.get(*a);
+            v = kb.fadd(v, o);
+        }
+        for mask in [16u32, 8, 4, 2, 1] {
+            let o = kb.shfl_xor_f(v, mask);
+            v = kb.fadd(v, o);
+        }
+        v
+    };
+    let v = lane_sum(&mut kb, &accs);
+    let gv = if fusion { Some(lane_sum(&mut kb, &gaccs)) } else { None };
     let zero = kb.c32(0);
     let first = kb.eq(lane, zero);
     if warps > 1 {
-        kb.if_(first, |kb| kb.sh_st_f(sg, v));
+        kb.if_(first, |kb| {
+            kb.sh_st_f(sg, v);
+            if let Some(g) = gv {
+                let gi = kb.addc(sg, slots);
+                kb.sh_st_f(gi, g);
+            }
+        });
         kb.barrier();
     }
     let lead = if warps > 1 {
@@ -839,19 +893,63 @@ pub(crate) fn build_fast(ty: u32, f: Fast, dot: bool) -> Vec<u32> {
     };
     kb.if_(lead, |kb| {
         let mut total = v;
+        let mut gtotal = gv;
         for w in 1..warps {
             let idx = kb.addc(sg, w);
             let o = kb.sh_ld_f(idx);
             total = kb.fadd(total, o);
+            if let Some(g) = gtotal {
+                let gi = kb.addc(idx, slots);
+                let og = kb.sh_ld_f(gi);
+                gtotal = Some(kb.fadd(g, og));
+            }
         }
         let a = kb.mul(bz, ssd);
         let b = kb.mul(by, scd_);
         let ab = kb.add(a, b);
         let ab = kb.add(ab, row0);
         let addr = kb.addr(dst, ab, 4);
+        if let (Some((x_bias, _, gate_bias, use_gate)), Some(g)) = (fused, gtotal) {
+            total = fused_epilogue(kb, total, g, ab, x_bias, gate_bias, use_gate);
+        }
         kb.st(Ty::F32, addr, total, 4);
     });
     kb.finish()
+}
+
+/// ggml's fused epilogue on one row's sums (`idx`: the row's destination index, which the biases
+/// share): `sum + x_bias[idx]`, and with a gate `* silu(gate + gate_bias[idx])`, silu as
+/// `x / (1 + expf(-x))`. Absent biases (null) add nothing.
+fn fused_epilogue(kb: &mut Kb, sum: V, gate_sum: V, idx: V, x_bias: V, gate_bias: V, use_gate: V) -> V {
+    let bias_at = |kb: &mut Kb, base: V| {
+        let z0 = kb.cf(0.0);
+        let r = kb.var(Ty::F32, z0);
+        let z = kb.c64(0);
+        let present = kb.ne(base, z);
+        kb.if_(present, |kb| {
+            let a = kb.addr(base, idx, 4);
+            let v = kb.ld(Ty::F32, a, 4);
+            kb.set(r, v);
+        });
+        kb.get(r)
+    };
+    let xb = bias_at(kb, x_bias);
+    let out = kb.fadd(sum, xb);
+    let res = kb.var(Ty::F32, out);
+    kb.if_(use_gate, |kb| {
+        let gb = bias_at(kb, gate_bias);
+        let g = kb.fadd(gate_sum, gb);
+        let neg1 = kb.cf(-1.0);
+        let ng = kb.fmul(g, neg1);
+        let e = kb.exp(ng);
+        let one = kb.cf(1.0);
+        let den = kb.fadd(one, e);
+        let silu = kb.fdiv(g, den);
+        let cur = kb.get(res);
+        let m = kb.fmul(cur, silu);
+        kb.set(res, m);
+    });
+    kb.get(res)
 }
 
 /// Shape of the decode-fast mmvq: rows per workgroup, warps per row, accumulators per lane.
