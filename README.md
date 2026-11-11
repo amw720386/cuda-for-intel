@@ -12,7 +12,7 @@
 
 <sub>MP4: <a href="docs/demo/pipeline.mp4">pipeline</a> · <a href="docs/demo/architecture.mp4">architecture</a> · <a href="docs/demo/prefill-chart.mp4">prefill chart</a> · <a href="docs/demo/hero.mp4">all three chained</a></sub>
 
-<sub>🔥 Stock Ollama v0.12.6 generates tokens on an Intel Arc B390 through this shim (small models; slower than Ollama's CPU backend today). Experimental.</sub>
+<sub>🔥 Stock Ollama v0.12.6 generates tokens on an Intel Arc B390 and Arc 140V through this shim: Qwen2.5-0.5B decodes at about 61 tok/s on the B390, roughly 2.5x below Ollama's own Vulkan backend, with prefill at parity. Experimental.</sub>
 
 </div>
 
@@ -20,7 +20,22 @@
 
 <p align="center"><a href="docs/demo/prefill-chart.mp4"><img src="docs/demo/prefill-chart.gif" alt="Bar chart of prefill tokens per second, substitution off versus on: Qwen2.5-0.5B 1818 to 6767, Llama-3.2-1B 817 to 4877, Qwen2.5-1.5B 627 to 3727" width="100%"></a></p>
 
-Prefill tokens/s on Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off (flash attention is being fixed), release candidate `7fc40fb`. Single runs on a shared machine; a 2026-11-09 rerun gives 1814 to 6876 (3.8x), 924 to 5258 (5.7x) and 635 to 4028 (6.3x) ([log](docs/hw-logs/prefill-subst-2026-11-09/README.md)). Qwen2.5-0.5B Q8_0 **3.7x**, Llama-3.2-1B Q4_K_M **6.0x**, Qwen2.5-1.5B Q4_K_M **5.9x**. Details: [docs/kernel-subst.md](docs/kernel-subst.md).
+Prefill tokens/s on Arc B390, stock Ollama v0.12.6, 631-token prompt, flash attention off, release candidate `7fc40fb`. Single runs on a shared machine; a 2026-11-09 rerun gives 1814 to 6876 (3.8x), 924 to 5258 (5.7x) and 635 to 4028 (6.3x) ([log](docs/hw-logs/prefill-subst-2026-11-09/README.md)). Qwen2.5-0.5B Q8_0 **3.7x**, Llama-3.2-1B Q4_K_M **6.0x**, Qwen2.5-1.5B Q4_K_M **5.9x**. Details: [docs/kernel-subst.md](docs/kernel-subst.md).
+
+## 🚀 Decode speed
+
+Qwen2.5-0.5B-Instruct Q8_0, stock Ollama v0.12.6, 631-token prompt, 48 greedy tokens, decode p50 in tok/s. The counting-prompt text equals the CPU backend in every cell.
+
+| Arc B390 build | FA off | FA on |
+| --- | --- | --- |
+| before #42 | 38.9 | 40.1 |
+| #42 fast decode mmvq + #43 launch path | 57.8 | 58.9 |
+| + #45 in-flight window (current main) | 61.4 | 62.2 |
+| stock Ollama Vulkan, same box and model | 157.4 | 156.2 |
+
+On the Arc 140V, #42 takes decode from 23.1 to 39.8 tok/s with FA off and from 27.2 to 46.8 with FA on; Vulkan there runs at 111.5 / 127.8.
+With flash attention on, prefill is at parity with Vulkan on the B390: 8075 against 8030 tok/s.
+Sources: [decode-2026-11-11.md](docs/hw-logs/decode-2026-11-11.md), [vulkan-baseline-2026-11-10.md](docs/hw-logs/vulkan-baseline-2026-11-10.md).
 
 ## 🧩 Architecture
 
@@ -61,7 +76,8 @@ Everything in this table was run, and the evidence is linked. "Untested" means n
 | --- | --- | --- |
 | Windows x64, Intel Arc B390 (Xe3, PCI `8086:b080`, driver 32.0.101.9033) | Primary target. Everything below was verified here. | [docs/hw-logs/](docs/hw-logs/README.md) |
 | Windows x64, Intel Iris Xe (Alder Lake, PCI `8086:46a8`, driver 32.0.101.7085) | Driver API tests, vector add, reduction, RMSNorm, ggml residual add, genuine CUDA Runtime 13.0.88 kernel; stock Ollama enumerates it as CUDA0. Nothing newer (PyTorch, stock model generation, XMX) has been run on it. | [docs/milestone-12.md](docs/milestone-12.md), [docs/milestone-13.md](docs/milestone-13.md), [docs/agent-handoff.md](docs/agent-handoff.md) |
-| Other Intel GPUs (Arc A-series, other Arc B-series, Lunar Lake, Data Center) | Untested. | |
+| Windows x64, Intel Arc 140V (Lunar Lake, Xe2, PCI `8086:64a0`, driver 32.0.101.9175) | Stock Ollama decode (table above), full GPU suite 117 of 118 on a translator branch, where the one failure also fails on main. Needs a current Intel driver: 32.0.101.5564 does not load with Memory Integrity on, because its catalog certificate has expired. | [decode-2026-11-11.md](docs/hw-logs/decode-2026-11-11.md) |
+| Other Intel GPUs (Arc A-series, other Arc B-series, Data Center) | Untested. | |
 | XMX (DPAS) GEMM path | Needs Xe2/Xe3 with `SPV_INTEL_subgroup_matrix_multiply_accumulate`; verified on Arc B390 only (`tests/gpu/hw_xmx_gemm.rs`, [log](docs/hw-logs/xmx-2026-11-09.txt)); end to end no clear gain: Qwen2.5-0.5B prefill +9 % in one run and -3 % in another (single runs, within run-to-run noise). Other GPUs fall back to the tiled PTX GEMM. | commit `57b9fa5`, `tests/gpu/hw_xmx_gemm.rs` (no committed log) |
 | Linux | The Level Zero loader path is included for portability. Untested on hardware. | |
 | macOS | Build and library unit tests only (no GPU). | `cargo test --lib`: 215 passed on the Windows box ([test-unit.log](docs/hw-logs/test-unit.log)); the count on macOS is UNVERIFIED |
@@ -76,7 +92,7 @@ Everything in this table was run, and the evidence is linked. "Untested" means n
 | PyTorch 2.13.0 conda-forge `cuda128` build (PTX compute_120) | Works: matmul, Linear, softmax, layer_norm, gelu, conv2d forward and backward, SDPA math, autocast fp16, SGD loop. About 6 % of probed kernels still fail to translate. | [docs/pytorch.md](docs/pytorch.md) | [torch-bringup.md](docs/torch-bringup.md), [torch-arch-guard-stubs.md](docs/torch-arch-guard-stubs.md) |
 | PyTorch Windows wheels cu121 to cu130 | Cannot run: they contain SASS only, no PTX. | [docs/pytorch.md](docs/pytorch.md) | [torch-round1.md](docs/hw-logs/torch-round1.md) |
 | CUDA C sample programs (PTX only, cudart 13.5) | `basic_kernels` 5/5, `atomics_warp` 8/8, `cublas_gemm` 6/6, `cublaslt_bias` 2/2, `streams_graphs` 4/4 (+2 skips). | [docs/cuda-programs.md](docs/cuda-programs.md) | [cuda-apps-round1.md](docs/hw-logs/cuda-apps-round1.md) |
-| Rust test suites | 215 library tests; GPU suite 79 of 79 on the final tree of the round-1 log. | [CONTRIBUTING.md](CONTRIBUTING.md) | [test-gpu.log](docs/hw-logs/test-gpu.log), [test-unit.log](docs/hw-logs/test-unit.log) |
+| Rust test suites | `cargo test --lib`: 529 passed, 0 failed, 21 ignored on Linux (CPU, fake Level Zero backend, spirv-val installed; PR #46). GPU suite 79 of 79 on the final tree of the round-1 log. | [CONTRIBUTING.md](CONTRIBUTING.md) | [test-gpu.log](docs/hw-logs/test-gpu.log), [test-unit.log](docs/hw-logs/test-unit.log) |
 
 What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a translator cannot run them; the cu118 wheel and the conda CUDA 12.8 build do.
 
@@ -90,10 +106,10 @@ What we tried: PyTorch Windows wheels newer than cu118 carry no PTX, so a transl
   greedy text equal to the CPU backend; stock Ollama's own Vulkan backend reaches about 157 tok/s on the same machine and model, so expect
   roughly 2.5x below native Vulkan ([docs/hw-logs/vulkan-baseline-2026-11-10.md](docs/hw-logs/vulkan-baseline-2026-11-10.md); decode numbers in the
   `CUDA_FOR_INTEL_INFLIGHT` row and the decode table below). Prefill is close to Vulkan. Older measurements: [docs/hw-logs/perf-matrix.md](docs/hw-logs/perf-matrix.md).
-- **Flash attention** kernels (`flash_attn_ext_*`) do not all translate (87 entries in the stock Ollama scan); disable flash attention.
-- **No NCCL, cuFFT, cuSOLVER.** cuDNN is a partial shim: 2-D convolution and batch norm run on it (enabled by `cfi_torch.install()`, [docs/pytorch.md](docs/pytorch.md); hardware gate pending); everything else (3-D/fp64 convolution, RNN, CTC) falls back to PyTorch's native kernels ([docs/cudnn-shim.md](docs/cudnn-shim.md)).
-- **Not implemented:** SASS execution, VMM (`cuMemCreate` family reports no capability), multi-GPU peer access, conditional and memory-allocation graph nodes,
-  texture/surface instructions.
+- **Flash attention** works for the measured models: Qwen2.5 and Llama 3.2. Prefill runs on a native kernel for head dims 64/128 (#18), and decode runs on the translated kernel. Other `flash_attn_ext_*` variants do not all translate (87 entries in the stock Ollama scan), so disable flash attention if a model fails with it on. With `CFI_REPORT_CC=8.0`, flash attention needs `CFI_FATBIN_ARCH=cc` as well.
+- **Libraries.** No NCCL. cuFFT and cuSPARSE are shims, and torch.fft and torch.sparse run under `cfi-run` ([pytorch-status.md](docs/pytorch-status.md)). cuSOLVER single-matrix solves run through NVIDIA's own DLL, but `eigh` and `svd` fail. cuDNN is a partial shim: 2-D convolution and batch norm run on it (enabled by `cfi_torch.install()`, [docs/pytorch.md](docs/pytorch.md); hardware gate pending); everything else (3-D/fp64 convolution, RNN, CTC) falls back to PyTorch's native kernels ([docs/cudnn-shim.md](docs/cudnn-shim.md)).
+- **Not implemented:** SASS execution, VMM (`cuMemCreate` family reports no capability), multi-GPU peer access, conditional and memory-allocation graph nodes.
+  Textures and surfaces are emulated on linear memory: texture references, `tld4` and layered, cube and mipmapped textures are not supported ([docs/textures.md](docs/textures.md)).
 - **Numerics.** GPU and CPU outputs can differ at near-ties (2 of 12 greedy prompts diverged); Q8_0 perplexity is 0.11 % below CPU in one run, unexplained.
 - **Architecture-guard stubs.** PTX built for another architecture can contain empty stub kernels; the runtime reports error 209 instead of computing nothing
   (see Troubleshooting).
