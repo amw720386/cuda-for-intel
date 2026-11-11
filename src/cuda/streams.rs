@@ -507,28 +507,30 @@ impl Streams {
         // work is queued and unfinished, so bound the outstanding work-groups per stream.
         let groups: u64 = geometry.0.iter().map(|&g| u64::from(g)).product();
         let config = self.inflight;
-        if config.needs_room(self.get(key)?.window.queued(), groups) {
+        let counted = config.counted(groups);
+        if config.needs_room(self.get(key)?.window.queued(), counted) {
             if config.window {
-                self.make_room(api, key, groups)?;
+                self.make_room(api, key, counted)?;
             } else {
                 self.wait_stream(api, key, u64::MAX)?;
             }
         }
-        let checkpoint = self.get(key)?.window.wants_checkpoint(config, groups);
+        let checkpoint = self.get(key)?.window.wants_checkpoint(config, counted);
         let result = self.record_signalled(api, context, key, checkpoint, |list, signal, waits| {
             list.launch(api, kernel, geometry, args, signal, waits)
         });
         if result.is_ok() {
             let stream = self.get_mut(key)?;
             let fence = if checkpoint { stream.tail() } else { None };
-            stream.window.launched(groups, fence);
+            stream.window.launched(counted, fence);
         }
         result
     }
 
-    /// Window mode: wait for the oldest checkpoints of `key` until `groups` more fit under the
-    /// limit, so the stream keeps the rest of its queue running. Without a checkpoint to wait
-    /// for (one launch larger than the interval), fall back to a full drain.
+    /// Window mode: wait for the oldest checkpoints of `key` until `groups` more (counted) fit
+    /// under the limit, so the stream keeps the rest of its queue running. Without a checkpoint to
+    /// wait for, fall back to a full drain. A failed wait has already dropped its checkpoint, so a
+    /// later call falls back to the drain, which reports the error again.
     fn make_room(&mut self, api: &Api, key: usize, groups: u64) -> Result<(), CuResult> {
         let config = self.inflight;
         let stream = self.get_mut(key)?;
@@ -631,6 +633,8 @@ impl Streams {
         } else if blocking {
             let legacy = self.get_mut(0)?;
             legacy.flush(api)?;
+            // tail() is the last legacy op only because every blocking-stream op carries a fence
+            // once track_legacy is on (window checkpoints on non-blocking streams are never read here).
             Ok(legacy.tail().into_iter().collect())
         } else {
             Ok(Vec::new())
@@ -920,6 +924,16 @@ fn synchronize_with(
                 })
             {
                 stream.complete();
+            } else if let Some(batch) = &stream.batch
+                && !batch.buffered()
+                && batch.tail().is_some_and(|tail| {
+                    lists.iter().any(|completion| {
+                        matches!(completion, Completion::Regular(fence) if Arc::ptr_eq(fence, tail))
+                    })
+                })
+            {
+                // Nothing was submitted after the awaited list: its window checkpoints are done.
+                stream.window.complete();
             }
         }
         drop(lists);

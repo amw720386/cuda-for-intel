@@ -6,9 +6,17 @@
 //! leaves the GPU idle until the next append arrives; with a 65536-group limit a Qwen2.5-0.5B
 //! decode token (about 450k work-groups) drains about seven times.
 //!
-//! `CUDA_FOR_INTEL_INFLIGHT=window` keeps the same bound without emptying the queue: every
-//! `limit / 4` work-groups one launch carries a completion event (a checkpoint), and a stream over
-//! the limit waits for its oldest checkpoints only, so later work keeps the GPU busy meanwhile.
+//! `CUDA_FOR_INTEL_INFLIGHT=window` keeps a similar bound without emptying the queue: every
+//! `limit / 4` counted work-groups one launch carries a completion event (a checkpoint), and a
+//! stream over the limit waits for its oldest checkpoints only, so later work keeps the GPU busy
+//! meanwhile. A launch counts as at most `limit / 2` work-groups, so a launch larger than the limit
+//! (the 151936-row output head) neither forces a drain itself nor makes the next launch wait for it.
+//!
+//! Bound: the counted outstanding work stays within `limit`, so at most two launches larger than
+//! `limit / 2` are outstanding at once plus the one being appended; everything smaller counts in
+//! full. With the default limit that is a few hundred thousand work-groups for decode-shaped work,
+//! far below the roughly 14 million queued work-groups that hit OUT_OF_DEVICE_MEMORY; drain mode
+//! keeps at most `max(limit, one launch)`.
 use super::Fence;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -54,15 +62,18 @@ impl Config {
         (self.limit / 4).max(1)
     }
 
-    /// Whether `next` more work-groups must wait. Drain mode keeps the original rule (outstanding
-    /// plus the next launch within the limit). Window mode counts at most half the limit for the
-    /// next launch, so one launch larger than the limit (a 151936-row output head) waits for older
-    /// checkpoints instead of forcing a full drain.
+    /// Work-groups a launch of `groups` counts for: all of them in drain mode, at most half the
+    /// limit in window mode.
+    pub fn counted(self, groups: u64) -> u64 {
+        if self.window { groups.min((self.limit / 2).max(1)) } else { groups }
+    }
+
+    /// Whether `next` more counted work-groups must wait: outstanding plus the next launch would
+    /// exceed the limit (the original drain rule; window mode passes counted sizes).
     pub fn needs_room(self, queued: u64, next: u64) -> bool {
         if self.limit == 0 || queued == 0 {
             return false;
         }
-        let next = if self.window { next.min(self.limit / 2) } else { next };
         queued.saturating_add(next) > self.limit
     }
 }
@@ -158,10 +169,13 @@ mod tests {
     #[test]
     fn window_mode_caps_the_next_launch_at_half_the_limit() {
         let config = Config { limit: 65_536, window: true };
-        assert!(!config.needs_room(32_768, 151_936));
-        assert!(config.needs_room(32_769, 151_936));
+        assert_eq!(config.counted(151_936), 32_768);
+        assert_eq!(config.counted(14_336), 14_336);
+        assert_eq!(drain(65_536).counted(151_936), 151_936);
+        assert!(!config.needs_room(32_768, config.counted(151_936)));
+        assert!(config.needs_room(32_769, config.counted(151_936)));
         assert!(config.needs_room(60_000, 14_336));
-        assert!(!config.needs_room(0, 151_936));
+        assert!(!config.needs_room(0, config.counted(151_936)));
     }
 
     #[test]
@@ -253,7 +267,7 @@ mod fake_tests {
                     .unwrap();
                     assert_eq!(cuStreamSynchronize(target), Success);
                     with_context(|_, context| {
-                        assert_eq!(context.streams.get(key)?.window.checkpoints(), 0);
+                        assert_eq!(context.streams.get(key)?.window.checkpoints(), 0, "batch {} window {window} legacy {}", policy.is_some(), target.is_null());
                         Ok(())
                     })
                     .unwrap();
