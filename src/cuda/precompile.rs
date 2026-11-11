@@ -43,7 +43,8 @@ options:
                         directory such as Ollama's models/blobs, to --ggml-types (f32
                         and f16 are always added)
   --list                list modules and entries; translate nothing
-  --report FILE         per-entry TSV: module, entry, result, translate_ms, compile_ms, detail
+  --report FILE         per-entry TSV: module, entry, result, translate_ms, compile_ms,
+                        prepare_ms, detail
   --quiet               summary only";
 
 #[derive(Default, Debug)]
@@ -514,8 +515,7 @@ pub(crate) fn run(o: &Options, log: &mut (dyn std::io::Write + Send)) -> Result<
             "off (CFI_NO_CACHE)"
         }
     );
-    // Big modules first so the long Intel-compiler jobs do not end up last.
-    jobs.sort_by_key(|j| std::cmp::Reverse(modules[j.module].raw.len()));
+    schedule_jobs(&mut jobs, |m| modules[m].raw.len());
     let threads = o
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(2, usize::from))
@@ -545,9 +545,9 @@ pub(crate) fn run(o: &Options, log: &mut (dyn std::io::Write + Send)) -> Result<
                         let src = &modules[job.module];
                         let row =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| one(src, &job.entry, compiler.as_deref().filter(|_| job.native), counters)))
-                                .unwrap_or_else(|_| ("panic", 0, 0, String::new()));
+                                .unwrap_or_else(|_| ("panic", 0, 0, 0, String::new()));
                         if let Ok(mut r) = rows.lock() {
-                            r.push(format!("{}\t{}\t{}\t{}\t{}\t{}", src.origin, job.entry, row.0, row.1, row.2, row.3));
+                            r.push(format!("{}\t{}\t{}\t{}\t{}\t{}\t{}", src.origin, job.entry, row.0, row.1, row.2, row.3, row.4));
                         }
                         let done = counters.done.fetch_add(1, Ordering::Relaxed) + 1;
                         if !quiet && done % progress_every == 0 {
@@ -568,7 +568,7 @@ pub(crate) fn run(o: &Options, log: &mut (dyn std::io::Write + Send)) -> Result<
     summary.native_failed = counters.native_failed.load(Ordering::Relaxed);
     let rows = rows.into_inner().unwrap_or_else(|p| p.into_inner());
     if let Some(path) = &o.report {
-        let mut text = String::from("module\tentry\tresult\ttranslate_ms\tcompile_ms\tdetail\n");
+        let mut text = String::from("module\tentry\tresult\ttranslate_ms\tcompile_ms\tprepare_ms\tdetail\n");
         for r in &rows {
             text.push_str(r);
             text.push('\n');
@@ -601,15 +601,34 @@ pub(crate) fn run(o: &Options, log: &mut (dyn std::io::Write + Send)) -> Result<
     Ok(summary)
 }
 
+/// Orders the work queue. Big modules come first so the long Intel-compiler jobs do not end up
+/// last. Within that order, the first entry of every module is moved to the front: its worker
+/// runs the module's (single-threaded) PTX normalisation, so the modules are prepared
+/// concurrently. Without this, all workers reach the same module together and wait for one
+/// thread's prepare, module after module.
+fn schedule_jobs(jobs: &mut Vec<Job>, module_len: impl Fn(usize) -> usize) {
+    jobs.sort_by_key(|j| std::cmp::Reverse(module_len(j.module)));
+    let mut seen = std::collections::HashSet::new();
+    let (first, rest): (Vec<Job>, Vec<Job>) = std::mem::take(jobs).into_iter().partition(|j| seen.insert(j.module));
+    jobs.extend(first);
+    jobs.extend(rest);
+}
+
 /// Translates (or finds) one entry and builds it natively. Returns (result, translate_ms,
-/// compile_ms, detail).
+/// compile_ms, prepare_ms, detail).
+///
+/// `prepare_ms` is the module-wide normalisation (`ptx::prepare_module`), charged once to the
+/// entry whose thread ran it and 0 for the others. `translate_ms` excludes it, and also excludes
+/// time spent waiting for another thread's prepare of the same module, so it measures this entry's
+/// own parse, SPIR-V emission and cache write (or its cache lookup).
 fn one(
     src: &ModuleSrc,
     entry: &str,
     compiler: Option<&crate::level_zero::NativeCompiler>,
     c: &Counters,
-) -> (&'static str, u128, u128, String) {
-    let t0 = std::time::Instant::now();
+) -> (&'static str, u128, u128, u128, String) {
+    let mut t0 = std::time::Instant::now();
+    let mut prepare_ms = 0;
     let key = xcache::key_for_hash(src.hash, entry);
     let (translation, mut result) = match xcache::get(key) {
         Some(hit) => {
@@ -617,11 +636,17 @@ fn one(
             (hit, "cached")
         }
         None => {
-            let prepared = src.prepared.get_or_init(|| ptx::prepare_module(&src.raw).ok());
+            let prepared = src.prepared.get_or_init(|| {
+                let t = std::time::Instant::now();
+                let prepared = ptx::prepare_module(&src.raw).ok();
+                prepare_ms = t.elapsed().as_millis();
+                prepared
+            });
             let Some(prepared) = prepared else {
                 c.rejected.fetch_add(1, Ordering::Relaxed);
-                return ("rejected", 0, 0, "module normalisation failed".into());
+                return ("rejected", 0, 0, prepare_ms, "module normalisation failed".into());
             };
+            t0 = std::time::Instant::now();
             match ptx::translate_prepared_entry(prepared, entry) {
                 Ok(t) => {
                     if t.globals.is_empty() {
@@ -635,7 +660,7 @@ fn one(
                 Err(e) => {
                     c.rejected.fetch_add(1, Ordering::Relaxed);
                     let detail = e.to_string().replace(['\t', '\n'], " ");
-                    return ("rejected", t0.elapsed().as_millis(), 0, detail);
+                    return ("rejected", t0.elapsed().as_millis(), 0, prepare_ms, detail);
                 }
             }
         }
@@ -671,7 +696,7 @@ fn one(
         }
         compile_ms = t1.elapsed().as_millis();
     }
-    (result, translate_ms, compile_ms, String::new())
+    (result, translate_ms, compile_ms, prepare_ms, String::new())
 }
 
 /// `cfi_precompile_main(argc, argv)`: the `cfi-precompile` command line, run inside this
@@ -731,6 +756,22 @@ mod tests {
         // nvcc aligns frames in `.nv_fatb` to 8 bytes.
         f.resize(f.len().next_multiple_of(8), 0);
         f
+    }
+
+    #[test]
+    fn schedule_starts_every_module_before_the_rest() {
+        let job = |module: usize, entry: &str| Job { module, entry: entry.into(), native: false };
+        // Module sizes: 0 is small, 1 is big, 2 is medium.
+        let sizes = [10usize, 300, 200];
+        let mut jobs = vec![job(0, "a0"), job(0, "a1"), job(1, "b0"), job(1, "b1"), job(1, "b2"), job(2, "c0"), job(2, "c1")];
+        schedule_jobs(&mut jobs, |m| sizes[m]);
+        let order: Vec<&str> = jobs.iter().map(|j| j.entry.as_str()).collect();
+        // First one entry per module, biggest module first, then the others in the same big-first order.
+        assert_eq!(order, ["b0", "c0", "a0", "b1", "b2", "c1", "a1"]);
+        let mut one = vec![job(0, "x")];
+        schedule_jobs(&mut one, |_| 1);
+        assert_eq!(one.len(), 1);
+        schedule_jobs(&mut Vec::new(), |_| 1);
     }
 
     #[test]
