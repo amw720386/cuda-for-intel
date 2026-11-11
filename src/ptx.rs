@@ -2050,10 +2050,7 @@ ld.global.u32 %r1, [%rd3];\nst.global.u32 [%rd2], %r1;\nret;\n}\n";
     #[test]
     #[ignore = "requires the Khronos spirv-val executable"]
     fn validate_opencl_spirv() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
+        // Universal SPIR-V 1.3 rules: see `coverage_tests::validate_named` for why not `opencl2.2`.
         for source in [
             VECTOR_ADD,
             SHARED,
@@ -2068,23 +2065,8 @@ ld.global.u32 %r1, [%rd3];\nst.global.u32 [%rd2], %r1;\nret;\n}\n";
             include_str!("../examples/forge_reduce.ptx"),
         ] {
             let translated = translate(source).unwrap();
-            let mut process = Command::new(&validator)
-                .args(["--target-env", "opencl2.2", "-"])
-                .stdin(Stdio::piped())
-                .spawn()
-                .expect("start spirv-val");
-            let bytes: Vec<_> = translated
-                .words
-                .iter()
-                .flat_map(|word| word.to_le_bytes())
-                .collect();
-            let written = process.stdin.take().unwrap().write_all(&bytes);
-            assert!(
-                process.wait().unwrap().success(),
-                "invalid SPIR-V for {}",
-                translated.kernels[0].name
-            );
-            written.unwrap();
+            let name = &translated.kernels[0].name;
+            assert!(super::coverage_tests::validate_named(&translated.words, name), "spirv-val is not installed");
         }
     }
 

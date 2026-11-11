@@ -146,18 +146,9 @@ fn modules_without_variables_emit_none() {
 #[test]
 #[ignore = "requires the Khronos spirv-val executable"]
 fn globals_module_validates_as_opencl_spirv() {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
+    // Universal SPIR-V 1.3 rules: see `coverage_tests::validate_named` for why not `opencl2.2`.
     let translated = translate(MODULE).unwrap();
-    let bytes: Vec<u8> = translated.words.iter().flat_map(|word| word.to_le_bytes()).collect();
-    let mut process = Command::new(validator)
-        .args(["--target-env", "opencl2.2", "-"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("start spirv-val");
-    process.stdin.take().unwrap().write_all(&bytes).unwrap();
-    assert!(process.wait().unwrap().success());
+    assert!(super::coverage_tests::validate_named(&translated.words, "the globals module"), "spirv-val is not installed");
 }
 
 #[test]

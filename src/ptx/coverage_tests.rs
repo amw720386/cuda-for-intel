@@ -35,7 +35,21 @@ pub(super) fn kernel_with_shared(regs: &str, shared: &str, body: &str) -> String
     .replace("%rdo", "%rd15")
 }
 
+/// Validates with `spirv-val` when it is installed; silently skipped otherwise.
 pub(super) fn validate(words: &[u32]) {
+    validate_named(words, "the module");
+}
+
+/// Runs `spirv-val` (`SPIRV_VAL` or `PATH`) on a translated module and panics, naming `name`,
+/// when it rejects it. Returns false when the validator is not installed.
+///
+/// The environment is universal SPIR-V 1.3, not `opencl2.x`: the translator always declares
+/// `Float16` (Level Zero's compiler accepts it, the device-side counterpart of `cl_khr_fp16`), and
+/// spirv-val's OpenCL environments reject that capability outright; no `OpExtension` enables it,
+/// because `cl_khr_fp16` is an OpenCL API extension, not a SPIR-V one. 1.3 is the highest version
+/// the translator emits (subgroup operations). The Intel `SubgroupSize` execution mode is removed
+/// first because spirv-val does not know it.
+pub(super) fn validate_named(words: &[u32], name: &str) -> bool {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
@@ -58,7 +72,7 @@ pub(super) fn validate(words: &[u32]) {
         .stderr(Stdio::piped())
         .spawn()
     else {
-        return; // validator not installed
+        return false; // validator not installed
     };
     let mut stdin = process.stdin.take().unwrap();
     let writer = std::thread::spawn(move || stdin.write_all(&bytes));
@@ -66,9 +80,10 @@ pub(super) fn validate(words: &[u32]) {
     let _ = writer.join();
     assert!(
         output.status.success(),
-        "spirv-val rejected the module: {}",
+        "spirv-val rejected {name}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    true
 }
 
 /// Translates and validates; returns the decoded module.

@@ -6,16 +6,9 @@ use super::sim::{Gpu, Launch, Sim};
 use super::*;
 
 fn spirv_val(words: &[u32], name: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
-    let Ok(mut child) = Command::new(&validator).args(["--target-env", "opencl2.2", "-"]).stdin(Stdio::piped()).spawn() else {
+    if !super::coverage_tests::validate_named(words, name) {
         eprintln!("spirv-val not found; skipping validation of {name}");
-        return;
-    };
-    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let _ = child.stdin.take().unwrap().write_all(&bytes);
-    assert!(child.wait().unwrap().success(), "invalid SPIR-V for {name}");
+    }
 }
 
 #[test]
