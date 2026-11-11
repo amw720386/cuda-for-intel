@@ -284,12 +284,17 @@ fn decl_insert_position(out: &[String], open: usize) -> usize {
 }
 
 /// `[ %rd1 + 8 ]` -> `[ %rd1+8 ]` (the parser expects one address token).
-fn merge_addresses(tokens: Vec<String>) -> Vec<String> {
+///
+/// Tokens are moved into the output rather than cloned (a copy of every token of the module was
+/// 12% of `normalize::run` on stock ggml-cuda). The look-ahead only reads tokens after `i`, which
+/// have not been moved yet.
+fn merge_addresses(mut tokens: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(tokens.len());
     let mut i = 0;
     while i < tokens.len() {
-        out.push(tokens[i].clone());
-        if tokens[i] == "[" {
+        let open = tokens[i] == "[";
+        out.push(std::mem::take(&mut tokens[i]));
+        if open {
             if let Some(close) = tokens[i + 1..].iter().take(8).position(|t| t == "]") {
                 let inner = &tokens[i + 1..i + 1 + close];
                 if close > 1 && !inner.iter().any(|t| matches!(t.as_str(), "," | "{" | "}" | ";")) {
