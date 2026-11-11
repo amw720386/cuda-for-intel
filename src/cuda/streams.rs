@@ -34,6 +34,8 @@ mod graph_tests;
 #[cfg(test)]
 mod timing_tests;
 #[cfg(test)]
+mod copy_validation_tests;
+#[cfg(test)]
 mod subst_tests;
 #[cfg(all(test, windows))]
 mod profiling;
