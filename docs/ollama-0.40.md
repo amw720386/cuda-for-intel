@@ -25,8 +25,8 @@ parameter layout (`src/subst`). Three of them changed signature in 0.40:
 | Kernel | 0.12.6 | 0.40 | Status |
 | --- | --- | --- | --- |
 | `quantize_q8_1` | `PKfPvxxxxxj5uint3` | unchanged | substituted |
-| `mul_mat_vec_q` (decode) | `<type, ncols>`, 23 words | `<type, ncols, has_fusion, small_k, halve_iters>`, 80-byte fusion struct after `ids`, trailing `ids_stride`: 44 words | **ported for `has_fusion = false`** (this change) |
-| `mul_mat_vec_q` with fusion | none | gate dot product + GLU (SwiGLU, GeGLU, ...), row biases, shared expert | translated stock kernel; native port open |
+| `mul_mat_vec_q` (decode) | `<type, ncols>`, 23 words | `<type, ncols, has_fusion, small_k, halve_iters>`, 80-byte fusion struct after `ids`, trailing `ids_stride`: 44 words | **ported** |
+| `mul_mat_vec_q` with fusion | none | gate dot product + GLU, row biases, shared expert | **ported for bias-only and SwiGLU epilogues without MoE** (Qwen/Llama q/k/v and FFN gate/up); GEGLU, SWIGLU_OAI/CLAMP, NVFP4 scales, MoE ids and shared experts stay on the translated kernel, decided per launch |
 | `mul_mat_q` + `stream_k_fixup` (prefill) | `<type, mmq_x, need_check>` | `<type, mmq_x, need_check, ggml_prec, fused_glu>`, gate and GLU arguments | translated stock kernel; native port open |
 | `flash_attn_ext_f16` (#18) | 0.12.6 template | changed | translated stock kernel |
 
@@ -40,22 +40,29 @@ parameter layout (`src/subst`). Three of them changed signature in 0.40:
   = warps per block. `halve_iters` only affects the GB10 table.
 - The launch hook hands the native kernels the legacy 23 words (drops the fusion words and
   `ids_stride`), so the native kernels and their probes are unchanged apart from rows per block.
+  For `has_fusion` kernels it appends `x_bias`, `gate`, `gate_bias` and `glu_op` from the
+  struct; the native kernel adds the bias, and with a gate accumulates the gate dot product in
+  the same loop and multiplies by `silu(gate + gate_bias)` (ggml's `x / (1 + expf(-x))`).
+- In `has_fusion` kernels the translator types `vx` and `dst` as u64 (the shared-expert branch
+  reassigns them); the registry treats u64 and pointer slots as the same 8 bytes.
 - Q6_K: ggml raised `VDR_Q6_K_Q8_1_MMVQ` from 1 to 2, so the stock 0.40 kernel splits a block
   differently and rounds differently (NMSE about 1e-14 against the v0.12.6-order native kernel).
   The other types are bit for bit.
 
-Tests (no GPU): `cargo test --lib -- fused_abi small_k_native`; with the 0.40 PTX extracted
-locally (never committed) as `blob40.ptx` in a directory `D`:
-`CFI_STOCK_PTX_DIR_040=D CFI_GGML_PTX_DIR=D cargo test --release --lib -- stock_0_40 mmvq_fused_abi_stock`
-(the registry accepts all 40 supported instantiations; stock 0.40 output equals the reference).
+Tests (no GPU): `cargo test --lib -- fused_abi small_k_native fused_native fusion_launch`; with
+the 0.40 PTX extracted locally (never committed) as `blob40.ptx` in a directory `D`:
+`CFI_STOCK_PTX_DIR_040=D CFI_GGML_PTX_DIR=D cargo test --release --lib -- stock_0_40 mmvq_fused`
+(the registry accepts all 52 supported instantiations, 12 of them fused; stock 0.40 output equals
+the reference bit for bit without fusion except Q6_K, and to NMSE < 1e-10 with the fused epilogue,
+where the stock kernel's expf is NVIDIA's ex2.approx sequence; the native kernels equal the same
+reference).
 
 ## Next
 
 1. Hardware (B390, then GPU A): stock 0.40.14 with the shim: `/info` reports CUDA, Qwen2.5-0.5B
    Q8_0 loads with `library=CUDA` and no Vulkan/CPU fallback, the `subst:` log lines show the
-   native `mul_mat_vec_q` taken, tokens match the CPU backend, then `scripts/bench-decode.ps1`
-   against the Vulkan rows of the baseline with the same request. Try `GGML_CUDA_DISABLE_FUSION=1`
-   too, which keeps every decode product on the substituted (non-fused) kernel.
-2. Native fused `mul_mat_vec_q` (gate + GLU, biases): fewer launches per token, which is where
-   decode spends its time.
-3. Native `mul_mat_q` for the 0.40 signature (prefill), then FlashAttention.
+   native `mul_mat_vec_q` (including `:fused` keys) taken, tokens match the CPU backend, then
+   `scripts/bench-decode.ps1` against the Vulkan rows of the baseline with the same request, with
+   fusion on (default) and with `GGML_CUDA_DISABLE_FUSION=1` (more launches per token).
+2. Native `mul_mat_q` for the 0.40 signature (prefill), then FlashAttention.
+3. Q6_K in 0.40's `vdr` 2 order, for bit-identical output with the stock kernel.
